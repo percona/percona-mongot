@@ -49,7 +49,7 @@ def query_bazel_target(bazel, filepath):
 
 
 def query_affected_tests(bazel, tag, affected_targets_expr):
-    query = f'attr(tags, "{tag}", tests(rdeps(//src/..., {affected_targets_expr})))'
+    query = f'attr(tags, "^{tag}$", tests(rdeps(//src/..., {affected_targets_expr})))'
     rc, stdout, err = run([bazel, "query", query])
     if rc != 0:
         print(f"Bazel query for affected tests failed: {err}", file=sys.stderr)
