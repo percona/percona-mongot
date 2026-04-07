@@ -262,8 +262,7 @@ public class LuceneCodecTest {
   public void postingsFormat_idField_dynamicToggle_switchesFormatAtRuntime() {
     AtomicBoolean bloomEnabled = new AtomicBoolean(false);
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
-            Map.of(), bloomEnabled::get, Optional.empty());
+        LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), bloomEnabled::get, Optional.empty());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -284,7 +283,7 @@ public class LuceneCodecTest {
   public void postingsFormat_bloomFilterDelegate_reusesPostingsFormatFromDelegateCodec()
       throws NoSuchFieldException, IllegalAccessException {
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(Map.of(), () -> true, Optional.empty());
+        LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), () -> true, Optional.empty());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -305,7 +304,7 @@ public class LuceneCodecTest {
   public void postingsFormat_idField_withMetricsUpdater_incrementsBloomPostingCounter() {
     var metricsUpdater = SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH);
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+        LuceneCodec.Factory.forIndexWithBloomFilter(
             Map.of(), () -> true, Optional.of(metricsUpdater));
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
@@ -321,7 +320,7 @@ public class LuceneCodecTest {
   public void postingsFormat_idField_bloomDisabled_withMetrics_incrementsLucene99PostingCounter() {
     var metricsUpdater = SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH);
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+        LuceneCodec.Factory.forIndexWithBloomFilter(
             Map.of(), () -> false, Optional.of(metricsUpdater));
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
@@ -337,7 +336,7 @@ public class LuceneCodecTest {
   private static void testPostingsFormat(
       boolean isBloomEnabled, String fieldName, Class<? extends PostingsFormat> expectedType) {
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+        LuceneCodec.Factory.forIndexWithBloomFilter(
             Map.of(), () -> isBloomEnabled, Optional.empty());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
 

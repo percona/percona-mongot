@@ -198,7 +198,7 @@ public class LuceneCodecBloomFilterTest {
         IndexWriterConfig config =
             new IndexWriterConfig()
                 .setCodec(
-                    LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                    LuceneCodec.Factory.forIndexWithBloomFilter(
                         Map.of(), () -> DFF_ENABLED, Optional.of(metricsUpdater)));
         try (IndexWriter writer = new IndexWriter(dir, config)) {
           addDoc(writer, DOC_1);
@@ -224,7 +224,7 @@ public class LuceneCodecBloomFilterTest {
         IndexWriterConfig config =
             new IndexWriterConfig()
                 .setCodec(
-                    LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                    LuceneCodec.Factory.forIndexWithBloomFilter(
                         Map.of(), () -> DFF_DISABLED, Optional.of(metricsUpdater)));
         try (IndexWriter writer = new IndexWriter(dir, config)) {
           addDoc(writer, DOC_1);
@@ -319,7 +319,7 @@ public class LuceneCodecBloomFilterTest {
     IndexWriterConfig config =
         new IndexWriterConfig()
             .setCodec(
-                LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                LuceneCodec.Factory.forIndexWithBloomFilter(
                     Map.of(), bloomSupplier, Optional.empty()));
     return new IndexWriter(dir, config);
   }
@@ -417,7 +417,7 @@ public class LuceneCodecBloomFilterTest {
       IndexWriterConfig config =
           new IndexWriterConfig()
               .setCodec(
-                  LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                  LuceneCodec.Factory.forIndexWithBloomFilter(
                       Map.of(), bloomEnabled::get, Optional.empty()));
 
       try (IndexWriter writer = new IndexWriter(dir, config)) {

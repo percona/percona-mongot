@@ -12,6 +12,7 @@ import static org.mockito.Mockito.spy;
 
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.FieldExceededLimitsException;
@@ -270,7 +271,9 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             directoryFactory,
             mock(IndexDirectoryHelper.class),
             Optional.empty(),
-            FeatureFlags.getDefault());
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            false);
     this.indexWriter = initializedIndex.getWriter();
     this.indexReader = initializedIndex.getReader();
   }

@@ -86,7 +86,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       IndexDirectoryHelper indexDirectoryHelper,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry)
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan)
       throws IOException {
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
@@ -94,8 +95,15 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
         .log("Initializing index");
 
     try {
-      var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags,
-          dynamicFeatureFlagRegistry);
+      var ret =
+          create(
+              index,
+              generationId,
+              directoryFactory,
+              luceneIndexSnapshotter,
+              featureFlags,
+              dynamicFeatureFlagRegistry,
+              enableNaturalOrderScan);
       LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
@@ -112,8 +120,15 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
         throw e;
       }
     }
-    var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags,
-        dynamicFeatureFlagRegistry);
+    var ret =
+        create(
+            index,
+            generationId,
+            directoryFactory,
+            luceneIndexSnapshotter,
+            featureFlags,
+            dynamicFeatureFlagRegistry,
+            enableNaturalOrderScan);
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
@@ -127,7 +142,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       IndexDirectoryFactory directoryFactory,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry)
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan)
       throws IOException {
     var definition = index.getDefinition();
     var searchIndexProperties = index.getSearchIndexProperties();
@@ -170,7 +186,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                     luceneIndexSnapshotter.map(
                         snapshotter -> snapshotter.getSnapshotDeletionPolicy(indexPartitionId)),
                     featureFlags,
-                    dynamicFeatureFlagRegistry),
+                    dynamicFeatureFlagRegistry,
+                    enableNaturalOrderScan),
             luceneIndexWriter ->
                 LuceneSearcherManager.create(
                     luceneIndexWriter.getLuceneWriter(),

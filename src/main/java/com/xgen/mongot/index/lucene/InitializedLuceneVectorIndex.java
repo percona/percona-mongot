@@ -6,6 +6,7 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
@@ -82,14 +83,24 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
       IndexDirectoryFactory directoryFactory,
       IndexDirectoryHelper indexDirectoryHelper,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
-      FeatureFlags featureFlags)
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan)
       throws IOException {
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
         .log("Initializing index");
     try {
-      var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags);
+      var ret =
+          create(
+              index,
+              generationId,
+              directoryFactory,
+              luceneIndexSnapshotter,
+              featureFlags,
+              dynamicFeatureFlagRegistry,
+              enableNaturalOrderScan);
       LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
@@ -106,7 +117,15 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
         throw e;
       }
     }
-    var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags);
+    var ret =
+        create(
+            index,
+            generationId,
+            directoryFactory,
+            luceneIndexSnapshotter,
+            featureFlags,
+            dynamicFeatureFlagRegistry,
+            enableNaturalOrderScan);
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
@@ -119,7 +138,9 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
       GenerationId generationId,
       IndexDirectoryFactory directoryFactory,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
-      FeatureFlags featureFlags)
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan)
       throws IOException {
     var vectorIndexProperties = index.getVectorIndexProperties();
     var definition = index.getDefinition();
@@ -156,7 +177,9 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
                     indexMetricsUpdaterBuilder.getIndexingMetricsUpdater(),
                     luceneIndexSnapshotter.map(
                         snapshotter -> snapshotter.getSnapshotDeletionPolicy(indexPartitionId)),
-                    featureFlags),
+                    featureFlags,
+                    dynamicFeatureFlagRegistry,
+                    enableNaturalOrderScan),
             luceneIndexWriter ->
                 LuceneSearcherManager.create(
                     luceneIndexWriter.getLuceneWriter(),

@@ -92,7 +92,8 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            DynamicFeatureFlagRegistry.empty(),
+            false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     // This ensures the spy delegates to a writer that has the mocked luceneWriter
@@ -212,7 +213,8 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            DynamicFeatureFlagRegistry.empty(),
+            false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -280,7 +282,8 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            DynamicFeatureFlagRegistry.empty(),
+            false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -348,7 +351,8 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            DynamicFeatureFlagRegistry.empty(),
+            false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -416,7 +420,8 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            DynamicFeatureFlagRegistry.empty(),
+            false);
 
     // Spy the writer to mock doLogIndexingFailure method
     var spyWriter = spy(writer);

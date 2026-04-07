@@ -16,6 +16,7 @@ import com.xgen.mongot.index.FieldExceededLimitsException;
 import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.WriterClosedException;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
@@ -48,6 +49,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.lucene.analysis.Analyzer;
@@ -179,15 +181,25 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
       IndexCapabilities indexCapabilities,
       IndexMetricsUpdater.IndexingMetricsUpdater indexingMetricsUpdater,
       Optional<IndexDeletionPolicy> indexDeletionPolicy,
-      FeatureFlags featureFlags)
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan)
       throws IOException {
 
     Map<FieldPath, VectorFieldSpecification> vectorFields =
         LuceneCodecUtils.extractVectorFieldsFromVectorIndex(indexDefinition.getFields());
 
+    BooleanSupplier bloomFilterForIdFieldEnabledSupplier =
+        getBloomFilterForIdFieldEnabledSupplier(
+            dynamicFeatureFlagRegistry, enableNaturalOrderScan, indexDefinition);
+
     IndexWriterConfig indexWriterConfig =
         new org.apache.lucene.index.IndexWriterConfig()
-            .setCodec(new LuceneCodec(vectorFields))
+            .setCodec(
+                LuceneCodec.Factory.forIndexWithBloomFilter(
+                    vectorFields,
+                    bloomFilterForIdFieldEnabledSupplier,
+                    Optional.of(indexingMetricsUpdater)))
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)
             .setMergeScheduler(mergeScheduler)
@@ -244,7 +256,8 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
       IndexMetricsUpdater.IndexingMetricsUpdater indexingMetricsUpdater,
       Optional<IndexDeletionPolicy> indexDeletionPolicy,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry)
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan)
       throws IOException {
 
     Similarity similarity = LuceneSimilarity.from(resolver.indexDefinition);
@@ -252,14 +265,16 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
     Map<FieldPath, VectorFieldSpecification> pathToField =
         LuceneCodecUtils.extractVectorFieldsFromSearchMappings(resolver.getFields());
 
+    BooleanSupplier bloomFilterForIdFieldEnabledSupplier =
+        getBloomFilterForIdFieldEnabledSupplier(
+            dynamicFeatureFlagRegistry, enableNaturalOrderScan, resolver.indexDefinition);
+
     IndexWriterConfig indexWriterConfig =
         new org.apache.lucene.index.IndexWriterConfig(indexAnalyzer)
             .setCodec(
-                LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                LuceneCodec.Factory.forIndexWithBloomFilter(
                     pathToField,
-                    () ->
-                        dynamicFeatureFlagRegistry.evaluateClusterInvariant(
-                            DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD),
+                    bloomFilterForIdFieldEnabledSupplier,
                     Optional.of(indexingMetricsUpdater)))
             .setSimilarity(similarity)
             .setMergePolicy(mergePolicy)
@@ -312,6 +327,19 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
                 .ifThrows(writer::getNumFields))
         .log("Index writer initialized");
     return writer;
+  }
+
+  @VisibleForTesting
+  public static BooleanSupplier getBloomFilterForIdFieldEnabledSupplier(
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan,
+      IndexDefinition indexDefinition) {
+    return indexDefinition.isAutoEmbeddingIndex()
+        ? () -> false
+        : () ->
+            enableNaturalOrderScan
+                && dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+                    DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD);
   }
 
   public org.apache.lucene.index.IndexWriter getLuceneWriter() {

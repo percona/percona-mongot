@@ -46,8 +46,11 @@ import org.apache.lucene.store.Directory;
  *
  * <p>Delegates to {@link HybridPostingsFormat}, which dynamically selects between a {@link
  * BloomFilteringPostingsFormat} and the default Lucene99 format for the {@code _id} field based on
- * a runtime toggle. See {@link HybridPostingsFormat} for details on the per-segment format
- * selection, metrics, and rollback behavior.
+ * a runtime toggle. Search and vector Lucene indexes both use {@link
+ * Factory#forIndexWithBloomFilter} so the same dynamic feature flag applies, except writers for
+ * auto-embedding indexes pass a supplier that is always {@code false}. See {@link
+ * HybridPostingsFormat} for details on the per-segment format selection, metrics, and rollback
+ * behavior.
  *
  * <h3>Codec name compatibility</h3>
  *
@@ -95,6 +98,7 @@ public class LuceneCodec extends FilterCodec {
     this(codecName, Map.of());
   }
 
+  @VisibleForTesting
   public LuceneCodec(Map<FieldPath, VectorFieldSpecification> fieldMap) {
     this(CODEC_NAME, fieldMap);
   }
@@ -202,7 +206,7 @@ public class LuceneCodec extends FilterCodec {
 
   public static class Factory {
 
-    public static LuceneCodec forSearchIndexWithBloomFilter(
+    public static LuceneCodec forIndexWithBloomFilter(
         Map<FieldPath, VectorFieldSpecification> fieldMap,
         BooleanSupplier bloomFilterForIdFieldEnabled,
         Optional<IndexMetricsUpdater.IndexingMetricsUpdater> indexingMetricsUpdater) {

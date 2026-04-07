@@ -13,6 +13,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.MeteredIndexWriter;
@@ -254,7 +255,9 @@ public class LuceneVectorIndexReaderTest {
               directoryFactory,
               mock(IndexDirectoryHelper.class),
               Optional.empty(),
-              FeatureFlags.getDefault());
+              FeatureFlags.getDefault(),
+              DynamicFeatureFlagRegistry.empty(),
+              false);
       var context =
           new VectorQueryFactoryContext(
               VectorIndex.MOCK_INDEX_DEFINITION_GENERATION_ALL_QUANTIZATION.getIndexDefinition(),
@@ -910,7 +913,9 @@ public class LuceneVectorIndexReaderTest {
               directoryFactory,
               mock(IndexDirectoryHelper.class),
               Optional.empty(),
-              FeatureFlags.getDefault());
+              FeatureFlags.getDefault(),
+              DynamicFeatureFlagRegistry.empty(),
+              false);
       this.writer =
           ((SingleLuceneIndexWriter)
                   ((MeteredIndexWriter) this.initializedIndex.getWriter()).getWrapped())

@@ -159,7 +159,8 @@ public class PeriodicLuceneIndexRefresherTest {
             SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            DynamicFeatureFlagRegistry.empty(),
+            false);
 
     luceneIndexWriter.commit(EncodedUserData.EMPTY);
 

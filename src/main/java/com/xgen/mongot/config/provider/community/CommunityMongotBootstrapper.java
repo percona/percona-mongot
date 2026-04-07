@@ -625,7 +625,8 @@ public class CommunityMongotBootstrapper {
                         meterAndFtdcRegistry,
                         Optional.empty(),
                         analyzerRegistryFactory,
-                        diskMonitor));
+                        diskMonitor,
+                        mongotConfigs.initialSyncConfig.enableNaturalOrderScan()));
 
     var mvMetadataCatalog = new MaterializedViewCollectionMetadataCatalog();
     var autoEmbeddingMongoClient =
