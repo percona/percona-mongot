@@ -21,12 +21,11 @@ public class UnresolvedAutoEmbeddingIndexGeneration extends IndexGeneration {
         switch (reason) {
           case MONGO_CLIENT_NOT_AVAILABLE ->
               IndexStatus.failed(
-                  "Unable to create materialized view index, "
-                      + "will retry when sync source is updated.",
+                  "Unable to create Automated Embedding index at this time",
                   AUTO_EMBEDDING_RESOLUTION_FAILED);
           default ->
               IndexStatus.failed(
-                  "Unable to create materialized view index, will retry in next update cycle.",
+                  "Unable to create Automated Embedding index at this time",
                   AUTO_EMBEDDING_RESOLUTION_RETRY);
         };
     var failedIndex =

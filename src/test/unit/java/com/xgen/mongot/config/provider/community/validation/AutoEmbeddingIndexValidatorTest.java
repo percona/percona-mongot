@@ -235,7 +235,7 @@ public class AutoEmbeddingIndexValidatorTest {
                 AutoEmbeddingIndexValidator.validateNoAutoEmbeddingFieldChanges(
                     oldIndex, newIndex));
 
-    assertThat(exception.getMessage()).contains("Updates to auto-embedding fields are not allowed");
+    assertThat(exception.getMessage()).contains("cannot update type:autoEmbed fields");
   }
 
   @Test
@@ -255,7 +255,7 @@ public class AutoEmbeddingIndexValidatorTest {
                 AutoEmbeddingIndexValidator.validateNoAutoEmbeddingFieldChanges(
                     oldIndex, newIndex));
 
-    assertThat(exception.getMessage()).contains("Updates to auto-embedding fields are not allowed");
+    assertThat(exception.getMessage()).contains("cannot update type:autoEmbed fields");
   }
 
   @Test
@@ -609,7 +609,7 @@ public class AutoEmbeddingIndexValidatorTest {
                 AutoEmbeddingIndexValidator.validateNoAutoEmbeddingFieldChanges(
                     oldIndex, newIndex));
 
-    assertThat(exception.getMessage()).contains("Updates to auto-embedding fields are not allowed");
+    assertThat(exception.getMessage()).contains("cannot update type:autoEmbed fields");
   }
 
   @Test

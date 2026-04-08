@@ -171,7 +171,9 @@ public class AutoEmbeddingIndexValidator {
       throws InvalidIndexDefinitionException {
     checkBothAutoEmbedding(oldIndex, newIndex);
     throwIfFieldsChanged(
-        getAutoEmbeddingFieldDefinitions(oldIndex), getAutoEmbeddingFieldDefinitions(newIndex));
+        getAutoEmbeddingFieldDefinitions(oldIndex),
+        getAutoEmbeddingFieldDefinitions(newIndex),
+        newIndex.getName());
   }
 
   public static void validateNoAutoEmbeddingFieldChanges(
@@ -179,7 +181,9 @@ public class AutoEmbeddingIndexValidator {
       throws InvalidIndexDefinitionException {
     checkBothAutoEmbedding(oldIndex, newIndex);
     throwIfFieldsChanged(
-        getAutoEmbeddingFieldDefinitions(oldIndex), getAutoEmbeddingFieldDefinitions(newIndex));
+        getAutoEmbeddingFieldDefinitions(oldIndex),
+        getAutoEmbeddingFieldDefinitions(newIndex),
+        newIndex.getName());
   }
 
   private static List<VectorIndexFieldDefinition> getAutoEmbeddingFieldDefinitions(
@@ -208,12 +212,16 @@ public class AutoEmbeddingIndexValidator {
     }
   }
 
-  private static void throwIfFieldsChanged(List<?> oldFields, List<?> newFields)
+  private static void throwIfFieldsChanged(
+      List<?> oldFields, List<?> newFields, String indexName)
       throws InvalidIndexDefinitionException {
     if (!oldFields.equals(newFields)) {
       throw new InvalidIndexDefinitionException(
-          "Updates to auto-embedding fields are not allowed. "
-              + "To modify auto-embedding fields, please drop and recreate the index.");
+          String.format(
+              "Index: %s cannot update type:autoEmbed fields. "
+                  + "To modify an index containing Automated Embedding fields, "
+                  + "please delete the index and create a new one instead",
+              indexName));
     }
   }
 
