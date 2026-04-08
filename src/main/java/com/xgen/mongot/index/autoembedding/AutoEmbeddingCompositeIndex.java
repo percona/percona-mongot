@@ -16,6 +16,7 @@ import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
 import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
 import java.io.IOException;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.apache.commons.codec.DecoderException;
 import org.bson.BsonTimestamp;
@@ -35,6 +36,9 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
 
   // Track previous status to log only on transitions
   @Nullable private StatusCode previousConsolidatedStatus = null;
+  // One-way ratchet: true once the composite can service queries.
+  // Initialized from the persisted lease so restarts don't reset the ratchet.
+  private final AtomicBoolean compositeWasQueryable;
 
   public AutoEmbeddingCompositeIndex(
       InitializedMaterializedViewIndex matViewIndex,
@@ -43,6 +47,8 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
     this.matViewIndex = matViewIndex;
     this.vectorIndex = vectorIndex;
     this.initializedVectorIndexSupplier = initializedVectorIndexSupplier;
+    this.compositeWasQueryable =
+        new AtomicBoolean(matViewIndex.isCurrentVersionQueryablePerLease());
   }
 
   public AutoEmbeddingCompositeIndex(
@@ -122,14 +128,22 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
       return luceneStatus;
     }
 
+    // If the composite was previously queryable, Lucene is still serving queries correctly for the
+    // existing definition. Skip the lag check to avoid regressing a live index to INITIAL_SYNC
+    // (e.g. after a definition change clears steadyAsOfOplogPosition or advances it past Lucene).
+    if (this.compositeWasQueryable.get()) {
+      return luceneStatus;
+    }
+
+    // First build: verify Lucene has caught up to the position where MV first became STEADY.
     Optional<BsonTimestamp> steadyPosition = this.matViewIndex.getSteadyAsOfOplogPosition();
-    // If MV hasn't recorded a steady position yet, we can't determine lag.
     if (steadyPosition.isEmpty()) {
+      // No position recorded yet (e.g. MV just became STEADY but highWaterMark not yet set);
+      // can't determine lag so pass through Lucene's status.
       return luceneStatus;
     }
 
     Optional<BsonTimestamp> lucenePosition = extractLucenePosition();
-    // Lucene is STEADY only if MV is STEADY and Lucene has caught up
     boolean caughtUp =
         lucenePosition.isPresent() && lucenePosition.get().compareTo(steadyPosition.get()) >= 0;
     return caughtUp ? luceneStatus : new IndexStatus(StatusCode.INITIAL_SYNC);
@@ -167,10 +181,15 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
     IndexStatus result = computeConsolidatedStatus(mvStatus, luceneStatus);
     StatusCode newStatus = result.getStatusCode();
 
+    if (result.canServiceQueries()) {
+      this.compositeWasQueryable.set(true);
+    }
+
     // Log on status transitions
     if (this.previousConsolidatedStatus != newStatus) {
       LOG.atInfo()
           .addKeyValue("indexId", getDefinition().getIndexId())
+          .addKeyValue("generationId", this.matViewIndex.getGenerationId())
           .addKeyValue("previousStatus", this.previousConsolidatedStatus)
           .addKeyValue("newStatus", newStatus)
           .addKeyValue("mvStatus", mvStatus)

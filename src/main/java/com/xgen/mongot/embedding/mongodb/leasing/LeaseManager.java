@@ -162,6 +162,18 @@ public interface LeaseManager {
   Optional<BsonTimestamp> getSteadyAsOfOplogPosition(MaterializedViewGenerationId generationId);
 
   /**
+   * Returns true if the given index definition version has ever been queryable (reached STEADY at
+   * least once), as persisted in the lease. Used to initialize the composite index's queryable
+   * ratchet after a restart.
+   *
+   * @param generationId the generation id
+   * @param indexDefinitionVersion the definition version to check
+   * @return true if that version has been queryable
+   */
+  boolean isCurrentVersionQueryable(
+      MaterializedViewGenerationId generationId, long indexDefinitionVersion);
+
+  /**
    * Returns the current lease version for the given generation ID. Used as a fencing token for MV
    * writes.
    *

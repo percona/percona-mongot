@@ -819,6 +819,21 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
   }
 
   @Override
+  public boolean isCurrentVersionQueryable(
+      MaterializedViewGenerationId generationId, long indexDefinitionVersion) {
+    try {
+      Lease lease = this.leases.get(getLeaseKey(generationId));
+      return lease != null && lease.isVersionQueryable(String.valueOf(indexDefinitionVersion));
+    } catch (IllegalStateException e) {
+      LOG.warn(
+          "Failed to look up lease for generation {} during isCurrentVersionQueryable",
+          generationId,
+          e);
+      return false;
+    }
+  }
+
+  @Override
   public MaterializedViewCollectionMetadata initializeLease(
       MaterializedViewIndexDefinitionGeneration indexDefinitionGeneration,
       MaterializedViewCollectionMetadata proposedMetadata)

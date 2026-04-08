@@ -468,6 +468,21 @@ public class StaticLeaderLeaseManager implements LeaseManager {
         .flatMap(Lease::getSteadyAsOfOplogPosition);
   }
 
+  @Override
+  public boolean isCurrentVersionQueryable(
+      MaterializedViewGenerationId generationId, long indexDefinitionVersion) {
+    try {
+      Lease lease = this.leases.get(getLeaseKey(generationId));
+      return lease != null && lease.isVersionQueryable(String.valueOf(indexDefinitionVersion));
+    } catch (IllegalStateException e) {
+      LOG.warn(
+          "Failed to look up lease for generation {} during isCurrentVersionQueryable",
+          generationId,
+          e);
+      return false;
+    }
+  }
+
   private void ensureLeaseExists(MaterializedViewGenerationId generationId) {
     if (!this.leases.containsKey(getLeaseKey(generationId))) {
       throw new IllegalStateException("Lease does not exist for " + getLeaseKey(generationId));

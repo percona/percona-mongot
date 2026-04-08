@@ -190,6 +190,18 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
     return this.leaseManager.getSteadyAsOfOplogPosition(this.generationId);
   }
 
+  /**
+   * Returns true if the current definition version has ever been queryable, as persisted in the
+   * lease. Used to initialize the composite index's queryable ratchet after a restart.
+   */
+  public boolean isCurrentVersionQueryablePerLease() {
+    return this.leaseManager.isCurrentVersionQueryable(
+        this.generationId,
+        this.vectorIndexDefinition
+            .getDefinitionVersion()
+            .orElse(DEFAULT_INDEX_DEFINITION_VERSION));
+  }
+
   public UUID getMaterializedViewCollectionUuid() {
     return this.materializedViewWriter.getCollectionUuid();
   }

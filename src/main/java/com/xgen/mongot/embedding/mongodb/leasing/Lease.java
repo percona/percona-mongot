@@ -493,6 +493,15 @@ public record Lease(
     return Optional.ofNullable(this.steadyAsOfOplogPosition);
   }
 
+  /**
+   * Returns true if the given index definition version has ever been queryable (i.e. reached STEADY
+   * at least once), as persisted in the lease.
+   */
+  public boolean isVersionQueryable(String version) {
+    IndexDefinitionVersionStatus status = this.indexDefinitionVersionStatusMap.get(version);
+    return status != null && status.isQueryable();
+  }
+
   @Override
   public BsonDocument toBson() {
     return BsonDocumentBuilder.builder()
