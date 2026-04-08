@@ -2,6 +2,7 @@ package com.xgen.mongot.index.autoembedding;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
@@ -29,6 +30,64 @@ public class InitializedMaterializedViewIndexTest {
 
   private static final ObjectId INDEX_ID = new ObjectId();
   private static final String NAMESPACE = "embedding.materializedView.stats";
+
+  @Test
+  public void getStatus_returnsRecoveringTransient_whenPreviouslyQueryableAndNowInitialSync()
+      throws Exception {
+    InitializedMaterializedViewIndex index = createIndex(IndexStatus.unknown());
+
+    // Transition to STEADY (queryable)
+    index.setStatus(IndexStatus.steady());
+    assertEquals(IndexStatus.StatusCode.STEADY, index.getStatus().getStatusCode());
+
+    // Fall off the oplog -> INITIAL_SYNC: should report RECOVERING_TRANSIENT (STALE), not BUILDING
+    index.setStatus(IndexStatus.initialSync());
+    assertEquals(IndexStatus.StatusCode.RECOVERING_TRANSIENT, index.getStatus().getStatusCode());
+  }
+
+  @Test
+  public void getStatus_returnsInitialSync_whenNeverQueryableAndNowInitialSync() throws Exception {
+    InitializedMaterializedViewIndex index = createIndex(IndexStatus.unknown());
+
+    index.setStatus(IndexStatus.initialSync());
+    assertEquals(IndexStatus.StatusCode.INITIAL_SYNC, index.getStatus().getStatusCode());
+  }
+
+  @Test
+  public void getStatus_returnsRecoveringTransient_whenInitializedAsQueryable() throws Exception {
+    // Index rehydrated from a previous STEADY state
+    InitializedMaterializedViewIndex index = createIndex(IndexStatus.steady());
+
+    index.setStatus(IndexStatus.initialSync());
+    assertEquals(IndexStatus.StatusCode.RECOVERING_TRANSIENT, index.getStatus().getStatusCode());
+  }
+
+  private InitializedMaterializedViewIndex createIndex(IndexStatus initialStatus) throws Exception {
+    MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    MaterializedViewIndexDefinitionGeneration defGen =
+        MaterializedViewIndex.mockMatViewDefinitionGeneration(INDEX_ID);
+    MaterializedViewGenerationId generationId = defGen.getGenerationId();
+    String uniqueString = generationId.uniqueString();
+    String collectionName = "matview-" + INDEX_ID.toHexString();
+    PerIndexMetricsFactory metricsFactory =
+        new PerIndexMetricsFactory(NAMESPACE, meterAndFtdcRegistry, uniqueString, collectionName);
+    IndexMetricValuesSupplier metricValuesSupplier =
+        IndexMetricsSupplier.mockEmptyIndexMetricsSupplier();
+    IndexMetricsUpdater indexMetricsUpdater =
+        new IndexMetricsUpdater(defGen.getIndexDefinition(), metricValuesSupplier, metricsFactory);
+    MaterializedViewWriter writer = mock(MaterializedViewWriter.class);
+    LeaseManager leaseManager = mock(LeaseManager.class);
+    doNothing().when(leaseManager).updateReplicationStatus(
+        org.mockito.ArgumentMatchers.any(),
+        org.mockito.ArgumentMatchers.anyLong(),
+        org.mockito.ArgumentMatchers.any());
+    AtomicReference<IndexStatus> statusRef = new AtomicReference<>(initialStatus);
+    MaterializedViewSchemaMetadata schemaMetadata =
+        new MaterializedViewSchemaMetadata(0, java.util.Map.of());
+    return new InitializedMaterializedViewIndex(
+        defGen, writer, indexMetricsUpdater, statusRef, leaseManager, schemaMetadata,
+        "__mdb_internal_search");
+  }
 
   @Test
   public void close_whenCalled_unregistersLeaderStatusGauge() throws Exception {

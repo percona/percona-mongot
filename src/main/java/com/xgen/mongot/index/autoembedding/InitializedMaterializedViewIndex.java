@@ -32,6 +32,7 @@ import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bson.BsonArray;
@@ -44,6 +45,7 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
   private final IndexMetricsUpdater indexMetricsUpdater;
   private final MaterializedViewWriter materializedViewWriter;
   private final AtomicReference<IndexStatus> statusRef;
+  private final AtomicBoolean wasQueryable;
   private final LeaseManager leaseManager;
   private final MaterializedViewSchemaMetadata schemaMetadata;
   private final String matViewDatabaseName;
@@ -65,6 +67,7 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
     this.indexMetricsUpdater = indexMetricsUpdater;
     this.materializedViewWriter = materializedViewWriter;
     this.statusRef = statusRef;
+    this.wasQueryable = new AtomicBoolean(statusRef.get().canServiceQueries());
     this.leaseManager = leaseManager;
     this.schemaMetadata = schemaMetadata;
     this.matViewDatabaseName = matViewDatabaseName;
@@ -140,12 +143,22 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
     } catch (MaterializedViewTransientException ignored) {
       // TODO(CLOUDP-371153): Revisit this to decide how to handle committing error.
     }
+    if (status.canServiceQueries()) {
+      this.wasQueryable.set(true);
+    }
     this.statusRef.set(status);
   }
 
   @Override
   public IndexStatus getStatus() {
-    return this.statusRef.get();
+    IndexStatus status = this.statusRef.get();
+    // If the index was previously queryable but is now rebuilding (e.g. fell off the oplog),
+    // report RECOVERING_TRANSIENT (reported externally as STALE) so Atlas reflects "queryable but
+    // potentially out of date" while the resync is in progress.
+    if (this.wasQueryable.get() && status.getStatusCode() == IndexStatus.StatusCode.INITIAL_SYNC) {
+      return IndexStatus.recoveringTransient("Recovering via resync");
+    }
+    return status;
   }
 
   @Override

@@ -20,6 +20,14 @@ public class StatusResolutionUtils {
 
     // Same Version: Pass through
     if (requestedIndexDefinitionVersionStatus.equals(latestIndexDefinitionVersionStatus)) {
+      // If the index was previously queryable but is now rebuilding (e.g. fell off the oplog),
+      // report RECOVERING_TRANSIENT (which gets reported externally as STALE) rather than
+      // INITIAL_SYNC (BUILDING) so Atlas reflects "queryable but potentially out of date" while the
+      // resync is in progress.
+      if (requestedIndexDefinitionVersionStatus.isQueryable()
+          && requestedStatus == StatusCode.INITIAL_SYNC) {
+        return IndexStatus.recoveringTransient("Recovering via resync");
+      }
       return new IndexStatus(requestedStatus);
     }
 

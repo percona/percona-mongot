@@ -373,9 +373,14 @@ public record Lease(
     var isSteady = indexStatus.getStatusCode() == IndexStatus.StatusCode.STEADY;
     Map<String, IndexDefinitionVersionStatus> newVersionStatus =
         new HashMap<>(this.indexDefinitionVersionStatusMap);
+    var versionKey = String.valueOf(indexDefinitionVersion);
+    var wasQueryable =
+        Optional.ofNullable(newVersionStatus.get(versionKey))
+            .map(IndexDefinitionVersionStatus::isQueryable)
+            .orElse(false);
     newVersionStatus.put(
-        String.valueOf(indexDefinitionVersion),
-        new IndexDefinitionVersionStatus(isSteady, indexStatus.getStatusCode()));
+        versionKey,
+        new IndexDefinitionVersionStatus(isSteady || wasQueryable, indexStatus.getStatusCode()));
 
     // Set steadyAsOfOplogPosition only on first STEADY transition
     @Var BsonTimestamp newSteadyPosition = this.steadyAsOfOplogPosition;

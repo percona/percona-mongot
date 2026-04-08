@@ -474,6 +474,36 @@ public class LeaseTest {
       assertEquals(new BsonTimestamp(1234567890L), updatedLease.getSteadyAsOfOplogPosition().get());
     }
 
+    @Test
+    public void testWithUpdatedStatus_isQueryableIsOneWayRatchet() {
+      // Start with a lease at INITIAL_SYNC (not queryable)
+      Lease lease = createLeaseWithSteadyPosition(null);
+      assertFalse(
+          lease.indexDefinitionVersionStatusMap().get("1").isQueryable());
+
+      // Transition to STEADY — isQueryable becomes true
+      Lease afterSteady = lease.withUpdatedStatus(IndexStatus.steady(), 1L, null);
+      assertTrue(
+          "isQueryable should be true after reaching STEADY",
+          afterSteady.indexDefinitionVersionStatusMap().get("1").isQueryable());
+
+      // Fall off the oplog → INITIAL_SYNC — isQueryable must remain true
+      Lease afterResync = afterSteady.withUpdatedStatus(IndexStatus.initialSync(), 1L, null);
+      assertTrue(
+          "isQueryable should remain true after falling off the oplog (STEADY → INITIAL_SYNC)",
+          afterResync.indexDefinitionVersionStatusMap().get("1").isQueryable());
+    }
+
+    @Test
+    public void testWithUpdatedStatus_isQueryableStartsFalseForNewVersion() {
+      // A version that has never been STEADY starts with isQueryable=false
+      Lease lease = createLeaseWithSteadyPosition(null);
+      Lease withNewVersion = lease.withUpdatedStatus(IndexStatus.initialSync(), 2L, null);
+      assertFalse(
+          "New version should start with isQueryable=false",
+          withNewVersion.indexDefinitionVersionStatusMap().get("2").isQueryable());
+    }
+
     private static Lease createLeaseWithCommitInfo(String commitInfo) {
       return new Lease(
           LEASE_ID,
