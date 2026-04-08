@@ -31,6 +31,7 @@ import com.xgen.mongot.util.Enums;
 import com.xgen.testing.mongot.index.IndexMetricsBuilder;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.query.CollectorQueryBuilder;
 import com.xgen.testing.mongot.index.query.OperatorQueryBuilder;
 import com.xgen.testing.mongot.index.query.collectors.CollectorBuilder;
@@ -127,6 +128,61 @@ public class IndexMetricsUpdaterTest {
       Assert.assertEquals(expected, result);
     }
 
+    @Test
+    public void testNumNestedVectorFieldsIsZeroForSearchIndex() {
+      var indexDefinition =
+          SearchIndexDefinitionBuilder.builder().defaultMetadata().dynamicMapping().build();
+      var indexMetricsUpdater =
+          IndexMetricsUpdaterBuilder.builder()
+              .metricsFactory(mockMetricsFactory(IndexMetricsUpdater.NAMESPACE))
+              .indexDefinition(indexDefinition)
+              .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+              .build();
+
+      Assert.assertEquals(0,
+          indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+    }
+
+    @Test
+    public void testNumNestedVectorFieldsIsZeroForVectorIndexWithoutNestedRoot() {
+      var indexDefinition =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("embedding", 128)
+              .build();
+      var indexMetricsUpdater =
+          IndexMetricsUpdaterBuilder.builder()
+              .metricsFactory(mockMetricsFactory(IndexMetricsUpdater.NAMESPACE))
+              .indexDefinition(indexDefinition)
+              .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+              .build();
+
+      Assert.assertEquals(0,
+          indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+    }
+
+    @Test
+    public void testNumNestedVectorFieldsCountsOnlyVectorFieldsUnderNestedRoot() {
+      // 2 vector fields under the nested root, 1 vector field outside, 1 filter field under the
+      // nested root — only the 2 nested vector fields should be counted
+      var indexDefinition =
+          VectorIndexDefinitionBuilder.builder()
+              .nestedRoot("items")
+              .withCosineVectorField("items.embedding", 128)
+              .withCosineVectorField("items.embedding2", 64)
+              .withCosineVectorField("topLevelEmbedding", 32)
+              .withFilterPath("items.category")
+              .build();
+      var indexMetricsUpdater =
+          IndexMetricsUpdaterBuilder.builder()
+              .metricsFactory(mockMetricsFactory(IndexMetricsUpdater.NAMESPACE))
+              .indexDefinition(indexDefinition)
+              .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+              .build();
+
+      Assert.assertEquals(2,
+          indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+    }
+
     public static class TestIndexingMetricsUpdater {
       @Test
       public void testIndexingMetricsSuppliers() {
@@ -151,7 +207,7 @@ public class IndexMetricsUpdaterTest {
             .when(mockedIndexingMetricsUpdater)
             .getReplicationOpTimeInfo();
 
-        var result = mockedIndexingMetricsUpdater.getMetrics(mockedIndexMetricsSupplier);
+        var result = mockedIndexingMetricsUpdater.getMetrics(mockedIndexMetricsSupplier, 0);
         var expected =
             IndexMetricsBuilder.IndexingMetricsBuilder.builder()
                 .replicationOpTime(new BsonTimestamp(10L))
@@ -182,7 +238,7 @@ public class IndexMetricsUpdaterTest {
 
         Assert.assertTrue(
             indexingMetricsUpdater
-                .getMetrics(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+                .getMetrics(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier(), 0)
                 .replicationLagMs()
                 .isPresent());
         // it should also be reported to the meter registry

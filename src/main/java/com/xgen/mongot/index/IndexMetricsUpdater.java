@@ -172,11 +172,28 @@ public class IndexMetricsUpdater implements Closeable {
    * @return a record of metrics and values for this index
    */
   public IndexMetrics getMetrics() {
+    IndexDefinition indexDefinition = getIndexDefinition();
     return IndexMetrics.create(
-        getIndexDefinition(),
+        indexDefinition,
         this.indexMetricValuesSupplier.getIndexStatus(),
-        getIndexingMetricsUpdater().getMetrics(this.indexMetricValuesSupplier),
+        getIndexingMetricsUpdater()
+            .getMetrics(this.indexMetricValuesSupplier,
+                computeNumNestedVectorFields(indexDefinition)),
         getQueryingMetricsUpdater().getMetrics());
+  }
+
+  private int computeNumNestedVectorFields(IndexDefinition indexDefinition) {
+    if (indexDefinition.getType() != IndexDefinition.Type.VECTOR_SEARCH) {
+      return 0;
+    }
+    var vectorDef = indexDefinition.asVectorDefinition();
+    if (vectorDef.getNestedRoot().isEmpty()) {
+      return 0;
+    }
+    var nestedRoot = vectorDef.getNestedRoot().get();
+    return (int) vectorDef.getFields().stream()
+        .filter(field -> field.isVectorField() && field.getPath().isChildOf(nestedRoot))
+        .count();
   }
 
   /** De-registers all metrics for the index. */
@@ -391,7 +408,8 @@ public class IndexMetricsUpdater implements Closeable {
     }
 
     @VisibleForTesting
-    IndexMetrics.IndexingMetrics getMetrics(IndexMetricValuesSupplier indexMetricValuesSupplier) {
+    IndexMetrics.IndexingMetrics getMetrics(
+        IndexMetricValuesSupplier indexMetricValuesSupplier, int numNestedVectorFields) {
       DocCounts docCounts = indexMetricValuesSupplier.getDocCounts();
       return IndexMetrics.IndexingMetrics.create(
           this.documentEventTypeCounterMap,
@@ -409,7 +427,8 @@ public class IndexMetricsUpdater implements Closeable {
           docCounts.maxLuceneMaxDocs,
           docCounts.numMongoDbDocs,
           getBatchIndexingTimer(),
-          indexMetricValuesSupplier.getRequiredMemoryForVectorData());
+          indexMetricValuesSupplier.getRequiredMemoryForVectorData(),
+          numNestedVectorFields);
     }
 
     @Override

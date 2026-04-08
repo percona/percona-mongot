@@ -518,6 +518,8 @@ public class IndexMetricsBuilder {
 
     private Bytes requiredMemory = Bytes.ofBytes(0L);
 
+    private int numNestedVectorFields = 0;
+
     public static IndexingMetricsBuilder builder() {
       return new IndexingMetricsBuilder();
     }
@@ -604,6 +606,11 @@ public class IndexMetricsBuilder {
       return this;
     }
 
+    public IndexingMetricsBuilder numNestedVectorFields(int numNestedVectorFields) {
+      this.numNestedVectorFields = numNestedVectorFields;
+      return this;
+    }
+
     public IndexMetrics.IndexingMetrics build() {
       return new IndexMetrics.IndexingMetrics(
           this.documentEventTypeCountMap,
@@ -621,7 +628,8 @@ public class IndexMetricsBuilder {
           this.numFields,
           this.numFieldsPerDatatype,
           Optional.of(this.batchIndexingTimer),
-          this.requiredMemory);
+          this.requiredMemory,
+          this.numNestedVectorFields);
     }
   }
 
