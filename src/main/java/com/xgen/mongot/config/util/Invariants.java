@@ -128,7 +128,7 @@ public class Invariants {
           throw new InvalidIndexDefinitionException(
               "nestedRoot \""
                   + rawNestedRoot.get()
-                  + "\" does not match any field path in the index definition");
+                  + "\" does not match any vector field path in the index definition");
         }
       }
     }

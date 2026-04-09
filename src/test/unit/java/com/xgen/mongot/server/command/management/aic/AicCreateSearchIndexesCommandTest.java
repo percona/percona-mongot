@@ -425,7 +425,8 @@ public class AicCreateSearchIndexesCommandTest {
   public void mismatchedNestedRootFailsToCreate()
       throws BsonParseException, MetadataServiceException {
     this.failsWithCommandFailed(
-        "nestedRoot \"sections\" does not match any field path in the index definition",
+        "nestedRoot \"sections\" does not match any vector field path "
+            + "in the index definition",
         bson(
             """
         {
