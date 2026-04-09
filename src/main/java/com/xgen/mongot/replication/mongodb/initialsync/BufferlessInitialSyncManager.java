@@ -21,7 +21,6 @@ import com.xgen.mongot.replication.mongodb.common.InitialSyncResumeInfo;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Crash;
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
@@ -52,7 +51,8 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
   /* Tracks the duration of applying change stream events */
   private final Timer changeStreamTimer;
   private final InitialSyncMongoClient mongoClient;
-  private final Counter fsyncErrorCounter;
+  private final Timer fsyncSuccessDurationTimer;
+  private final Timer fsyncFailureDurationTimer;
   private final MetricsFactory metricsFactory;
 
   @VisibleForTesting
@@ -80,7 +80,10 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
     this.collectionScanTimer = metricsFactory.timer("collectionScanTime");
     this.changeStreamTimer = metricsFactory.timer("changeStreamTime");
     this.mongoClient = mongoClient;
-    this.fsyncErrorCounter = metricsFactory.counter("fsyncError");
+    this.fsyncSuccessDurationTimer =
+        metricsFactory.timer("fsyncDuration", Tags.of("outcome", "success"));
+    this.fsyncFailureDurationTimer =
+        metricsFactory.timer("fsyncDuration", Tags.of("outcome", "failure"));
     this.metricsFactory = metricsFactory;
   }
 
@@ -242,14 +245,23 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
           // lastStableRecoveryTimestamp,
           // which ensures record id correctness for natural order scan
           if (this.context.useNaturalOrderScan()) {
+            var fsyncStopwatch = Stopwatch.createStarted();
             try {
               var response = this.mongoClient.fsync();
+              this.fsyncSuccessDurationTimer.record(fsyncStopwatch.stop().elapsed());
               this.logger
                   .atInfo()
                   .addKeyValue("response", response.toJson())
                   .log("finish fsync successfully");
             } catch (MongoCommandException e) {
-              this.fsyncErrorCounter.increment();
+              this.fsyncFailureDurationTimer.record(fsyncStopwatch.stop().elapsed());
+              String errorCode =
+                  e.getErrorCodeName() != null ? e.getErrorCodeName() : "unknown";
+              this.metricsFactory
+                  .counter(
+                      "fsyncError",
+                      Tags.of("errorCode", errorCode, "errorType", "MongoCommandException"))
+                  .increment();
               this.logger
                   .atInfo()
                   .addKeyValue("errorCode", e.getErrorCode())
@@ -258,17 +270,17 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
                   .addKeyValue("response", e.getResponse().toJson())
                   .log("Failed to run fsync during initial sync, ignore error and continue");
             } catch (Exception e) {
-              this.fsyncErrorCounter.increment();
+              this.fsyncFailureDurationTimer.record(fsyncStopwatch.stop().elapsed());
+              this.metricsFactory
+                  .counter("fsyncError", Tags.of("errorType", e.getClass().getSimpleName()))
+                  .increment();
               throw e;
             }
           }
         });
 
-    double bytesBeforeSync = this
-        .context
-        .getInitialSyncMetricsUpdater()
-        .getTotalApplicableBytes()
-        .count();
+    double bytesBeforeSync =
+        this.context.getInitialSyncMetricsUpdater().getTotalApplicableBytes().count();
 
     try (changeStreamApplier) {
       // Continue the initial sync until the entire collection has been scanned.
@@ -296,8 +308,10 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
 
     Optional<ChangeStreamResumeInfo> changeStreamResumeInfo = changeStreamApplier.getResumeInfo();
 
-    long totalBytesProcessed = (long) (this.context.getInitialSyncMetricsUpdater()
-            .getTotalApplicableBytes().count() - bytesBeforeSync);
+    long totalBytesProcessed =
+        (long)
+            (this.context.getInitialSyncMetricsUpdater().getTotalApplicableBytes().count()
+                - bytesBeforeSync);
     String sizeBucket = getSizeBucket(totalBytesProcessed);
     Tags sizeCategoryTag = Tags.of("sizeCategory", sizeBucket);
 
@@ -310,14 +324,14 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
           .histogram(
               "completedSyncThroughputBytesPerSec",
               sizeCategoryTag,
-              1_000_000,     // 1 MB/s
-              3_000_000,     // 3 MB/s
-              10_000_000,    // 10 MB/s
-              30_000_000,    // 30 MB/s
-              100_000_000,   // 100 MB/s
-              209_715_200,   // 200 MiB/s
-              314_572_800    // 300 MiB/s
-          )
+              1_000_000, // 1 MB/s
+              3_000_000, // 3 MB/s
+              10_000_000, // 10 MB/s
+              30_000_000, // 30 MB/s
+              100_000_000, // 100 MB/s
+              209_715_200, // 200 MiB/s
+              314_572_800 // 300 MiB/s
+              )
           .record(totalBytesProcessed / elapsedSeconds);
     }
 
@@ -327,8 +341,8 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
         .addKeyValue("duration", stopwatch)
         .addKeyValue("totalBytesProcessed", totalBytesProcessed)
         .addKeyValue("sizeCategory", sizeBucket)
-        .addKeyValue("throughputBytesPerSec",
-            elapsedSeconds > 0 ? totalBytesProcessed / elapsedSeconds : 0)
+        .addKeyValue(
+            "throughputBytesPerSec", elapsedSeconds > 0 ? totalBytesProcessed / elapsedSeconds : 0)
         .addKeyValue("indexId", this.context.getIndexId())
         .addKeyValue("generationId", this.context.getGenerationId())
         .log("Completed initial sync. Beginning first commit.");

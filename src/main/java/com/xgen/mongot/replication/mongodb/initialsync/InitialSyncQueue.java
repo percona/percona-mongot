@@ -599,7 +599,7 @@ public class InitialSyncQueue {
     private final Boolean pauseAllInitialSync;
     private final Optional<Integer> embeddingGetMoreBatchSize;
 
-    private final Map<Boolean, AtomicLong> collectionScansFeatureFlagMapping;
+    private final Map<Boolean, Counter> collectionScansFeatureFlagMapping;
 
     /** A helper for persisting metrics data */
     @SuppressWarnings("unused")
@@ -650,18 +650,16 @@ public class InitialSyncQueue {
       Tags idOrderScanTag = Tags.of("scan_type", "id_order");
 
       String collectionScanName = "collectionScan";
+      Tags replicationTypeTag =
+          Tags.of("replicationType", replicationConfig.getReplicationType().name());
       this.collectionScansFeatureFlagMapping =
           Map.of(
               true,
-              this.metricsFactory.numGauge(
-                  collectionScanName,
-                  naturalOrderScanTag.and(
-                      Tag.of("replicationType", replicationConfig.getReplicationType().name()))),
+              this.metricsFactory.counter(
+                  collectionScanName, naturalOrderScanTag.and(replicationTypeTag)),
               false,
-              this.metricsFactory.numGauge(
-                  collectionScanName,
-                  idOrderScanTag.and(
-                      Tag.of("replicationType", replicationConfig.getReplicationType().name()))));
+              this.metricsFactory.counter(
+                  collectionScanName, idOrderScanTag.and(replicationTypeTag)));
       this.inProgressResumedSyncs =
           this.metricsFactory.numGauge(
               "inProgressResumedSyncs",
@@ -776,21 +774,20 @@ public class InitialSyncQueue {
             IndexDefinition indexDefinition =
                 request.getIndexDefinitionGeneration().getIndexDefinition();
             this.inProgressSyncs.get(getIndexTypeTag(indexDefinition)).incrementAndGet();
-            this.collectionScansFeatureFlagMapping
-                .get(request.getUseNaturalOrderScan())
-                .incrementAndGet();
             request
                 .getResumeInfo()
                 .ifPresent(unused -> this.inProgressResumedSyncs.incrementAndGet());
             Crash.because("failed running initial sync")
                 .ifCompletesExceptionally(
                     CompletableFuture.runAsync(() -> runInitialSync(request), syncExecutor))
+                .whenComplete(
+                    (result, throwable) ->
+                        this.collectionScansFeatureFlagMapping
+                            .get(request.getUseNaturalOrderScan())
+                            .increment())
                 .thenRun(
                     () -> {
                       this.inProgressSyncs.get(getIndexTypeTag(indexDefinition)).decrementAndGet();
-                      this.collectionScansFeatureFlagMapping
-                          .get(request.getUseNaturalOrderScan())
-                          .decrementAndGet();
                       request
                           .getResumeInfo()
                           .ifPresent(unused -> this.inProgressResumedSyncs.decrementAndGet());

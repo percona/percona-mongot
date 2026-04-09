@@ -1111,6 +1111,79 @@ public class InitialSyncQueueTest {
   }
 
   @Test
+  public void testCollectionScanCounterIncrementedOnNewSyncCompletion() throws Exception {
+    String name = "initialsync.dispatcher.collectionScan";
+    MeterRegistry registry = new SimpleMeterRegistry();
+
+    Mocks mocks =
+        Mocks.create(
+            Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO),
+            ControlledBlockingQueue.ready(),
+            registry,
+            Optional.of(2),
+            Optional.empty());
+
+    CountDownLatch startedLatch = new CountDownLatch(1);
+    Runnable initialSyncStartedCallback = startedLatch::countDown;
+    CompletableFuture<ChangeStreamResumeInfo> future =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER,
+            MOCK_INDEX_DEFINITION_GENERATION,
+            initialSyncStartedCallback,
+            IGNORE_METRICS,
+            false,
+            false);
+
+    startedLatch.await(5, TimeUnit.SECONDS);
+    mocks.mockInitialSyncManagerFactory.completeSync(MOCK_INDEX_GENERATION_ID);
+    future.get(5, TimeUnit.SECONDS);
+
+    Condition.await()
+        .atMost(Duration.ofSeconds(60))
+        .untilDoesNotThrow(
+            () ->
+                assertThat(registry.get(name).tag("scan_type", "id_order").counter().count())
+                    .isEqualTo(1D));
+  }
+
+  @Test
+  public void testCollectionScanCounterIncrementedOnResumedSyncCompletion() throws Exception {
+    String name = "initialsync.dispatcher.collectionScan";
+    MeterRegistry registry = new SimpleMeterRegistry();
+
+    Mocks mocks =
+        Mocks.create(
+            Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO),
+            ControlledBlockingQueue.ready(),
+            registry,
+            Optional.of(2),
+            Optional.empty());
+
+    CountDownLatch startedLatch = new CountDownLatch(1);
+    Runnable initialSyncStartedCallback = startedLatch::countDown;
+    CompletableFuture<ChangeStreamResumeInfo> future =
+        mocks.initialSyncQueue.enqueueResume(
+            DOCUMENT_INDEXER,
+            MOCK_INDEX_DEFINITION_GENERATION,
+            initialSyncStartedCallback,
+            INITIAL_SYNC_RESUME_INFO,
+            IGNORE_METRICS,
+            false,
+            false);
+
+    startedLatch.await(5, TimeUnit.SECONDS);
+    mocks.mockInitialSyncManagerFactory.completeSync(MOCK_INDEX_GENERATION_ID);
+    future.get(5, TimeUnit.SECONDS);
+
+    Condition.await()
+        .atMost(Duration.ofSeconds(60))
+        .untilDoesNotThrow(
+            () ->
+                assertThat(registry.get(name).tag("scan_type", "id_order").counter().count())
+                    .isEqualTo(1D));
+  }
+
+  @Test
   public void testEnqueueInitialSyncsPaused() throws Exception {
     var initialSyncGate = ToggleGate.closed();
 
