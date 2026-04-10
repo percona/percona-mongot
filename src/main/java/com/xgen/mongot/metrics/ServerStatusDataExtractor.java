@@ -67,6 +67,10 @@ public class ServerStatusDataExtractor {
     return ProcessMeterData.create(this.meterRegistry);
   }
 
+  public LoadSheddingMeterData createLoadSheddingMeterData() {
+    return LoadSheddingMeterData.create(this.meterRegistry);
+  }
+
   public static class JvmMeterData {
     static final String MAX_MEMORY_KEY = "jvm.memory.max";
     static final String USED_MEMORY_KEY = "jvm.memory.used";
@@ -466,6 +470,26 @@ public class ServerStatusDataExtractor {
       return new ProcessMeterData(
           getMeterValue(meterRegistry, MAJOR_PAGE_FAULTS),
           getMeterValue(meterRegistry, MINOR_PAGE_FAULTS));
+    }
+  }
+
+  public static class LoadSheddingMeterData {
+    public static final String WOULD_HAVE_REJECTED = "loadShedding.wouldHaveRejected";
+
+    public final double wouldHaveRejectedTotal;
+
+    @VisibleForTesting
+    public LoadSheddingMeterData(double wouldHaveRejectedTotal) {
+      this.wouldHaveRejectedTotal = wouldHaveRejectedTotal;
+    }
+
+    private static double getMeterValue(MeterRegistry meterRegistry, String meterName) {
+      Meter meter = meterRegistry.find(meterName).meter();
+      return meter != null ? getMeterCount(meter) : 0;
+    }
+
+    public static LoadSheddingMeterData create(MeterRegistry meterRegistry) {
+      return new LoadSheddingMeterData(getMeterValue(meterRegistry, WOULD_HAVE_REJECTED));
     }
   }
 

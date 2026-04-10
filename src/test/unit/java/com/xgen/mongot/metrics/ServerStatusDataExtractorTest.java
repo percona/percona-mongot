@@ -1,5 +1,6 @@
 package com.xgen.mongot.metrics;
 
+import com.xgen.mongot.metrics.ServerStatusDataExtractor.LoadSheddingMeterData;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor.LuceneMeterData;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor.MmsMeterData;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor.ProcessMeterData;
@@ -478,5 +479,25 @@ public class ServerStatusDataExtractorTest {
 
     Assert.assertEquals(3.0, processMeterData.majorPageFaults, 0.0);
     Assert.assertEquals(11.0, processMeterData.minorPageFaults, 0.0);
+  }
+
+  @Test
+  public void testLoadSheddingMeterData() {
+    this.meterRegistry
+        .counter(LoadSheddingMeterData.WOULD_HAVE_REJECTED, "executor", "blocking-server-worker")
+        .increment(7);
+
+    var loadSheddingMeterData =
+        new ServerStatusDataExtractor(this.meterRegistry).createLoadSheddingMeterData();
+
+    Assert.assertEquals(7.0, loadSheddingMeterData.wouldHaveRejectedTotal, 0.0);
+  }
+
+  @Test
+  public void testEmptyLoadSheddingMeterData() {
+    var loadSheddingMeterData =
+        new ServerStatusDataExtractor(this.meterRegistry).createLoadSheddingMeterData();
+
+    Assert.assertEquals(0.0, loadSheddingMeterData.wouldHaveRejectedTotal, 0.0);
   }
 }
