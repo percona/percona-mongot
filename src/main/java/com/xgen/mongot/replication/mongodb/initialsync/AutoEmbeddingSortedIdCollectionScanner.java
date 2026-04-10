@@ -91,8 +91,7 @@ public class AutoEmbeddingSortedIdCollectionScanner extends BufferlessCollection
 
     this.matViewFieldMappingWithHashes =
         AutoEmbeddingIndexDefinitionUtils.getMatViewIndexFields(
-            resolveFieldMapping(context),
-            this.matViewCollectionMetadata.schemaMetadata());
+            resolveFieldMapping(context), this.matViewCollectionMetadata.schemaMetadata());
   }
 
   @Override

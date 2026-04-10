@@ -7,6 +7,7 @@ import static com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils.
 
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.common.hash.Hashing;
 import com.google.errorprone.annotations.Var;
@@ -44,6 +45,17 @@ public class AutoEmbeddingDocumentUtils {
 
   public static final String HASH_FIELD_SUFFIX = "_hash";
   private static final Logger LOG = LoggerFactory.getLogger(AutoEmbeddingDocumentUtils.class);
+
+  /**
+   * Metadata fields present in materialized view documents that are not part of the index field
+   * mappings. These fields must be excluded when comparing MV documents to source documents to
+   * avoid spurious re-indexing. When adding a new metadata field to the MV document (e.g., in
+   * {@link com.xgen.mongot.index.mongodb.MaterializedViewWriter}), it must also be added here.
+   */
+  // Package-private so tests within the same package can validate it. The cross-package enforcer
+  // test in MaterializedViewWriterTest validates it via the full writer → compareDocuments path.
+  static final ImmutableSet<String> MV_METADATA_FIELDS =
+      ImmutableSet.of("_id", "_autoEmbed._leaseVersion");
 
   /**
    * Extracts string field values from rawBsonDocument based on VectorIndexFieldMappings (from index
@@ -290,7 +302,7 @@ public class AutoEmbeddingDocumentUtils {
       // check if mat view has extra fields which are no longer in the index definition.
       // an example of this is when a filter field is removed.
       for (FieldPath fieldPath : matViewValues.keySet()) {
-        if (!fieldPath.toString().equals("_id")
+        if (!MV_METADATA_FIELDS.contains(fieldPath.toString())
             && !matViewMappings.fieldMap().containsKey(fieldPath)) {
           needsReIndexing = true;
           break;

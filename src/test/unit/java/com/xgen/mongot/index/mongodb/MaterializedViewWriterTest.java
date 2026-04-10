@@ -443,7 +443,7 @@ public class MaterializedViewWriterTest {
     writer.commit(EncodedUserData.EMPTY);
     Mockito.verify(limiter, Mockito.never()).acquire();
   }
-  
+
   @SuppressWarnings("unchecked")
   @Test
   public void testFactory_sharedRateLimiterAndNoRateLimiter() throws Exception {
@@ -492,7 +492,7 @@ public class MaterializedViewWriterTest {
     Optional<RateLimiter> rl3 = (Optional<RateLimiter>) rlField.get(writer3);
     Assert.assertFalse("Writer should not have a rate limiter", rl3.isPresent());
   }
-  
+
   @Test
   public void testRateLimiterMetrics_throttleCountAndWaitTime()
       throws IOException, FieldExceededLimitsException {
@@ -818,6 +818,111 @@ public class MaterializedViewWriterTest {
 
     verify(this.mockMongoClient).getDatabase(tenantDb);
     verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 1));
+  }
+
+  /**
+   * Enforcer test: verifies that MV documents produced by fencing do not cause spurious
+   * re-indexing in {@link
+   * com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils#compareDocuments}. This test
+   * automatically catches regressions when new metadata fields are added to the writer but not
+   * registered in {@link
+   * com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils#MV_METADATA_FIELDS}.
+   */
+  @Test
+  public void testFencedDocumentDoesNotTriggerSpuriousReIndexing() throws java.io.IOException {
+    // Build a MV document via the normal auto-embedding path.
+    // Use schema version 1 so embeddings are stored under _autoEmbed.* (e.g., _autoEmbed.a,
+    // _autoEmbed._hash.a). This causes compareDocuments to traverse the _autoEmbed subtree and
+    // encounter _autoEmbed._leaseVersion as an "extra field". With version 0, embeddings are
+    // stored as top-level fields and _autoEmbed is not traversed, so the test would pass vacuously
+    // even without the MV_METADATA_FIELDS exclusion.
+    var vectorIndexDefinition =
+        com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder.builder()
+            .withAutoEmbedField("a")
+            .withAutoEmbedField("b")
+            .withFilterPath("color")
+            .build();
+    var schemaMetadata =
+        new com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata
+            .MaterializedViewSchemaMetadata(
+                1,
+                java.util.Map.of(
+                    com.xgen.mongot.util.FieldPath.parse("a"),
+                    com.xgen.mongot.util.FieldPath.parse("_autoEmbed.a"),
+                    com.xgen.mongot.util.FieldPath.parse("b"),
+                    com.xgen.mongot.util.FieldPath.parse("_autoEmbed.b")));
+
+    com.xgen.mongot.util.bson.Vector vector1 =
+        com.xgen.mongot.util.bson.Vector.fromFloats(
+            new float[] {1.0f, 2.0f},
+            com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE);
+    com.xgen.mongot.util.bson.Vector vector2 =
+        com.xgen.mongot.util.bson.Vector.fromFloats(
+            new float[] {5.0f, 6.0f},
+            com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE);
+
+    com.google.common.collect.ImmutableMap<String, com.xgen.mongot.util.bson.Vector> embeddings =
+        com.google.common.collect.ImmutableMap.of("aString", vector1, "bString", vector2);
+
+    BsonDocument bsonDoc =
+        new BsonDocument()
+            .append("_id", new BsonString("anId"))
+            .append("a", new BsonString("aString"))
+            .append("b", new BsonString("bString"))
+            .append("color", new BsonString("red"));
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+    DocumentEvent rawDocumentEvent =
+        DocumentEvent.createInsert(
+            DocumentMetadata.fromOriginalDocument(Optional.of(rawBsonDoc)), rawBsonDoc);
+
+    com.google.common.collect.ImmutableMap.Builder<
+            com.xgen.mongot.util.FieldPath,
+            com.google.common.collect.ImmutableMap<String, com.xgen.mongot.util.bson.Vector>>
+        embeddingsPerFieldBuilder = com.google.common.collect.ImmutableMap.builder();
+    for (com.xgen.mongot.util.FieldPath fieldPath :
+        vectorIndexDefinition.getMappings().fieldMap().keySet()) {
+      embeddingsPerFieldBuilder.put(fieldPath, embeddings);
+    }
+
+    DocumentEvent mvDocEvent =
+        com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils
+            .buildMaterializedViewDocumentEvent(
+                rawDocumentEvent,
+                vectorIndexDefinition,
+                embeddingsPerFieldBuilder.build(),
+                schemaMetadata);
+
+    // Run fencing — this injects _autoEmbed._leaseVersion (and potentially future metadata).
+    RawBsonDocument mvRawDoc = mvDocEvent.getDocument().get();
+    var replaceModel =
+        new ReplaceOneModel<>(
+            new BsonDocument("_id", new BsonString("anId")),
+            mvRawDoc,
+            new ReplaceOptions().upsert(true));
+
+    List<WriteModel<RawBsonDocument>> fencedModels =
+        MaterializedViewWriter.addFencingToWriteModels(List.of(replaceModel), 42L);
+
+    ReplaceOneModel<RawBsonDocument> fencedModel =
+        (ReplaceOneModel<RawBsonDocument>) fencedModels.get(0);
+    RawBsonDocument fencedDoc = fencedModel.getReplacement();
+
+    // Now compareDocuments against the fenced MV doc — it should NOT trigger re-indexing.
+    var comparisonResult =
+        com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils.compareDocuments(
+            rawDocumentEvent.getDocument().get(),
+            fencedDoc,
+            vectorIndexDefinition.getMappings(),
+            com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils
+                .getMatViewIndexFields(vectorIndexDefinition.getMappings(), schemaMetadata),
+            schemaMetadata);
+
+    Assert.assertFalse(
+        "Fenced MV document should not trigger spurious re-indexing. "
+            + "If this fails, a metadata field added by MaterializedViewWriter is not registered "
+            + "in AutoEmbeddingDocumentUtils.MV_METADATA_FIELDS.",
+        comparisonResult.needsReIndexing());
+    Assert.assertEquals(2, comparisonResult.reusableEmbeddings().size());
   }
 
   private DocumentEvent createDocumentEvent(ObjectId indexId, int docId) {

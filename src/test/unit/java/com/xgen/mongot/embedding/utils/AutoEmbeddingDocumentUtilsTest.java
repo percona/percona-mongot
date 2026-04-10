@@ -37,6 +37,7 @@ import org.bson.BsonArray;
 import org.bson.BsonDocument;
 import org.bson.BsonDouble;
 import org.bson.BsonInt32;
+import org.bson.BsonInt64;
 import org.bson.BsonString;
 import org.bson.RawBsonDocument;
 import org.junit.Test;
@@ -917,6 +918,163 @@ public class AutoEmbeddingDocumentUtilsTest {
     assertTrue(comparisonResult.reusableEmbeddings().containsKey(FieldPath.parse("a")));
     assertTrue(comparisonResult.reusableEmbeddings().containsKey(FieldPath.parse("b")));
   }
+
+  @Test
+  public void testNeedsReIndexing_LeaseVersionInMatView_version0() throws IOException {
+    VectorIndexDefinition vectorIndexDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .withAutoEmbedField("a")
+            .withAutoEmbedField("b")
+            .withFilterPath("color")
+            .build();
+    ImmutableMap<String, Vector> embeddings = createEmbeddings();
+    BsonDocument bsonDoc = createBasicBson();
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+    DocumentEvent rawDocumentEvent =
+        DocumentEvent.createInsert(
+            DocumentMetadata.fromOriginalDocument(Optional.of(rawBsonDoc)), rawBsonDoc);
+
+    DocumentEvent result =
+        buildMaterializedViewDocumentEvent(
+            rawDocumentEvent,
+            vectorIndexDefinition,
+            createEmbeddingsPerField(vectorIndexDefinition.getMappings(), embeddings),
+            MAT_VIEW_SCHEMA_METADATA);
+
+    // Simulate MaterializedViewWriter fencing: inject _autoEmbed._leaseVersion into the MV doc.
+    // Decode to a mutable BsonDocument since RawBsonDocument is immutable.
+    BsonDocument matViewDoc = new BsonDocument();
+    matViewDoc.putAll(result.getDocument().get());
+    BsonDocument autoEmbedDoc =
+        matViewDoc.containsKey("_autoEmbed")
+            ? matViewDoc.getDocument("_autoEmbed")
+            : new BsonDocument();
+    autoEmbedDoc.put("_leaseVersion", new BsonInt64(42));
+    matViewDoc.put("_autoEmbed", autoEmbedDoc);
+    RawBsonDocument matViewRawDoc =
+        new RawBsonDocument(matViewDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    var comparisonResult =
+        compareDocuments(
+            rawDocumentEvent.getDocument().get(),
+            matViewRawDoc,
+            vectorIndexDefinition.getMappings(),
+            AutoEmbeddingIndexDefinitionUtils.getMatViewIndexFields(
+                vectorIndexDefinition.getMappings(), MAT_VIEW_SCHEMA_METADATA),
+            MAT_VIEW_SCHEMA_METADATA);
+
+    // _leaseVersion is a metadata field and should NOT trigger re-indexing.
+    assertFalse(comparisonResult.needsReIndexing());
+    assertEquals(2, comparisonResult.reusableEmbeddings().size());
+  }
+
+  @Test
+  public void testNeedsReIndexing_LeaseVersionInMatView_version1() throws IOException {
+    VectorIndexDefinition vectorIndexDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .withAutoEmbedField("a")
+            .withAutoEmbedField("b")
+            .withFilterPath("color")
+            .build();
+    var schemaMetadata =
+        new MaterializedViewSchemaMetadata(
+            1,
+            Map.of(
+                FieldPath.parse("a"),
+                FieldPath.parse("_autoEmbed.a"),
+                FieldPath.parse("b"),
+                FieldPath.parse("_autoEmbed.b")));
+
+    ImmutableMap<String, Vector> embeddings = createEmbeddings();
+    BsonDocument bsonDoc = createBasicBson();
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+    DocumentEvent rawDocumentEvent =
+        DocumentEvent.createInsert(
+            DocumentMetadata.fromOriginalDocument(Optional.of(rawBsonDoc)), rawBsonDoc);
+
+    DocumentEvent result =
+        buildMaterializedViewDocumentEvent(
+            rawDocumentEvent,
+            vectorIndexDefinition,
+            createEmbeddingsPerField(vectorIndexDefinition.getMappings(), embeddings),
+            schemaMetadata);
+
+    // Simulate MaterializedViewWriter fencing: inject _autoEmbed._leaseVersion into the MV doc.
+    // Decode to a mutable BsonDocument since RawBsonDocument is immutable.
+    BsonDocument matViewDoc = new BsonDocument();
+    matViewDoc.putAll(result.getDocument().get());
+    BsonDocument autoEmbedDoc = matViewDoc.getDocument("_autoEmbed");
+    autoEmbedDoc.put("_leaseVersion", new BsonInt64(42));
+
+    RawBsonDocument matViewRawDoc =
+        new RawBsonDocument(matViewDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    var comparisonResult =
+        compareDocuments(
+            rawDocumentEvent.getDocument().get(),
+            matViewRawDoc,
+            vectorIndexDefinition.getMappings(),
+            AutoEmbeddingIndexDefinitionUtils.getMatViewIndexFields(
+                vectorIndexDefinition.getMappings(), schemaMetadata),
+            schemaMetadata);
+
+    // _leaseVersion is a metadata field and should NOT trigger re-indexing.
+    assertFalse(comparisonResult.needsReIndexing());
+    assertEquals(2, comparisonResult.reusableEmbeddings().size());
+  }
+
+  @Test
+  public void testNeedsReIndexing_UnknownMetadataFieldInMatView_triggersReIndexing()
+      throws IOException {
+    VectorIndexDefinition vectorIndexDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .withAutoEmbedField("a")
+            .withAutoEmbedField("b")
+            .withFilterPath("color")
+            .build();
+    ImmutableMap<String, Vector> embeddings = createEmbeddings();
+    BsonDocument bsonDoc = createBasicBson();
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+    DocumentEvent rawDocumentEvent =
+        DocumentEvent.createInsert(
+            DocumentMetadata.fromOriginalDocument(Optional.of(rawBsonDoc)), rawBsonDoc);
+
+    DocumentEvent result =
+        buildMaterializedViewDocumentEvent(
+            rawDocumentEvent,
+            vectorIndexDefinition,
+            createEmbeddingsPerField(vectorIndexDefinition.getMappings(), embeddings),
+            MAT_VIEW_SCHEMA_METADATA);
+
+    // Inject an unknown field that is NOT in MV_METADATA_FIELDS.
+    BsonDocument matViewDoc = new BsonDocument();
+    matViewDoc.putAll(result.getDocument().get());
+    matViewDoc.put("_unknownFutureField", new BsonString("someValue"));
+    RawBsonDocument matViewRawDoc =
+        new RawBsonDocument(matViewDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    var comparisonResult =
+        compareDocuments(
+            rawDocumentEvent.getDocument().get(),
+            matViewRawDoc,
+            vectorIndexDefinition.getMappings(),
+            AutoEmbeddingIndexDefinitionUtils.getMatViewIndexFields(
+                vectorIndexDefinition.getMappings(), MAT_VIEW_SCHEMA_METADATA),
+            MAT_VIEW_SCHEMA_METADATA);
+
+    // Unknown fields SHOULD trigger re-indexing — we must not over-exclude.
+    assertTrue(comparisonResult.needsReIndexing());
+  }
+
+  @Test
+  public void testMvMetadataFieldsContainsLeaseVersionField() {
+    // Ensure MV_METADATA_FIELDS tracks _autoEmbed._leaseVersion (written by
+    // MaterializedViewWriter). The enforcer test in MaterializedViewWriterTest verifies the full
+    // writer → compareDocuments path. This test catches removal of the field from the set.
+    assertThat(AutoEmbeddingDocumentUtils.MV_METADATA_FIELDS)
+        .contains("_autoEmbed._leaseVersion");
+  }
+
 
   private BsonDocument createBasicBson() {
     BsonDocument bsonDoc = new BsonDocument();
