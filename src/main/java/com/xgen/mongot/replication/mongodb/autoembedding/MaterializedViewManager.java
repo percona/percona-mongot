@@ -60,6 +60,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -172,6 +173,16 @@ public class MaterializedViewManager implements ReplicationManager {
   private final ScheduledFuture<?> statusRefreshFuture;
 
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
+
+  /**
+   * Tracks generationIds with a pending async shutdown from {@link #transitionToFollower}.
+   * {@link #refreshStatus()} skips leadership acquisition for these ids to avoid a race where
+   * a new generator tries to enqueue init-sync before the old generator finishes cleanup.
+   * Removed when shutdown completes.
+   */
+  @VisibleForTesting
+  final Set<MaterializedViewGenerationId> pendingShutdowns =
+      ConcurrentHashMap.newKeySet();
 
   /**
    * Package-private constructor for testing - registers gauges and starts periodic tasks. This
@@ -663,12 +674,32 @@ public class MaterializedViewManager implements ReplicationManager {
   private synchronized void transitionToFollower(
       UUID uuid, MaterializedViewGenerator existingGenerator) {
     MaterializedViewIndexGeneration matViewIndexGeneration = existingGenerator.getIndexGeneration();
+    MaterializedViewGenerationId generationId = matViewIndexGeneration.getGenerationId();
+    // Skip if a previous transitionToFollower is still shutting down for this generationId.
+    // This can happen when two heartbeat threads both snapshot the same leader generator
+    // before either enters this synchronized block.
+    if (this.pendingShutdowns.contains(generationId)) {
+      LOG.atWarn()
+          .addKeyValue("generationId", generationId)
+          .log("Shutdown already pending, skipping duplicate transitionToFollower");
+      return;
+    }
     MaterializedViewGenerator newGenerator =
         this.matViewGeneratorFactory.create(matViewIndexGeneration);
     // Replace in the map immediately so subsequent operations use the new follower generator.
     this.managedMaterializedViewGenerators.put(uuid, newGenerator);
-    // Shutdown the old generator asynchronously. No need to wait or activate leadership.
-    existingGenerator.shutdown();
+    // Shutdown the old generator asynchronously. Track the pending shutdown so that
+    // refreshStatus() skips leadership acquisition until cleanup completes.
+    this.pendingShutdowns.add(generationId);
+    existingGenerator
+        .shutdown()
+        .whenComplete(
+            (ignored, throwable) -> {
+              this.pendingShutdowns.remove(generationId);
+              LOG.atInfo()
+                  .addKeyValue("generationId", generationId)
+                  .log("Old generator shutdown complete, leadership acquisition unblocked");
+            });
   }
 
   /**
@@ -897,7 +928,15 @@ public class MaterializedViewManager implements ReplicationManager {
 
     // Dynamic leader election only: attempt to acquire leadership for acquirable leases.
     if (this.leaseManager instanceof DynamicLeaderLeaseManager) {
+      List<MaterializedViewGenerationId> skippedForShutdown = new ArrayList<>();
       for (MaterializedViewGenerationId generationId : pollResult.acquirableLeases()) {
+        // Skip leadership acquisition if the old generator is still shutting down.
+        // This avoids a race where the new generator enqueues init-sync before the old
+        // one finishes cleanup, which would cause IllegalStateException in InitialSyncQueue.
+        if (this.pendingShutdowns.contains(generationId)) {
+          skippedForShutdown.add(generationId);
+          continue;
+        }
         // Get a fresh snapshot from managedMaterializedViewGenerators instead of the snapshot
         // taken at the start of refreshStatus(). The generator may still be missing due to a
         // race condition (leaseManager.add() called but generator not yet stored), which is
@@ -926,6 +965,11 @@ public class MaterializedViewManager implements ReplicationManager {
               .log("Acquired leadership for materialized view, transitioning to leader mode");
           generator.get().becomeLeader();
         }
+      }
+      if (!skippedForShutdown.isEmpty()) {
+        LOG.atInfo()
+            .addKeyValue("skippedGenerationIds", skippedForShutdown)
+            .log("Skipping leadership acquisition — old generators still shutting down");
       }
     }
   }

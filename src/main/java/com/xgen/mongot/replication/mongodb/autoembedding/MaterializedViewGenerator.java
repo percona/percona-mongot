@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import javax.annotation.Nullable;
 
 /**
  * MaterializedViewGenerator manages one materialized view collection for auto-embedding indexes.
@@ -62,6 +63,15 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
    */
   @GuardedBy("this")
   private boolean isLeader;
+
+  /**
+   * Cached shutdown future so that every caller of {@link #shutdown()} gets the same future from
+   * the first real shutdown. Without this, a second {@code shutdown()} call would see the generator
+   * already in {@code SHUT_DOWN} state and return {@code COMPLETED_FUTURE} immediately, which can
+   * cause {@code whenComplete} callbacks to fire before the real shutdown finishes.
+   */
+  @GuardedBy("this")
+  @Nullable private CompletableFuture<Void> shutdownFuture = null;
 
   /** Executor for scheduling lifecycle tasks. Stored here since parent's field is private. */
   private final Executor lifecycleExecutor;
@@ -164,11 +174,15 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
 
   @Override
   public synchronized CompletableFuture<Void> shutdown() {
+    if (this.shutdownFuture != null) {
+      return this.shutdownFuture;
+    }
     this.matViewIndex.setLeaderMode(false);
     // Once shutdown, this generator is no longer the leader, as becomeLeader will be no-op because
     // of shutdown checks in ReplicationIndexManager
     this.isLeader = false;
-    return super.shutdown();
+    this.shutdownFuture = super.shutdown();
+    return this.shutdownFuture;
   }
 
   /**

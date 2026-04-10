@@ -1481,6 +1481,103 @@ public class MaterializedViewManagerTest {
     verify(generator).becomeLeader();
   }
 
+  @Test
+  public void dynamicLeader_acquireLease_skipsWhenPendingShutdown() {
+    // During leadership oscillation, refreshStatus should skip leadership acquisition
+    // for a generationId that has a pending shutdown from transitionToFollower.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+
+    // Simulate a pending shutdown — old generator is still cleaning up.
+    mocks.manager.pendingShutdowns.add(matViewGenId);
+
+    // Run the status refresh.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // tryAcquireLeadership should NOT be called because shutdown is pending.
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(any());
+    verify(generator, never()).becomeLeader();
+  }
+
+  @Test
+  public void dynamicLeader_acquireLease_resumesAfterShutdownCompletes() {
+    // After the pending shutdown completes and is removed from pendingShutdowns,
+    // refreshStatus should resume leadership acquisition normally.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId)).thenReturn(true);
+
+    // Simulate shutdown that already completed — not in pendingShutdowns.
+    // (No add to pendingShutdowns — it was added and removed before this refresh.)
+
+    // Run the status refresh.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // tryAcquireLeadership should be called and becomeLeader() invoked.
+    verify(mocks.leaseManager).tryAcquireLeadership(matViewGenId);
+    verify(generator).becomeLeader();
+  }
+
+  @Test
+  public void dynamicLeader_transitionToFollower_skipsWhenPendingShutdown() {
+    // When two heartbeat threads snapshot the same leader generator before either enters
+    // the synchronized transitionToFollower, the second call should skip because
+    // pendingShutdowns already contains the generationId.
+    // Uses DynamicLeaderLeaseManager mock so the instanceof check in emitHeartbeat passes.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    // Generator was activated as leader during addIndexForReplication.
+    verify(generator).becomeLeader();
+    assertTrue(generator.isLeader());
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    // Simulate a pending shutdown — first transitionToFollower already in progress.
+    mocks.manager.pendingShutdowns.add(matViewGenId);
+
+    // Simulate leadership loss so heartbeat would normally call transitionToFollower.
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
+
+    // Capture and run the heartbeat task.
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    // The generator factory should NOT have been called again to create a new follower,
+    // because transitionToFollower skipped due to pending shutdown.
+    verify(mocks.materializedViewGeneratorFactory, times(1)).create(matViewIndexGen);
+  }
+
   // ==================== getMatViewGenerator Tests ====================
 
   @Test
@@ -1793,6 +1890,25 @@ public class MaterializedViewManagerTest {
      * immediately, triggering the leadership activation path in createNewGenerator().
      */
     private static Mocks createDynamicLeaderWithUnexpiredLease() {
+      // Use a plain LeaseManager mock (NOT StaticLeaderLeaseManager) so the dynamic
+      // leader election path in createNewGenerator() is tested.
+      return createDynamicLeader(LeaseManager.class);
+    }
+
+    /**
+     * Creates Mocks with a DynamicLeaderLeaseManager mock so the instanceof check in
+     * emitHeartbeat() passes, enabling tests for the transitionToFollower heartbeat path.
+     */
+    private static Mocks createDynamicLeaderWithDynamicLeaseManager() {
+      return createDynamicLeader(DynamicLeaderLeaseManager.class);
+    }
+
+    /**
+     * Shared setup for dynamic leader mocks, parameterized by lease manager type. Using a plain
+     * LeaseManager mock tests the generic dynamic leader path; using DynamicLeaderLeaseManager
+     * additionally enables the instanceof-guarded heartbeat and refreshStatus paths.
+     */
+    private static Mocks createDynamicLeader(Class<? extends LeaseManager> leaseManagerType) {
       NamedExecutorService executorService = mock(NamedExecutorService.class);
       when(executorService.getName()).thenReturn("indexing");
       try {
@@ -1821,9 +1937,7 @@ public class MaterializedViewManagerTest {
       SteadyStateManager steadyStateManager = mock(SteadyStateManager.class);
       when(steadyStateManager.shutdown()).thenReturn(COMPLETED_FUTURE);
 
-      // Use a plain LeaseManager mock (NOT StaticLeaderLeaseManager) so the dynamic
-      // leader election path in createNewGenerator() is tested
-      LeaseManager mockLeaseManager = mock(LeaseManager.class);
+      LeaseManager mockLeaseManager = mock(leaseManagerType);
       doNothing().when(mockLeaseManager).drop(any());
       when(mockLeaseManager.dropLease(any(String.class))).thenReturn(COMPLETED_FUTURE);
 
@@ -1832,14 +1946,12 @@ public class MaterializedViewManagerTest {
       doAnswer(
               invocation -> {
                 IndexGeneration indexGen = invocation.getArgument(0);
-                // Simulate owning an unexpired lease - add to leaders set
                 leaderGenerationIds.add(indexGen.getGenerationId());
                 return null;
               })
           .when(mockLeaseManager)
           .add(any(), anyBoolean());
 
-      // isLeader returns true for generations in leaderGenerationIds (unexpired lease)
       when(mockLeaseManager.isLeader(any()))
           .thenAnswer(inv -> leaderGenerationIds.contains(inv.getArgument(0)));
       when(mockLeaseManager.getLeaderGenerationIds()).thenAnswer(inv -> leaderGenerationIds);
@@ -1858,7 +1970,7 @@ public class MaterializedViewManagerTest {
           statusRefreshExecutor,
           optimeUpdaterExecutor,
           mockLeaseManager,
-          IndexStatus.unknown(), // expectedStatus
+          IndexStatus.unknown(),
           Optional.empty(),
           createMockMetadataCatalog());
     }

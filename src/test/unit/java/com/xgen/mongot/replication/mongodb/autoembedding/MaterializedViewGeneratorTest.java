@@ -3,6 +3,7 @@ package com.xgen.mongot.replication.mongodb.autoembedding;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewDefinitionGeneration;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewIndexGeneration;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -21,6 +22,7 @@ import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.testing.mongot.metrics.SimpleMetricsFactory;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import org.bson.types.ObjectId;
 import org.junit.After;
 import org.junit.Before;
@@ -113,6 +115,17 @@ public class MaterializedViewGeneratorTest {
     generator.shutdown().get();
 
     assertFalse("Should not be leader after shutdown()", generator.isLeader());
+  }
+
+  @Test
+  public void shutdown_calledTwice_returnsSameFuture() throws Exception {
+    MaterializedViewGenerator generator = createGenerator();
+    generator.becomeLeader();
+
+    CompletableFuture<Void> first = generator.shutdown();
+    CompletableFuture<Void> second = generator.shutdown();
+
+    assertSame("Second shutdown() must return the same future as the first", first, second);
   }
 
   private MaterializedViewGenerator createGenerator() {
