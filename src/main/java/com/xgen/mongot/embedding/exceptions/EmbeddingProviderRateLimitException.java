@@ -12,10 +12,10 @@ package com.xgen.mongot.embedding.exceptions;
 public class EmbeddingProviderRateLimitException extends EmbeddingProviderTransientException {
 
   public EmbeddingProviderRateLimitException(String message) {
-    super(message);
+    super(message, Reason.RATE_LIMIT_EXCEEDED);
   }
 
   public EmbeddingProviderRateLimitException(Throwable throwable) {
-    super(throwable);
+    super(throwable, Reason.RATE_LIMIT_EXCEEDED);
   }
 }

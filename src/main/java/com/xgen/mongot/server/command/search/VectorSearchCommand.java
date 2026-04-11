@@ -783,7 +783,9 @@ public class VectorSearchCommand implements Command {
           "Vector index for this text based query is invalid due to missing model");
     }
     if (this.embeddingServiceManagerSupplier.get() == null) {
-      throw new EmbeddingProviderTransientException("Embedding service not initialized.");
+      throw new EmbeddingProviderTransientException(
+          "Embedding service not initialized.",
+          EmbeddingProviderTransientException.Reason.SERVICE_NOT_INITIALIZED);
     }
 
     // Use the raw (source) auto-embedding index definition for the embedding context.

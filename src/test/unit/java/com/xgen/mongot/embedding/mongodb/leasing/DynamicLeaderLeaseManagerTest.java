@@ -23,6 +23,7 @@ import com.mongodb.client.result.InsertOneResult;
 import com.mongodb.client.result.UpdateResult;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
+import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient;
 import com.xgen.mongot.embedding.mongodb.common.DefaultInternalDatabaseResolver;
 import com.xgen.mongot.embedding.mongodb.common.InternalDatabaseResolver;
@@ -1241,6 +1242,55 @@ public class DynamicLeaderLeaseManagerTest {
             uuid,
             collectionName),
         null);
+  }
+
+  @Test
+  public void materializedViewTransientException_reasonConstructors_preserveReason() {
+    var ex1 =
+        new MaterializedViewTransientException(
+            "test", MaterializedViewTransientException.Reason.LEASE_OPERATION_FAILED);
+    assertThat(ex1.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.LEASE_OPERATION_FAILED);
+
+    var ex2 =
+        new MaterializedViewTransientException(
+            new RuntimeException("cause"),
+            MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE);
+    assertThat(ex2.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE);
+
+    var ex3 =
+        new MaterializedViewTransientException(
+            "msg",
+            new RuntimeException("cause"),
+            MaterializedViewTransientException.Reason.BULK_WRITE_ERROR);
+    assertThat(ex3.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.BULK_WRITE_ERROR);
+  }
+
+  @Test
+  public void materializedViewTransientException_legacyConstructors_defaultToUnknown() {
+    var ex1 = new MaterializedViewTransientException("test");
+    assertThat(ex1.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+
+    var ex2 = new MaterializedViewTransientException(new RuntimeException("cause"));
+    assertThat(ex2.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+
+    var ex3 =
+        new MaterializedViewTransientException("msg", new RuntimeException("cause"));
+    assertThat(ex3.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+  }
+
+  @Test
+  public void materializedViewTransientException_nullReason_defaultsToUnknown() {
+    MaterializedViewTransientException.Reason nullReason = null;
+    var ex =
+        new MaterializedViewTransientException("test", nullReason);
+    assertThat(ex.getReason())
+        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
   }
 
   @SuppressWarnings("unchecked")

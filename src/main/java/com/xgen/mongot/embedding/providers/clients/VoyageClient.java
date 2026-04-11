@@ -22,6 +22,7 @@ import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.concurrent.OneShotSingleThreadExecutor;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.URI;
@@ -66,6 +67,7 @@ public class VoyageClient implements ClientInterface {
   private final Counter invalidRequestCounter;
   private final Counter congestionEventCounter;
   private final Counter aimdSuccessCounter;
+  private final MetricsFactory metricsFactory;
   private @Nullable DynamicSemaphore congestionSemaphore;
 
   private boolean isDedicatedCluster;
@@ -119,6 +121,7 @@ public class VoyageClient implements ClientInterface {
     this.voyageHttpClientCreatedEpochMs = System.currentTimeMillis();
     this.mongotMetadata = metadata;
     this.attachBillingMetadata = attachBillingMetadata;
+    this.metricsFactory = metricsFactory;
     this.inputTokenDistribution = metricsFactory.summary("inputTokenDistribution");
     this.invalidRequestCounter = metricsFactory.counter("invalidRequestCounter");
     this.congestionEventCounter = metricsFactory.counter("aimdCongestionEvents");
@@ -143,7 +146,11 @@ public class VoyageClient implements ClientInterface {
           this.congestionSemaphore.acquire();
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
-          throw new EmbeddingProviderTransientException("Interrupted while acquiring semaphore");
+          recordProviderErrorMetric(
+              EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL);
+          throw new EmbeddingProviderTransientException(
+              "Interrupted while acquiring semaphore",
+              EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL);
         }
       }
 
@@ -177,7 +184,9 @@ public class VoyageClient implements ClientInterface {
         IllegalArgumentException cleanedException =
             new IllegalArgumentException(cleanedMessage, e.getCause());
         LOG.error("HTTP Request Error", cleanedException);
-        throw new EmbeddingProviderTransientException(cleanedException);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR);
+        throw new EmbeddingProviderTransientException(
+            cleanedException, EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR);
       }
       renewHttpClientIfStale();
       HttpClient clientForRequest = this.voyageHttpClient;
@@ -198,21 +207,29 @@ public class VoyageClient implements ClientInterface {
         }
         LOG.error("Got timeout error when sending voyage API request", e);
         isAck = false;
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT);
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT);
       } catch (EmbeddingProviderRateLimitException e) {
         LOG.error("Got rate-limit error when sending voyage API request", e);
         isAck = false;
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED);
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         LOG.error("Got an error when sending voyage API request", e);
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED);
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED);
       } catch (IOException e) {
         if (indicatesConnectionLayerFailure(e)) {
           renewHttpClientAfterConnectionFailure(e, clientForRequest);
         }
         LOG.error("Got an error when sending voyage API request", e);
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION);
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION);
       } catch (EmbeddingProviderTransientException e) {
         LOG.error("Got an error when processing voyage API response", e);
         throw e;
@@ -232,6 +249,18 @@ public class VoyageClient implements ClientInterface {
         }
       }
     }
+  }
+
+  private void recordProviderErrorMetric(EmbeddingProviderTransientException.Reason reason) {
+    this.metricsFactory
+        .counter(
+            "embeddingProviderErrors",
+            Tags.of(
+                "exceptionType",
+                "EmbeddingProviderTransientException",
+                "reason",
+                reason.name().toLowerCase(Locale.ROOT)))
+        .increment();
   }
 
   /**
@@ -272,9 +301,12 @@ public class VoyageClient implements ClientInterface {
       // MTM cluster: tenant ID is required
       if (tenantId.isEmpty()) {
         LOG.error("Unable to extract tenant ID from database name for MTM cluster");
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
         throw new EmbeddingProviderTransientException(
             "Unable to extract tenant ID from database name for MTM cluster. "
-                + "Database name must be in format 'tenantId_dbName'.");
+                + "Database name must be in format 'tenantId_dbName'.",
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
       }
       String tenant = tenantId.get();
       String apiToken = this.tenantCredentials.get(tenant);
@@ -283,8 +315,11 @@ public class VoyageClient implements ClientInterface {
             "No credentials found for tenant: {}, available tenants: {}",
             tenant,
             this.tenantCredentials.keySet());
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
         throw new EmbeddingProviderTransientException(
-            String.format("Unable to find credentials for tenant: %s", tenant));
+            String.format("Unable to find credentials for tenant: %s", tenant),
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
       }
       LOG.debug(
           "Using tenant-specific credentials for tenant: {}, tokenLength={}",
@@ -597,8 +632,10 @@ public class VoyageClient implements ClientInterface {
           String.format("Timeout exception (HTTP 408). Response body: %s", response.body()));
     }
     if (statusCode > 400) {
+      recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS);
       throw new EmbeddingProviderTransientException(
-          String.format("Got non OK status from response, status code: %s", statusCode));
+          String.format("Got non OK status from response, status code: %s", statusCode),
+          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS);
     }
     try {
       String outputDataType = getOutputDataType(context.autoEmbedQuantization());
@@ -620,7 +657,9 @@ public class VoyageClient implements ClientInterface {
       }
       return results;
     } catch (BsonParseException e) {
-      throw new EmbeddingProviderTransientException(e);
+      recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR);
+      throw new EmbeddingProviderTransientException(
+          e, EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR);
     }
   }
 

@@ -574,7 +574,8 @@ public class StaticLeaderLeaseManager implements LeaseManager {
           throw new MaterializedViewNonTransientException(
               "Fails to update lease for "
                   + getLeaseKey(generationId)
-                  + "please check Lease collection to clean up corrupted records");
+                  + " please check Lease collection to clean up corrupted records",
+              MaterializedViewNonTransientException.Reason.FENCING_REJECTION);
         } else {
           this.leases.put(getLeaseKey(generationId), updatedLease);
         }
@@ -586,7 +587,10 @@ public class StaticLeaderLeaseManager implements LeaseManager {
       }
       // TODO(CLOUDP-371153): we need to handle this appropriately in MatViewGenerator as updating
       // status can fail
-      throw new MaterializedViewTransientException(e);
+      throw new MaterializedViewTransientException(
+          String.valueOf(e.getMessage()),
+          e,
+          MaterializedViewTransientException.Reason.LEASE_OPERATION_FAILED);
     }
   }
 

@@ -21,6 +21,7 @@ import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.WriteModel;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewNonTransientException;
+import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.index.DocumentEvent;
@@ -821,10 +822,9 @@ public class MaterializedViewWriterTest {
   }
 
   /**
-   * Enforcer test: verifies that MV documents produced by fencing do not cause spurious
-   * re-indexing in {@link
-   * com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils#compareDocuments}. This test
-   * automatically catches regressions when new metadata fields are added to the writer but not
+   * Enforcer test: verifies that MV documents produced by fencing do not cause spurious re-indexing
+   * in {@link com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils#compareDocuments}. This
+   * test automatically catches regressions when new metadata fields are added to the writer but not
    * registered in {@link
    * com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils#MV_METADATA_FIELDS}.
    */
@@ -845,21 +845,19 @@ public class MaterializedViewWriterTest {
     var schemaMetadata =
         new com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata
             .MaterializedViewSchemaMetadata(
-                1,
-                java.util.Map.of(
-                    com.xgen.mongot.util.FieldPath.parse("a"),
-                    com.xgen.mongot.util.FieldPath.parse("_autoEmbed.a"),
-                    com.xgen.mongot.util.FieldPath.parse("b"),
-                    com.xgen.mongot.util.FieldPath.parse("_autoEmbed.b")));
+            1,
+            java.util.Map.of(
+                com.xgen.mongot.util.FieldPath.parse("a"),
+                com.xgen.mongot.util.FieldPath.parse("_autoEmbed.a"),
+                com.xgen.mongot.util.FieldPath.parse("b"),
+                com.xgen.mongot.util.FieldPath.parse("_autoEmbed.b")));
 
     com.xgen.mongot.util.bson.Vector vector1 =
         com.xgen.mongot.util.bson.Vector.fromFloats(
-            new float[] {1.0f, 2.0f},
-            com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE);
+            new float[] {1.0f, 2.0f}, com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE);
     com.xgen.mongot.util.bson.Vector vector2 =
         com.xgen.mongot.util.bson.Vector.fromFloats(
-            new float[] {5.0f, 6.0f},
-            com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE);
+            new float[] {5.0f, 6.0f}, com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE);
 
     com.google.common.collect.ImmutableMap<String, com.xgen.mongot.util.bson.Vector> embeddings =
         com.google.common.collect.ImmutableMap.of("aString", vector1, "bString", vector2);
@@ -913,8 +911,8 @@ public class MaterializedViewWriterTest {
             rawDocumentEvent.getDocument().get(),
             fencedDoc,
             vectorIndexDefinition.getMappings(),
-            com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils
-                .getMatViewIndexFields(vectorIndexDefinition.getMappings(), schemaMetadata),
+            com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils.getMatViewIndexFields(
+                vectorIndexDefinition.getMappings(), schemaMetadata),
             schemaMetadata);
 
     Assert.assertFalse(
@@ -923,6 +921,98 @@ public class MaterializedViewWriterTest {
             + "in AutoEmbeddingDocumentUtils.MV_METADATA_FIELDS.",
         comparisonResult.needsReIndexing());
     Assert.assertEquals(2, comparisonResult.reusableEmbeddings().size());
+  }
+
+  @Test
+  public void testCommitWithInvalidLeaseThrowsNonTransientWithInvalidLeaseReason() {
+    when(this.mockLeaseManager.getLeaseVersion(GENERATION_ID)).thenReturn(0L);
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+    MaterializedViewNonTransientException ex =
+        Assert.assertThrows(
+            MaterializedViewNonTransientException.class,
+            () -> updateAndCommit(1, matViewWriter));
+    Assert.assertEquals(
+        MaterializedViewNonTransientException.Reason.INVALID_LEASE, ex.getReason());
+  }
+
+  @Test
+  public void testCommitSingleDocExceedingLimitHasDocumentTooLargeReason() {
+    when(this.mockCollection.bulkWrite(any()))
+        .thenThrow(new BsonMaximumSizeExceededException("mocked error"));
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+    MaterializedViewNonTransientException ex =
+        Assert.assertThrows(
+            MaterializedViewNonTransientException.class,
+            () -> updateAndCommit(1, matViewWriter));
+    Assert.assertEquals(
+        MaterializedViewNonTransientException.Reason.DOCUMENT_TOO_LARGE, ex.getReason());
+  }
+
+  @Test
+  public void testCommitNonRetryableErrorHasNonRetryableErrorReason() {
+    // Error code 9 is FailedToParse - not retryable
+    BulkWriteError bulkWriteError =
+        new BulkWriteError(9, "mocked error", new BsonDocument(), 0);
+    MongoBulkWriteException bulkWriteException = mock(MongoBulkWriteException.class);
+    when(bulkWriteException.getWriteErrors()).thenReturn(List.of(bulkWriteError));
+    when(this.mockCollection.bulkWrite(any())).thenThrow(bulkWriteException);
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+    MaterializedViewNonTransientException ex =
+        Assert.assertThrows(
+            MaterializedViewNonTransientException.class,
+            () -> updateAndCommit(1, matViewWriter));
+    Assert.assertEquals(
+        MaterializedViewNonTransientException.Reason.NON_RETRYABLE_ERROR,
+        ex.getReason());
+  }
+
+  @Test
+  public void testGetCommitUserDataThrowsTransientWithReadLeaseFailedReason() throws IOException {
+    when(this.mockLeaseManager.getCommitInfo(GENERATION_ID))
+        .thenThrow(new IOException("mocked lease read failure"));
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+    MaterializedViewTransientException ex =
+        Assert.assertThrows(
+            MaterializedViewTransientException.class,
+            matViewWriter::getCommitUserData);
+    Assert.assertEquals(
+        MaterializedViewTransientException.Reason.READ_LEASE_FAILED, ex.getReason());
   }
 
   private DocumentEvent createDocumentEvent(ObjectId indexId, int docId) {

@@ -1380,7 +1380,10 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       }
     } catch (Exception e) {
       // Transient error (e.g., network issue) - throw so caller can retry on next cycle.
-      throw new MaterializedViewTransientException(e);
+      throw new MaterializedViewTransientException(
+          String.valueOf(e.getMessage()),
+          e,
+          MaterializedViewTransientException.Reason.LEASE_OPERATION_FAILED);
     }
   }
 
@@ -1413,7 +1416,12 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
           .withReadPreference(ReadPreference.primary())
           .withWriteConcern(WriteConcern.MAJORITY);
     } catch (AssertionError e) {
-      throw new MaterializedViewTransientException(e);
+      // Catches empty this.autoEmbeddingMongoClient.getLeaseManagerMongoClient() when sync source
+      // is missing.
+      throw new MaterializedViewTransientException(
+          String.valueOf(e.getMessage()),
+          e,
+          MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE);
     }
   }
 }

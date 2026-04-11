@@ -117,15 +117,18 @@ public class MongoClientOperationExecutor {
       // as transient so the upper retry loop can back off and retry.
       if (isDiskFull(e)) {
         this.mongodDiskFullErrors.increment();
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            e, MaterializedViewTransientException.Reason.EXCEEDED_DISK_LIMIT);
       }
       if (isUserWritesBlocked(e)) {
         this.mongodUserWritesBlockedErrors.increment();
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            e, MaterializedViewTransientException.Reason.USER_WRITES_BLOCKED);
       }
       if (isSystemOverloaded(e)) {
         this.mongodSystemOverloadErrors.increment();
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            e, MaterializedViewTransientException.Reason.SYSTEM_OVERLOADED);
       }
       if (e instanceof MongoBulkWriteException bulkEx) {
         boolean hasDiskFull =
@@ -147,7 +150,16 @@ public class MongoClientOperationExecutor {
           this.mongodSystemOverloadErrors.increment();
         }
         if (hasDiskFull || hasUserWritesBlocked || hasSystemOverload) {
-          throw new MaterializedViewTransientException(e);
+          // Priority: disk-full > writes-blocked > system-overloaded.
+          // A bulk write can contain errors from multiple categories; we
+          // pick the most specific reason for the metric tag.
+          MaterializedViewTransientException.Reason reason =
+              hasDiskFull
+                  ? MaterializedViewTransientException.Reason.EXCEEDED_DISK_LIMIT
+                  : hasUserWritesBlocked
+                      ? MaterializedViewTransientException.Reason.USER_WRITES_BLOCKED
+                      : MaterializedViewTransientException.Reason.SYSTEM_OVERLOADED;
+          throw new MaterializedViewTransientException(e, reason);
         }
       }
       failureCounter.increment();

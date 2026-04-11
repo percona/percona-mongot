@@ -36,6 +36,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -1233,6 +1234,81 @@ public class VoyageClientTest {
     httpClientField.setAccessible(true);
     assertNotSame(mockClient, httpClientField.get(voyageClient));
     verify(mockClient, timeout(1000)).shutdown();
+  }
+
+  @Test
+  public void embed_ioException_hasHttpIoExceptionReason() throws Exception {
+    HttpClient mockClient = mock(HttpClient.class);
+    doThrow(new IOException("connection reset"))
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    VoyageClient voyageClient =
+        createMockedVoyageClient(createDedicatedClusterConfig("token"), mockClient);
+    EmbeddingProviderTransientException ex =
+        assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> voyageClient.embed(List.of("hi"), dummyContext()));
+    assertEquals(EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION, ex.getReason());
+  }
+
+  @Test
+  public void embed_timeout_hasHttpTimeoutReason() throws Exception {
+    HttpClient mockClient = mock(HttpClient.class);
+    doThrow(new HttpTimeoutException("timed out"))
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    doReturn(true).when(mockClient).awaitTermination(any(Duration.class));
+    VoyageClient voyageClient =
+        createMockedVoyageClient(createDedicatedClusterConfig("token"), mockClient);
+    EmbeddingProviderTransientException ex =
+        assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> voyageClient.embed(List.of("hi"), dummyContext()));
+    assertEquals(EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT, ex.getReason());
+  }
+
+  @Test
+  public void embed_nonOkStatus_hasHttpNonOkStatusReason() throws Exception {
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(500).when(mockResponse).statusCode();
+    doReturn("Internal Server Error").when(mockResponse).body();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    VoyageClient voyageClient =
+        createMockedVoyageClient(createDedicatedClusterConfig("token"), mockClient);
+    EmbeddingProviderTransientException ex =
+        assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> voyageClient.embed(List.of("hi"), dummyContext()));
+    assertEquals(
+        EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS, ex.getReason());
+  }
+
+  @Test
+  public void embed_tenantCredentialsFailure_hasTenantCredentialsFailureReason() throws Exception {
+    HttpClient mockClient = createMockHttpClient();
+    // MTM config with no matching tenant credentials
+    var config =
+        createMtmClusterConfig(
+            Map.of("other_tenant", createTenantCredentials("other-token")));
+    VoyageClient voyageClient = createMockedVoyageClient(config, mockClient);
+    // Use a database name with a tenant prefix that doesn't match
+    EmbeddingRequestContext mtmContext =
+        new EmbeddingRequestContext(
+            "missing_tenant_dbname",
+            "testIndex",
+            "testCollection",
+            1024,
+            VectorAutoEmbedQuantization.FLOAT);
+    EmbeddingProviderTransientException ex =
+        assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> voyageClient.embed(List.of("hi"), mtmContext));
+    assertEquals(
+        EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE,
+        ex.getReason());
   }
 
   @Test

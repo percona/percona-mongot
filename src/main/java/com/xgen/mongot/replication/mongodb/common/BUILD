@@ -115,6 +115,7 @@ java_library(
         "@maven//:com_google_guava_guava",
         "@maven//:commons_codec_commons_codec",
         "@maven//:io_micrometer_micrometer_core",
+        "@maven//:net_jodah_failsafe",
         "@maven//:org_apache_commons_commons_lang3",
         "@maven//:org_jetbrains_annotations",
         "@maven//:org_mongodb_bson",

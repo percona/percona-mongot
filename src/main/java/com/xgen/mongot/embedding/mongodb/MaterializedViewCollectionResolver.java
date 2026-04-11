@@ -133,7 +133,10 @@ public class MaterializedViewCollectionResolver {
           indexDefinitionGeneration.getGenerationId(), matViewDb);
       return materializedViewCollectionMetadata;
     } catch (Exception e) {
-      throw new MaterializedViewTransientException(e);
+      throw new MaterializedViewTransientException(
+          String.valueOf(e.getMessage()),
+          e,
+          MaterializedViewTransientException.Reason.COLLECTION_RESOLUTION_FAILED);
     }
   }
 
@@ -232,7 +235,10 @@ public class MaterializedViewCollectionResolver {
       mongoClient.getDatabase(matViewDb).createCollection(collectionName);
     } catch (MongoCommandException e) {
       if (e.getErrorCode() != NAMESPACE_EXISTS_ERROR_CODE) {
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            String.valueOf(e.getMessage()),
+            e,
+            MaterializedViewTransientException.Reason.COLLECTION_RESOLUTION_FAILED);
       }
       // Ignore if the collection already exists.
     }

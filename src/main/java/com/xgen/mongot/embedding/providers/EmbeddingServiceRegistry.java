@@ -72,7 +72,8 @@ public class EmbeddingServiceRegistry {
       throw new EmbeddingProviderNonTransientException(
           String.format(
               "CanonicalModel: %s not registered yet, supported models are: %s",
-              modelName, getAllSupportedModels()));
+              modelName, getAllSupportedModels()),
+          EmbeddingProviderNonTransientException.Reason.MODEL_NOT_REGISTERED);
     }
     return REGISTERED_PROVIDER_MANAGERS.get(modelName);
   }

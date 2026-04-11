@@ -141,7 +141,8 @@ public class EmbeddingServiceManager {
           new EmbeddingProviderNonTransientException(
               String.format(
                   "CanonicalModel: %s not registered yet, supported models are: %s",
-                  embeddingModelConfig.name(), EmbeddingModelCatalog.getAllSupportedModels())));
+                  embeddingModelConfig.name(), EmbeddingModelCatalog.getAllSupportedModels()),
+              EmbeddingProviderNonTransientException.Reason.MODEL_NOT_REGISTERED));
     }
     EmbeddingModelConfig.ConsolidatedWorkloadParams workloadSpecificParams =
         getWorkloadParamsByTier(embeddingModelConfig, serviceTier);
@@ -218,7 +219,8 @@ public class EmbeddingServiceManager {
                     instanceof EmbeddingProviderBatchingException batchingException) {
                   this.tokenEstimationFailsCounter.increment();
                   throw new EmbeddingProviderNonTransientException(
-                      Strings.nullToEmpty(batchingException.getMessage()));
+                      Strings.nullToEmpty(batchingException.getMessage()),
+                      EmbeddingProviderNonTransientException.Reason.BATCHING_ERROR);
                 }
                 throw new CompletionException(unrecoverableEx);
               });

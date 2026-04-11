@@ -33,6 +33,7 @@ import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldMapping;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory.IndexingStrategy;
 import com.xgen.mongot.replication.mongodb.common.SchedulerQueue.Priority;
 import com.xgen.mongot.util.Check;
@@ -40,16 +41,21 @@ import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
+import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import net.jodah.failsafe.FailsafeException;
 
 /**
  * The embedding indexing work scheduler accepts embedding and indexing work and schedules it to be
@@ -97,6 +103,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
   private final Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier;
 
   private final MaterializedViewCollectionMetadataCatalog materializedViewCollectionMetadataCatalog;
+  private final MetricsFactory metricsFactory;
 
   private final AutoEmbeddingMemoryBudget globalBudget;
 
@@ -115,6 +122,10 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
     this.indexingStrategy = indexingStrategy;
     this.globalBudget = globalBudget;
     this.perBatchBudgetBytes = perBatchBudgetBytes;
+    this.metricsFactory =
+        new MetricsFactory(
+            "embeddingIndexingWorkScheduler",
+            indexingExecutor.getMeterRegistry());
   }
 
   /**
@@ -215,7 +226,8 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
             new EmbeddingProviderNonTransientException(
                 String.format(
                     "CanonicalModel: %s not registered yet, supported models are: [%s]",
-                    modelName, String.join(", ", EmbeddingModelCatalog.getAllSupportedModels()))));
+                    modelName, String.join(", ", EmbeddingModelCatalog.getAllSupportedModels())),
+                EmbeddingProviderNonTransientException.Reason.MODEL_NOT_REGISTERED));
       }
       modelConfigPerPathBuilder.put(
           entry.getKey(), EmbeddingModelCatalog.getModelConfig(modelName));
@@ -231,7 +243,8 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
               String.format(
                   "Unable to process materialized view index batch because mat view metadata is"
                       + " not present for generationId: %s",
-                  batch.generationId)));
+                  batch.generationId),
+              EmbeddingProviderNonTransientException.Reason.MV_METADATA_NOT_PRESENT));
     }
 
     ImmutableMap<FieldPath, EmbeddingModelConfig> modelConfigPerPath =
@@ -246,7 +259,8 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
     if (!this.globalBudget.tryAcquire(estimatedBatchBytes)) {
       return CompletableFuture.failedFuture(
           new MaterializedViewTransientException(
-              "Global auto-embedding memory budget exceeded; batch will be retried"));
+              "Global auto-embedding memory budget exceeded; batch will be retried",
+              MaterializedViewTransientException.Reason.MEMORY_BUDGET_EXCEEDED));
     }
 
     CompletableFuture<Void> batchFuture;
@@ -397,6 +411,9 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
                   () -> {
                     try {
                       batch.indexer.commit();
+                    } catch (MaterializedViewTransientException
+                        | MaterializedViewNonTransientException e) {
+                      throw e;
                     } catch (Exception e) {
                       throw new MaterializedViewTransientException(
                           "Failed intermediate sub-batch commit", e);
@@ -407,16 +424,40 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
     return chain;
   }
 
+  /**
+   * Unwraps wrapper exceptions (CompletionException, ExecutionException, FailsafeException) to find
+   * the root cause. The embedding pipeline can wrap typed exceptions in multiple layers:
+   * CompletionException → FailsafeException → EmbeddingProviderTransientException.
+   */
+  private static Throwable unwrapCause(Throwable throwable) {
+    @Var Throwable current = throwable;
+    while (current.getCause() != null
+        && current.getCause() != current
+        && (current instanceof CompletionException
+            || current instanceof ExecutionException
+            || current instanceof FailsafeException)) {
+      current = current.getCause();
+    }
+    return current;
+  }
+
   @Override
   void handleBatchException(IndexingSchedulerBatch batch, Throwable throwable) {
-    if (throwable.getCause() instanceof EmbeddingProviderNonTransientException ex) {
+    Throwable cause = unwrapCause(throwable);
+    if (cause instanceof EmbeddingProviderNonTransientException ex) {
+      recordBatchErrorMetric(
+          EmbeddingProviderNonTransientException.class.getSimpleName(),
+          ex.getReason().name());
       if (batch.priority == Priority.INITIAL_SYNC_COLLECTION_SCAN
           || batch.priority == Priority.INITIAL_SYNC_CHANGE_STREAM) {
         batch.future.completeExceptionally(InitialSyncException.createFailed(ex));
       } else {
         batch.future.completeExceptionally(SteadyStateException.createNonInvalidatingResync(ex));
       }
-    } else if (throwable.getCause() instanceof EmbeddingProviderTransientException ex) {
+    } else if (cause instanceof EmbeddingProviderTransientException ex) {
+      recordBatchErrorMetric(
+          EmbeddingProviderTransientException.class.getSimpleName(),
+          ex.getReason().name());
       // TODO(CLOUDP-305372): Find a way to skip already indexed document event in retries.
       if (batch.priority == Priority.INITIAL_SYNC_COLLECTION_SCAN
           || batch.priority == Priority.INITIAL_SYNC_CHANGE_STREAM) {
@@ -424,14 +465,20 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
       } else {
         batch.future.completeExceptionally(SteadyStateException.createTransient(ex));
       }
-    } else if (throwable.getCause() instanceof MaterializedViewTransientException ex) {
+    } else if (cause instanceof MaterializedViewTransientException ex) {
+      recordBatchErrorMetric(
+          MaterializedViewTransientException.class.getSimpleName(),
+          ex.getReason().name());
       if (batch.priority == Priority.INITIAL_SYNC_COLLECTION_SCAN
           || batch.priority == Priority.INITIAL_SYNC_CHANGE_STREAM) {
         batch.future.completeExceptionally(InitialSyncException.createResumableTransient(ex));
       } else {
         batch.future.completeExceptionally(SteadyStateException.createTransient(ex));
       }
-    } else if (throwable.getCause() instanceof MaterializedViewNonTransientException ex) {
+    } else if (cause instanceof MaterializedViewNonTransientException ex) {
+      recordBatchErrorMetric(
+          MaterializedViewNonTransientException.class.getSimpleName(),
+          ex.getReason().name());
       if (batch.priority == Priority.INITIAL_SYNC_COLLECTION_SCAN
           || batch.priority == Priority.INITIAL_SYNC_CHANGE_STREAM) {
         batch.future.completeExceptionally(InitialSyncException.createFailed(ex));
@@ -441,6 +488,15 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
     } else {
       batch.future.completeExceptionally(throwable);
     }
+  }
+
+  private void recordBatchErrorMetric(String exceptionType, String reason) {
+    this.metricsFactory
+        .counter(
+            "embeddingBatchErrors",
+            Tags.of("exceptionType", exceptionType,
+                "reason", reason.toLowerCase(Locale.ROOT)))
+        .increment();
   }
 
   @Override
