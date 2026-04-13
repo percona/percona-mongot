@@ -15,9 +15,9 @@ import java.util.Arrays;
  * <p>The raw bytes are only accessible via {@link #withBytes(CheckedConsumer)} or {@link
  * #mapBytes(CheckedFunction)}, which pass a defensive copy to the callback.
  *
- * <p>Note: The static factory {@link #wrapAndZeroInput(byte[])} zeros the caller's input array
- * after copying. This is done to encourage the caller does not retain the data outside the returned
- * instance.
+ * <p>Note: The static factory method {@link #wrapAndZeroInput(byte[])} zeros the caller's input
+ * array after copying. This is done to encourage the caller to not retain the input data outside
+ * the returned instance.
  */
 public final class SanitizedBytes {
   private static final String SANITIZED_PLACEHOLDER = "xxx-sanitized-xxx";
@@ -92,6 +92,11 @@ public final class SanitizedBytes {
     return Arrays.hashCode(this.data);
   }
 
+  /**
+   * Compares two {@link SanitizedBytes} instances for equality using a standard byte array
+   * comparison. This is NOT a constant-time comparison and should not be used in security-sensitive
+   * contexts where timing attacks are a concern. See the class-level Javadoc for intended usage.
+   */
   @Override
   public boolean equals(Object obj) {
     if (this == obj) {
