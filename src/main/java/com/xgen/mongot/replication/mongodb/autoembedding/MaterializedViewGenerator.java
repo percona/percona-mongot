@@ -151,6 +151,9 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
             .handleAsync(
                 (ignored, throwable) -> {
                   if (throwable != null) {
+                    this.logger.atWarn()
+                        .setCause(throwable)
+                        .log("Leader initialization failed, dropping index for resync");
                     // For materialized views, data is stored in MongoDB. Always drop on failure,
                     // because the data can be resynced from the source collection.
                     this.failAndDropIndex(throwable, IndexStatus.Reason.INITIALIZATION_FAILED);
@@ -175,8 +178,12 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   @Override
   public synchronized CompletableFuture<Void> shutdown() {
     if (this.shutdownFuture != null) {
+      this.logger.atInfo()
+          .log("Shutdown already in progress");
       return this.shutdownFuture;
     }
+    this.logger.atInfo()
+        .log("Shutting down materialized view generator");
     this.matViewIndex.setLeaderMode(false);
     // Once shutdown, this generator is no longer the leader, as becomeLeader will be no-op because
     // of shutdown checks in ReplicationIndexManager
@@ -233,9 +240,9 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   // For auto-embedding index, we always resync instead of leaving the index in
   // RECOVERING_NON_TRANSIENT state.
   protected void handleSteadyStateNonInvalidatingResync(SteadyStateException steadyStateException) {
-    this.logger.info(
-        "Exception requiring resync occurred during steady state replication.",
-        steadyStateException);
+    this.logger.atInfo()
+        .setCause(steadyStateException)
+        .log("Resync triggered during steady state replication for auto-embedding index");
     enqueueInitialSync(IndexStatus.initialSync());
   }
 }

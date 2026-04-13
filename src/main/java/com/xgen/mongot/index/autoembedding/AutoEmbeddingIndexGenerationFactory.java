@@ -72,6 +72,9 @@ public class AutoEmbeddingIndexGenerationFactory {
                 .getIndex(derivedIndexDefinitionGeneration.getGenerationId())
                 .filter(idx -> idx instanceof InitializedVectorIndex)
                 .map(idx -> (InitializedVectorIndex) idx);
+    LOG.atInfo()
+        .addKeyValue("generationId", rawDefinitionGeneration.getGenerationId())
+        .log("Created auto-embedding composite index generation");
     return new AutoEmbeddingIndexGeneration(
         new AutoEmbeddingCompositeIndex(
             matViewIndex,

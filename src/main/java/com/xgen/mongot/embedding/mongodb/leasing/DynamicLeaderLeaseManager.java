@@ -733,8 +733,22 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
           .addKeyValue("hostname", this.hostname)
           .log("Heartbeat - renewing leases for leader generations");
     }
+    List<MaterializedViewGenerationId> renewedGenerationIds = new ArrayList<>();
+    List<MaterializedViewGenerationId> failedGenerationIds = new ArrayList<>();
     for (MaterializedViewGenerationId generationId : new ArrayList<>(this.leaderGenerationIds)) {
-      renewLease(generationId);
+      if (renewLease(generationId)) {
+        renewedGenerationIds.add(generationId);
+      } else {
+        failedGenerationIds.add(generationId);
+      }
+    }
+    if (!renewedGenerationIds.isEmpty() || !failedGenerationIds.isEmpty()) {
+      LOG.atInfo()
+          .addKeyValue("renewedCount", renewedGenerationIds.size())
+          .addKeyValue("renewedGenerationIds", renewedGenerationIds)
+          .addKeyValue("failedCount", failedGenerationIds.size())
+          .addKeyValue("failedGenerationIds", failedGenerationIds)
+          .log("Heartbeat lease renewal summary");
     }
   }
 
@@ -1150,7 +1164,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
    * }
    * }</pre>
    */
-  private void renewLease(MaterializedViewGenerationId generationId) {
+  private boolean renewLease(MaterializedViewGenerationId generationId) {
     @Var String leaseKey = null;
     try {
       leaseKey = getLeaseKey(generationId);
@@ -1160,7 +1174,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
             "No local lease found for leader generation {}, transitioning to follower",
             generationId);
         becomeFollower(generationId);
-        return;
+        return false;
       }
 
       // If our in-memory lease has expired, we've lost the right to be leader.
@@ -1175,7 +1189,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
             now);
         refreshLeaseFromDatabase(leaseKey);
         becomeFollower(generationId);
-        return;
+        return false;
       }
 
       Lease renewedLease = currentLease.withRenewedOwnership(this.hostname);
@@ -1192,17 +1206,14 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       if (result.getMatchedCount() > 0) {
         // Successfully renewed.
         this.leases.put(leaseKey, renewedLease);
-        LOG.atInfo()
-            .addKeyValue("generationId", generationId)
-            .addKeyValue("newExpiration", renewedLease.leaseExpiration())
-            .addKeyValue("leaseVersion", renewedLease.leaseVersion())
-            .log("Renewed lease");
+        return true;
       } else {
         // Lease was taken by another instance - lost leadership.
         LOG.warn(
             "Lease renewal failed for {} - lease was updated by another instance", generationId);
         refreshLeaseFromDatabase(leaseKey);
         becomeFollower(generationId);
+        return false;
       }
     } catch (IllegalStateException e) {
       LOG.warn(
@@ -1210,10 +1221,12 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
           generationId,
           e);
       cleanupAfterMetadataLoss(generationId, leaseKey);
+      return false;
     } catch (Exception e) {
       // Transient error (network, etc.) - don't give up leadership yet.
       // Let the next heartbeat cycle retry. If the lease expires, we'll give up then.
       LOG.warn("Failed to renew lease for {}, will retry on next heartbeat", generationId, e);
+      return false;
     }
   }
 

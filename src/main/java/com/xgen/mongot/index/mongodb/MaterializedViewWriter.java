@@ -325,6 +325,10 @@ public class MaterializedViewWriter implements IndexWriter {
    * @return a future that completes when the materialized view collection has been dropped.
    */
   public CompletableFuture<Void> dropMaterializedViewCollection() {
+    LOG.atInfo()
+        .addKeyValue("generationId", this.generationId)
+        .addKeyValue("namespace", this.namespace)
+        .log("Dropping materialized view collection");
     this.close();
     var mongoClientOpt = this.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient();
     if (mongoClientOpt.isEmpty()) {

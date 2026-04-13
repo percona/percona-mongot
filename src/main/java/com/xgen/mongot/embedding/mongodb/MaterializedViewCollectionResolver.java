@@ -31,12 +31,17 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Map;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implements the logic to determine which materialized view collection to use for a given index
  * definition. Responsible for discovering existing collections and creating new ones as needed.
  */
 public class MaterializedViewCollectionResolver {
+
+  private static final Logger LOG =
+      LoggerFactory.getLogger(MaterializedViewCollectionResolver.class);
 
   public static final String MV_COLLECTION_SCHEMA_NAMESPACE = "_autoEmbed";
   private static final String DELIM = "-";
@@ -131,8 +136,18 @@ public class MaterializedViewCollectionResolver {
           indexDefinitionGeneration.getGenerationId(), materializedViewCollectionMetadata);
       this.metadataCatalog.addDatabaseName(
           indexDefinitionGeneration.getGenerationId(), matViewDb);
+      LOG.atInfo()
+          .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("Registered materialized view metadata and database name");
       return materializedViewCollectionMetadata;
     } catch (Exception e) {
+      LOG.atWarn()
+          .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
+          .addKeyValue("database", matViewDb)
+          .setCause(e)
+          .log("Failed to resolve materialized view collection");
       throw new MaterializedViewTransientException(
           String.valueOf(e.getMessage()),
           e,
@@ -192,6 +207,15 @@ public class MaterializedViewCollectionResolver {
         .isEmpty()) {
       // Create new mat view collection when it's not found.
       createCollection(mongoClient, matViewDb, collectionName);
+      LOG.atInfo()
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("Created new materialized view collection");
+    } else {
+      LOG.atInfo()
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("Reusing existing materialized view collection");
     }
     return collectionName;
   }
@@ -240,7 +264,11 @@ public class MaterializedViewCollectionResolver {
             e,
             MaterializedViewTransientException.Reason.COLLECTION_RESOLUTION_FAILED);
       }
-      // Ignore if the collection already exists.
+      // Collection already exists — another instance created it concurrently.
+      LOG.atInfo()
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("MatView collection already exists, skipping creation");
     }
   }
 

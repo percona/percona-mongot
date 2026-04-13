@@ -794,20 +794,37 @@ public class MaterializedViewManager implements ReplicationManager {
         this.activeGenerationIdCatalog.genIdByMatViewCollection.get(uuid);
     if (genIdsByUuid == null) {
       // generationId is dropped twice.
+      LOG.atWarn()
+          .addKeyValue("generationId", generationId)
+          .addKeyValue("collectionName", metadata.get().collectionName())
+          .log("MatView collection already dropped, possible duplicate drop for generationId");
       return COMPLETED_FUTURE;
     }
     genIdsByUuid.remove(generationId);
     if (!genIdsByUuid.isEmpty()) {
       // Other generationIds are still using this matview UUID, no need to drop the collection.
+      LOG.atInfo()
+          .addKeyValue("generationId", generationId)
+          .addKeyValue("collectionName", metadata.get().collectionName())
+          .addKeyValue("remainingGenerationIds", new ArrayList<>(genIdsByUuid))
+          .log("Other generations still active on this MatView collection, skipping drop");
       return COMPLETED_FUTURE;
     }
     // No other generationIds are using this matview UUID, good to drop the collection.
+    LOG.atInfo()
+        .addKeyValue("generationId", generationId)
+        .addKeyValue("collectionName", metadata.get().collectionName())
+        .log("Dropping lease and materialized view collection");
     this.activeGenerationIdCatalog.genIdByMatViewCollection.remove(uuid);
     var generator = this.managedMaterializedViewGenerators.remove(uuid);
     var lastMaterializedViewIndexGeneration =
         this.activeGenerationIdCatalog.latestMatViewIndexGenerationByCollection.remove(uuid);
     if (generator == null && lastMaterializedViewIndexGeneration == null) {
       // same UUID should already be dropped.
+      LOG.atWarn()
+          .addKeyValue("generationId", generationId)
+          .addKeyValue("collectionName", metadata.get().collectionName())
+          .log("Generator and last generation both null, MatView collection may be dropped");
       return COMPLETED_FUTURE;
     }
     var materializedViewIndexGeneration =

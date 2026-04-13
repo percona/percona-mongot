@@ -188,7 +188,6 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
     // Log on status transitions
     if (this.previousConsolidatedStatus != newStatus) {
       LOG.atInfo()
-          .addKeyValue("indexId", getDefinition().getIndexId())
           .addKeyValue("generationId", this.matViewIndex.getGenerationId())
           .addKeyValue("previousStatus", this.previousConsolidatedStatus)
           .addKeyValue("newStatus", newStatus)
