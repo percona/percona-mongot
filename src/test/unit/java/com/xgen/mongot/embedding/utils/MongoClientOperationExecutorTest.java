@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoCommandException;
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.MongoWriteException;
 import com.mongodb.ServerAddress;
 import com.mongodb.WriteError;
@@ -15,9 +16,13 @@ import com.mongodb.bulk.BulkWriteError;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.mongodb.Errors;
+import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
@@ -343,5 +348,92 @@ public class MongoClientOperationExecutorTest {
                 () -> {
                   throw commandException(2, "bad value");
                 }));
+  }
+
+  // --- Retryable errors are retried and can succeed ---
+
+  @Test
+  public void retryableError_succeedsAfterRetry() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+    AtomicInteger attempts = new AtomicInteger(0);
+
+    String result =
+        executor.execute(
+            "bulkWrite",
+            () -> {
+              if (attempts.incrementAndGet() == 1) {
+                throw new MongoTimeoutException("timeout");
+              }
+              return "success";
+            });
+
+    assertEquals("success", result);
+    assertEquals(2, attempts.get());
+  }
+
+  // --- shouldAbortRetry stops retries when closed ---
+
+  @Test
+  public void shouldAbortRetry_stopsRetryWhenTrue() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    AtomicBoolean closed = new AtomicBoolean(false);
+    MongoClientOperationExecutor executor =
+        new MongoClientOperationExecutor(
+            new MetricsFactory(PREFIX, registry),
+            "resource",
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofMillis(10))
+                .backoffFactor(2)
+                .maxDelay(Duration.ofMillis(100))
+                .maxRetries(5)
+                .jitter(0)
+                .build(),
+            closed::get);
+    AtomicInteger attempts = new AtomicInteger(0);
+
+    assertThrows(
+        MongoTimeoutException.class,
+        () ->
+            executor.execute(
+                "bulkWrite",
+                () -> {
+                  attempts.incrementAndGet();
+                  closed.set(true);
+                  throw new MongoTimeoutException("timeout");
+                }));
+
+    assertEquals(1, attempts.get());
+  }
+
+  @Test
+  public void shouldAbortRetry_retriesWhenFalse() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor =
+        new MongoClientOperationExecutor(
+            new MetricsFactory(PREFIX, registry),
+            "resource",
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofMillis(10))
+                .backoffFactor(2)
+                .maxDelay(Duration.ofMillis(100))
+                .maxRetries(5)
+                .jitter(0)
+                .build(),
+            () -> false);
+    AtomicInteger attempts = new AtomicInteger(0);
+
+    String result =
+        executor.execute(
+            "bulkWrite",
+            () -> {
+              if (attempts.incrementAndGet() == 1) {
+                throw new MongoTimeoutException("timeout");
+              }
+              return "success";
+            });
+
+    assertEquals("success", result);
+    assertEquals(2, attempts.get());
   }
 }

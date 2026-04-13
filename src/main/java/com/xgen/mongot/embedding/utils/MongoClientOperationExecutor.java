@@ -16,6 +16,7 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import net.jodah.failsafe.Failsafe;
 import net.jodah.failsafe.RetryPolicy;
 import net.jodah.failsafe.function.CheckedRunnable;
@@ -52,25 +53,44 @@ public class MongoClientOperationExecutor {
    * @param resourceName the mongoDB resource name. This will be used as the prefix for all metrics.
    */
   public MongoClientOperationExecutor(MetricsFactory metricsFactory, String resourceName) {
-    this.metricsFactory = metricsFactory;
-
-    this.retryPolicy =
+    this(
+        metricsFactory,
+        resourceName,
         ExponentialBackoffPolicy.builder()
             .initialDelay(Duration.ofMillis(500))
             .backoffFactor(2)
             .maxDelay(Duration.ofMillis(5000))
             .maxRetries(5)
             .jitter(0.1)
-            .build()
-            .applyParameters(
-                new RetryPolicy<>()
-                    .handleIf(MongoClientOperationExecutor::isRetryable)
-                    .onRetry(
-                        ex ->
-                            LOG.warn(
-                                "Operation failed. Attempt count {}",
-                                ex.getAttemptCount(),
-                                ex.getLastFailure())));
+            .build(),
+        () -> false);
+  }
+
+  /**
+   * Creates a new MongoClientOperationExecutor with a custom backoff policy and abort condition.
+   *
+   * @param shouldAbortRetry supplier that returns true to stop retries immediately (e.g., when the
+   *     owning resource is closed). When true, the current exception propagates without further
+   *     retry attempts.
+   */
+  public MongoClientOperationExecutor(
+      MetricsFactory metricsFactory,
+      String resourceName,
+      ExponentialBackoffPolicy backoffPolicy,
+      BooleanSupplier shouldAbortRetry) {
+    this.metricsFactory = metricsFactory;
+
+    this.retryPolicy =
+        backoffPolicy.applyParameters(
+            new RetryPolicy<>()
+                .handleIf(e -> !shouldAbortRetry.getAsBoolean() && isRetryable(e))
+                .onRetry(
+                    ex ->
+                        LOG.warn(
+                            "Operation failed. Attempt {} ({} elapsed). Retrying.",
+                            ex.getAttemptCount(),
+                            ex.getElapsedTime(),
+                            ex.getLastFailure())));
     this.requestLatencyMetricName = resourceName + ".requestLatency";
     this.failedRequestsMetricName = resourceName + ".failedRequests";
     this.successfulRequestsMetricName = resourceName + ".successfulRequests";

@@ -32,6 +32,7 @@ import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.concurrent.LockGuard;
 import com.xgen.mongot.util.mongodb.Errors;
+import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -39,6 +40,7 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.io.Closeable;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -140,7 +142,17 @@ public class MaterializedViewWriter implements IndexWriter {
     this.bulkWriteNumDocs = metricsFactory.summary("bulkWriteNumDocs");
     this.bulkWritePayloadSize = metricsFactory.summary("bulkWritePayloadSize");
     this.operationExecutor =
-        new MongoClientOperationExecutor(metricsFactory, "materializedViewCollection");
+        new MongoClientOperationExecutor(
+            metricsFactory,
+            "materializedViewCollection",
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofSeconds(1))
+                .backoffFactor(4)
+                .maxDelay(Duration.ofMinutes(1))
+                .maxRetries(5)
+                .jitter(0.1)
+                .build(),
+            () -> this.closed);
     this.collectionUuid = collectionUuid;
     this.rateLimiter = rateLimiter;
     ReentrantReadWriteLock shutdownLock = new ReentrantReadWriteLock(true);
