@@ -265,12 +265,17 @@ public class DefaultLifecycleManager implements LifecycleManager {
     }
     this.snapshotterManager.ifPresent(manager -> manager.drop(generationId));
     IndexLifecycleManager indexManager = this.indexManagers.remove(generationId);
-    return FutureUtils.allOf(
-        List.of(
-            indexManager.drop(),
-            this.materializedViewManager
-                .map(matViewManager -> matViewManager.dropIndex(generationId))
-                .orElse(FutureUtils.COMPLETED_FUTURE)));
+    // Initiate MV drop first: indexManager.drop() can block synchronously (e.g. if
+    // PeriodicIndexCommitter.close() contends with a Lucene merge stall, especially until
+    // CLOUDP-359705 is fully rolled out) and there is a user cost element to keeping the embedding
+    // generator running, so we must ensure the MV cleanup future is created before
+    // dropping the lucene index. Java evaluates List.of() arguments in order, and a blocking
+    // first argument would prevent the second from ever being evaluated.
+    CompletableFuture<Void> mvDropFuture =
+        this.materializedViewManager
+            .map(matViewManager -> matViewManager.dropIndex(generationId))
+            .orElse(FutureUtils.COMPLETED_FUTURE);
+    return FutureUtils.allOf(List.of(indexManager.drop(), mvDropFuture));
   }
 
   @Override

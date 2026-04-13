@@ -1239,9 +1239,12 @@ public class MaterializedViewManagerTest {
     // dropIndex(a1): last attempt dropped — lease should now be cleaned up
     mocks.manager.dropIndex(genIdA1).get(5, TimeUnit.SECONDS);
 
-    // Now the generator should be shut down, generationId untracked, and lease dropped
+    // Now the generator should be shut down, generationId untracked, and lease dropped.
+    // leaseManager.drop() is called twice: once eagerly in cleanUpMatViewResources() to stop
+    // heartbeats immediately, and once in cleanUpGenerationIdStates() for reference-counting
+    // cleanup. Both calls are idempotent.
     verify(generator).shutdown();
-    verify(mocks.leaseManager).drop(defGen.getGenerationId());
+    verify(mocks.leaseManager, times(2)).drop(defGen.getGenerationId());
     verify(mocks.leaseManager).dropLease(any(String.class));
     verify(mocks.metadataCatalog).removeMetadata(defGen.getGenerationId());
   }
@@ -1380,9 +1383,12 @@ public class MaterializedViewManagerTest {
         new GenerationId(indexId, new Generation(u1Version, IndexFormatVersion.CURRENT, 1));
     mocks.manager.dropIndex(genIdU1A1).get(5, TimeUnit.SECONDS);
 
-    // Generator shutdown + lease cleanup (leader path)
+    // Generator shutdown + lease cleanup (leader path).
+    // leaseManager.drop() is called twice: once eagerly in cleanUpMatViewResources() to stop
+    // heartbeats immediately, and once in cleanUpGenerationIdStates() for reference-counting
+    // cleanup. Both calls are idempotent.
     verify(generatorU1).shutdown();
-    verify(mocks.leaseManager).drop(defGenU1.getGenerationId());
+    verify(mocks.leaseManager, times(2)).drop(defGenU1.getGenerationId());
     verify(mocks.leaseManager).dropLease(any(String.class));
     // Metadata cleanup
     verify(mocks.metadataCatalog).removeMetadata(defGenU1.getGenerationId());

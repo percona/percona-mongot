@@ -815,6 +815,12 @@ public class MaterializedViewManager implements ReplicationManager {
     // Checks both generator and leaseManager, since we may dropIndex when sync source changes.
     boolean wasLeader =
         this.leaseManager.isLeader(materializedViewIndexGeneration.getGenerationId());
+    // Stop heartbeats immediately by removing from leaderGenerationIds. This must happen AFTER
+    // capturing wasLeader (so we still know to drop the MV collection) but BEFORE the async
+    // cleanup chain (so heartbeats stop while generator shutdown and MV drop are in progress).
+    // The call is idempotent — cleanUpGenerationIdStates() will call leaseManager.drop() again,
+    // which is a safe no-op on ConcurrentHashMap.
+    this.leaseManager.drop(materializedViewIndexGeneration.getGenerationId());
     CompletableFuture<Void> generatorShutdownFuture =
         generator != null ? generator.shutdown() : COMPLETED_FUTURE;
     return generatorShutdownFuture
