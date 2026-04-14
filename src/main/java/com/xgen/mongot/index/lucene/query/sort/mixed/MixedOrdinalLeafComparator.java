@@ -104,4 +104,9 @@ class MixedOrdinalLeafComparator implements MixedLeafFieldComparator {
   public int compareTopToCurrent() throws IOException {
     return compareWithinBracket(this.topOrd);
   }
+
+  @Override
+  public int nextDoc() throws IOException {
+    return this.dv.nextDoc();
+  }
 }

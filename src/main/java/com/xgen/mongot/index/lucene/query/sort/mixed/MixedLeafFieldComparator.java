@@ -64,4 +64,17 @@ interface MixedLeafFieldComparator {
    * of this comparator.
    */
   void notifyNewBottom(BsonValue bottom) throws IOException;
+
+  /**
+   * Advances to the next document that has a value in this column. Returns {@link
+   * org.apache.lucene.search.DocIdSetIterator#NO_MORE_DOCS} when exhausted.
+   *
+   * <p>After this returns a valid doc ID, {@link #getCurrentValue()} is available.
+   *
+   * <p><b>Iterator interaction:</b> both {@code nextDoc()} and {@link #hasValue(int)} advance the
+   * same underlying doc-value iterator. Callers must not mix the two on the same comparator
+   * instance — use {@code nextDoc()} for sequential scans and {@link #hasValue(int)} for
+   * random-access lookups.
+   */
+  int nextDoc() throws IOException;
 }

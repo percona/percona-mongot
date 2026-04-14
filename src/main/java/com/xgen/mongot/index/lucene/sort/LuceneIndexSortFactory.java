@@ -6,6 +6,7 @@ import com.xgen.mongot.index.definition.NumericFieldDefinition;
 import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.query.sort.LuceneSortFactory;
+import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.Sort;
 import com.xgen.mongot.util.Check;
@@ -48,80 +49,87 @@ public class LuceneIndexSortFactory {
         this.fieldDefinitionResolver.getFieldDefinition(
             mongotSortField.field(), Optional.empty()), "fieldDefinition");
 
-    FieldName.TypeField typeField = determineTypeField(fieldDefinition, mongotSortField);
+    ImmutableSet<FieldName.TypeField> typeFields =
+        determineTypeFields(fieldDefinition, mongotSortField);
 
-    Optional<SortField> sortField =
-        LuceneSortFactory.createOptimizedSortField(
-            mongotSortField,
-            ImmutableSet.of(typeField),
-            Optional.empty(),
-            Optional.empty(),
-            this.fieldDefinitionResolver.getIndexCapabilities(),
-            true);
+    // Single-type fields use Lucene's native optimized SortField (e.g., SortedNumericSortField),
+    // which supports efficient comparators and codec-level optimizations. Multi-type fields fall
+    // back to MqlMixedSort, which implements cross-type BSON comparison via a custom IndexSorter.
+    if (typeFields.size() == 1) {
+      Optional<SortField> optimized =
+          LuceneSortFactory.createOptimizedSortField(
+              mongotSortField,
+              typeFields,
+              Optional.empty(),
+              Optional.empty(),
+              this.fieldDefinitionResolver.getIndexCapabilities(),
+              true);
 
-    if (sortField.isEmpty()) {
-      throw new IllegalStateException("Failed to create sort field " + mongotSortField.field());
+      if (optimized.isEmpty()) {
+        throw new IllegalStateException(
+            "Failed to create sort field " + mongotSortField.field());
+      }
+
+      SortField sortField = optimized.get();
+      FieldName.TypeField typeField = typeFields.iterator().next();
+      boolean needsNullness =
+          typeField == FieldName.TypeField.NUMBER_INT64_V2
+              || typeField == FieldName.TypeField.DATE_V2;
+
+      List<SortField> result = new ArrayList<>();
+      if (needsNullness) {
+        FieldPath nullnessPath =
+            FieldPath.newRoot(FieldName.getNullnessFieldName(mongotSortField.field()));
+        MongotSortField nullnessSortField =
+            new MongotSortField(nullnessPath, mongotSortField.options());
+        result.add(LuceneSortFactory.createNullnessSortField(nullnessSortField));
+      }
+      result.add(sortField);
+      return result;
     }
 
-    boolean needsNullness =
-        typeField == FieldName.TypeField.NUMBER_INT64_V2
-            || typeField == FieldName.TypeField.DATE_V2;
-
-    List<SortField> result = new ArrayList<>();
-    if (needsNullness) {
-      FieldPath nullnessPath =
-          FieldPath.newRoot(FieldName.getNullnessFieldName(mongotSortField.field()));
-      MongotSortField nullnessSortField =
-          new MongotSortField(nullnessPath, mongotSortField.options());
-      result.add(LuceneSortFactory.createNullnessSortField(nullnessSortField));
-    }
-    result.add(sortField.get());
-    return result;
+    // MqlMixedSort handles null/missing internally via its IndexSorter, so no nullness prefix.
+    return List.of(new MqlMixedSort(mongotSortField, Optional.empty()));
   }
 
-  /**
-   * Determines the TypeField for a given field definition and sort field.
-   *
-   * <p>Note: The hierarchy order of checks here doesn't represent priority - it takes advantage
-   * of the fact that in Sorted Index Private Preview, only one type definition is allowed
-   * per field. In public preview, this function will be changed to support multi-type fields.
-   */
-  private FieldName.TypeField determineTypeField(
+  /** Collects all sortable Lucene TypeFields for a given field definition. */
+  private ImmutableSet<FieldName.TypeField> determineTypeFields(
       FieldDefinition fieldDefinition, MongotSortField mongotSortField) {
-    // Boolean
+    ImmutableSet.Builder<FieldName.TypeField> typeFields = ImmutableSet.builder();
+
     if (fieldDefinition.booleanFieldDefinition().isPresent()
         && this.fieldDefinitionResolver
         .getIndexCapabilities()
         .supportsObjectIdAndBooleanDocValues()) {
-      return FieldName.TypeField.BOOLEAN;
+      typeFields.add(FieldName.TypeField.BOOLEAN);
     }
 
-    // Date
     if (fieldDefinition.dateFieldDefinition().isPresent()) {
-      return FieldName.TypeField.DATE_V2;
+      typeFields.add(FieldName.TypeField.DATE_V2);
     }
 
-    // Token
     if (fieldDefinition.tokenFieldDefinition().isPresent()) {
-      return FieldName.TypeField.TOKEN;
+      typeFields.add(FieldName.TypeField.TOKEN);
     }
 
-    // UUID
     if (fieldDefinition.uuidFieldDefinition().isPresent()) {
-      return FieldName.TypeField.UUID;
+      typeFields.add(FieldName.TypeField.UUID);
     }
 
-    // ObjectID
     if (fieldDefinition.objectIdFieldDefinition().isPresent()) {
-      return FieldName.TypeField.OBJECT_ID;
+      typeFields.add(FieldName.TypeField.OBJECT_ID);
     }
 
-    // Number
     if (fieldDefinition.numberFieldDefinition().isPresent()) {
-      return determineNumberTypeField(fieldDefinition.numberFieldDefinition().get());
+      typeFields.add(determineNumberTypeField(fieldDefinition.numberFieldDefinition().get()));
     }
-    throw new IllegalArgumentException(
-        "No supported sortable type found for field: " + mongotSortField.field());
+
+    ImmutableSet<FieldName.TypeField> result = typeFields.build();
+    if (result.isEmpty()) {
+      throw new IllegalArgumentException(
+          "No supported sortable type found for field: " + mongotSortField.field());
+    }
+    return result;
   }
 
   private FieldName.TypeField determineNumberTypeField(

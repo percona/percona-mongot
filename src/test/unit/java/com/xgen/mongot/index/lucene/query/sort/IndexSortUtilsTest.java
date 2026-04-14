@@ -7,6 +7,7 @@ import static org.junit.Assert.assertFalse;
 import com.google.common.collect.ImmutableSet;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.lucene.field.FieldName;
+import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import com.xgen.mongot.util.FieldPath;
@@ -553,6 +554,99 @@ public class IndexSortUtilsTest {
     if (!Objects.equals(mql.getMissingValue(), SortField.STRING_LAST)) {
       assertThat(mql.equals(wrongMissing)).isFalse();
       assertThat(luceneMirror.equals(wrongMissing)).isFalse();
+    }
+  }
+
+  @Test
+  public void relaxedEquals_MqlMixedSort_matchesDeserializedSortField() {
+    MqlMixedSort mql = new MqlMixedSort(
+        new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+        Optional.empty());
+
+    SortField deserialized = new SortField("f", SortField.Type.CUSTOM, false);
+    assertThat(mql.equals(deserialized)).isTrue();
+
+    SortField wrongField = new SortField("g", SortField.Type.CUSTOM, false);
+    assertThat(mql.equals(wrongField)).isFalse();
+
+    SortField wrongReverse = new SortField("f", SortField.Type.CUSTOM, true);
+    assertThat(mql.equals(wrongReverse)).isFalse();
+
+    SortField wrongType = new SortField("f", SortField.Type.LONG, false);
+    assertThat(mql.equals(wrongType)).isFalse();
+  }
+
+  @Test
+  public void expandedSortAligns_int64PlusMqlMixedSort_returnsTrue() {
+    List<MongotSortField> queryFields =
+        List.of(userSortField("dateField"), userSortField("mixedField"));
+    Sort indexSort = new Sort(
+        nullnessSortField("dateField"),
+        valueSortField("$type:int64V2/dateField"),
+        new SortField("mixedField", SortField.Type.CUSTOM, false));
+
+    assertThat(IndexSortUtils.expandedSortAlignsWithIndexSort(
+        queryFields, indexSort))
+        .isTrue();
+  }
+
+  @Test
+  public void expandedSortAligns_mqlMixedSortOnly_returnsTrue() {
+    List<MongotSortField> queryFields = List.of(userSortField("mixedField"));
+    Sort indexSort = new Sort(
+        new SortField("mixedField", SortField.Type.CUSTOM, false));
+
+    assertThat(IndexSortUtils.expandedSortAlignsWithIndexSort(
+        queryFields, indexSort))
+        .isTrue();
+  }
+
+  @Test
+  public void expandedSortAligns_mqlMixedSortWrongField_returnsFalse() {
+    List<MongotSortField> queryFields = List.of(userSortField("mixedField"));
+    Sort indexSort = new Sort(
+        new SortField("otherField", SortField.Type.CUSTOM, false));
+
+    assertThat(IndexSortUtils.expandedSortAlignsWithIndexSort(
+        queryFields, indexSort))
+        .isFalse();
+  }
+
+  @Test
+  public void canBenefitFromIndexSort_survivesSerializationBoundary_mqlMixedSort()
+      throws IOException {
+    MongotSortField mongotField =
+        new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC);
+    MqlMixedSort valueField = new MqlMixedSort(mongotField, Optional.empty());
+
+    Sort indexSort = new Sort(valueField);
+
+    try (Directory dir = new ByteBuffersDirectory()) {
+      IndexWriterConfig config = new IndexWriterConfig();
+      config.setIndexSort(indexSort);
+      String intLuceneName =
+          FieldName.TypeField.NUMBER_INT64_V2.getLuceneFieldName(
+              FieldPath.newRoot("f"), Optional.empty());
+
+      try (IndexWriter writer = new IndexWriter(dir, config)) {
+        Document doc = new Document();
+        doc.add(new SortedNumericDocValuesField(intLuceneName, 42L));
+        writer.addDocument(doc);
+      }
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        Optional<Sort> deserializedSort = IndexSortUtils.extractFirstIndexSort(reader);
+        assertThat(deserializedSort).isPresent();
+
+        SortField[] deserialized = deserializedSort.get().getSort();
+        assertThat(deserialized[0]).isNotInstanceOf(MqlMixedSort.class);
+
+        Sort freshQuerySort = new Sort(
+            new MqlMixedSort(mongotField, Optional.empty()));
+
+        assertThat(IndexSortUtils.canBenefitFromIndexSort(freshQuerySort, deserializedSort.get()))
+            .isTrue();
+      }
     }
   }
 }

@@ -108,11 +108,13 @@ public class IndexSortUtils {
       String indexFieldName = indexValueNames.get(i);
       Optional<FieldName.TypeField> indexType =
           FieldName.TypeField.getTypeOf(indexFieldName);
-      if (indexType.isEmpty()) {
-        return false;
-      }
-      if (!indexType.get().stripPrefix(indexFieldName)
-          .equals(field.field().toString())) {
+      if (indexType.isPresent()) {
+        if (!indexType.get().stripPrefix(indexFieldName)
+            .equals(field.field().toString())) {
+          return false;
+        }
+      } else if (!indexFieldName.equals(field.field().toString())) {
+        // MqlMixedSort uses the plain field path as Lucene field name (no $type: prefix).
         return false;
       }
     }

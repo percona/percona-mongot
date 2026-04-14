@@ -52,4 +52,9 @@ class MixedNullLeafComparator implements MixedLeafFieldComparator {
   public void notifyNewBottom(BsonValue bottom) {
     // No need to keep track of a bottom ord since there is only one ordinal in the column, 0
   }
+
+  @Override
+  public int nextDoc() throws IOException {
+    return this.dv.nextDoc();
+  }
 }

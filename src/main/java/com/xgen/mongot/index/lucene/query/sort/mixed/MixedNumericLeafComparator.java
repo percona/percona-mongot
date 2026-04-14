@@ -55,4 +55,9 @@ abstract class MixedNumericLeafComparator implements MixedLeafFieldComparator {
     // TODO(CLOUDP-210522): We could avoid allocations here if BsonNumberUtils handled NaNs properly
     return SortUtil.compareWithinBracketUnsafe(left, this.getCurrentValue());
   }
+
+  @Override
+  public int nextDoc() throws IOException {
+    return this.dv.nextDoc();
+  }
 }

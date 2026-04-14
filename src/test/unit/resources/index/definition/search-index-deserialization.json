@@ -457,6 +457,32 @@
         "autoEmbeddingDefinitionVersion": 5,
         "materializedViewNameFormatVersion": 2
       }
+    },
+    {
+      "description": "multi-type sort field with token and number",
+      "value": {
+        "indexID": "507f191e810c19729de860ea",
+        "name": "index",
+        "database": "database",
+        "lastObservedCollectionName": "collection",
+        "collectionUUID": "eb6c40ca-f25e-47e8-b48c-02a05b64a5aa",
+        "mappings": {
+          "dynamic": false,
+          "fields": {
+            "a": [
+              {
+                "type": "token"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          }
+        },
+        "sort": {
+          "a": 1
+        }
+      }
     }
   ],
   "invalid": [
@@ -1099,10 +1125,10 @@
           "a.c": -1
         }
       },
-      "errorMessageContains": "Sort fields: {a.b=STRING, a.c=GEO} are not sortable types. Sortable types are: [BOOLEAN, DATE, NUMBER, OBJECT_ID, TOKEN, UUID]"
+      "errorMessageContains": "Sort fields are not sortable: {a.b=[STRING], a.c=[GEO]}"
     },
     {
-      "description": "multi-type sort field is not supported",
+      "description": "multi-type sort field with unsortable type",
       "value": {
         "indexID": "507f191e810c19729de860ea",
         "name": "index",
@@ -1114,10 +1140,10 @@
           "fields": {
             "a": [
               {
-                "type": "token"
+                "type": "number"
               },
               {
-                "type": "number"
+                "type": "string"
               }
             ]
           }
@@ -1126,7 +1152,7 @@
           "a": 1
         }
       },
-      "errorMessageContains": "Sort fields: [a] have mixed types or are not defined"
+      "errorMessageContains": "Sort fields are not sortable: {a=[NUMBER, STRING]}"
     }
   ]
 }

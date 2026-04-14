@@ -36,6 +36,7 @@ import com.xgen.mongot.index.lucene.field.FieldValue;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.query.LuceneSearchQueryFactoryDistributor;
 import com.xgen.mongot.index.lucene.query.sort.LuceneSortFactory;
+import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.sort.LuceneIndexSortFactory;
 import com.xgen.mongot.index.lucene.util.LuceneDoubleConversionUtils;
@@ -1332,6 +1333,65 @@ public class IndexSortFactoryTest {
               new BsonDocument("subfield", new BsonDocument("token", new BsonString("bravo")))),
           Optional.of("f.subfield.token"),
           Optional.empty());
+    }
+  }
+
+  public static class ValidateMultiTypeSortTest {
+
+    @Test
+    public void createIndexSort_multiTypeField_producesMqlMixedSort() {
+      SearchFieldDefinitionResolver mockResolver = mock(SearchFieldDefinitionResolver.class);
+      when(mockResolver.getIndexCapabilities()).thenReturn(SearchIndexCapabilities.CURRENT);
+      when(mockResolver.getFieldDefinition(any(), any()))
+          .thenReturn(
+              Optional.of(
+                  FieldDefinitionBuilder.builder()
+                      .token(TokenFieldDefinitionBuilder.builder().build())
+                      .number(
+                          NumericFieldDefinitionBuilder.builder()
+                              .indexIntegers(true)
+                              .representation(NumericFieldOptions.Representation.INT64)
+                              .buildNumberField())
+                      .build()));
+
+      LuceneIndexSortFactory sortFactory = new LuceneIndexSortFactory(mockResolver);
+      Sort sortSpec =
+          new Sort(
+              ImmutableList.of(
+                  new MongotSortField(
+                      FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC)));
+      org.apache.lucene.search.Sort actualSort = sortFactory.createIndexSort(sortSpec);
+
+      SortField[] sortFields = actualSort.getSort();
+      // MqlMixedSort handles null/missing internally; no nullness prefix for multi-type fields.
+      assertThat(sortFields.length).isEqualTo(1);
+      assertThat(sortFields[0]).isInstanceOf(MqlMixedSort.class);
+    }
+
+    @Test
+    public void createIndexSort_multiTypeFieldWithoutNumericOrDate_noNullnessPrefix() {
+      SearchFieldDefinitionResolver mockResolver = mock(SearchFieldDefinitionResolver.class);
+      when(mockResolver.getIndexCapabilities()).thenReturn(SearchIndexCapabilities.CURRENT);
+      when(mockResolver.getFieldDefinition(any(), any()))
+          .thenReturn(
+              Optional.of(
+                  FieldDefinitionBuilder.builder()
+                      .token(TokenFieldDefinitionBuilder.builder().build())
+                      .bool(BooleanFieldDefinitionBuilder.builder().build())
+                      .build()));
+
+      LuceneIndexSortFactory sortFactory = new LuceneIndexSortFactory(mockResolver);
+      Sort sortSpec =
+          new Sort(
+              ImmutableList.of(
+                  new MongotSortField(
+                      FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC)));
+      org.apache.lucene.search.Sort actualSort = sortFactory.createIndexSort(sortSpec);
+
+      SortField[] sortFields = actualSort.getSort();
+      // TOKEN + BOOLEAN: no numeric/date types, so no nullness prefix
+      assertThat(sortFields.length).isEqualTo(1);
+      assertThat(sortFields[0]).isInstanceOf(MqlMixedSort.class);
     }
   }
 

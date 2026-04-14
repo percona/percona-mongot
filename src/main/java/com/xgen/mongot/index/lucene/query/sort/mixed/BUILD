@@ -15,6 +15,7 @@ java_library(
         "MixedNullLeafComparator.java",
         "MixedNumericLeafComparator.java",
         "MixedOrdinalLeafComparator.java",
+        "MqlMixedIndexSorter.java",
         "MqlMixedSort.java",
         "SortUtil.java",
     ],

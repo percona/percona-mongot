@@ -106,14 +106,12 @@ public class SearchIndexDefinitionTest {
           withIndexIdAtCreationTimeSameAsIndexId(),
           withAutoEmbeddingDefinitionVersion(),
           withMaterializedViewNameFormatVersion(),
-          withBothAutoEmbeddingAndMaterializedViewVersions());
+          withBothAutoEmbeddingAndMaterializedViewVersions(),
+          withMultiTypeSortField());
     }
 
     @Test
     public void runTest() throws Exception {
-      if (this.testSpec.getName().equals("multi-type sort field is not supported")) {
-        System.out.println("Skipping test: " + this.testSpec.getName());
-      }
       TEST_SUITE.runTest(this.testSpec);
     }
 
@@ -558,6 +556,38 @@ public class SearchIndexDefinitionTest {
               .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
               .autoEmbeddingDefinitionVersion(5L)
               .materializedViewNameFormatVersion(2L)
+              .build());
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<SearchIndexDefinition>
+        withMultiTypeSortField() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "multi-type sort field with token and number",
+          SearchIndexDefinitionBuilder.builder()
+              .indexId(new ObjectId("507f191e810c19729de860ea"))
+              .name("index")
+              .database("database")
+              .lastObservedCollectionName("collection")
+              .collectionUuid(UUID.fromString("eb6c40ca-f25e-47e8-b48c-02a05b64a5aa"))
+              .mappings(
+                  DocumentFieldDefinitionBuilder.builder()
+                      .dynamic(false)
+                      .field(
+                          "a",
+                          FieldDefinitionBuilder.builder()
+                              .token(TokenFieldDefinitionBuilder.builder().build())
+                              .number(
+                                  NumericFieldDefinitionBuilder.builder().buildNumberField())
+                              .build())
+                      .build())
+              .sort(
+                  SortSpecBuilder.builder()
+                      .sortField(
+                          SortFieldBuilder.builder()
+                              .path("a")
+                              .sortOption(UserFieldSortOptions.DEFAULT_ASC)
+                              .build())
+                      .buildSort())
               .build());
     }
   }
