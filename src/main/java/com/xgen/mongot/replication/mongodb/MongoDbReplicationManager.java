@@ -37,6 +37,7 @@ import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
 import com.xgen.mongot.replication.mongodb.steadystate.changestream.SteadyStateReplicationConfig;
 import com.xgen.mongot.replication.mongodb.synonyms.SynonymManager;
 import com.xgen.mongot.util.FutureUtils;
+import com.xgen.mongot.util.Optionals;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
@@ -275,6 +276,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
     if (syncSourceConfig.isEmpty()) {
       throw new IllegalArgumentException("syncSourceConfig must be provided");
     }
+    syncSourceConfig.get().validateReplicationUrisAvailable();
+
     LOG.info("creating MongoDbReplicationManager");
     var meterRegistry = meterAndFtdcRegistry.meterRegistry();
     meterRegistry.gauge("replication.manager", 1);
@@ -314,18 +317,26 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
     var syncMongoClient = clientSessionRecords.get(syncSourceHost).syncMongoClient();
     var sessionRefresher = clientSessionRecords.get(syncSourceHost).sessionRefresher();
-    // create mongos client/session refresher if mongosUri is provided, otherwise use mongod client
-    var synonymsMongoClient =
-        syncSourceConfig
-            .get()
-            .mongosUri
-            .map(
-                syncSource ->
-                    getSynonymsMongoClient(
-                        syncSource.uri(),
-                        syncSource.sslContext(),
-                        replicationConfig.numConcurrentSynonymSyncs,
-                        meterRegistry));
+
+    // create mongos client/session refresher if we're in a sharded environment,
+    // otherwise use mongod client
+    Optional<MongoClient> synonymsMongoClient;
+    if (syncSourceConfig.get().isSharded) {
+      ConnectionInfo mongosSingleHostUri =
+          Optionals.orElseThrow(
+              syncSourceConfig.get().mongosSingleHostReplicationUri,
+              "mongosSingleHostReplicationUri must be set before starting up the "
+                  + "MongoDbReplicationManager if we're in a sharded environment");
+      synonymsMongoClient =
+          Optional.of(
+              getSynonymsMongoClient(
+                  mongosSingleHostUri.uri(),
+                  mongosSingleHostUri.sslContext(),
+                  replicationConfig.numConcurrentSynonymSyncs,
+                  meterRegistry));
+    } else {
+      synonymsMongoClient = Optional.empty();
+    }
 
     var synonymsSessionRefresher =
         synonymsMongoClient.map(
@@ -363,7 +374,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
     var synonymManager =
         SynonymManager.create(
-            synonymsMongoClient.isPresent(),
+            syncSourceConfig.get().isSharded,
             synonymsMongoClient.orElse(syncMongoClient),
             synonymsSessionRefresher.orElse((DefaultSessionRefresher) sessionRefresher),
             meterRegistry,
@@ -520,14 +531,23 @@ public class MongoDbReplicationManager implements ReplicationManager {
       MeterRegistry meterRegistry,
       NamedScheduledExecutorService sessionRefreshExecutor,
       String syncSourceHost) {
+
+    // validateReplicationUrisAvailable() should have caught an absent URI before we get here;
+    // the orElseThrow is a defensive assertion.
+    ConnectionInfo mongodUri =
+        Optionals.orElseThrow(
+            syncSourceConfig.mongodSingleHostReplicationUri,
+            "syncSourceConfig.mongodSingleHostReplicationUri must be set before starting up"
+                + " the MongoDbReplicationManager");
+
     LOG.atInfo().addKeyValue("defaultHost", syncSourceHost).log("start constructing mongoClients");
 
     var sessionRefresherMetricsFactory =
         new MetricsFactory("replication.sessionRefresher", meterRegistry);
-    // make sure syncClient and session refresher connecting mongodUri is included
+    // make sure syncClient and session refresher connecting mongodSingleHostReplicationUri is
+    // included
     var syncMongoClient =
-        getSyncMongoClient(
-            syncSourceConfig.mongodUri, type.metricsNamespacePrefix, meterRegistry, maxConnections);
+        getSyncMongoClient(mongodUri, type.metricsNamespacePrefix, meterRegistry, maxConnections);
     var sessionRefresher =
         DefaultSessionRefresher.create(
             sessionRefresherMetricsFactory, type, sessionRefreshExecutor, syncMongoClient);
@@ -556,9 +576,9 @@ public class MongoDbReplicationManager implements ReplicationManager {
   static int getSyncMaxConnections(
       SyncSourceConfig syncSourceConfig, MongoDbReplicationConfig replicationConfig) {
     int initialSyncConnections = (2 * replicationConfig.numConcurrentInitialSyncs);
-    // synonym syncs do not use this client when mongosUri exists
+    // synonym syncs do not use this client when cluster is sharded
     int synonymSyncConnections =
-        syncSourceConfig.mongosUri.isPresent() ? 0 : replicationConfig.numConcurrentSynonymSyncs;
+        syncSourceConfig.isSharded ? 0 : replicationConfig.numConcurrentSynonymSyncs;
     int sessionRefreshConnections = 1;
     int changeStreamModeSelectionConnections = 1;
 
@@ -568,19 +588,34 @@ public class MongoDbReplicationManager implements ReplicationManager {
         + changeStreamModeSelectionConnections;
   }
 
+  /**
+   * Returns the hostname (without port) of the single mongod instance used for initial sync.
+   *
+   * <p>Prefers a match from {@link SyncSourceConfig#mongodUris} when available. Falls back to
+   * extracting the first host from {@link SyncSourceConfig#mongodSingleHostReplicationUri}.
+   */
   public static String getSyncSourceHost(SyncSourceConfig syncSourceConfig) {
+
+    // validateReplicationUrisAvailable() should have caught an absent URI before we get here;
+    // the orElseThrow is a defensive assertion.
+    ConnectionInfo mongodUri =
+        Optionals.orElseThrow(
+            syncSourceConfig.mongodSingleHostReplicationUri,
+            "syncSourceConfig.mongodSingleHostReplicationUri must be set before starting up"
+                + " the MongoDbReplicationManager");
+
     Optional<String> hostName =
         syncSourceConfig.mongodUris.flatMap(
             map ->
                 map.entrySet().stream()
-                    .filter(e -> syncSourceConfig.mongodUri.equals(e.getValue()))
+                    .filter(e -> mongodUri.equals(e.getValue()))
                     .map(Map.Entry::getKey)
                     .findFirst());
 
     if (hostName.isEmpty()) {
-      // There should only be one host from mongodUri for Atlas that's using a direct connection for
-      // initial sync
-      String host = syncSourceConfig.mongodUri.uri().getHosts().getFirst();
+      // There should only be one host from mongodSingleHostReplicationUri for Atlas that's using a
+      // direct connection for initial sync
+      String host = mongodUri.uri().getHosts().getFirst();
       // return the host name excluding port.
       return host.split(":")[0];
     }
@@ -606,8 +641,10 @@ public class MongoDbReplicationManager implements ReplicationManager {
       String metricsNamespacePrefix,
       MeterRegistry meterRegistry) {
     return MongoClientBuilder.builder(
-            syncSourceConfig.mongodClusterReaderUri.uri(), metricsNamespacePrefix, meterRegistry)
-        .sslContext(syncSourceConfig.mongodClusterReaderUri.sslContext())
+            syncSourceConfig.mongodClusterReplicationUri.uri(),
+            metricsNamespacePrefix,
+            meterRegistry)
+        .sslContext(syncSourceConfig.mongodClusterReplicationUri.sslContext())
         .description("steady state sync")
         .maxConnections(numConcurrentChangeStreams)
         .buildSyncBatchClient();

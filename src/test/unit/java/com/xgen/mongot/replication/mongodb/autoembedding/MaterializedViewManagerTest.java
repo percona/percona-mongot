@@ -890,15 +890,34 @@ public class MaterializedViewManagerTest {
   public void testUpdateSyncSource_delegatesToFactory() {
     Mocks mocks = Mocks.create();
     SyncSourceConfig newConfig =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"),
-            ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"),
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .build();
 
     mocks.manager.updateSyncSource(newConfig);
 
     verify(mocks.materializedViewGeneratorFactory).updateSyncSourceConfig(newConfig);
+  }
+
+  @Test
+  public void testUpdateSyncSource_mongodUriAbsent_skipsFactoryUpdate() {
+    Mocks mocks = Mocks.create();
+    SyncSourceConfig configWithoutMongodUri =
+        SyncSourceConfig.builder()
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://host"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://host"))
+            .build();
+
+    mocks.manager.updateSyncSource(configWithoutMongodUri);
+
+    verify(mocks.materializedViewGeneratorFactory, never()).updateSyncSourceConfig(any());
   }
 
   @Test
@@ -920,11 +939,14 @@ public class MaterializedViewManagerTest {
 
     // Phase 3: Update sync source
     SyncSourceConfig newConfig =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"),
-            ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"),
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .build();
     mocks.manager.updateSyncSource(newConfig);
     verify(mocks.materializedViewGeneratorFactory).updateSyncSourceConfig(newConfig);
 
@@ -1694,11 +1716,14 @@ public class MaterializedViewManagerTest {
       this.metadataCatalog = metadataCatalog;
 
       SyncSourceConfig syncSourceConfig =
-          new SyncSourceConfig(
-              ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"),
-              ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"),
-              Optional.empty(),
-              Optional.empty());
+          SyncSourceConfig.builder()
+              .mongodSingleHostReplicationUri(
+                  ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
+              .mongodClusterReplicationUri(
+                  ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
+              .mongodClusterReadWriteUri(
+                  ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
+              .build();
       AutoEmbeddingMongoClient autoEmbeddingMongoClient =
           new AutoEmbeddingMongoClient(Optional.of(syncSourceConfig), new SimpleMeterRegistry());
 

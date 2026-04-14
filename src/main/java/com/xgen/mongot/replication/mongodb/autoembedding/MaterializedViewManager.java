@@ -175,14 +175,13 @@ public class MaterializedViewManager implements ReplicationManager {
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
 
   /**
-   * Tracks generationIds with a pending async shutdown from {@link #transitionToFollower}.
-   * {@link #refreshStatus()} skips leadership acquisition for these ids to avoid a race where
-   * a new generator tries to enqueue init-sync before the old generator finishes cleanup.
-   * Removed when shutdown completes.
+   * Tracks generationIds with a pending async shutdown from {@link #transitionToFollower}. {@link
+   * #refreshStatus()} skips leadership acquisition for these ids to avoid a race where a new
+   * generator tries to enqueue init-sync before the old generator finishes cleanup. Removed when
+   * shutdown completes.
    */
   @VisibleForTesting
-  final Set<MaterializedViewGenerationId> pendingShutdowns =
-      ConcurrentHashMap.newKeySet();
+  final Set<MaterializedViewGenerationId> pendingShutdowns = ConcurrentHashMap.newKeySet();
 
   /**
    * Package-private constructor for testing - registers gauges and starts periodic tasks. This
@@ -361,8 +360,6 @@ public class MaterializedViewManager implements ReplicationManager {
     var decodingWorkScheduler =
         DecodingWorkScheduler.create(
             materializedViewConfig.numChangeStreamDecodingThreads, AUTO_EMBEDDING, meterRegistry);
-
-
 
     var commitExecutor =
         Executors.fixedSizeThreadScheduledExecutor(
@@ -568,6 +565,13 @@ public class MaterializedViewManager implements ReplicationManager {
   }
 
   public synchronized void updateSyncSource(SyncSourceConfig syncSourceConfig) {
+    if (!syncSourceConfig.hasReplicationUrisAvailable()) {
+      // Factory shutdown is async and done by the lifecycle manager before updating the sync
+      // source. By the time we reach this guard, the factory is either uninitialized or already
+      // shut down, and mongo clients will be re-created once the required URIs are available.
+      LOG.info("Sync source URIs not yet available; skipping auto-embedding sync source update.");
+      return;
+    }
     LOG.info("Update AutoEmbeddingMatViewManager by new sync source.");
     this.matViewGeneratorFactory.updateSyncSourceConfig(syncSourceConfig);
   }
@@ -1225,6 +1229,8 @@ public class MaterializedViewManager implements ReplicationManager {
     }
 
     void updateSyncSourceConfig(SyncSourceConfig syncSourceConfig) {
+      syncSourceConfig.validateReplicationUrisAvailable();
+
       var meterRegistry = this.meterAndFtdcRegistry.meterRegistry();
       var sessionRefreshExecutor =
           Executors.singleThreadScheduledExecutor("auto-embedding-session-refresh", meterRegistry);

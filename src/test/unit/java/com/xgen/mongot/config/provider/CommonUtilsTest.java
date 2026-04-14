@@ -69,13 +69,17 @@ public class CommonUtilsTest {
       this.ftdcRegistry = spy(new SimpleMeterRegistry());
       this.meterRegistry = spy(new SimpleMeterRegistry());
       this.syncSourceConfig =
-          new SyncSourceConfig(
-              ConnectionStringUtil.toConnectionInfoUnchecked(
-                  "mongodb://random/?serverselectiontimeoutms=100"),
-              ConnectionStringUtil.toConnectionInfoUnchecked(
-                  "mongodb://random/?serverselectiontimeoutms=100"),
-              Optional.empty(),
-              Optional.empty());
+          SyncSourceConfig.builder()
+              .mongodSingleHostReplicationUri(
+                  ConnectionStringUtil.toConnectionInfoUnchecked(
+                      "mongodb://random/?serverselectiontimeoutms=100"))
+              .mongodClusterReplicationUri(
+                  ConnectionStringUtil.toConnectionInfoUnchecked(
+                      "mongodb://random/?serverselectiontimeoutms=100"))
+              .mongodClusterReadWriteUri(
+                  ConnectionStringUtil.toConnectionInfoUnchecked(
+                      "mongodb://random/?serverselectiontimeoutms=100"))
+              .build();
       this.embeddingServiceManagerSupplier = Optional.empty();
       this.leaseManager = mock(LeaseManager.class);
       this.mvMetadataCatalog = mock(MaterializedViewCollectionMetadataCatalog.class);

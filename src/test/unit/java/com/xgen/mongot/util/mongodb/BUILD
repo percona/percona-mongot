@@ -13,6 +13,7 @@ java_test_suite(
         "MongoClientBuilderTest.java",
         "MongoCredentialsTest.java",
         "MongoDbMetadataClientTest.java",
+        "SyncSourceConfigTest.java",
     ],
     tags = ["unit"],
     deps = [

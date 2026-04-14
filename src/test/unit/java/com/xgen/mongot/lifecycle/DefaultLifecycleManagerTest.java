@@ -63,7 +63,11 @@ public class DefaultLifecycleManagerTest {
 
   private static SyncSourceConfig createMockSyncSourceConfig() {
     ConnectionInfo c = ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://localhost");
-    return new SyncSourceConfig(c, c, Optional.empty(), Optional.empty());
+    return SyncSourceConfig.builder()
+        .mongodSingleHostReplicationUri(c)
+        .mongodClusterReplicationUri(c)
+        .mongodClusterReadWriteUri(c)
+        .build();
   }
 
   private static class Mocks {
@@ -498,11 +502,14 @@ public class DefaultLifecycleManagerTest {
         createLifecycleManagerWithMatViewManager(matViewManager);
 
     SyncSourceConfig newConfig =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"),
-            ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"),
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newHost"))
+            .build();
     lifecycleManager.updateSyncSource(newConfig);
 
     verify(matViewManager).updateSyncSource(newConfig);

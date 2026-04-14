@@ -95,11 +95,15 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
       Optional<SyncSourceConfig> syncSource,
       Duration updateInterval,
       MeterRegistry meterRegistry) {
+    // mongodSingleHostReplicationUri may be absent when this updater is created alongside a
+    // NoOpReplicationManager (i.e. no healthy sync-source host has been selected yet).
     Optional<MongoClient> mongoClient =
-        syncSource.map(
+        syncSource.flatMap(
             syncSourceConfig ->
-                MongoClientBuilder.buildNonReplicationWithDefaults(
-                    syncSourceConfig.mongodUri, "periodic optime fetcher", meterRegistry));
+                syncSourceConfig.mongodSingleHostReplicationUri.map(
+                    uri ->
+                        MongoClientBuilder.buildNonReplicationWithDefaults(
+                            uri, "periodic optime fetcher", meterRegistry)));
     var executor =
         Executors.singleThreadScheduledExecutor("replicationOptimeUpdater", meterRegistry);
     return new ReplicationOptimeUpdater(

@@ -178,11 +178,14 @@ public class MongoDbNoOpReplicationManagerTest {
       this.manager =
           MongoDbNoOpReplicationManager.create(
               Optional.of(
-                  new SyncSourceConfig(
-                      ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"),
-                      ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"),
-                      Optional.empty(),
-                      Optional.empty())),
+                  SyncSourceConfig.builder()
+                      .mongodSingleHostReplicationUri(
+                          ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
+                      .mongodClusterReplicationUri(
+                          ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
+                      .mongodClusterReadWriteUri(
+                          ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
+                      .build()),
               cursorManager,
               mock(IndexCatalog.class),
               initializedIndexCatalog,

@@ -123,7 +123,7 @@ public class CommunityMongotBootstrapper {
 
     CommunityConfig config =
         Crash.because("failed to parse config file")
-            .ifThrows(() -> CommunityConfig.readFromFile(configPath));
+            .ifThrowsExceptionOrError(() -> CommunityConfig.readFromFile(configPath));
 
     config
         .loggingConfig()
@@ -143,7 +143,7 @@ public class CommunityMongotBootstrapper {
 
     // Unlike production mode, we expect that the path to the data dir may not exist yet
     Crash.because("failed to create data directory")
-        .ifThrows(() -> Files.createDirectories(config.storageConfig().dataPath()));
+        .ifThrowsExceptionOrError(() -> Files.createDirectories(config.storageConfig().dataPath()));
 
     // The server-id is stored to disk so we need the datapath to exist before fetching it.
     var serverInfo = new CommunityServerInfo(config);
@@ -322,23 +322,31 @@ public class CommunityMongotBootstrapper {
 
     // Default the read-preference to secondary-preferred. Callers should override to primary where
     // applicable.
-    var mongodClusterReadWriteConnectionInfo =
+    var mongodClusterReadWriteUri =
         ConnectionInfoFactory.getClusterConnectionInfo(
             replicaSet, ReadPreference.secondaryPreferred(), caFile);
-    var mongosReplicationUri =
+
+    var mongosSingleHostReplicationUri =
+        communitySyncSourceConfig
+            .router()
+            .map(router -> ConnectionInfoFactory.getSingleHostConnectionInfo(router, caFile));
+
+    var mongosClusterReadWriteUri =
         communitySyncSourceConfig
             .router()
             .map(
                 router ->
                     ConnectionInfoFactory.getClusterConnectionInfo(
-                        router, replicationReadPreference, caFile));
+                        router, ReadPreference.secondaryPreferred(), caFile));
 
-    return new SyncSourceConfig(
-        mongodSingleHostReplicationUri,
-        mongodClusterReplicationUri,
-        mongodClusterReadWriteConnectionInfo,
-        mongosReplicationUri,
-        Optional.empty());
+    return SyncSourceConfig.builder()
+        .mongodSingleHostReplicationUri(mongodSingleHostReplicationUri)
+        .mongodClusterReplicationUri(mongodClusterReplicationUri)
+        .mongodClusterReadWriteUri(mongodClusterReadWriteUri)
+        .mongosSingleHostReplicationUri(mongosSingleHostReplicationUri)
+        .mongosClusterReadWriteUri(mongosClusterReadWriteUri)
+        .isSharded(communitySyncSourceConfig.router().isPresent())
+        .build();
   }
 
   private static Optional<PrometheusServer> maybeStartPrometheusServer(
@@ -398,7 +406,7 @@ public class CommunityMongotBootstrapper {
 
     var ftdc =
         Crash.because("failed to initialize ftdc")
-            .ifThrows(() -> Ftdc.initialize(ftdcConfig, metadata));
+            .ifThrowsExceptionOrError(() -> Ftdc.initialize(ftdcConfig, metadata));
     // If feature flag is enabled, use CompositeMeterRegistry so executor metrics are exported to
     // both FTDC itself and Prometheus. Otherwise, use ftdcRegistry to keep executor metrics only
     // in FTDC.
@@ -622,10 +630,10 @@ public class CommunityMongotBootstrapper {
     LuceneGlobalSettings.apply(mongotConfigs.luceneConfig);
     var analyzerRegistryFactory =
         Crash.because("failed to get AnalyzerRegistry.Factory instance")
-            .ifThrows(AnalyzerRegistry::factory);
+            .ifThrowsExceptionOrError(AnalyzerRegistry::factory);
     var indexFactory =
         Crash.because("failed to get LuceneIndexFactory instance")
-            .ifThrows(
+            .ifThrowsExceptionOrError(
                 () ->
                     LuceneIndexFactory.fromConfig(
                         mongotConfigs.luceneConfig,

@@ -252,11 +252,19 @@ public class MongoClientBuilderTest {
   @Test
   public void testBuildNonReplicationPreferringMongos() throws Exception {
     var syncSource =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"),
-            ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"),
-            Optional.of(ConnectionStringUtil.toConnectionInfo("mongodb://mongos:11111")),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"))
+            .mongosSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongos:11111"))
+            .mongosClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongos:11111"))
+            .isSharded(true)
+            .build();
     String applicationName = "testApp";
     MongoClient client =
         MongoClientBuilder.buildNonReplicationPreferringMongos(

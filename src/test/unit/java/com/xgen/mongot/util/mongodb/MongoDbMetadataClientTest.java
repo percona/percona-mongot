@@ -7,6 +7,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.junit.Assert;
 import org.junit.Test;
@@ -16,13 +17,17 @@ public class MongoDbMetadataClientTest {
   @Test
   public void testMongodUriUsedWhenMongosUriIsNotPresent() throws Exception {
     var syncSource =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo(
-                "mongodb://user:pass@atlas-mongod:27017/"), // kingfisher:ignore
-            ConnectionStringUtil.toConnectionInfo(
-                "mongodb://user:pass@atlas-mongod:27017/"), // kingfisher:ignore
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongodClusterReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongodClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .build();
     try (var client =
         MongoClientBuilder.buildNonReplicationPreferringMongos(
             syncSource, this.getClass().getSimpleName(), new SimpleMeterRegistry())) {
@@ -35,15 +40,24 @@ public class MongoDbMetadataClientTest {
   @Test
   public void testMongosUriUsedWhenPresent() throws Exception {
     var syncSource =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo(
-                "mongodb://user:pass@atlas-mongod:27017/"), // kingfisher:ignore
-            ConnectionStringUtil.toConnectionInfo(
-                "mongodb://user:pass@atlas-mongod:27017/"), // kingfisher:ignore
-            Optional.of(
-                ConnectionStringUtil.toConnectionInfo(
-                    "mongodb://user:pass@atlas-mongos:27017/")), // kingfisher:ignore
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongodClusterReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongodClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongosSingleHostReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongos:27017/"))
+            .mongosClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongos:27017/"))
+            .isSharded(true)
+            .build();
     try (var client =
         MongoClientBuilder.buildNonReplicationPreferringMongos(
             syncSource, this.getClass().getSimpleName(), new SimpleMeterRegistry())) {
@@ -56,13 +70,17 @@ public class MongoDbMetadataClientTest {
   @Test
   public void testDefaultSocketTimeout() throws Exception {
     var syncSource =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo(
-                "mongodb://user:pass@atlas-mongod:27017/"), // kingfisher:ignore
-            ConnectionStringUtil.toConnectionInfo(
-                "mongodb://user:pass@atlas-mongod:27017/"), // kingfisher:ignore
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongodClusterReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .mongodClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@atlas-mongod:27017/"))
+            .build();
     try (var client =
         MongoClientBuilder.buildNonReplicationPreferringMongos(
             syncSource, this.getClass().getSimpleName(), new SimpleMeterRegistry())) {
@@ -78,15 +96,20 @@ public class MongoDbMetadataClientTest {
   @Test
   public void testSocketTimeoutIsNotOverriddenWhenSpecifiedInConnectionString() throws Exception {
     var syncSource =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo(
-                // kingfisher:ignore
-                "mongodb://user:pass@atlas-mongod:27017/?socketTimeoutMS=30000"),
-            ConnectionStringUtil.toConnectionInfo(
-                // kingfisher:ignore
-                "mongodb://user:pass@atlas-mongod:27017/?socketTimeoutMS=30000"),
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo(
+                    // kingfisher:ignore
+                    "mongodb://user:pass@atlas-mongod:27017/?socketTimeoutMS=30000"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo(
+                    // kingfisher:ignore
+                    "mongodb://user:pass@atlas-mongod:27017/?socketTimeoutMS=30000"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo(
+                    // kingfisher:ignore
+                    "mongodb://user:pass@atlas-mongod:27017/?socketTimeoutMS=30000"))
+            .build();
     try (var client =
         MongoClientBuilder.buildNonReplicationPreferringMongos(
             syncSource, this.getClass().getSimpleName(), new SimpleMeterRegistry())) {
@@ -96,6 +119,60 @@ public class MongoDbMetadataClientTest {
               .getSettings()
               .getSocketSettings()
               .getReadTimeout(TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  public void constructor_mongodUriAbsent_doesNotCreateClients() throws Exception {
+    // Regression: before the guard, buildNonReplicationPreferringMongos would throw
+    // NoSuchElementException because it called mongodSingleHostReplicationUri.get() eagerly.
+    var config =
+        SyncSourceConfig.builder()
+            .mongodClusterReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .mongodClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .build();
+    try (var client = new MongoDbMetadataClient(Optional.of(config), new SimpleMeterRegistry())) {
+      // Clients were not created, so resolveCollectionInfos should throw.
+      Assert.assertThrows(
+          CheckedMongoException.class, () -> client.resolveCollectionInfos(Set.of("test")));
+    }
+  }
+
+  @Test
+  public void maybeUpdateSyncSource_mongodUriAbsent_closesExistingClientsAndDoesNotCreateNew()
+      throws Exception {
+    var validConfig =
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .mongodClusterReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .mongodClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .build();
+    var configWithoutMongodUri =
+        SyncSourceConfig.builder()
+            .mongodClusterReplicationUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .mongodClusterReadWriteUri(
+                // kingfisher:ignore
+                ConnectionStringUtil.toConnectionInfo("mongodb://user:pass@mongod:27017/"))
+            .build();
+
+    try (var client =
+        new MongoDbMetadataClient(Optional.of(validConfig), new SimpleMeterRegistry())) {
+      client.maybeUpdateSyncSource(configWithoutMongodUri);
+      // Existing clients were closed and no new ones were created.
+      Assert.assertThrows(
+          CheckedMongoException.class, () -> client.resolveCollectionInfos(Set.of("test")));
     }
   }
 

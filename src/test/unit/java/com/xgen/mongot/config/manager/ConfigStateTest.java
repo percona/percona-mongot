@@ -55,11 +55,13 @@ public class ConfigStateTest {
   public void testUpdateSyncSource() throws Exception {
     var mocks = ConfigStateMocks.create();
     SyncSourceConfig newSyncSourceConfig =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo("mongodb://newString"),
-            ConnectionStringUtil.toConnectionInfo("mongodb://newString"),
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://newString"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://newString"))
+            .mongodClusterReadWriteUri(ConnectionStringUtil.toConnectionInfo("mongodb://newString"))
+            .build();
     mocks.configState.updateSyncSource(newSyncSourceConfig);
     Assert.assertTrue(
         mocks
@@ -96,11 +98,18 @@ public class ConfigStateTest {
 
     // only mongosUri changes
     SyncSourceConfig syncSourceConfigWithMongos =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI),
-            ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI),
-            Optional.of(ConnectionStringUtil.toConnectionInfo("mongodb://mongos")),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI))
+            .mongosSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongos"))
+            .mongosClusterReadWriteUri(ConnectionStringUtil.toConnectionInfo("mongodb://mongos"))
+            .isSharded(true)
+            .build();
     mocks.configState.updateSyncSource(syncSourceConfigWithMongos);
     Assert.assertTrue(
         mocks
@@ -124,11 +133,14 @@ public class ConfigStateTest {
 
     // only mongoDbClusterUri changes
     SyncSourceConfig syncSourceConfigWithCulsterSeed =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI),
-            ConnectionStringUtil.toConnectionInfo("mongodb://cluster-seed"),
-            Optional.empty(),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo(ConfigStateMocks.DEFAULT_MDB_URI))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://cluster-seed"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://cluster-seed"))
+            .build();
     mocks.configState.updateSyncSource(syncSourceConfigWithCulsterSeed);
     Assert.assertTrue(
         mocks

@@ -23,6 +23,7 @@ import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.Keep;
 import com.mongodb.client.MongoClient;
+import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -30,6 +31,8 @@ import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedSearchIndex;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
+import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
+import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
@@ -38,6 +41,7 @@ import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.ReplicationOptimeUpdater;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
+import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
 import com.xgen.mongot.replication.mongodb.synonyms.SynonymManager;
 import com.xgen.mongot.util.Check;
@@ -54,6 +58,7 @@ import com.xgen.testing.mongot.index.version.GenerationIdBuilder;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Map;
@@ -521,16 +526,21 @@ public class MongoDbReplicationManagerTest {
   @Test
   public void testGetClientSessionRecords() throws Exception {
     SyncSourceConfig syncSourceConfig1 =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-            Optional.empty(),
-            Optional.of(
-                Map.of(
-                    "localhost1",
-                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-                    "localhost2",
-                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27018"))));
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodUris(
+                Optional.of(
+                    Map.of(
+                        "localhost1",
+                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
+                        "localhost2",
+                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27018"))))
+            .build();
 
     var result1 =
         MongoDbReplicationManager.getClientSessionRecords(
@@ -546,16 +556,21 @@ public class MongoDbReplicationManagerTest {
     Assert.assertTrue(result1.containsKey("localhost2"));
 
     SyncSourceConfig syncSourceConfig2 =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-            Optional.empty(),
-            Optional.of(
-                Map.of(
-                    "localhost2",
-                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27017"),
-                    "localhost3",
-                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost3:27018"))));
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodUris(
+                Optional.of(
+                    Map.of(
+                        "localhost2",
+                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27017"),
+                        "localhost3",
+                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost3:27018"))))
+            .build();
 
     var result2 =
         MongoDbReplicationManager.getClientSessionRecords(
@@ -578,42 +593,168 @@ public class MongoDbReplicationManagerTest {
     Assert.assertEquals(
         "localhost1",
         MongoDbReplicationManager.getSyncSourceHost(
-            new SyncSourceConfig(
-                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-                Optional.empty(),
-                Optional.of(
-                    Map.of(
-                        "localhost1",
-                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-                        "localhost2",
-                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27018"))))));
+            SyncSourceConfig.builder()
+                .mongodSingleHostReplicationUri(
+                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+                .mongodClusterReplicationUri(
+                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+                .mongodClusterReadWriteUri(
+                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+                .mongodUris(
+                    Optional.of(
+                        Map.of(
+                            "localhost1",
+                            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
+                            "localhost2",
+                            ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27018"))))
+                .build()));
 
     // when connecting string mapping is empty
     Assert.assertEquals(
         "localhost1",
         MongoDbReplicationManager.getSyncSourceHost(
-            new SyncSourceConfig(
-                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-                Optional.empty(),
-                Optional.empty())));
+            SyncSourceConfig.builder()
+                .mongodSingleHostReplicationUri(
+                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+                .mongodClusterReplicationUri(
+                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+                .mongodClusterReadWriteUri(
+                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+                .build()));
 
     // when there is no match
     SyncSourceConfig syncSourceConfig3 =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-            ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"),
-            Optional.empty(),
-            Optional.of(
-                Map.of(
-                    "localhost2",
-                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27017"),
-                    "localhost3",
-                    ConnectionStringUtil.toConnectionInfo("mongodb://localhost3:27018"))));
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017"))
+            .mongodUris(
+                Optional.of(
+                    Map.of(
+                        "localhost2",
+                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost2:27017"),
+                        "localhost3",
+                        ConnectionStringUtil.toConnectionInfo("mongodb://localhost3:27018"))))
+            .build();
 
     Assert.assertEquals(
         "localhost1", MongoDbReplicationManager.getSyncSourceHost(syncSourceConfig3));
+  }
+
+  @Test
+  public void create_mongodSingleHostReplicationUriAbsent_throwsIllegalStateException()
+      throws Exception {
+    var syncSourceConfig =
+        SyncSourceConfig.builder()
+            // no mongodSingleHostReplicationUri
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .build();
+
+    Assert.assertThrows(
+        IllegalStateException.class,
+        () ->
+            MongoDbReplicationManager.create(
+                Path.of("/tmp"),
+                mock(Gate.class),
+                Optional.of(syncSourceConfig),
+                MongoDbReplicationConfig.getDefault(),
+                DurabilityConfig.create(Optional.of(1), Optional.of(Duration.ofMillis(100))),
+                new InitialSyncConfig(),
+                FeatureFlags.getDefault(),
+                mock(MongotCursorManager.class),
+                mock(IndexCatalog.class),
+                mock(InitializedIndexCatalog.class),
+                MeterAndFtdcRegistry.createWithSimpleRegistries(),
+                Duration.ofSeconds(1),
+                mock(BatchMongoClient.class),
+                Optional.empty()));
+  }
+
+  @Test
+  public void create_sharded_mongosSingleHostReplicationUriAbsent_throwsIllegalStateException()
+      throws Exception {
+
+    var syncSourceConfig =
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .isSharded(true)
+            .mongosClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27018"))
+            // no mongosSingleHostReplicationUri
+            .build();
+
+    Assert.assertThrows(
+        IllegalStateException.class,
+        () ->
+            MongoDbReplicationManager.create(
+                Path.of("/tmp"),
+                mock(Gate.class),
+                Optional.of(syncSourceConfig),
+                MongoDbReplicationConfig.getDefault(),
+                DurabilityConfig.create(Optional.of(1), Optional.of(Duration.ofMillis(100))),
+                new InitialSyncConfig(),
+                FeatureFlags.getDefault(),
+                mock(MongotCursorManager.class),
+                mock(IndexCatalog.class),
+                mock(InitializedIndexCatalog.class),
+                MeterAndFtdcRegistry.createWithSimpleRegistries(),
+                Duration.ofSeconds(1),
+                mock(BatchMongoClient.class),
+                Optional.empty()));
+  }
+
+  @Test
+  public void testGetSyncMaxConnectionsShardedDoesNotCountSynonymConnections() throws Exception {
+    var shardedConfig =
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .isSharded(true)
+            .mongosClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27018"))
+            .build();
+
+    var config = MongoDbReplicationConfig.getDefault();
+    int connections = MongoDbReplicationManager.getSyncMaxConnections(shardedConfig, config);
+    // Sharded: synonyms use the dedicated mongos client, so 0 synonym connections here
+    int expected = (2 * config.numConcurrentInitialSyncs) + 1 + 1;
+    Assert.assertEquals(expected, connections);
+  }
+
+  @Test
+  public void testGetSyncMaxConnectionsNonShardedCountsSynonymConnections() throws Exception {
+    var nonShardedConfig =
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://localhost:27017"))
+            // not sharded
+            .build();
+
+    var config = MongoDbReplicationConfig.getDefault();
+    int connections = MongoDbReplicationManager.getSyncMaxConnections(nonShardedConfig, config);
+    // Non-sharded: synonyms use this (mongod) client
+    int expected =
+        (2 * config.numConcurrentInitialSyncs) + config.numConcurrentSynonymSyncs + 1 + 1;
+    Assert.assertEquals(expected, connections);
   }
 
   private static class Mocks {
@@ -674,17 +815,26 @@ public class MongoDbReplicationManagerTest {
                   cursorManager,
                   clientSessionRecordMap,
                   Optional.of(
-                      new SyncSourceConfig(
-                          Crash.because("invalid test uri")
-                              .ifThrows(
-                                  () ->
-                                      ConnectionStringUtil.toConnectionInfo("mongodb://newString")),
-                          Crash.because("invalid test uri")
-                              .ifThrows(
-                                  () ->
-                                      ConnectionStringUtil.toConnectionInfo("mongodb://newString")),
-                          Optional.empty(),
-                          Optional.empty())),
+                      SyncSourceConfig.builder()
+                          .mongodSingleHostReplicationUri(
+                              Crash.because("invalid test uri")
+                                  .ifThrows(
+                                      () ->
+                                          ConnectionStringUtil.toConnectionInfo(
+                                              "mongodb://newString")))
+                          .mongodClusterReplicationUri(
+                              Crash.because("invalid test uri")
+                                  .ifThrows(
+                                      () ->
+                                          ConnectionStringUtil.toConnectionInfo(
+                                              "mongodb://newString")))
+                          .mongodClusterReadWriteUri(
+                              Crash.because("invalid test uri")
+                                  .ifThrows(
+                                      () ->
+                                          ConnectionStringUtil.toConnectionInfo(
+                                              "mongodb://newString")))
+                          .build()),
                   FeatureFlags.getDefault(),
                   initialSyncQueue,
                   steadyStateManager,
