@@ -1725,7 +1725,10 @@ public class MaterializedViewManagerTest {
                   ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
               .build();
       AutoEmbeddingMongoClient autoEmbeddingMongoClient =
-          new AutoEmbeddingMongoClient(Optional.of(syncSourceConfig), new SimpleMeterRegistry());
+          new AutoEmbeddingMongoClient(
+              Optional.of(syncSourceConfig),
+              new SimpleMeterRegistry(),
+              AutoEmbeddingMaterializedViewConfig.getDefault());
 
       this.managerSupplier =
           () ->

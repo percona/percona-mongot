@@ -13,6 +13,7 @@ java_library(
         "@maven//:org_mongodb_mongodb_driver_sync",
     ],
     deps = [
+        "//src/main/java/com/xgen/mongot/replication/mongodb/common",
         "//src/main/java/com/xgen/mongot/util/mongodb",
         "@maven//:com_google_guava_guava",
         "@maven//:io_micrometer_micrometer_core",

@@ -649,7 +649,9 @@ public class CommunityMongotBootstrapper {
     var mvMetadataCatalog = new MaterializedViewCollectionMetadataCatalog();
     var autoEmbeddingMongoClient =
         new AutoEmbeddingMongoClient(
-            Optional.of(syncSourceConfig), meterAndFtdcRegistry.meterRegistry());
+            Optional.of(syncSourceConfig),
+            meterAndFtdcRegistry.meterRegistry(),
+            mongotConfigs.autoEmbeddingMaterializedViewConfig);
     var dbResolver = new DefaultInternalDatabaseResolver();
     var leaseManager =
         CommonUtils.getLeaseManager(
@@ -896,6 +898,7 @@ public class CommunityMongotBootstrapper {
             Optional.empty(),
             // Set 0 for now, as we are still working on the mat view collection naming.
             Optional.of(0L),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),

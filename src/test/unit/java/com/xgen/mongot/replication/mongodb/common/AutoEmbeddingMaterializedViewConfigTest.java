@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.testing.BsonSerializationTestSuite;
 import com.xgen.testing.util.MockRuntimeBuilder;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -86,7 +87,8 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.of(60),
               Optional.of(1000L),
               Optional.of(2000L),
-              Optional.of(3000L)));
+              Optional.of(3000L),
+              Optional.empty()));
     }
 
     @Test
@@ -160,6 +162,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
       assertEquals(30_000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(30_000L, config.materializedViewStatusRefreshIntervalMs);
       assertEquals(10_000L, config.materializedViewOptimeUpdateIntervalMs);
+
+      assertEquals(
+          Duration.ofSeconds(60).toMillis(), config.materializedViewWriterSocketTimeoutMs);
     }
 
     @Test
@@ -184,6 +189,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.of(50),
+              Optional.empty(),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
@@ -225,6 +231,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
                   Optional.empty(),
                   Optional.empty(),
                   Optional.empty(),
+                  Optional.empty(),
                   Optional.empty()));
     }
 
@@ -246,6 +253,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.of(75),
+              Optional.empty(),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
@@ -303,6 +311,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
+              Optional.empty(),
               Optional.empty());
       assertEquals(8, config.matViewWriterMaxConnections);
     }
@@ -316,6 +325,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               runtime,
               new CommonReplicationConfig.GlobalReplicationConfig(
                   false, List.of(), false, List.of(), false),
+              Optional.empty(),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
@@ -371,7 +381,8 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.of(5000L),
               Optional.of(15000L),
-              Optional.of(3000L));
+              Optional.of(3000L),
+              Optional.empty());
       assertEquals(5000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(15000L, config.materializedViewStatusRefreshIntervalMs);
       assertEquals(3000L, config.materializedViewOptimeUpdateIntervalMs);
@@ -405,7 +416,8 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.of(0L),
               Optional.of(0L),
-              Optional.of(0L));
+              Optional.of(0L),
+              Optional.empty());
       assertEquals(30_000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(30_000L, config.materializedViewStatusRefreshIntervalMs);
       assertEquals(10_000L, config.materializedViewOptimeUpdateIntervalMs);
@@ -439,10 +451,79 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.of(-1L),
               Optional.of(-100L),
-              Optional.of(-50L));
+              Optional.of(-50L),
+              Optional.empty());
       assertEquals(30_000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(30_000L, config.materializedViewStatusRefreshIntervalMs);
       assertEquals(10_000L, config.materializedViewOptimeUpdateIntervalMs);
+    }
+
+    @Test
+    public void materializedViewWriterSocketTimeout_mustBePositive() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              AutoEmbeddingMaterializedViewConfig.create(
+                  CommonReplicationConfig.defaultGlobalReplicationConfig(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(0L)));
+    }
+
+    @Test
+    public void materializedViewWriterSocketTimeout_mustNotExceedIntegerMaxValue() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              AutoEmbeddingMaterializedViewConfig.create(
+                  CommonReplicationConfig.defaultGlobalReplicationConfig(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of((long) Integer.MAX_VALUE + 1)));
     }
   }
 }

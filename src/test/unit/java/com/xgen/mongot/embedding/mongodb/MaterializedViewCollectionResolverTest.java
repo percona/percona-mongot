@@ -440,6 +440,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -488,6 +489,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(1),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
@@ -563,6 +565,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -624,6 +627,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(1L),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
@@ -725,6 +729,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -781,6 +786,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(0L),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
@@ -949,6 +955,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(0L),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),

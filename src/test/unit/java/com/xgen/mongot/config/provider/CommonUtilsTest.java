@@ -258,6 +258,7 @@ public class CommonUtilsTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     DefaultInternalDatabaseResolver dbResolver =
@@ -340,6 +341,7 @@ public class CommonUtilsTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MongotConfigs withOverride = MongotConfigs.getDefault(dataPath, customMvConfig);
@@ -412,6 +414,7 @@ public class CommonUtilsTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
     Assert.assertEquals(
         "Config should have defaultMaterializedViewNameFormatVersion=0 when explicitly set",
@@ -424,6 +427,7 @@ public class CommonUtilsTest {
     AutoEmbeddingMaterializedViewConfig config =
         AutoEmbeddingMaterializedViewConfig.create(
             CommonReplicationConfig.defaultGlobalReplicationConfig(),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),

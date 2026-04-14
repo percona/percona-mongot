@@ -201,8 +201,7 @@ public class CommonUtils {
         leaseManager,
         collectionResolver,
         dbResolver,
-        materializedViewConfig.getMvWriteRateLimitRps(),
-        materializedViewConfig.matViewWriterMaxConnections);
+        materializedViewConfig.getMvWriteRateLimitRps());
   }
 
   /**

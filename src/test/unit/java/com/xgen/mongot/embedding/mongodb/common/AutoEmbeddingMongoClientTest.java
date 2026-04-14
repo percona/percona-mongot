@@ -5,6 +5,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import com.mongodb.client.MongoClient;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.Optional;
@@ -34,7 +35,11 @@ public class AutoEmbeddingMongoClientTest {
 
   @Test
   public void constructor_noSyncSource_allClientsEmpty() {
-    var client = new AutoEmbeddingMongoClient(Optional.empty(), new SimpleMeterRegistry());
+    var client =
+        new AutoEmbeddingMongoClient(
+            Optional.empty(),
+            new SimpleMeterRegistry(),
+            AutoEmbeddingMaterializedViewConfig.getDefault());
 
     assertThat(client.getMaterializedViewResolverMongoClient()).isEmpty();
     assertThat(client.getLeaseManagerMongoClient()).isEmpty();
@@ -64,7 +69,11 @@ public class AutoEmbeddingMongoClientTest {
 
   @Test
   public void close_noSyncSource_doesNotThrow() {
-    var client = new AutoEmbeddingMongoClient(Optional.empty(), new SimpleMeterRegistry());
+    var client =
+        new AutoEmbeddingMongoClient(
+            Optional.empty(),
+            new SimpleMeterRegistry(),
+            AutoEmbeddingMaterializedViewConfig.getDefault());
     client.close();
     assertThat(client.getMaterializedViewResolverMongoClient()).isEmpty();
   }

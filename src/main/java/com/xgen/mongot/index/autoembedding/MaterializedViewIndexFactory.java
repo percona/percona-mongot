@@ -51,14 +51,15 @@ public class MaterializedViewIndexFactory implements IndexFactory {
       LeaseManager leaseManager,
       MaterializedViewCollectionResolver collectionResolver,
       InternalDatabaseResolver dbResolver,
-      Optional<Integer> mvWriteRateLimitRps,
-      int matViewWriterMaxConnections) {
+      Optional<Integer> mvWriteRateLimitRps) {
     this.meterAndFtdcRegistry = meterAndFtdcRegistry;
     this.metricsFactory = new MetricsFactory(NAMESPACE, meterAndFtdcRegistry.meterRegistry());
     this.featureFlags = featureFlags;
     this.materializedViewWriterFactory =
         new MaterializedViewWriter.Factory(
-            autoEmbeddingMongoClient, meterAndFtdcRegistry.meterRegistry(), mvWriteRateLimitRps);
+            autoEmbeddingMongoClient,
+            meterAndFtdcRegistry.meterRegistry(),
+            mvWriteRateLimitRps);
     this.leaseManager = leaseManager;
     this.collectionResolver = collectionResolver;
     this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;

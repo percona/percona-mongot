@@ -3,6 +3,7 @@ package com.xgen.mongot.index.mongodb;
 import static com.xgen.mongot.index.mongodb.MaterializedViewWriter.MV_DATABASE_NAME;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -111,29 +112,34 @@ public class MaterializedViewWriterTest {
             COLLECTION_UUID,
             Optional.empty());
     ObjectId indexId = new ObjectId();
-    RawBsonDocument document =
+    RawBsonDocument document1 =
         BsonUtils.documentToRaw(
             new BsonDocument(indexId.toString(), new BsonDocument("_id", new BsonInt32(1))));
+    RawBsonDocument document2 =
+        BsonUtils.documentToRaw(
+            new BsonDocument(indexId.toString(), new BsonDocument("_id", new BsonInt32(2))));
     DocumentEvent insertDocument =
         DocumentEvent.createInsert(
-            DocumentMetadata.fromMetadataNamespace(Optional.of(document), indexId), document);
+            DocumentMetadata.fromMetadataNamespace(Optional.of(document1), indexId), document1);
     DocumentEvent updateDocument =
         DocumentEvent.createInsert(
-            DocumentMetadata.fromMetadataNamespace(Optional.of(document), indexId), document);
-    DocumentEvent deleteDocument = DocumentEvent.createDelete(new BsonInt32(1));
+            DocumentMetadata.fromMetadataNamespace(Optional.of(document2), indexId), document2);
+    DocumentEvent deleteDocument = DocumentEvent.createDelete(new BsonInt32(3));
     matViewWriter.updateIndex(insertDocument);
     matViewWriter.updateIndex(updateDocument);
     matViewWriter.updateIndex(deleteDocument);
 
     matViewWriter.commit(EncodedUserData.EMPTY);
 
-    verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 3));
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(list -> list.size() == 3), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
   public void testCommitSingleDocumentExceedingLimitThrowsNonTransientException()
       throws IOException, FieldExceededLimitsException {
-    when(this.mockCollection.bulkWrite(any()))
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
         .thenThrow(new BsonMaximumSizeExceededException("mocked error"));
     var matViewWriter =
         new MaterializedViewWriter(
@@ -153,7 +159,7 @@ public class MaterializedViewWriterTest {
   @Test
   public void testCommitLargeBatchGetsRetriedWithSmallerBatches()
       throws IOException, FieldExceededLimitsException {
-    when(this.mockCollection.bulkWrite(any()))
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
         .thenThrow(new BsonMaximumSizeExceededException("mocked error"))
         .thenReturn(null);
     var matViewWriter =
@@ -171,7 +177,9 @@ public class MaterializedViewWriterTest {
     updateAndCommit(2, matViewWriter);
 
     // should see two separate bulk writes, each with a single document
-    verify(this.mockCollection, times(2)).bulkWrite(argThat(list -> list.size() == 1));
+    verify(this.mockCollection, times(2))
+        .bulkWrite(
+            argThat(list -> list.size() == 1), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -181,7 +189,8 @@ public class MaterializedViewWriterTest {
     BulkWriteError bulkWriteError = new BulkWriteError(9, "mocked error", new BsonDocument(), 0);
     MongoBulkWriteException bulkWriteException = mock(MongoBulkWriteException.class);
     when(bulkWriteException.getWriteErrors()).thenReturn(List.of(bulkWriteError));
-    when(this.mockCollection.bulkWrite(any())).thenThrow(bulkWriteException);
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException);
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,
@@ -204,7 +213,9 @@ public class MaterializedViewWriterTest {
     BulkWriteError bulkWriteError = new BulkWriteError(6, "mocked error", new BsonDocument(), 0);
     MongoBulkWriteException bulkWriteException = mock(MongoBulkWriteException.class);
     when(bulkWriteException.getWriteErrors()).thenReturn(List.of(bulkWriteError));
-    when(this.mockCollection.bulkWrite(any())).thenThrow(bulkWriteException).thenReturn(null);
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException)
+        .thenReturn(null);
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,
@@ -217,7 +228,35 @@ public class MaterializedViewWriterTest {
             Optional.empty());
     updateAndCommit(1, matViewWriter);
 
-    verify(this.mockCollection, times(2)).bulkWrite(argThat(list -> list.size() == 1));
+    verify(this.mockCollection, times(2))
+        .bulkWrite(
+            argThat(list -> list.size() == 1), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+  }
+
+  @Test
+  public void testCommitBulkWriteExceptionWithNoWriteErrorsRetriesFullBatch()
+      throws IOException, FieldExceededLimitsException {
+    MongoBulkWriteException bulkWriteException = mock(MongoBulkWriteException.class);
+    when(bulkWriteException.getWriteErrors()).thenReturn(List.of());
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException)
+        .thenReturn(null);
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    updateAndCommit(2, matViewWriter);
+
+    verify(this.mockCollection, times(2))
+        .bulkWrite(
+            argThat(list -> list.size() == 2), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -323,7 +362,8 @@ public class MaterializedViewWriterTest {
                   }
                   // Check that it's an UpdateOneModel, not ReplaceOneModel
                   return list.get(0) instanceof com.mongodb.client.model.UpdateOneModel;
-                }));
+                }),
+            same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -363,7 +403,8 @@ public class MaterializedViewWriterTest {
                   }
                   // Check that it's a ReplaceOneModel, not UpdateOneModel
                   return list.get(0) instanceof com.mongodb.client.model.ReplaceOneModel;
-                }));
+                }),
+            same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -380,7 +421,9 @@ public class MaterializedViewWriterTest {
             COLLECTION_UUID,
             Optional.empty());
     updateAndCommit(1, writer);
-    verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 1));
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(list -> list.size() == 1), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -400,7 +443,9 @@ public class MaterializedViewWriterTest {
             Optional.of(limiter));
     updateAndCommit(1, writer);
     verify(limiter).acquire();
-    verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 1));
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(list -> list.size() == 1), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -470,8 +515,7 @@ public class MaterializedViewWriterTest {
             UUID.randomUUID(),
             Optional.of(sharedLimiter));
 
-    java.lang.reflect.Field rlField =
-        MaterializedViewWriter.class.getDeclaredField("rateLimiter");
+    java.lang.reflect.Field rlField = MaterializedViewWriter.class.getDeclaredField("rateLimiter");
     rlField.setAccessible(true);
     Optional<RateLimiter> rl1 = (Optional<RateLimiter>) rlField.get(writer1);
     Optional<RateLimiter> rl2 = (Optional<RateLimiter>) rlField.get(writer2);
@@ -518,10 +562,8 @@ public class MaterializedViewWriterTest {
     Assert.assertNotNull("Throttle wait time metric should be registered", throttleWaitTime);
 
     updateAndCommit(1, writer);
-    Assert.assertEquals(
-        "First commit should not be throttled", 0, (int) throttleCount.count());
-    Assert.assertEquals(
-        "No wait time recorded for first commit", 0, throttleWaitTime.count());
+    Assert.assertEquals("First commit should not be throttled", 0, (int) throttleCount.count());
+    Assert.assertEquals("No wait time recorded for first commit", 0, throttleWaitTime.count());
 
     updateAndCommit(1, writer);
     Assert.assertEquals("Second commit should be throttled", 1, (int) throttleCount.count());
@@ -548,17 +590,14 @@ public class MaterializedViewWriterTest {
         MaterializedViewWriter.addFencingToWriteModels(List.of(replaceModel), 42L);
 
     Assert.assertEquals("Should produce same number of models", 1, result.size());
-    Assert.assertTrue(
-        "Should be a ReplaceOneModel", result.get(0) instanceof ReplaceOneModel);
+    Assert.assertTrue("Should be a ReplaceOneModel", result.get(0) instanceof ReplaceOneModel);
 
-    ReplaceOneModel<RawBsonDocument> fencedModel =
-        (ReplaceOneModel<RawBsonDocument>) result.get(0);
+    ReplaceOneModel<RawBsonDocument> fencedModel = (ReplaceOneModel<RawBsonDocument>) result.get(0);
 
     // Verify _autoEmbed._leaseVersion was added as nested doc {_autoEmbed: {_leaseVersion: 42}}
     BsonDocument fencedDoc = fencedModel.getReplacement().toBsonDocument();
     Assert.assertTrue(
-        "Replacement doc should contain _autoEmbed",
-        fencedDoc.containsKey("_autoEmbed"));
+        "Replacement doc should contain _autoEmbed", fencedDoc.containsKey("_autoEmbed"));
     Assert.assertEquals(
         42L, fencedDoc.getDocument("_autoEmbed").getInt64("_leaseVersion").getValue());
 
@@ -572,8 +611,7 @@ public class MaterializedViewWriterTest {
     // Verify original RawBsonDocument was not mutated
     BsonDocument afterDoc = rawDoc.toBsonDocument();
     Assert.assertFalse(
-        "Original document should not be modified",
-        afterDoc.containsKey("_autoEmbed"));
+        "Original document should not be modified", afterDoc.containsKey("_autoEmbed"));
   }
 
   @Test
@@ -589,8 +627,7 @@ public class MaterializedViewWriterTest {
     Assert.assertEquals(1, result.size());
     Assert.assertTrue(result.get(0) instanceof UpdateOneModel);
 
-    UpdateOneModel<RawBsonDocument> fencedModel =
-        (UpdateOneModel<RawBsonDocument>) result.get(0);
+    UpdateOneModel<RawBsonDocument> fencedModel = (UpdateOneModel<RawBsonDocument>) result.get(0);
 
     // Verify __leaseVersion was added to $set
     BsonDocument fencedUpdate = fencedModel.getUpdate().toBsonDocument();
@@ -599,8 +636,7 @@ public class MaterializedViewWriterTest {
         "$set should contain __leaseVersion",
         fencedSet.containsKey(MaterializedViewWriter.LEASE_VERSION_FIELD));
     Assert.assertEquals(
-        99L,
-        fencedSet.getInt64(MaterializedViewWriter.LEASE_VERSION_FIELD).getValue());
+        99L, fencedSet.getInt64(MaterializedViewWriter.LEASE_VERSION_FIELD).getValue());
 
     // Verify original $set fields are preserved
     Assert.assertEquals("newValue", fencedSet.getString("filterField").getValue());
@@ -619,16 +655,14 @@ public class MaterializedViewWriterTest {
         MaterializedViewWriter.addFencingToWriteModels(List.of(deleteModel), 10L);
 
     Assert.assertEquals(1, result.size());
-    Assert.assertTrue(
-        "Should be a DeleteOneModel", result.get(0) instanceof DeleteOneModel);
+    Assert.assertTrue("Should be a DeleteOneModel", result.get(0) instanceof DeleteOneModel);
 
     // Should be a new instance with fencing filter, not the original
-    Assert.assertNotSame("DeleteOneModel should be replaced with fenced version",
-        deleteModel, result.get(0));
+    Assert.assertNotSame(
+        "DeleteOneModel should be replaced with fenced version", deleteModel, result.get(0));
 
     // Verify fencing filter is present
-    DeleteOneModel<RawBsonDocument> fencedModel =
-        (DeleteOneModel<RawBsonDocument>) result.get(0);
+    DeleteOneModel<RawBsonDocument> fencedModel = (DeleteOneModel<RawBsonDocument>) result.get(0);
     BsonDocument filterDoc = fencedModel.getFilter().toBsonDocument();
     Assert.assertTrue("Filter should contain $and", filterDoc.containsKey("$and"));
   }
@@ -652,8 +686,7 @@ public class MaterializedViewWriterTest {
 
     Assert.assertEquals("Must preserve list size (1:1 invariant)", 3, result.size());
     Assert.assertTrue(
-        "Index 0 should be ReplaceOneModel",
-        result.get(0) instanceof ReplaceOneModel);
+        "Index 0 should be ReplaceOneModel", result.get(0) instanceof ReplaceOneModel);
     Assert.assertTrue("Index 1 should be DeleteOneModel", result.get(1) instanceof DeleteOneModel);
     Assert.assertTrue("Index 2 should be UpdateOneModel", result.get(2) instanceof UpdateOneModel);
   }
@@ -693,10 +726,11 @@ public class MaterializedViewWriterTest {
     Assert.assertThrows(
         MaterializedViewNonTransientException.class, () -> updateAndCommit(1, matViewWriter));
 
-    verify(this.mockCollection, times(0)).bulkWrite(any());
+    verify(this.mockCollection, times(0))
+        .bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
-  // ==================== Fencing + ordered retry tests ====================
+  // ==================== Fencing + partial-failure retry tests ====================
 
   @Test
   public void testCommitFencingRejection_dupKey11000_throwsNonTransientException()
@@ -707,7 +741,8 @@ public class MaterializedViewWriterTest {
         new BulkWriteError(11000, "duplicate key error", new BsonDocument(), 0);
     MongoBulkWriteException bulkWriteException = Mockito.mock(MongoBulkWriteException.class);
     when(bulkWriteException.getWriteErrors()).thenReturn(List.of(bulkWriteError));
-    when(this.mockCollection.bulkWrite(any())).thenThrow(bulkWriteException);
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException);
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,
@@ -723,21 +758,19 @@ public class MaterializedViewWriterTest {
         MaterializedViewNonTransientException.class, () -> updateAndCommit(1, matViewWriter));
 
     // Should not retry — only one bulkWrite call
-    verify(this.mockCollection, times(1)).bulkWrite(any());
+    verify(this.mockCollection, times(1))
+        .bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
-  public void testCommitOrderedRetry_includesUnattemptedOps()
+  public void testCommitPartialFailureRetry_retriesOnlyErroredOps()
       throws IOException, FieldExceededLimitsException {
-    // Simulate ordered bulk write: 3 ops sent, error at index 1 (retryable), op at index 2
-    // was never attempted. The retry should include both op 1 (errored) and op 2 (unattempted).
-    // Error code 6 is HostUnreachable — retryable.
     BulkWriteError bulkWriteError = new BulkWriteError(6, "mocked error", new BsonDocument(), 1);
     MongoBulkWriteException bulkWriteException = Mockito.mock(MongoBulkWriteException.class);
     when(bulkWriteException.getWriteErrors()).thenReturn(List.of(bulkWriteError));
-    when(this.mockCollection.bulkWrite(any()))
-        .thenThrow(bulkWriteException) // first call: fails at index 1
-        .thenReturn(null); // retry: succeeds
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException)
+        .thenReturn(null);
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,
@@ -751,22 +784,25 @@ public class MaterializedViewWriterTest {
 
     updateAndCommit(3, matViewWriter);
 
-    // First call: 3 ops. Retry: 2 ops (errored op at index 1 + unattempted op at index 2).
-    verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 3));
-    verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 2));
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(list -> list.size() == 3), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(list -> list.size() == 1), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
   public void testCommitFencingRejection_prioritizedOverRetryableErrors()
       throws IOException, FieldExceededLimitsException {
-    // Unlikely with ordered writes (batch stops at first error), but defensively test that
-    // if errors contain both a fencing dup key and a retryable error, fencing wins.
+    // Defensive test: if errors contain both a fencing dup key and a retryable error, fencing wins.
     BulkWriteError retryableError =
         new BulkWriteError(6, "host unreachable", new BsonDocument(), 0);
     BulkWriteError fencingError = new BulkWriteError(11000, "duplicate key", new BsonDocument(), 1);
     MongoBulkWriteException bulkWriteException = Mockito.mock(MongoBulkWriteException.class);
     when(bulkWriteException.getWriteErrors()).thenReturn(List.of(retryableError, fencingError));
-    when(this.mockCollection.bulkWrite(any())).thenThrow(bulkWriteException);
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException);
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,
@@ -782,7 +818,8 @@ public class MaterializedViewWriterTest {
         MaterializedViewNonTransientException.class, () -> updateAndCommit(2, matViewWriter));
 
     // Should not retry — fencing rejection takes priority
-    verify(this.mockCollection, times(1)).bulkWrite(any());
+    verify(this.mockCollection, times(1))
+        .bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   @Test
@@ -818,7 +855,9 @@ public class MaterializedViewWriterTest {
     matViewWriter.commit(EncodedUserData.EMPTY);
 
     verify(this.mockMongoClient).getDatabase(tenantDb);
-    verify(this.mockCollection).bulkWrite(argThat(list -> list.size() == 1));
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(list -> list.size() == 1), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
 
   /**
@@ -946,7 +985,7 @@ public class MaterializedViewWriterTest {
 
   @Test
   public void testCommitSingleDocExceedingLimitHasDocumentTooLargeReason() {
-    when(this.mockCollection.bulkWrite(any()))
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
         .thenThrow(new BsonMaximumSizeExceededException("mocked error"));
     var matViewWriter =
         new MaterializedViewWriter(
@@ -973,7 +1012,8 @@ public class MaterializedViewWriterTest {
         new BulkWriteError(9, "mocked error", new BsonDocument(), 0);
     MongoBulkWriteException bulkWriteException = mock(MongoBulkWriteException.class);
     when(bulkWriteException.getWriteErrors()).thenReturn(List.of(bulkWriteError));
-    when(this.mockCollection.bulkWrite(any())).thenThrow(bulkWriteException);
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenThrow(bulkWriteException);
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,

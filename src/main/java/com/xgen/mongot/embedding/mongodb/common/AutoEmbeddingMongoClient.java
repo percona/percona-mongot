@@ -3,6 +3,7 @@ package com.xgen.mongot.embedding.mongodb.common;
 import com.google.common.annotations.VisibleForTesting;
 import com.mongodb.ConnectionString;
 import com.mongodb.client.MongoClient;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.util.mongodb.MongoClientBuilder;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -19,8 +20,8 @@ import org.slf4j.LoggerFactory;
 public class AutoEmbeddingMongoClient {
   private static final Logger LOG = LoggerFactory.getLogger(AutoEmbeddingMongoClient.class);
   private static final int RESOLVER_MONGO_CLIENT_MAX_CONNECTIONS = 1;
-  private static final int WRITER_MONGO_CLIENT_MAX_CONNECTIONS = 2;
   private static final int LEASE_MANAGER_MONGO_CLIENT_MAX_CONNECTIONS = 2;
+
   // Use for createCollection and listCollections for MaterializedView Collections.
   private final AtomicReference<MongoClient> materializedViewResolverMongoClient =
       new AtomicReference<>();
@@ -32,6 +33,9 @@ public class AutoEmbeddingMongoClient {
   private final MeterRegistry meterRegistry;
 
   private Optional<SyncSourceConfig> syncSourceConfig;
+
+  private final long materializedViewWriterSocketTimeoutMs;
+  private final int matViewWriterMaxConnections;
 
   @VisibleForTesting
   public AutoEmbeddingMongoClient(
@@ -45,12 +49,21 @@ public class AutoEmbeddingMongoClient {
     this.leaseManagerMongoClient.set(leaseManagerMongoClient);
     this.materializedViewWriterMongoClient.set(materializedViewWriterMongoClient);
     this.meterRegistry = meterRegistry;
+    var defaults = AutoEmbeddingMaterializedViewConfig.getDefault();
+    this.materializedViewWriterSocketTimeoutMs = defaults.materializedViewWriterSocketTimeoutMs;
+    this.matViewWriterMaxConnections = defaults.matViewWriterMaxConnections;
   }
 
   public AutoEmbeddingMongoClient(
-      Optional<SyncSourceConfig> syncSourceConfig, MeterRegistry meterRegistry) {
+      Optional<SyncSourceConfig> syncSourceConfig,
+      MeterRegistry meterRegistry,
+      AutoEmbeddingMaterializedViewConfig autoEmbeddingMaterializedViewConfig) {
     this.syncSourceConfig = syncSourceConfig;
     this.meterRegistry = meterRegistry;
+    this.materializedViewWriterSocketTimeoutMs =
+        autoEmbeddingMaterializedViewConfig.materializedViewWriterSocketTimeoutMs;
+    this.matViewWriterMaxConnections =
+        autoEmbeddingMaterializedViewConfig.matViewWriterMaxConnections;
     syncSourceConfig.ifPresent(this::updateSyncSource);
   }
 
@@ -136,12 +149,14 @@ public class AutoEmbeddingMongoClient {
       ConnectionString connectionString, Optional<SSLContext> sslContext) {
     LOG.atInfo()
         .addKeyValue("hosts", connectionString.getHosts())
+        .addKeyValue("socketTimeoutSeconds", this.materializedViewWriterSocketTimeoutMs / 1000)
+        .addKeyValue("maxConnections", this.matViewWriterMaxConnections)
         .log("Creating MongoClient for MaterializedViewWriter");
-    return MongoClientBuilder.buildNonReplicationWithDefaults(
-        connectionString,
-        "AutoEmbedding Materialized View Writer",
-        WRITER_MONGO_CLIENT_MAX_CONNECTIONS,
-        sslContext,
-        this.meterRegistry);
+    return MongoClientBuilder.builder(connectionString, this.meterRegistry)
+        .sslContext(sslContext)
+        .description("AutoEmbedding Materialized View Writer")
+        .maxConnections(this.matViewWriterMaxConnections)
+        .socketTimeoutMs(Math.toIntExact(this.materializedViewWriterSocketTimeoutMs))
+        .buildNonReplicationClient();
   }
 }

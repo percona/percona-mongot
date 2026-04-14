@@ -9,6 +9,7 @@ import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoNamespace;
 import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.DeleteOneModel;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.ReplaceOneModel;
@@ -45,6 +46,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -69,10 +71,25 @@ import org.slf4j.LoggerFactory;
  *       commit as opposed to every write as that would be inefficient. We expect to, however,
  *       commit more frequently than the Lucene writer.
  * </ul>
+ *
+ * <p>MV commits always use <b>unordered</b> {@link com.mongodb.client.MongoCollection#bulkWrite}
+ * for the materialized view collection (commit and partial-failure retry paths only), which does
+ * not follow list order. So we need deduplication operations to avoid non-deterministic behavior.
+ * Deduplication operations are applied in {@link
+ * com.xgen.mongot.replication.mongodb.common.ChangeStreamDocumentUtils}. {@link
+ * #dropMaterializedViewCollection()} uses {@code drop()} and is unaffected.
  */
 public class MaterializedViewWriter implements IndexWriter {
 
   private static final Logger LOG = LoggerFactory.getLogger(MaterializedViewWriter.class);
+
+  /**
+   * Options for MV {@code bulkWrite}; unordered so retry logic can use per-index write errors.
+   *
+   * <p>Treat as immutable: this instance is shared — do not call fluent setters ({@code ordered},
+   * etc.) on it.
+   */
+  static final BulkWriteOptions MV_BULK_WRITE_OPTIONS = new BulkWriteOptions().ordered(false);
 
   // TODO(CLOUDP-356242): make this configurable
   public static final String MV_DATABASE_NAME = "__mdb_internal_search";
@@ -230,11 +247,12 @@ public class MaterializedViewWriter implements IndexWriter {
               "Cannot write to MV without a valid lease (leaseVersion=" + leaseVersion + ")",
               MaterializedViewNonTransientException.Reason.INVALID_LEASE);
         }
+        List<WriteModel<RawBsonDocument>> bulkList = bulkOperations.stream().toList();
         // Apply fencing once here, then pass already-fenced documents to bulkWrite.
         // This ensures retry paths (partial failure, payload split) use the same fenced
         // documents without re-fencing, and error indices align directly.
         List<WriteModel<RawBsonDocument>> fencedOps =
-            addFencingToWriteModels(bulkOperations.stream().toList(), leaseVersion);
+            addFencingToWriteModels(bulkList, leaseVersion);
         bulkWrite(fencedOps, 0);
       } catch (MaterializedViewNonTransientException e) {
         throw e;
@@ -355,7 +373,9 @@ public class MaterializedViewWriter implements IndexWriter {
     private final MetricsFactory metricsFactory;
     private final Optional<RateLimiter> rateLimiter;
 
-    public Factory(AutoEmbeddingMongoClient autoEmbeddingMongoClient, MeterRegistry meterRegistry,
+    public Factory(
+        AutoEmbeddingMongoClient autoEmbeddingMongoClient,
+        MeterRegistry meterRegistry,
         Optional<Integer> mvWriteRateLimitRps) {
       // TODO(CLOUDP-360542): Investigate whether we need to change this when primary mongod node is
       // not discoverable in original seedAddresses
@@ -446,12 +466,10 @@ public class MaterializedViewWriter implements IndexWriter {
                 .get()
                 .getDatabase(this.namespace.getDatabaseName())
                 .getCollection(this.namespace.getCollectionName(), RawBsonDocument.class)
-                // Ordered writes: preserves operation order for same-_id correctness
-                // (e.g., insert then delete on the same doc within one batch).
-                .bulkWrite(documents);
+                .bulkWrite(documents, MV_BULK_WRITE_OPTIONS);
           });
     } catch (MongoBulkWriteException e) {
-      // With ordered writes, the batch stops at the first error.
+      // Unordered bulk may report multiple writeErrors (one per failed op).
       // Check if the error is a fencing rejection (DuplicateKey from a fenced upsert).
       // DuplicateKey occurs when the fencing filter doesn't match (existing doc has a higher
       // _autoEmbed._leaseVersion) and the upsert attempts an insert that conflicts on _id.
@@ -470,7 +488,7 @@ public class MaterializedViewWriter implements IndexWriter {
             "MV write rejected by fencing: a newer leader has written to this document",
             MaterializedViewNonTransientException.Reason.FENCING_REJECTION);
       }
-      // Not a fencing rejection — retry the failed + unattempted operations.
+      // Not a fencing rejection — retry the failed operations
       // Disk-full and write-blocked cases are detected and wrapped as transient by
       // MongoClientOperationExecutor before reaching here.
       // filterFailedOperations may throw MaterializedViewNonTransientException
@@ -478,13 +496,26 @@ public class MaterializedViewWriter implements IndexWriter {
       this.partialBulkWriteErrors.increment();
       List<WriteModel<RawBsonDocument>> failedOperations;
       try {
-        failedOperations =
-            filterFailedOperations(documents, e.getWriteErrors());
+        failedOperations = filterFailedOperations(documents, e.getWriteErrors());
       } catch (MaterializedViewNonTransientException nonTransient) {
-        recordMvErrorMetric(
-            MaterializedViewNonTransientException.class,
-            nonTransient.getReason());
+        recordMvErrorMetric(MaterializedViewNonTransientException.class, nonTransient.getReason());
         throw nonTransient;
+      }
+      if (failedOperations.isEmpty()) {
+        // e.g. writeConcernError with no per-operation writeErrors — we have no indices for a
+        // partial retry, and bulkWrite(List.of()) would throw IllegalArgumentException.
+        //
+        // Tradeoff: we retry the entire batch, which may re-apply ops that already succeeded on the
+        // server (ambiguous ack / partial success). MV writes are replace/update/delete by _id with
+        // fencing; replaying the same batch is treated as acceptable idempotence at document scope
+        // versus failing closed or crashing on an empty retry list.
+        LOG.warn(
+            "Bulk write failed with no per-operation write errors; retrying full batch of {}"
+                + " operations",
+            documents.size());
+        // TODO(CLOUDP-397327): avoid retrying the whole batch.
+        bulkWrite(documents, subRetryAttempt + 1);
+        return;
       }
       LOG.warn(
           "{} out of {} operations failed in bulk write, retrying failed operations",
@@ -524,8 +555,7 @@ public class MaterializedViewWriter implements IndexWriter {
     }
   }
 
-  private void recordMvErrorMetric(
-      Class<? extends Exception> exceptionType, Enum<?> reason) {
+  private void recordMvErrorMetric(Class<? extends Exception> exceptionType, Enum<?> reason) {
     this.metricsFactory
         .counter(
             "mvErrors",
@@ -609,8 +639,7 @@ public class MaterializedViewWriter implements IndexWriter {
                 updateDoc,
                 updateModel.getOptions()));
       } else if (writeModel instanceof DeleteOneModel<RawBsonDocument> deleteModel) {
-        fenced.add(
-            new DeleteOneModel<>(Filters.and(deleteModel.getFilter(), fencingCondition)));
+        fenced.add(new DeleteOneModel<>(Filters.and(deleteModel.getFilter(), fencingCondition)));
       } else {
         fenced.add(writeModel);
       }
@@ -632,42 +661,26 @@ public class MaterializedViewWriter implements IndexWriter {
   }
 
   /**
-   * Filter failed operations using BulkWriteError and identify operations to retry.
-   *
-   * <p>With ordered bulk writes, MongoDB stops at the first error. {@code getWriteErrors()} only
-   * contains the operations that actually errored — operations after the error were never attempted
-   * and are not reported. This method includes both the errored operations and the unattempted
-   * operations (those at indices after the highest error index) in the retry list.
-   *
-   * @param bulkOperations The original list of bulk write operations
-   * @param writeErrors BulkWriteErrors returned from MongoBulkWriteException
-   * @return A list containing the failed operations and any unattempted operations
+   * MV {@code bulkWrite} is always unordered: the server may attempt every operation in the batch.
+   * Operations that succeeded must not be retried. Returns one entry per distinct failing index in
+   * {@code writeErrors} (sorted by index).
    */
   private static List<WriteModel<RawBsonDocument>> filterFailedOperations(
       List<WriteModel<RawBsonDocument>> bulkOperations, List<BulkWriteError> writeErrors) {
-    List<WriteModel<RawBsonDocument>> retryOperations = new ArrayList<>();
-
-    @Var int maxErrorIndex = -1;
+    TreeSet<Integer> failedIndices = new TreeSet<>();
     for (BulkWriteError error : writeErrors) {
       if (!Errors.RETRYABLE_ERROR_CODES.contains(error.getCode())) {
-        // Since we cannot skip any document events, we need to fail the entire batch if we
-        // encounter even a single non-retryable error.
         throw new MaterializedViewNonTransientException(
             "Failed to write to materialized view due to non-retryable error: "
                 + error.getMessage(),
             MaterializedViewNonTransientException.Reason.NON_RETRYABLE_ERROR);
       }
-      int failedIndex = error.getIndex();
-      retryOperations.add(bulkOperations.get(failedIndex));
-      maxErrorIndex = Math.max(maxErrorIndex, failedIndex);
+      failedIndices.add(error.getIndex());
     }
-
-    // With ordered writes, operations after the last error were never attempted.
-    // Include them in the retry list so they are not silently lost.
-    for (int i = maxErrorIndex + 1; i < bulkOperations.size(); i++) {
-      retryOperations.add(bulkOperations.get(i));
+    List<WriteModel<RawBsonDocument>> retryOperations = new ArrayList<>(failedIndices.size());
+    for (int idx : failedIndices) {
+      retryOperations.add(bulkOperations.get(idx));
     }
-
     return retryOperations;
   }
 
