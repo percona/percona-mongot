@@ -149,7 +149,7 @@ MISC_ARTIFACTS = [
     "org.apache.commons:commons-compress:1.28.0",
     "org.apache.httpcomponents:httpclient:4.5.14",
     "org.apache.httpcomponents:httpcore:4.4.16",
-    "org.apache.logging.log4j:log4j-core:2.25.3",
+    "org.apache.logging.log4j:log4j-core:2.25.4",
     "org.reactivestreams:reactive-streams:1.0.4",
     "org.yaml:snakeyaml:2.4",
     "com.google.flogger:flogger:0.9",
