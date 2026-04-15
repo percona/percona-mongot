@@ -33,7 +33,9 @@ import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
+import io.micrometer.core.instrument.Counter;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -91,6 +93,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
   private final AutoEmbeddingMongoClient autoEmbeddingMongoClient;
   // End of give-up blackout (epoch ms). While now < this, do not acquire leadership.
   private final AtomicLong giveUpBlackoutEndTimeMs = new AtomicLong(0);
+  private final Counter corruptedLeaseCounter;
 
   public DynamicLeaderLeaseManager(
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
@@ -100,6 +103,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       MaterializedViewCollectionMetadataCatalog mvMetadataCatalog) {
     this.operationExecutor =
         new MongoClientOperationExecutor(metricsFactory, "leaseTableCollection");
+    this.corruptedLeaseCounter = metricsFactory.counter("corruptedLeases");
     this.hostname = hostname;
     this.mvMetadataCatalog = mvMetadataCatalog;
     this.leases = new ConcurrentHashMap<>();
@@ -235,20 +239,32 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
           this.operationExecutor.execute(
               "getLeases",
               () -> this.getCollection(defaultDb).find().into(new ArrayList<>()));
+      List<String> corruptedLeaseIds = new ArrayList<>();
       for (BsonDocument rawLease : rawLeases) {
-        // Populate the database mapping before normalization so that getDatabaseForLease()
-        // resolves correctly when normalizeLeaseIfNeeded() calls back into it for UUID resolution.
-        Lease parsed = Lease.fromBson(rawLease);
-        this.leaseKeyToDatabase.putIfAbsent(parsed.id(), defaultDb);
-        Lease lease = normalizeLeaseIfNeeded(parsed);
-        if (lease != null) {
-          this.leases.put(lease.id(), lease);
-        } else {
-          // TODO(CLOUDP-384971): clean up corrupted leases
-          LOG.atError()
-              .addKeyValue("leaseId", parsed.id())
-              .log("Corrupted lease found, skipping");
+        try {
+          // Populate the database mapping before normalization so that getDatabaseForLease()
+          // resolves correctly when normalizeLeaseIfNeeded() calls back into it for UUID
+          // resolution.
+          Lease parsed = parseLeaseOrThrow(rawLease);
+          this.leaseKeyToDatabase.putIfAbsent(parsed.id(), defaultDb);
+          Lease lease = normalizeLeaseIfNeeded(parsed);
+          if (lease != null) {
+            this.leases.put(lease.id(), lease);
+          } else {
+            // TODO(CLOUDP-384971): clean up corrupted leases
+            this.corruptedLeaseCounter.increment();
+            corruptedLeaseIds.add(parsed.id());
+          }
+        } catch (BsonParseException e) {
+          // parseLeaseOrThrow already incremented corruptedLeaseCounter
+          corruptedLeaseIds.add(extractLeaseId(rawLease));
         }
+      }
+      if (!corruptedLeaseIds.isEmpty()) {
+        LOG.atError()
+            .addKeyValue("corruptedLeaseIds", corruptedLeaseIds)
+            .addKeyValue("count", corruptedLeaseIds.size())
+            .log("Corrupted leases found during sync, skipping");
       }
       LOG.atInfo()
           .addKeyValue("leaseCount", rawLeases.size())
@@ -260,6 +276,27 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
           .setCause(e)
           .addKeyValue("hostname", this.hostname)
           .log("syncLeasesFromMongod fails, skipping syncLeases to avoid crash.");
+    }
+  }
+
+  /**
+   * Wraps {@link Lease#fromBson} and increments the corrupted lease counter on parse failure.
+   * Callers can catch the re-thrown exception to decide whether to skip or propagate.
+   */
+  private Lease parseLeaseOrThrow(BsonDocument rawLease) throws BsonParseException {
+    try {
+      return Lease.fromBson(rawLease);
+    } catch (BsonParseException e) {
+      this.corruptedLeaseCounter.increment();
+      throw e;
+    }
+  }
+
+  private static String extractLeaseId(BsonDocument rawLease) {
+    try {
+      return rawLease.containsKey("_id") ? rawLease.get("_id").asString().getValue() : "unknown";
+    } catch (Exception e) {
+      return "unparseable";
     }
   }
 
@@ -635,8 +672,15 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
                         .find(Filters.in("_id", keys))
                         .into(new ArrayList<>()));
         for (BsonDocument rawLease : rawLeases) {
-          Lease lease = Lease.fromBson(rawLease);
-          fetchedLeases.put(lease.id(), lease);
+          try {
+            Lease lease = parseLeaseOrThrow(rawLease);
+            fetchedLeases.put(lease.id(), lease);
+          } catch (BsonParseException parseEx) {
+            LOG.atError()
+                .addKeyValue("leaseId", extractLeaseId(rawLease))
+                .setCause(parseEx)
+                .log("Failed to parse follower lease document, skipping");
+          }
         }
       }
       LOG.atDebug()
@@ -1325,7 +1369,11 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
     if (rawLease == null) {
       return null;
     }
-    return normalizeLeaseIfNeeded(Lease.fromBson(rawLease));
+    Lease lease = normalizeLeaseIfNeeded(parseLeaseOrThrow(rawLease));
+    if (lease == null) {
+      this.corruptedLeaseCounter.increment();
+    }
+    return lease;
   }
 
   /**

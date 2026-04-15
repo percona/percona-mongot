@@ -37,11 +37,14 @@ public class MongoClientOperationExecutor {
   private final RetryPolicy<Object> retryPolicy;
   private final MetricsFactory metricsFactory;
   private final String requestLatencyMetricName;
+  private final String perAttemptLatencyMetricName;
   private final String failedRequestsMetricName;
   private final String successfulRequestsMetricName;
   private final ConcurrentHashMap<String, Timer> timerCache = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Timer> perAttemptTimerCache = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Counter> successCounterCache = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Counter> failureCounterCache = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Counter> retriedAttemptsCache = new ConcurrentHashMap<>();
   private final Counter mongodDiskFullErrors;
   private final Counter mongodUserWritesBlockedErrors;
   private final Counter mongodSystemOverloadErrors;
@@ -80,18 +83,32 @@ public class MongoClientOperationExecutor {
       BooleanSupplier shouldAbortRetry) {
     this.metricsFactory = metricsFactory;
 
+    String retriedAttemptsMetricName = resourceName + ".retriedAttempts";
     this.retryPolicy =
         backoffPolicy.applyParameters(
             new RetryPolicy<>()
                 .handleIf(e -> !shouldAbortRetry.getAsBoolean() && isRetryable(e))
                 .onRetry(
+                    ex -> {
+                      String errorReason = classifyError(ex.getLastFailure());
+                      this.retriedAttemptsCache
+                          .computeIfAbsent(
+                              errorReason,
+                              k ->
+                                  metricsFactory.counter(
+                                      retriedAttemptsMetricName,
+                                      Tags.of("errorReason", k)))
+                          .increment();
+                    })
+                .onFailure(
                     ex ->
                         LOG.warn(
-                            "Operation failed. Attempt {} ({} elapsed). Retrying.",
+                            "Operation failed after {} attempts ({} elapsed).",
                             ex.getAttemptCount(),
                             ex.getElapsedTime(),
-                            ex.getLastFailure())));
+                            ex.getFailure())));
     this.requestLatencyMetricName = resourceName + ".requestLatency";
+    this.perAttemptLatencyMetricName = resourceName + ".perAttemptLatency";
     this.failedRequestsMetricName = resourceName + ".failedRequests";
     this.successfulRequestsMetricName = resourceName + ".successfulRequests";
     this.mongodDiskFullErrors = metricsFactory.counter("mongodDiskFullErrors");
@@ -115,6 +132,12 @@ public class MongoClientOperationExecutor {
             k ->
                 this.metricsFactory.timer(
                     this.requestLatencyMetricName, metricTags, 0.5, 0.75, 0.9, 0.99));
+    Timer perAttemptTimer =
+        this.perAttemptTimerCache.computeIfAbsent(
+            operationName,
+            k ->
+                this.metricsFactory.timer(
+                    this.perAttemptLatencyMetricName, metricTags, 0.5, 0.75, 0.9, 0.99));
     Counter successCounter =
         this.successCounterCache.computeIfAbsent(
             operationName,
@@ -124,10 +147,21 @@ public class MongoClientOperationExecutor {
             operationName,
             k -> this.metricsFactory.counter(this.failedRequestsMetricName, metricTags));
 
+    // Wrap operation to time each individual attempt (excluding backoff wait time).
+    CheckedSupplier<T> timedOperation =
+        () -> {
+          Timer.Sample attemptSample = Timer.start();
+          try {
+            return operation.get();
+          } finally {
+            attemptSample.stop(perAttemptTimer);
+          }
+        };
+
     // The latency metric here includes retries and is recorded for both success and failure.
     Timer.Sample sample = Timer.start();
     try {
-      T result = Failsafe.with(this.retryPolicy).get(operation);
+      T result = Failsafe.with(this.retryPolicy).get(timedOperation);
       successCounter.increment();
       return result;
 
@@ -210,6 +244,34 @@ public class MongoClientOperationExecutor {
   private static boolean isSystemOverloaded(Throwable e) {
     return e instanceof MongoException me
         && Errors.SYSTEM_OVERLOADED_ERROR_CODES.contains(me.getCode());
+  }
+
+  private static String classifyError(Throwable e) {
+    if (e instanceof MongoSocketException) {
+      return "socket_error";
+    }
+    if (e instanceof MongoTimeoutException) {
+      return "timeout";
+    }
+    if (e instanceof MongoNotPrimaryException) {
+      return "not_primary";
+    }
+    if (e instanceof MongoNodeIsRecoveringException) {
+      return "node_recovering";
+    }
+    if (e instanceof MongoCursorNotFoundException) {
+      return "cursor_not_found";
+    }
+    if (e instanceof MongoException mongoException) {
+      return "mongo_error_" + mongoException.getCode();
+    }
+    if (e instanceof IllegalStateException) {
+      return "client_closed";
+    }
+    if (e instanceof MaterializedViewTransientException) {
+      return "mv_transient";
+    }
+    return "unknown";
   }
 
   private static boolean isRetryable(Throwable e) {

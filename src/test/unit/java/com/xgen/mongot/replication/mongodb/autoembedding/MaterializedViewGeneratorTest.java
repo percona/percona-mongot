@@ -2,6 +2,7 @@ package com.xgen.mongot.replication.mongodb.autoembedding;
 
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewDefinitionGeneration;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewIndexGeneration;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -9,17 +10,19 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+import com.mongodb.MongoException;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexGeneration;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
+import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
 import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
-import com.xgen.testing.mongot.metrics.SimpleMetricsFactory;
+import com.xgen.mongot.util.mongodb.Errors;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
@@ -128,13 +131,127 @@ public class MaterializedViewGeneratorTest {
     assertSame("Second shutdown() must return the same future as the first", first, second);
   }
 
+  @Test
+  public void handleSteadyStateNonInvalidatingResync_oplogFalloff_incrementsCounter() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MaterializedViewGenerator generator = createGeneratorForMetricsTest(registry);
+
+    MongoException changeStreamHistoryLost =
+        new MongoException(Errors.CHANGE_STREAM_HISTORY_LOST.code, "oplog fell off");
+    SteadyStateException exception =
+        SteadyStateException.createNonInvalidatingResync(changeStreamHistoryLost);
+
+    generator.handleSteadyStateNonInvalidatingResync(exception);
+
+    assertEquals(
+        1.0,
+        registry
+            .counter("materializedViewGenerator.oplogFalloffResyncEvents")
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void handleSteadyStateNonInvalidatingResync_cappedPositionLost_incrementsCounter() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MaterializedViewGenerator generator = createGeneratorForMetricsTest(registry);
+
+    MongoException cappedPositionLost =
+        new MongoException(Errors.CAPPED_POSITION_LOST.code, "capped position lost");
+    SteadyStateException exception =
+        SteadyStateException.createNonInvalidatingResync(cappedPositionLost);
+
+    generator.handleSteadyStateNonInvalidatingResync(exception);
+
+    assertEquals(
+        1.0,
+        registry
+            .counter("materializedViewGenerator.oplogFalloffResyncEvents")
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void handleSteadyStateNonInvalidatingResync_nonOplogError_doesNotIncrementCounter() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MaterializedViewGenerator generator = createGeneratorForMetricsTest(registry);
+
+    MongoException bsonTooLarge =
+        new MongoException(Errors.BSON_OBJECT_TOO_LARGE.code, "bson too large");
+    SteadyStateException exception =
+        SteadyStateException.createNonInvalidatingResync(bsonTooLarge);
+
+    generator.handleSteadyStateNonInvalidatingResync(exception);
+
+    assertEquals(
+        0.0,
+        registry
+            .counter("materializedViewGenerator.oplogFalloffResyncEvents")
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void handleSteadyStateNonInvalidatingResync_nonMongoException_doesNotIncrementCounter() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MaterializedViewGenerator generator = createGeneratorForMetricsTest(registry);
+
+    SteadyStateException exception =
+        SteadyStateException.createNonInvalidatingResync(
+            new RuntimeException("non-mongo error"));
+
+    generator.handleSteadyStateNonInvalidatingResync(exception);
+
+    assertEquals(
+        0.0,
+        registry
+            .counter("materializedViewGenerator.oplogFalloffResyncEvents")
+            .count(),
+        0.0);
+  }
+
+  private MaterializedViewGenerator createGeneratorForMetricsTest(SimpleMeterRegistry registry) {
+    MaterializedViewIndexGeneration indexGeneration =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    com.xgen.mongot.metrics.MetricsFactory metricsFactory =
+        new com.xgen.mongot.metrics.MetricsFactory("materializedViewGenerator", registry);
+
+    // Use a subclass that stubs enqueueInitialSync to prevent async NPEs on background threads.
+    return new MaterializedViewGenerator(
+        this.executorService,
+        mock(MongotCursorManager.class),
+        mock(InitialSyncQueue.class),
+        mock(SteadyStateManager.class),
+        indexGeneration,
+        mock(InitializedMaterializedViewIndex.class),
+        mock(DocumentIndexer.class),
+        mock(PeriodicIndexCommitter.class),
+        metricsFactory,
+        mock(FeatureFlags.class),
+        Duration.ofSeconds(30),
+        Duration.ofSeconds(30),
+        Duration.ofSeconds(1),
+        false) {
+      @Override
+      protected synchronized void enqueueInitialSync(
+          com.xgen.mongot.index.status.IndexStatus status) {
+        // no-op: prevent async cascade in tests
+      }
+    };
+  }
+
   private MaterializedViewGenerator createGenerator() {
-    return createGeneratorWithIndex(mock(InitializedMaterializedViewIndex.class));
+    return createGeneratorWithIndex(
+        mock(InitializedMaterializedViewIndex.class), new SimpleMeterRegistry());
   }
 
   private MaterializedViewGenerator createGeneratorWithIndex(
       InitializedMaterializedViewIndex matViewIndex) {
-    SimpleMetricsFactory metricsFactory = new SimpleMetricsFactory();
+    return createGeneratorWithIndex(matViewIndex, new SimpleMeterRegistry());
+  }
+
+  private MaterializedViewGenerator createGeneratorWithIndex(
+      InitializedMaterializedViewIndex matViewIndex, SimpleMeterRegistry registry) {
     MaterializedViewIndexGeneration indexGeneration =
         mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
 
@@ -150,7 +267,7 @@ public class MaterializedViewGeneratorTest {
         Duration.ofSeconds(30),
         Duration.ofSeconds(30),
         Duration.ofSeconds(1),
-        metricsFactory.meterRegistry,
+        registry,
         mock(FeatureFlags.class),
         false);
   }

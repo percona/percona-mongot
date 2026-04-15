@@ -1125,6 +1125,123 @@ public class DynamicLeaderLeaseManagerTest {
     assertThat(manager.getLeaseKeyToDatabase()).doesNotContainKey(collectionName);
   }
 
+  // ==================== Corruption Counter ====================
+
+  @Test
+  public void normalizeLeaseIfNeeded_corruptedLease_incrementsCounter() {
+    // Arrange - create a lease with NIL UUID that will fail normalization
+    var rawLease =
+        BsonDocument.parse(
+            "{\"_id\": \"corrupt-collection\",\n"
+                + "        \"schemaVersion\": 1,\n"
+                + "        \"collectionUuid\":"
+                + " \"550e8400-e29b-41d4-a716-446655440000\",\n"
+                + "        \"collectionName\": \"source-collection\",\n"
+                + "        \"leaseOwner\": \"localhost\",\n"
+                + "        \"leaseExpiration\": {\n"
+                + "          \"$date\": \"2024-12-06T00:57:15.661Z\"\n"
+                + "        },\n"
+                + "        \"leaseVersion\": 1,\n"
+                + "        \"commitInfo\": \"{}\",\n"
+                + "        \"latestIndexDefinitionVersion\": \"1\",\n"
+                + "        \"indexDefinitionVersionStatusMap\": {\n"
+                + "          \"1\": {\n"
+                + "            \"isQueryable\": false,\n"
+                + "            \"indexStatusCode\": \"INITIAL_SYNC\"\n"
+                + "          }\n"
+                + "        }}");
+
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(rawLease);
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+
+    // Mock getCollectionInfo to fail — triggers normalizeLeaseIfNeeded returning null
+    ListCollectionsIterable<BsonDocument> emptyIterable =
+        mock(ListCollectionsIterable.class);
+    when(this.mockDatabase.listCollections(BsonDocument.class))
+        .thenReturn(emptyIterable);
+    MongoCursor<BsonDocument> emptyCursor = mock(MongoCursor.class);
+    when(emptyCursor.hasNext()).thenReturn(false);
+    when(emptyIterable.iterator()).thenReturn(emptyCursor);
+
+    // Act
+    SimpleMetricsFactory metricsFactory = new SimpleMetricsFactory();
+    DynamicLeaderLeaseManager manager =
+        new DynamicLeaderLeaseManager(
+            this.mockAutoEmbeddingMongoClient,
+            metricsFactory,
+            HOSTNAME,
+            DB_RESOLVER,
+            this.mvMetadataCatalog);
+    manager.syncLeasesFromMongod();
+
+    // Assert
+    assertThat(
+            metricsFactory.meterRegistry
+                .counter(metricsFactory.namespace + ".corruptedLeases")
+                .count())
+        .isEqualTo(1.0);
+  }
+
+  @Test
+  public void parseLeaseOrThrow_malformedBson_incrementsCounterAndSkips() {
+    // Arrange - a BSON document missing required fields so Lease.fromBson throws
+    var malformedLease = BsonDocument.parse("{\"_id\": \"bad-lease\"}");
+
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(malformedLease);
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+
+    // Act
+    SimpleMetricsFactory metricsFactory = new SimpleMetricsFactory();
+    DynamicLeaderLeaseManager manager =
+        new DynamicLeaderLeaseManager(
+            this.mockAutoEmbeddingMongoClient,
+            metricsFactory,
+            HOSTNAME,
+            DB_RESOLVER,
+            this.mvMetadataCatalog);
+    manager.syncLeasesFromMongod();
+
+    // Assert - counter incremented by parseLeaseOrThrow, lease not stored
+    assertThat(
+            metricsFactory.meterRegistry
+                .counter(metricsFactory.namespace + ".corruptedLeases")
+                .count())
+        .isEqualTo(1.0);
+    assertThat(manager.getLeases()).isEmpty();
+  }
+
+  @Test
+  public void parseLeaseOrThrow_nonStringId_extractsUnparseable() {
+    // Arrange - a BSON document with non-string _id (e.g. ObjectId)
+    var badIdLease = new BsonDocument();
+    badIdLease.put("_id", new org.bson.BsonInt32(12345));
+
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(badIdLease);
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+
+    // Act
+    SimpleMetricsFactory metricsFactory = new SimpleMetricsFactory();
+    DynamicLeaderLeaseManager manager =
+        new DynamicLeaderLeaseManager(
+            this.mockAutoEmbeddingMongoClient,
+            metricsFactory,
+            HOSTNAME,
+            DB_RESOLVER,
+            this.mvMetadataCatalog);
+    manager.syncLeasesFromMongod();
+
+    // Assert - counter incremented, lease not stored, no crash
+    assertThat(
+            metricsFactory.meterRegistry
+                .counter(metricsFactory.namespace + ".corruptedLeases")
+                .count())
+        .isEqualTo(1.0);
+    assertThat(manager.getLeases()).isEmpty();
+  }
+
   // ==================== Helper Methods ====================
 
   /**

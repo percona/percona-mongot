@@ -14,6 +14,8 @@ import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
 import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
+import com.xgen.mongot.util.mongodb.Errors;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.Collections;
@@ -82,6 +84,8 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
    */
   private final InitializedMaterializedViewIndex matViewIndex;
 
+  private final Counter oplogFalloffResyncCounter;
+
   MaterializedViewGenerator(
       Executor lifecycleExecutor,
       MongotCursorManager cursorManager,
@@ -116,6 +120,7 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
     this.lifecycleExecutor = lifecycleExecutor;
     this.isLeader = false; // All generators start as followers
     this.matViewIndex = matViewIndex;
+    this.oplogFalloffResyncCounter = metricsFactory.counter("oplogFalloffResyncEvents");
   }
 
   /** Returns whether this generator is currently acting as the leader. */
@@ -243,6 +248,19 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
     this.logger.atInfo()
         .setCause(steadyStateException)
         .log("Resync triggered during steady state replication for auto-embedding index");
+    if (isOplogFalloff(steadyStateException)) {
+      this.oplogFalloffResyncCounter.increment();
+    }
     enqueueInitialSync(IndexStatus.initialSync());
+  }
+
+  private static boolean isOplogFalloff(SteadyStateException steadyStateException) {
+    Throwable cause = steadyStateException.getCause();
+    if (cause instanceof com.mongodb.MongoException mongoException) {
+      int errorCode = mongoException.getCode();
+      return errorCode == Errors.CHANGE_STREAM_HISTORY_LOST.code
+          || errorCode == Errors.CAPPED_POSITION_LOST.code;
+    }
+    return false;
   }
 }
