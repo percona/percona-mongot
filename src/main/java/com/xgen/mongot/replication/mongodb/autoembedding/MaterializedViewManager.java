@@ -175,13 +175,15 @@ public class MaterializedViewManager implements ReplicationManager {
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
 
   /**
-   * Tracks generationIds with a pending async shutdown from {@link #transitionToFollower}. {@link
-   * #refreshStatus()} skips leadership acquisition for these ids to avoid a race where a new
-   * generator tries to enqueue init-sync before the old generator finishes cleanup. Removed when
-   * shutdown completes.
+   * Tracks generators with a pending async shutdown from {@link #transitionToFollower}.
+   * {@link #refreshStatus()} skips leadership acquisition for these ids to avoid a race where
+   * a new generator tries to enqueue init-sync before the old generator finishes cleanup.
+   * Removed in {@link #refreshStatus()} once the shutdown future completes and the
+   * InitialSyncQueue confirms the stale entry is gone.
    */
   @VisibleForTesting
-  final Set<MaterializedViewGenerationId> pendingShutdowns = ConcurrentHashMap.newKeySet();
+  final Map<MaterializedViewGenerationId, CompletableFuture<Void>> pendingShutdowns =
+      new ConcurrentHashMap<>();
 
   /**
    * Package-private constructor for testing - registers gauges and starts periodic tasks. This
@@ -682,28 +684,38 @@ public class MaterializedViewManager implements ReplicationManager {
     // Skip if a previous transitionToFollower is still shutting down for this generationId.
     // This can happen when two heartbeat threads both snapshot the same leader generator
     // before either enters this synchronized block.
-    if (this.pendingShutdowns.contains(generationId)) {
+    if (this.pendingShutdowns.containsKey(generationId)) {
       LOG.atWarn()
           .addKeyValue("generationId", generationId)
           .log("Shutdown already pending, skipping duplicate transitionToFollower");
       return;
     }
-    MaterializedViewGenerator newGenerator =
-        this.matViewGeneratorFactory.create(matViewIndexGeneration);
-    // Replace in the map immediately so subsequent operations use the new follower generator.
-    this.managedMaterializedViewGenerators.put(uuid, newGenerator);
-    // Shutdown the old generator asynchronously. Track the pending shutdown so that
-    // refreshStatus() skips leadership acquisition until cleanup completes.
-    this.pendingShutdowns.add(generationId);
-    existingGenerator
-        .shutdown()
-        .whenComplete(
-            (ignored, throwable) -> {
-              this.pendingShutdowns.remove(generationId);
-              LOG.atInfo()
-                  .addKeyValue("generationId", generationId)
-                  .log("Old generator shutdown complete, leadership acquisition unblocked");
-            });
+    // Block leadership acquisition early, before the slow factory.create() call.
+    this.pendingShutdowns.put(generationId, new CompletableFuture<>());
+    try {
+      MaterializedViewGenerator newGenerator =
+          this.matViewGeneratorFactory.create(matViewIndexGeneration);
+      // Replace in the map immediately so subsequent operations use the new follower generator.
+      this.managedMaterializedViewGenerators.put(uuid, newGenerator);
+      // Replace the placeholder with the real shutdown future. Removal from pendingShutdowns is
+      // deferred to refreshStatus() which checks both the future and the queue.
+      CompletableFuture<Void> shutdownFuture =
+          existingGenerator
+              .shutdown()
+              .whenComplete(
+                  (ignored, throwable) -> {
+                    if (throwable != null) {
+                      LOG.atError()
+                          .addKeyValue("generationId", generationId)
+                          .setCause(throwable)
+                          .log("Old generator shutdown completed exceptionally");
+                    }
+                  });
+      this.pendingShutdowns.put(generationId, shutdownFuture);
+    } catch (RuntimeException e) {
+      this.pendingShutdowns.remove(generationId);
+      throw e;
+    }
   }
 
   /**
@@ -774,6 +786,7 @@ public class MaterializedViewManager implements ReplicationManager {
     // Don't call leaseManager.dropLease() here, as lease may manage multiple
     // MaterializedViewGenerationIds.
     this.leaseManager.drop(matViewGenerationId);
+    this.pendingShutdowns.remove(matViewGenerationId);
     this.activeGenerationIdCatalog.genIdByMatViewGenId.remove(matViewGeneratorId);
     this.matViewMetadataCatalog.removeMetadata(matViewGenerationId);
   }
@@ -953,14 +966,26 @@ public class MaterializedViewManager implements ReplicationManager {
               }
             });
 
+    // Clear pendingShutdowns entries whose shutdown has completed and queue is clean.
+    this.pendingShutdowns.entrySet().removeIf(
+        entry -> {
+          if (!entry.getValue().isDone()) {
+            return false;
+          }
+          if (this.matViewGeneratorFactory.hasQueueEntry(entry.getKey())) {
+            return false;
+          }
+          LOG.atInfo()
+              .addKeyValue("generationId", entry.getKey())
+              .log("Shutdown and queue cleanup complete, leadership acquisition unblocked");
+          return true;
+        });
+
     // Dynamic leader election only: attempt to acquire leadership for acquirable leases.
     if (this.leaseManager instanceof DynamicLeaderLeaseManager) {
       List<MaterializedViewGenerationId> skippedForShutdown = new ArrayList<>();
       for (MaterializedViewGenerationId generationId : pollResult.acquirableLeases()) {
-        // Skip leadership acquisition if the old generator is still shutting down.
-        // This avoids a race where the new generator enqueues init-sync before the old
-        // one finishes cleanup, which would cause IllegalStateException in InitialSyncQueue.
-        if (this.pendingShutdowns.contains(generationId)) {
+        if (this.pendingShutdowns.containsKey(generationId)) {
           skippedForShutdown.add(generationId);
           continue;
         }
@@ -1226,6 +1251,11 @@ public class MaterializedViewManager implements ReplicationManager {
           this.meterAndFtdcRegistry.meterRegistry(),
           this.featureFlags,
           this.enableNaturalOrderScan);
+    }
+
+    /** Returns true if the InitialSyncQueue has an entry for this generationId. */
+    boolean hasQueueEntry(GenerationId generationId) {
+      return this.initialSyncQueue.map(q -> q.hasEntry(generationId)).orElse(false);
     }
 
     void updateSyncSourceConfig(SyncSourceConfig syncSourceConfig) {

@@ -1510,9 +1510,9 @@ public class MaterializedViewManagerTest {
   }
 
   @Test
-  public void dynamicLeader_acquireLease_skipsWhenPendingShutdown() {
+  public void dynamicLeader_acquireLease_skipsWhenPendingShutdownAndQueueDirty() {
     // During leadership oscillation, refreshStatus should skip leadership acquisition
-    // for a generationId that has a pending shutdown from transitionToFollower.
+    // when pendingShutdowns contains the generationId AND the queue still has a stale entry.
     Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
 
     MaterializedViewIndexGeneration matViewIndexGen =
@@ -1528,21 +1528,55 @@ public class MaterializedViewManagerTest {
             new LeaseManager.FollowerPollResult(
                 Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
 
-    // Simulate a pending shutdown — old generator is still cleaning up.
-    mocks.manager.pendingShutdowns.add(matViewGenId);
+    // Simulate a pending shutdown with stale queue entry.
+    mocks.manager.pendingShutdowns.put(matViewGenId, COMPLETED_FUTURE);
+    when(mocks.materializedViewGeneratorFactory.hasQueueEntry(matViewGenId)).thenReturn(true);
 
     // Run the status refresh.
     mocks.runnableCaptor.orElseThrow().getValue().run();
 
-    // tryAcquireLeadership should NOT be called because shutdown is pending.
+    // tryAcquireLeadership should NOT be called because queue is still dirty.
     verify(mocks.leaseManager, never()).tryAcquireLeadership(any());
     verify(generator, never()).becomeLeader();
+    assertTrue("pendingShutdowns should still contain the id",
+        mocks.manager.pendingShutdowns.containsKey(matViewGenId));
   }
 
   @Test
-  public void dynamicLeader_acquireLease_resumesAfterShutdownCompletes() {
-    // After the pending shutdown completes and is removed from pendingShutdowns,
-    // refreshStatus should resume leadership acquisition normally.
+  public void dynamicLeader_acquireLease_skipsWhenShutdownFutureNotDone() {
+    // Even if the queue is clean, keep the guard while the shutdown future is still running.
+    // This prevents concurrent writers when the old generator is in STEADY_STATE shutdown.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+
+    // Shutdown future still running, queue is clean.
+    mocks.manager.pendingShutdowns.put(matViewGenId, new CompletableFuture<>());
+    when(mocks.materializedViewGeneratorFactory.hasQueueEntry(matViewGenId)).thenReturn(false);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // Guard should stay — shutdown not done yet.
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(any());
+    assertTrue("pendingShutdowns should be retained while shutdown future is running",
+        mocks.manager.pendingShutdowns.containsKey(matViewGenId));
+  }
+
+  @Test
+  public void dynamicLeader_acquireLease_resumesWhenQueueClean() {
+    // When pendingShutdowns contains the generationId but the queue is clean,
+    // refreshStatus should remove from pendingShutdowns and acquire leadership.
     Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
 
     MaterializedViewIndexGeneration matViewIndexGen =
@@ -1559,13 +1593,16 @@ public class MaterializedViewManagerTest {
                 Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
     when(mocks.leaseManager.tryAcquireLeadership(matViewGenId)).thenReturn(true);
 
-    // Simulate shutdown that already completed — not in pendingShutdowns.
-    // (No add to pendingShutdowns — it was added and removed before this refresh.)
+    // Simulate a pending shutdown where the queue has already cleaned up.
+    mocks.manager.pendingShutdowns.put(matViewGenId, COMPLETED_FUTURE);
+    when(mocks.materializedViewGeneratorFactory.hasQueueEntry(matViewGenId)).thenReturn(false);
 
     // Run the status refresh.
     mocks.runnableCaptor.orElseThrow().getValue().run();
 
-    // tryAcquireLeadership should be called and becomeLeader() invoked.
+    // pendingShutdowns should be cleared and leadership acquired.
+    assertFalse("pendingShutdowns should be cleared",
+        mocks.manager.pendingShutdowns.containsKey(matViewGenId));
     verify(mocks.leaseManager).tryAcquireLeadership(matViewGenId);
     verify(generator).becomeLeader();
   }
@@ -1590,7 +1627,7 @@ public class MaterializedViewManagerTest {
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
 
     // Simulate a pending shutdown — first transitionToFollower already in progress.
-    mocks.manager.pendingShutdowns.add(matViewGenId);
+    mocks.manager.pendingShutdowns.put(matViewGenId, COMPLETED_FUTURE);
 
     // Simulate leadership loss so heartbeat would normally call transitionToFollower.
     when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
@@ -1604,6 +1641,89 @@ public class MaterializedViewManagerTest {
     // The generator factory should NOT have been called again to create a new follower,
     // because transitionToFollower skipped due to pending shutdown.
     verify(mocks.materializedViewGeneratorFactory, times(1)).create(matViewIndexGen);
+  }
+
+  @Test
+  public void dynamicLeader_transitionToFollower_addsPendingShutdownBeforeFactoryCreate() {
+    // Verify that pendingShutdowns.put() happens BEFORE factory.create() in
+    // transitionToFollower. This prevents Race 1 where a slow factory.create()
+    // allows refreshStatus to check pendingShutdowns before it's set.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator).becomeLeader();
+    assertTrue(generator.isLeader());
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    // Track when pendingShutdowns.put() is called relative to factory.create().
+    // Use doAnswer on factory.create() to assert pendingShutdowns already contains the id.
+    when(mocks.materializedViewGeneratorFactory.create(matViewIndexGen))
+        .thenAnswer(
+            invocation -> {
+              // At this point in transitionToFollower, pendingShutdowns.put() should have
+              // already been called (Race 1 fix).
+              assertTrue(
+                  "pendingShutdowns should contain generationId before factory.create()",
+                  mocks.manager.pendingShutdowns.containsKey(matViewGenId));
+              MaterializedViewGenerator newGen = mock(MaterializedViewGenerator.class);
+              when(newGen.getIndexGeneration()).thenReturn(matViewIndexGen);
+              when(newGen.shutdown()).thenReturn(CompletableFuture.completedFuture(null));
+              return newGen;
+            });
+
+    // Simulate leadership loss so heartbeat calls transitionToFollower.
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    // Verify transitionToFollower ran: factory.create() was called for the new follower generator.
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(matViewIndexGen);
+  }
+
+  @Test
+  public void dynamicLeader_transitionToFollower_rollsPendingShutdownOnFactoryFailure() {
+    // If factory.create() throws, pendingShutdowns must be cleaned up to avoid permanently
+    // blocking leadership acquisition for this generationId.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator).becomeLeader();
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    // Make factory.create() throw on the second call (transitionToFollower).
+    when(mocks.materializedViewGeneratorFactory.create(matViewIndexGen))
+        .thenThrow(new RuntimeException("factory failure"));
+
+    // Simulate leadership loss.
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+
+    // The exception propagates through emitHeartbeat; catch it to verify rollback.
+    try {
+      heartbeatCaptor.getValue().run();
+    } catch (RuntimeException expected) {
+      // Expected — transitionToFollower re-throws after rollback.
+    }
+
+    // pendingShutdowns should NOT retain the generationId after the failure.
+    assertFalse("pendingShutdowns should be rolled back on factory failure",
+        mocks.manager.pendingShutdowns.containsKey(matViewGenId));
   }
 
   // ==================== getMatViewGenerator Tests ====================
