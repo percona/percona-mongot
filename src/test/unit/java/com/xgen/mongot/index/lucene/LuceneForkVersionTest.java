@@ -25,7 +25,7 @@ import org.junit.Test;
 
 /**
  * Verify that lucene-core, lucene-codecs and lucene-backward-codecs are loaded from our fork
- * (version 9.11.1-2), while other Lucene modules come from upstream (9.11.1).
+ * (version 9.11.1-3), while other Lucene modules come from upstream (9.11.1).
  *
  * <p>The fork is resolved via a separate maven_install ("lucene_fork") and wired into the main
  * dependency graph via override_targets in deps.bzl. If this test fails, check that configuration.
@@ -33,7 +33,7 @@ import org.junit.Test;
 public class LuceneForkVersionTest {
 
   private static final String UPSTREAM_VERSION = "9.11.1";
-  private static final String FORK_VERSION = "9.11.1-2";
+  private static final String FORK_VERSION = "9.11.1-3";
 
   @Test
   public void luceneCore_fromFork() {

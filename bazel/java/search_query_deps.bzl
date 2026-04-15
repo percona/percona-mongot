@@ -41,7 +41,7 @@ _LUCENE_UPSTREAM_ARTIFACTS = append_version(
 # Changes included in this fork are documented in
 # https://github.com/mongodb-forks/lucene-mongot/blob/mongot_9_11_1/lucene/CHANGES.txt#L6-L12
 # Major change - Support for Bloom Filter for id field
-_LUCENE_FORK_VERSION = "9.11.1-2"
+_LUCENE_FORK_VERSION = "9.11.1-3"
 
 _LUCENE_FORK_ARTIFACT_NAMES = [
     "org.apache.lucene:lucene-backward-codecs",
