@@ -1059,6 +1059,32 @@
           }
         ]
       }
+    },
+    {
+      "description": "with storedSource true",
+      "value": {
+        "indexID": "507f191e810c19729de860ea",
+        "database": "myDatabase",
+        "lastObservedCollectionName": "myCollection",
+        "collectionUUID": {
+          "$binary": {
+            "base64": "62xAyvJeR+i0jAKgW2Slqg==",
+            "subType": "04"
+          }
+        },
+        "name": "myVectorIndex",
+        "type": "vectorSearch",
+        "storedSource": true,
+        "fields": [
+          {
+            "type": "vector",
+            "path": "my.vector.field",
+            "numDimensions": 2048,
+            "similarity": "cosine",
+            "quantization": "none"
+          }
+        ]
+      }
     }
   ]
 }

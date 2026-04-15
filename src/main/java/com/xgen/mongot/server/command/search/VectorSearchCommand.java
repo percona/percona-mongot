@@ -101,9 +101,9 @@ public class VectorSearchCommand implements Command {
   private static final Logger LOG = LoggerFactory.getLogger(VectorSearchCommand.class);
 
   /**
-   * Bundles the resolved embedding model name together with the raw (source) auto-embedding
-   * index definition. The source definition carries the original user-facing database name
-   * which is needed by {@link EmbeddingRequestContext} for multi-tenant credential lookup.
+   * Bundles the resolved embedding model name together with the raw (source) auto-embedding index
+   * definition. The source definition carries the original user-facing database name which is
+   * needed by {@link EmbeddingRequestContext} for multi-tenant credential lookup.
    */
   @VisibleForTesting
   record EmbedRequestInfo(Optional<String> modelName, IndexDefinition sourceDefinition) {}
@@ -435,7 +435,8 @@ public class VectorSearchCommand implements Command {
         Tracing.simpleSpanGuard("VectorSearchCommand.getSearchResults", Tracing.TOGGLE_OFF)) {
       var timer = Timer.start();
       var commandTimer = Timer.start();
-      var materializedQuery = maybeEmbed(
+      var materializedQuery =
+          maybeEmbed(
               vectorSearchQuery,
               findEmbedRequestInfo(optionalIndex.get().getDefinition(), vectorSearchQuery));
       if (vectorSearchQuery.returnStoredSource()) {
@@ -776,8 +777,7 @@ public class VectorSearchCommand implements Command {
           Check.isPresent(criteria.queryVector(), "queryVector"),
           findAutoEmbeddingFieldsMapping(vectorSearchQuery));
     }
-    Optional<String> canonicalModel =
-        embedRequestInfo.flatMap(EmbedRequestInfo::modelName);
+    Optional<String> canonicalModel = embedRequestInfo.flatMap(EmbedRequestInfo::modelName);
     if (canonicalModel.isEmpty()) {
       throw new InvalidQueryException(
           "Vector index for this text based query is invalid due to missing model");

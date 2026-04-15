@@ -219,6 +219,32 @@ public class VectorIndexDefinitionTest {
     }
 
     @Test
+    public void testStoredSource_roundTrip_inclusion() throws Exception {
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(INCLUSION, List.of("a", "b.c")))
+              .build();
+
+      BsonDocument bson = original.toBson();
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(bson);
+      assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testStoredSource_roundTrip_exclusion() throws Exception {
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(EXCLUSION, List.of("x", "y.z")))
+              .build();
+
+      BsonDocument bson = original.toBson();
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(bson);
+      assertEquals(original, parsed);
+    }
+
+    @Test
     public void testIndexIdAtCreationTime_sameAsIndexId_doesNotAffectEquality() {
       var indexId = new ObjectId("507f191e810c19729de860ea");
 
@@ -640,6 +666,8 @@ public class VectorIndexDefinitionTest {
           withView(),
           multipleIndexPartitions(),
           customHnswOptions(),
+          withStoredDocumentInclusion(),
+          withStoredDocumentExclusion(),
           textEmbedding(),
           textEmbeddingUsingDotProduct(),
           textEmbeddingFullConfig(),
@@ -721,6 +749,26 @@ public class VectorIndexDefinitionTest {
                   VectorQuantization.NONE,
                   new VectorIndexingAlgorithm.HnswIndexingAlgorithm(
                       new VectorFieldSpecification.HnswOptions(32, 500)))
+              .build());
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<VectorIndexDefinition>
+        withStoredDocumentInclusion() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "with stored fields document inclusion",
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(INCLUSION, List.of("a", "b.c", "b.d")))
+              .build());
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<VectorIndexDefinition>
+        withStoredDocumentExclusion() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "with stored fields document exclusion",
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(EXCLUSION, List.of("a", "b.c", "b.d")))
               .build());
     }
 

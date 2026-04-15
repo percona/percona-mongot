@@ -25,6 +25,7 @@ import com.xgen.mongot.cursor.MongotCursorResultInfo;
 import com.xgen.mongot.cursor.SearchCursorInfo;
 import com.xgen.mongot.cursor.serialization.MongotCursorBatch;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.EmptyExplainInformation;
@@ -309,8 +310,7 @@ public class VectorSearchCommandTest {
   }
 
   @Test
-  public void maybeLoadShed_autoEmbeddingQuery_returnsFalse()
-      throws Exception {
+  public void maybeLoadShed_autoEmbeddingQuery_returnsFalse() throws Exception {
     var mocks = new Mocks();
     var command =
         new VectorSearchCommand(
@@ -325,9 +325,7 @@ public class VectorSearchCommandTest {
                             ApproximateVectorQueryCriteriaBuilder.builder()
                                 .limit(LIMIT)
                                 .numCandidates(NUM_CANDIDATES)
-                                .query(
-                                    new VectorSearchQueryInput.Text(
-                                        "test query"))
+                                .query(new VectorSearchQueryInput.Text("test query"))
                                 .path(PATH)
                                 .build())
                         .build())
@@ -352,9 +350,7 @@ public class VectorSearchCommandTest {
                 .db(DATABASE_NAME)
                 .collectionName(COLLECTION_NAME)
                 .collectionUuid(COLLECTION_UUID)
-                .vectorSearchQuery(
-                    new BsonParseException(
-                        "invalid query", Optional.of(PATH)))
+                .vectorSearchQuery(new BsonParseException("invalid query", Optional.of(PATH)))
                 .build(),
             new DefaultIndexCatalog(),
             new InitializedIndexCatalog(),
@@ -1824,6 +1820,84 @@ public class VectorSearchCommandTest {
         1.0,
         metricsFactory.counter("vectorSearchCommandWrappedInvalidQueryException").count(),
         0.0);
+  }
+
+  @Test
+  public void testCheckSupportRejectsWhenStoredSourceUndefined() throws Exception {
+    Assume.assumeTrue(this.mongoDbVersion.compareTo(MIN_STORED_SOURCE_VERSION) >= 0);
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .returnStoredSource(true)
+            .build();
+
+    InitializedVectorIndex mockIndex = mock(InitializedVectorIndex.class);
+    when(mockIndex.getDefinition())
+        .thenReturn(
+            VectorIndexDefinitionBuilder.builder()
+                .withCosineVectorField(PATH.toString(), 3)
+                .build());
+
+    var ex =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.checkSupportForVectorStoredSource(
+                    bootstrapperMetadata(), query, Optional.of(mockIndex)));
+    Assert.assertTrue(
+        ex.getMessage().contains("Before using returnStoredSource, index must be created"));
+  }
+
+  @Test
+  public void testCheckSupportRejectsOldMongoDbVersion() throws Exception {
+    Assume.assumeTrue(this.mongoDbVersion.compareTo(MIN_STORED_SOURCE_VERSION) < 0);
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .returnStoredSource(true)
+            .build();
+
+    InitializedVectorIndex mockIndex = mock(InitializedVectorIndex.class);
+    when(mockIndex.getDefinition())
+        .thenReturn(
+            VectorIndexDefinitionBuilder.builder()
+                .withCosineVectorField(PATH.toString(), 3)
+                .storedSource(
+                    StoredSourceDefinition.create(
+                        StoredSourceDefinition.Mode.INCLUSION, List.of("_id")))
+                .build());
+
+    var metadata =
+        new SearchCommandsRegister.BootstrapperMetadata(
+            "testVersion",
+            "localhost",
+            () -> new MongoDbServerInfo(Optional.of(this.mongoDbVersion), Optional.of("testRs")),
+            FeatureFlags.withDefaults()
+                .enable(Feature.ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE)
+                .build(),
+            DynamicFeatureFlagRegistry.empty());
+
+    var ex =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.checkSupportForVectorStoredSource(
+                    metadata, query, Optional.of(mockIndex)));
+    Assert.assertTrue(ex.getMessage().contains("requires MongoDB server version"));
   }
 
   private static class Mocks {
