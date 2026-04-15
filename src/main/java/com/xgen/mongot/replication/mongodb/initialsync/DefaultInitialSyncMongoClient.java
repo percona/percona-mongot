@@ -168,7 +168,8 @@ class DefaultInitialSyncMongoClient implements InitialSyncMongoClient {
   public CollectionScanMongoClient<InitialSyncException> getCollectionAggregateCommandMongoClient(
       CollectionScanAggregateCommand aggregateCommand,
       IndexDefinition indexDefinition,
-      InitialSyncMetrics initialSyncMetricsUpdater)
+      InitialSyncMetrics initialSyncMetricsUpdater,
+      Optional<Integer> collectionScanGetMoreBatchSize)
       throws InitialSyncException {
 
     var session = InitialSyncException.wrapIfThrowsCollectionScan(this.mongoClient::startSession);
@@ -187,7 +188,8 @@ class DefaultInitialSyncMongoClient implements InitialSyncMongoClient {
         namespaceChangeCheck,
         InitialSyncException::wrapIfThrowsCollectionScan,
         InitialSyncException::createRequiresResync,
-        Optional.of(initialSyncMetricsUpdater));
+        Optional.of(initialSyncMetricsUpdater),
+        collectionScanGetMoreBatchSize);
   }
 
   @Override

@@ -220,7 +220,8 @@ public class BufferlessCollectionScanner {
     return this.mongoClient.getCollectionAggregateCommandMongoClient(
         builder.build(),
         this.context.getIndexDefinition(),
-        this.context.getInitialSyncMetricsUpdater());
+        this.context.getInitialSyncMetricsUpdater(),
+        this.context.getEmbeddingGetMoreBatchSize());
   }
 
   /**

@@ -449,8 +449,17 @@ public class MaterializedViewWriter implements IndexWriter {
     // Record bulk write metrics - this metric is at an attempt level, so it is possible to
     // double count when retrying. This is ok for now as we are mainly using these metrics to
     // detect general trends and not for precise accounting.
-    this.bulkWriteNumDocs.record(documents.size());
-    this.bulkWritePayloadSize.record(calculatePayloadSize(documents));
+    int docCount = documents.size();
+    long payloadSizeBytes = calculatePayloadSize(documents);
+    this.bulkWriteNumDocs.record(docCount);
+    this.bulkWritePayloadSize.record(payloadSizeBytes);
+    if (docCount > 0) {
+      LOG.debug(
+          "Materialized view bulk write: generationId={} docCount={} payloadSizeBytes={}",
+          this.generationId,
+          docCount,
+          payloadSizeBytes);
+    }
     // MV writes use the default write concern (w:1) rather than w:majority. This is safe because
     // commit() calls updateCommitInfo() after bulkWrite(), and updateCommitInfo() uses w:majority
     // on the lease collection. Since both write to the same mongod primary, MV writes precede the
@@ -572,8 +581,9 @@ public class MaterializedViewWriter implements IndexWriter {
    * <p>All write model types receive a fencing filter that rejects the operation when the existing
    * document already has a higher leaseVersion. In addition, {@link ReplaceOneModel} embeds the
    * leaseVersion in the replacement document, and {@link UpdateOneModel} adds it via {@code $set}.
-   * {@link DeleteOneModel} gets only the filter — without it a zombie could delete a doc written by
-   * the new leader, then reinsert stale data via a subsequent upsert.
+   * {@link DeleteOneModel} gets only the filter —
+   * without it a zombie could delete a doc written by the new leader, then reinsert stale data via
+   * a subsequent upsert.
    *
    * @param documents the original write models
    * @param leaseVersion the current lease version to embed as a fencing token

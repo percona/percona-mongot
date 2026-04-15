@@ -131,7 +131,6 @@ public class CollectionScanFindCommand {
 
   /** Constructs the proper proxy for the CollectionScanFindCommand. */
   public FindCommandProxy toProxy() {
-
     return new FindCommandProxy(
         new BsonString(this.collectionName),
         this.sort,

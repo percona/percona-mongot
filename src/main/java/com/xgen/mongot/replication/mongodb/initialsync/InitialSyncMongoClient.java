@@ -54,6 +54,8 @@ interface InitialSyncMongoClient {
    * InitialSyncMongoClient::getFindCommandMongoClient.
    *
    * <p>This client will also verify that the collection name was unchanged.
+   *
+   * <p>Find and getMore use server default batching (no {@code batchSize} on the wire).
    */
   CollectionScanMongoClient<InitialSyncException> getCollectionFindCommandMongoClient(
       CollectionScanFindCommand findCommand,
@@ -64,7 +66,8 @@ interface InitialSyncMongoClient {
   CollectionScanMongoClient<InitialSyncException> getCollectionAggregateCommandMongoClient(
       CollectionScanAggregateCommand findCommand,
       IndexDefinition indexDefinition,
-      InitialSyncMetrics initialSyncMetricsUpdater)
+      InitialSyncMetrics initialSyncMetricsUpdater,
+      Optional<Integer> collectionScanGetMoreBatchSize)
       throws InitialSyncException;
 
   /**

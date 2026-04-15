@@ -41,7 +41,8 @@ public class FindCommandCollectionScanMongoClient<E extends Exception>
         namespaceChangeCheck,
         futureWrapper,
         exceptionWrapper,
-        initialSyncMetricsUpdaterOpt);
+        initialSyncMetricsUpdaterOpt,
+        Optional.empty());
     this.command = command;
     this.openScanTimer = metricsFactory.timer("openScanDurations");
   }
