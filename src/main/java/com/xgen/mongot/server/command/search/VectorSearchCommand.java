@@ -764,23 +764,29 @@ public class VectorSearchCommand implements Command {
           EmbeddingProviderNonTransientException {
     VectorSearchCriteria criteria = vectorSearchQuery.criteria();
     Optional<String> textToEmbed = criteria.query().flatMap(VectorSearchQueryInput::getText);
-    if (textToEmbed.isEmpty()) {
-      // If query field was present but text is empty, throw a descriptive error
-      if (criteria.query().isPresent()) {
-        throw new InvalidQueryException(
-            "'query' field cannot be empty for auto-embedding vector search");
+    // No auto-embedding source from findEmbedRequestInfo: BYOV or plain vector (other teams: this
+    // gate). Anything else needs queryVector, including empty `query` on a regular vector index.
+    if (embedRequestInfo.filter(info -> info.sourceDefinition().isAutoEmbeddingIndex()).isEmpty()) {
+      if (criteria.queryVector().isPresent()) {
+        return new MaterializedVectorSearchQuery(
+            vectorSearchQuery,
+            criteria.queryVector().get(),
+            findAutoEmbeddingFieldsMapping(vectorSearchQuery));
       }
-      // No text to embed, but still can be a vector query on AutoEmbedding index, user can use
-      // queryVector to query it.
-      return new MaterializedVectorSearchQuery(
-          vectorSearchQuery,
-          Check.isPresent(criteria.queryVector(), "queryVector"),
-          findAutoEmbeddingFieldsMapping(vectorSearchQuery));
+      throw new InvalidQueryException("queryVector must be present");
     }
+
+    // Text query path: requires a valid text query.
+    if (criteria.query().isPresent() && textToEmbed.isEmpty()) {
+      throw new InvalidQueryException(
+          "'query' field cannot be empty when querying Automated Embedding index");
+    }
+
+    // Text query path: requires an auto-embedding-capable index and a resolvable model.
     Optional<String> canonicalModel = embedRequestInfo.flatMap(EmbedRequestInfo::modelName);
     if (canonicalModel.isEmpty()) {
       throw new InvalidQueryException(
-          "Vector index for this text based query is invalid due to missing model");
+          "Automated Embedding index query is invalid due to missing model");
     }
     if (this.embeddingServiceManagerSupplier.get() == null) {
       throw new EmbeddingProviderTransientException(

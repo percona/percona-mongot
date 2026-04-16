@@ -279,7 +279,7 @@ public class VectorSearchCommandAutoEmbedTest {
             .append(
                 "errmsg",
                 new BsonString(
-                    "Vector index for this text based query is invalid due to missing model")),
+                    "Automated Embedding index query is invalid due to missing model")),
         result);
   }
 
@@ -742,7 +742,7 @@ public class VectorSearchCommandAutoEmbedTest {
             .append(
                 "errmsg",
                 new BsonString(
-                    "Vector index for this text based query is invalid due to missing model")),
+                    "Automated Embedding index query is invalid due to missing model")),
         result);
   }
 
@@ -782,7 +782,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append("ok", new BsonInt32(0))
             .append(
                 "errmsg",
-                new BsonString("'query' field cannot be empty for auto-embedding vector search")),
+                new BsonString(
+                    "'query' field cannot be empty when querying Automated Embedding index")),
         result);
   }
 
@@ -823,7 +824,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append("ok", new BsonInt32(0))
             .append(
                 "errmsg",
-                new BsonString("'query' field cannot be empty for auto-embedding vector search")),
+                new BsonString(
+                    "'query' field cannot be empty when querying Automated Embedding index")),
         result);
   }
 
@@ -864,7 +866,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append("ok", new BsonInt32(0))
             .append(
                 "errmsg",
-                new BsonString("'query' field cannot be empty for auto-embedding vector search")),
+                new BsonString(
+                    "'query' field cannot be empty when querying Automated Embedding index")),
         result);
   }
 
