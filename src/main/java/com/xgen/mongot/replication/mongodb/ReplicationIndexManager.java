@@ -624,7 +624,11 @@ public class ReplicationIndexManager {
     // If the exception was not an InitialSyncException (i.e. was unexpected), fail the index.
     if (!(throwable instanceof InitialSyncException)) {
       maybeCrashOnUnexpectedThrowable(throwable);
-      failAndDropIndex(throwable, IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+        failAndCloseIndex(throwable, IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      } else {
+        failAndDropIndex(throwable, IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      }
       return;
     }
 
@@ -646,7 +650,11 @@ public class ReplicationIndexManager {
         if (InitialSyncException.isNotablescanError(throwable.getCause())) {
           this.metricsFactory.counter("failedInitialSyncDueToNotablescan").increment();
         }
-        failAndDropIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+        if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+          failAndCloseIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+        } else {
+          failAndDropIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+        }
         return;
       }
       case FIELD_EXCEEDED, DOCS_EXCEEDED ->

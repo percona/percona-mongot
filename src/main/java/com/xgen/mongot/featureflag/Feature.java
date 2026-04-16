@@ -45,6 +45,7 @@ package com.xgen.mongot.featureflag;
 public enum Feature {
   STALE_STATE_TRANSITION("enableStaleStateTransition", State.DISABLED),
   RETAIN_FAILED_INDEX_DATA_ON_DISK("retainFailedIndexDataOnDisk", State.DISABLED),
+  RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK("retainFailedInitialSyncDataOnDisk", State.DISABLED),
   REMOVE_ABSENT_INDEXES_BEFORE_INITIALIZATION(
       "removeAbsentIndexesBeforeInitialization", State.DISABLED),
   FACETING_OVER_TOKEN_FIELDS("enableFacetingOverTokenFields", State.DISABLED),

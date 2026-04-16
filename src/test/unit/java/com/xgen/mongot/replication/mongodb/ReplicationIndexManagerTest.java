@@ -683,6 +683,116 @@ public class ReplicationIndexManagerTest {
   }
 
   @Test
+  public void testFailedInitialSyncExceptionRetainInitialSyncDataOnDiskFlagEnabled_closeIndex()
+      throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .enable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+
+    // Exception type is InitialSyncException.
+    try (Mocks mocks =
+        Mocks.exceptionalInitialSyncWithFeatureFlag(
+            InitialSyncException.createFailed(new RuntimeException()), featureFlags)) {
+
+      // Verify index is closed, but NOT dropped
+      verify(mocks.index, timeout(5000)).close();
+      verify(mocks.index, never()).drop();
+
+      verify(mocks.index, timeout(1000))
+          .setStatus(
+              indexStatusWithReason(
+                  IndexStatus.StatusCode.FAILED,
+                  IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith(REPLICATION_FAILED_REASON_PREFIX);
+      mocks.assertStateTransitions(
+          ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+    }
+  }
+
+  @Test
+  public void testFailedInitialSyncExceptionRetainInitialSyncDataOnDiskFlagDisabled_dropIndex()
+      throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .disable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+
+    // Exception type is InitialSyncException.
+    try (Mocks mocks =
+        Mocks.exceptionalInitialSyncWithFeatureFlag(
+            InitialSyncException.createFailed(new RuntimeException()), featureFlags)) {
+
+      verify(mocks.index, timeout(5000)).close();
+      verify(mocks.index, timeout(5000)).drop();
+
+      verify(mocks.index, timeout(1000))
+          .setStatus(
+              indexStatusWithReason(
+                  IndexStatus.StatusCode.FAILED,
+                  IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith(REPLICATION_FAILED_REASON_PREFIX);
+      mocks.assertStateTransitions(
+          ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+    }
+  }
+
+  @Test
+  public void testUnexpectedExceptionRetainInitialSyncDataOnDiskFlagEnabled_closeIndex()
+      throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .enable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+
+    // Exception type is not InitialSyncException.
+    try (Mocks mocks =
+        Mocks.exceptionalInitialSyncWithFeatureFlag(new RuntimeException("unexpected"),
+                                                    featureFlags)) {
+      // Verify index is closed, but NOT dropped
+      verify(mocks.index, timeout(5000)).close();
+      verify(mocks.index, never()).drop();
+
+      verify(mocks.index, timeout(1000))
+          .setStatus(
+              indexStatusWithReason(
+                  IndexStatus.StatusCode.FAILED,
+                  IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
+
+      mocks.assertStateTransitions(
+          ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+    }
+  }
+
+  @Test
+  public void testUnexpectedExceptionRetainInitialSyncDataOnDiskFlagDisabled_dropIndex()
+      throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .disable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+
+    // Exception type is not InitialSyncException.
+    try (Mocks mocks =
+        Mocks.exceptionalInitialSyncWithFeatureFlag(new RuntimeException("unexpected"),
+                                                    featureFlags)) {
+      verify(mocks.index, timeout(5000)).close();
+      verify(mocks.index, timeout(5000)).drop();
+
+      verify(mocks.index, timeout(1000))
+          .setStatus(
+              indexStatusWithReason(
+                  IndexStatus.StatusCode.FAILED,
+                  IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
+
+      mocks.assertStateTransitions(
+          ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+    }
+  }
+
+  @Test
   public void testExceededInitialSyncExceptionFailsIndex() throws Exception {
     String reason = "exceeded limits";
     try (Mocks mocks =
