@@ -224,9 +224,11 @@ public record Lease(
 
     private static class Fields {
       /**
-       * Whether the index definition version is queryable. This field is to durably track the
-       * transition of this index definition version from building to queryable. Once it becomes
-       * queryable, it always remains so.
+       * Whether the index definition version is queryable. This field durably tracks the
+       * transition from building to queryable. Once it becomes queryable, it always remains so
+       * (one-way ratchet). A new version may inherit queryable=true from the previous version
+       * when {@code skipInitialSync=true} (Lucene-only or same-version change), since the MV
+       * data is preserved and the index can continue serving queries.
        */
       public static final Field.Required<Boolean> IS_QUERYABLE =
           Field.builder("isQueryable").booleanField().required();
@@ -328,9 +330,20 @@ public record Lease(
     // 3. Either use high water mark (reset to initial-sync from that point) or preserve commitInfo.
     Map<String, IndexDefinitionVersionStatus> newVersionStatus =
         new HashMap<>(this.indexDefinitionVersionStatusMap);
+    // When skipInitialSync=true (Lucene-only or same-version change), preserve isQueryable
+    // from the latest version — the generator resumes steady state so the index remains
+    // queryable. When skipInitialSync=false (schema change), reset to false since initial
+    // sync must complete before the index is queryable again.
+    boolean isQueryable =
+        skipInitialSync
+            && this.latestIndexDefinitionVersion != null
+            && Optional.ofNullable(
+                    this.indexDefinitionVersionStatusMap.get(this.latestIndexDefinitionVersion))
+                .map(IndexDefinitionVersionStatus::isQueryable)
+                .orElse(false);
     newVersionStatus.put(
         indexDefinitionVersion,
-        new IndexDefinitionVersionStatus(false, initialIndexStatus.getStatusCode()));
+        new IndexDefinitionVersionStatus(isQueryable, initialIndexStatus.getStatusCode()));
     @Var String newCommitInfo = this.commitInfo;
     if (!skipInitialSync) {
       newCommitInfo =
@@ -494,8 +507,10 @@ public record Lease(
   }
 
   /**
-   * Returns true if the given index definition version has ever been queryable (i.e. reached STEADY
-   * at least once), as persisted in the lease.
+   * Returns true if the given index definition version is queryable. A version becomes queryable
+   * when it reaches STEADY at least once, or when it inherits queryable status from the previous
+   * version via {@code skipInitialSync=true} (Lucene-only or same-version change where MV data is
+   * preserved). Once queryable, a version always remains so (one-way ratchet).
    */
   public boolean isVersionQueryable(String version) {
     IndexDefinitionVersionStatus status = this.indexDefinitionVersionStatusMap.get(version);

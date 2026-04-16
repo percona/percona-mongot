@@ -102,7 +102,7 @@ public class MaterializedViewManager implements ReplicationManager {
 
   public static final String STATE_LABEL = "state";
 
-  // Set of terminal states for a MaterializedViewGenerator that disqualifies it from being reused,
+  // Set of terminal states for a MaterializedViewGenerator that disqualifies it from being used,
   // for materializedViewGenerator, FAILED_EXCEEDED and STEADY_STATE_SHUT_DOWN wont reached.
   private static final Set<ReplicationIndexManager.State> TERMINAL_STATES =
       Set.of(SHUT_DOWN, FAILED);
@@ -449,10 +449,9 @@ public class MaterializedViewManager implements ReplicationManager {
   /**
    * Adds an index generation to be managed.
    *
-   * <p>Leader mode: Performs AutoEmbeddingMatViewGenerator live swapping if input indexGeneration
-   * has a higher definition version (user version), or adds to managedMatViewGenerators directly
-   * with no matching AutoEmbeddingMatViewGenerator. Otherwise, treat it as no op. Only supports
-   * filter field modification in index redefinition use case.
+   * <p>If no generator exists for this collection, creates a new one. If an existing generator is
+   * found, always replaces it — the {@code skipInitialSync} flag in {@link LeaseManager#add}
+   * determines whether the new generator resumes from the last checkpoint or does initial sync.
    *
    * <p>Follower mode: Tracks the materialized view generation for status polling.
    */
@@ -507,6 +506,13 @@ public class MaterializedViewManager implements ReplicationManager {
    * Computes the generator for the given materialized view index generation. This method is called
    * by {@link ConcurrentHashMap#compute} to determine the generator to use.
    *
+   * <p>If no existing generator exists, creates a new one. If the incoming generation has a lower
+   * definition version than the existing generator, the existing generator is kept (guards against
+   * out-of-order updates). Otherwise, replaces the existing generator. The {@code skipInitialSync}
+   * flag in {@link LeaseManager#add} ensures the new generator resumes correctly: Lucene-only or
+   * same-version changes preserve the existing commit (RESUME_STEADY_STATE), while MV schema
+   * changes trigger initial sync from the high water mark (RESUME_INITIAL_SYNC).
+   *
    * @param existingGenerator the existing generator, or null if none exists
    * @param matViewIndexGeneration the materialized view index generation
    * @return the generator to use
@@ -521,23 +527,25 @@ public class MaterializedViewManager implements ReplicationManager {
       return createNewGenerator(matViewIndexGeneration);
     }
 
-    ReplicationIndexManager.State existingState = existingGenerator.getState();
-    boolean needsNewGenerator =
-        TERMINAL_STATES.contains(existingState)
-            || existingGenerator
-                .getIndexGeneration()
-                .needsNewMatViewGenerator(matViewIndexGeneration);
-    if (needsNewGenerator) {
-      LOG.atInfo()
+    // Guard against out-of-order updates: do not replace if the incoming generation has a
+    // lower definition version than the existing generator (would revert MV schema/mapping).
+    long existingVersion =
+        existingGenerator.getIndexGeneration().getDefinition().getDefinitionVersion().orElse(0L);
+    long newVersion =
+        matViewIndexGeneration.getDefinition().getDefinitionVersion().orElse(0L);
+    if (newVersion < existingVersion) {
+      LOG.atWarn()
           .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
-          .log("Replacing existing generator for generation");
-      return replaceGenerator(existingGenerator, matViewIndexGeneration);
-    } else {
-      LOG.atInfo()
-          .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
-          .log("Reusing existing generator for generation");
-      return reuseGenerator(existingGenerator, matViewIndexGeneration);
+          .addKeyValue("existingVersion", existingVersion)
+          .addKeyValue("newVersion", newVersion)
+          .log("Ignoring generation with lower definition version than existing generator");
+      return existingGenerator;
     }
+
+    LOG.atInfo()
+        .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
+        .log("Replacing existing generator for generation");
+    return replaceGenerator(existingGenerator, matViewIndexGeneration);
   }
 
   /** Creates a new generator for a new index. */
@@ -583,22 +591,16 @@ public class MaterializedViewManager implements ReplicationManager {
   }
 
   /**
-   * Replaces an existing generator with a new one for index redefinition.
+   * Replaces an existing generator with a new one for index redefinition or same-version retry.
    *
    * <p>Note on timing: The new generator is returned immediately (in follower mode) while
-   * leaseManager.add() and leadership activation run asynchronously after the old generator shuts
-   * down. This is intentional - the new generator is safe in follower mode (no writes), and we must
-   * wait for the old generator to fully shutdown before activating leadership. If dropIndex() races
-   * with this transition, the generator is removed from the map first, and leaseManager.drop()
-   * handles cleanup.
+   * leaseManager.add() runs asynchronously after the old generator shuts down. Leadership
+   * activation is deferred to {@link #refreshStatus()} via the {@link #pendingShutdowns} guard to
+   * avoid a race where the new generator enqueues to InitialSyncQueue before the old generator's
+   * cancelled entry is cleaned up by the dispatcher (same race as CLOUDP-393734).
    *
    * <p>Note: shutdown() is guaranteed to complete successfully (never exceptionally) per its
    * contract, so thenRun() will always execute.
-   *
-   * <p>For dynamic leader election: If the old generator was a leader, the new generator should
-   * also become leader immediately since we still own the lease for this index. This ensures that
-   * index definition updates (e.g., filter field changes) trigger a new initial sync with the
-   * updated field mapping.
    *
    * <p>Resolves skipInitialSync from definition diff: Lucene-only change (e.g. hnswOptions) →
    * preserve existing commit (RESUME_STEADY_STATE); MV schema change (e.g. filter) → do initial
@@ -617,50 +619,60 @@ public class MaterializedViewManager implements ReplicationManager {
         .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
         .addKeyValue("skipInitialSync", skipInitialSync)
         .log("Determined index action when replacing existing generator for generation");
-    MaterializedViewGenerator newGenerator =
-        this.matViewGeneratorFactory.create(matViewIndexGeneration);
-    // Capture whether the old generator was a leader BEFORE shutdown.
-    // For dynamic leader election, if we were the leader for the old generation,
-    // we should also be the leader for the new generation (same index, same lease).
     MaterializedViewGenerationId oldGenerationId =
         existingGenerator.getIndexGeneration().getGenerationId();
+    MaterializedViewGenerationId newGenerationId = matViewIndexGeneration.getGenerationId();
 
+    // Block leadership acquisition early, before the slow factory.create() call.
+    // This prevents the same race as CLOUDP-393734: if shutdown() completes synchronously
+    // (e.g., cancel() returns COMPLETED_FUTURE for QUEUED entries), the old generator's
+    // InitialSyncQueue entry may still be present when the new generator tries to enqueue.
     boolean wasLeader = this.leaseManager.isLeader(oldGenerationId);
-    existingGenerator
-        .shutdown()
-        .thenRun(
-            () -> {
-              // Untracks oldGenerationId proactively since new one is ready.
-              this.leaseManager.drop(oldGenerationId);
-              this.leaseManager.add(matViewIndexGeneration, skipInitialSync);
-              if (this.leaseManager instanceof StaticLeaderLeaseManager) {
-                // For static leader election - see the comments in createNewGenerator().
-                activateStaticLeadership(newGenerator, matViewIndexGeneration.getGenerationId());
-              } else if (wasLeader) {
-                // For dynamic leader election: if the old generator was a leader, the new
-                // generator should also become leader. This is safe because:
-                // 1. We still own the lease (lease is per-index, not per-generation)
-                // 2. The old generator has been shut down
-                // 3. The new generator has the updated index definition with new field mapping
-                LOG.atInfo()
-                    .addKeyValue("oldGenerationId", oldGenerationId)
-                    .addKeyValue("newGenerationId", matViewIndexGeneration.getGenerationId())
-                    .log(
-                        "Activating leadership for new generator - "
-                            + "old generator was leader, transferring leadership");
-                newGenerator.becomeLeader();
-              }
-            });
-    return newGenerator;
-  }
-
-  /** Reuses an existing generator when the definition version is the same. */
-  private MaterializedViewGenerator reuseGenerator(
-      MaterializedViewGenerator existingGenerator,
-      MaterializedViewIndexGeneration matViewIndexGeneration) {
-    // Keep this swap logic as fail-safe.
-    matViewIndexGeneration.swapIndex(existingGenerator.getIndexGeneration().getIndex());
-    return existingGenerator;
+    this.pendingShutdowns.put(newGenerationId, new CompletableFuture<>());
+    try {
+      MaterializedViewGenerator newGenerator =
+          this.matViewGeneratorFactory.create(matViewIndexGeneration);
+      CompletableFuture<Void> shutdownFuture =
+          existingGenerator
+              .shutdown()
+              .thenRun(
+                  () -> {
+                    if (oldGenerationId.equals(newGenerationId)) {
+                      // Same-version replacement (e.g., fell off oplog, Lucene rebuild):
+                      // same MaterializedViewGenerationId means the old generator's
+                      // InitialSyncQueue entry could still be present (CLOUDP-393734).
+                      // Skip lease drop+add (no-op for same genId) and defer
+                      // becomeLeader to refreshStatus for both static and dynamic.
+                      LOG.atInfo()
+                          .addKeyValue("generationId", newGenerationId)
+                          .log(
+                              "Same generationId replacement, deferring "
+                                  + "leadership to refreshStatus");
+                    } else {
+                      // Different-version replacement: different genIds mean no
+                      // InitialSyncQueue collision. Swap lease tracking and activate
+                      // leadership immediately.
+                      this.leaseManager.drop(oldGenerationId);
+                      this.leaseManager.add(matViewIndexGeneration, skipInitialSync);
+                      if (this.leaseManager instanceof StaticLeaderLeaseManager) {
+                        activateStaticLeadership(
+                            newGenerator,
+                            matViewIndexGeneration.getGenerationId());
+                      } else if (wasLeader) {
+                        LOG.atInfo()
+                            .addKeyValue("oldGenerationId", oldGenerationId)
+                            .addKeyValue("newGenerationId", newGenerationId)
+                            .log("Activating leadership for new generator");
+                        newGenerator.becomeLeader();
+                      }
+                    }
+                  });
+      this.pendingShutdowns.put(newGenerationId, shutdownFuture);
+      return newGenerator;
+    } catch (RuntimeException e) {
+      this.pendingShutdowns.remove(newGenerationId);
+      throw e;
+    }
   }
 
   /**
@@ -774,7 +786,7 @@ public class MaterializedViewManager implements ReplicationManager {
       return;
     }
     genIdsByMatViewGeneratorId.remove(generationId);
-    // No need to clean up lease and metadata for ReuseGenerator cases (Generation::nextAttempt)
+    // No need to clean up lease and metadata when other attempts still reference this generator
     if (!genIdsByMatViewGeneratorId.isEmpty()) {
       return;
     }
@@ -966,20 +978,41 @@ public class MaterializedViewManager implements ReplicationManager {
               }
             });
 
-    // Clear pendingShutdowns entries whose shutdown has completed and queue is clean.
-    this.pendingShutdowns.entrySet().removeIf(
-        entry -> {
-          if (!entry.getValue().isDone()) {
-            return false;
+    // Two-phase pendingShutdowns cleanup: collect entries that are ready (shutdown done + queue
+    // clean), then activate deferred leadership and remove. Using two phases instead of removeIf
+    // keeps becomeLeader() out of the predicate — if it threw inside removeIf, the entry would
+    // never be removed, causing a tight retry loop on every refreshStatus cycle.
+    List<MaterializedViewGenerationId> readyForCleanup = new ArrayList<>();
+    this.pendingShutdowns.forEach(
+        (genId, future) -> {
+          if (future.isDone() && !this.matViewGeneratorFactory.hasQueueEntry(genId)) {
+            readyForCleanup.add(genId);
           }
-          if (this.matViewGeneratorFactory.hasQueueEntry(entry.getKey())) {
-            return false;
-          }
-          LOG.atInfo()
-              .addKeyValue("generationId", entry.getKey())
-              .log("Shutdown and queue cleanup complete, leadership acquisition unblocked");
-          return true;
         });
+    for (MaterializedViewGenerationId genId : readyForCleanup) {
+      // Activate deferred leadership from replaceGenerator: the generator is in
+      // leaderGenerationIds but was never activated because the queue was dirty.
+      try {
+        if (this.leaseManager.isLeader(genId)) {
+          var gen = getMatViewGenerator(genId);
+          if (gen.isPresent() && !gen.get().isLeader()) {
+            LOG.atInfo()
+                .addKeyValue("generationId", genId)
+                .log("Activating deferred leadership from replaceGenerator");
+            gen.get().becomeLeader();
+          }
+        }
+      } catch (RuntimeException e) {
+        LOG.atError()
+            .addKeyValue("generationId", genId)
+            .setCause(e)
+            .log("Failed to activate deferred leadership, removing from pendingShutdowns");
+      }
+      this.pendingShutdowns.remove(genId);
+      LOG.atInfo()
+          .addKeyValue("generationId", genId)
+          .log("Shutdown and queue cleanup complete, leadership acquisition unblocked");
+    }
 
     // Dynamic leader election only: attempt to acquire leadership for acquirable leases.
     if (this.leaseManager instanceof DynamicLeaderLeaseManager) {
@@ -1412,8 +1445,7 @@ public class MaterializedViewManager implements ReplicationManager {
       this.genIdByMatViewGenId
           .computeIfAbsent(matViewGeneratorId, unused -> ConcurrentHashMap.newKeySet())
           .add(generationId);
-      // Front loads swapIndex logic across matViewIndexGenerations when replication is disabled
-      // during sync source changes
+      // Track the latest matViewIndexGeneration per collection for restartReplication().
       this.latestMatViewIndexGenerationByCollection.compute(
           uuid,
           (unused, existing) -> {
@@ -1422,25 +1454,16 @@ public class MaterializedViewManager implements ReplicationManager {
             }
             long newVersion =
                 matViewIndexGeneration.getDefinition().getDefinitionVersion().orElse(0L);
-            long existingVersion = existing.getDefinition().getDefinitionVersion().orElse(0L);
-            if (newVersion > existingVersion) {
+            long existingVersion =
+                existing.getDefinition().getDefinitionVersion().orElse(0L);
+            if (newVersion >= existingVersion) {
               return matViewIndexGeneration;
-            } else if (newVersion == existingVersion) {
-              LOG.atInfo().log(
-                  "Swapping index to allow index status in sync between generations of same"
-                      + " definition version");
-              // Same definition version: reuse existing generator.
-              // TODO(CLOUDP-366953): Temporary approach to ensure the new index generation points
-              // to the same underlying index when re-using the generator.
-              matViewIndexGeneration.swapIndex(existing.getIndex());
-              return existing;
-            } else {
-              LOG.atWarn()
-                  .log(
-                      "Received index generation with lower definition version than existing,"
-                          + " likely a bug");
-              return existing;
             }
+            LOG.atWarn()
+                .log(
+                    "Received index generation with lower definition"
+                        + " version than existing, likely a bug");
+            return existing;
           });
     }
   }

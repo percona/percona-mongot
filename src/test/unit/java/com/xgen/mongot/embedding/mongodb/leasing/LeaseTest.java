@@ -286,6 +286,43 @@ public class LeaseTest {
     }
 
     @Test
+    public void testWithNewIndexDefinitionVersion_skipInitialSync_preservesIsQueryable() {
+      // Lease where V1 is queryable (index was in steady state).
+      var lease =
+          new Lease(
+              LEASE_ID,
+              Lease.FIRST_LEASE_VERSION,
+              COLLECTION_UUID,
+              COLLECTION_NAME,
+              LEASE_OWNER,
+              Instant.now(),
+              Lease.FIRST_LEASE_VERSION,
+              EncodedUserData.EMPTY.asString(),
+              "1",
+              Map.of(
+                  "1",
+                  new Lease.IndexDefinitionVersionStatus(
+                      true, IndexStatus.StatusCode.STEADY)),
+              new MaterializedViewCollectionMetadata(
+                  VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
+              null);
+
+      // skipInitialSync=true (Lucene-only change): isQueryable should be preserved from V1.
+      var v2SkipSync =
+          lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), true);
+      assertTrue(
+          "isQueryable should be preserved from latest version when skipInitialSync=true",
+          v2SkipSync.indexDefinitionVersionStatusMap().get("2").isQueryable());
+
+      // skipInitialSync=false (schema change): isQueryable should reset to false.
+      var v2NoSkip =
+          lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), false);
+      assertFalse(
+          "isQueryable should be false when skipInitialSync=false",
+          v2NoSkip.indexDefinitionVersionStatusMap().get("2").isQueryable());
+    }
+
+    @Test
     public void testSteadyAsOfOplogPosition_serialization() {
       // Field present - serialized to BSON correctly
       BsonTimestamp position = new BsonTimestamp(1000, 1);

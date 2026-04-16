@@ -63,8 +63,8 @@ public final class MaterializedViewIndexGenerationUtil {
       return true;
     }
 
-    // 4. Defensive logic. This should never happen because we only call skipInitialSync to
-    // determine index action when definition version changes.
+    // 4. Same definition version (e.g. Lucene rebuild, fell off oplog). No MV schema change,
+    // so we preserve the existing commit and resume steady-state replication.
     if (oldDef.getDefinitionVersion().equals(newDef.getDefinitionVersion())) {
       LOG.atInfo().log("Definition version did not change");
       return true;
