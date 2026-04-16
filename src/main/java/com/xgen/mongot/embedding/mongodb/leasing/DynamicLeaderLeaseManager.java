@@ -502,6 +502,11 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
   }
 
   @Override
+  public void releaseLeadership(MaterializedViewGenerationId generationId) {
+    becomeFollower(generationId);
+  }
+
+  @Override
   public long getLeaseVersion(MaterializedViewGenerationId generationId) {
     Lease lease = this.leases.get(getLeaseKey(generationId));
     return lease != null ? lease.leaseVersion() : -1;
@@ -948,6 +953,11 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
   }
 
   @VisibleForTesting
+  void putLease(String leaseKey, Lease lease) {
+    this.leases.put(leaseKey, lease);
+  }
+
+  @VisibleForTesting
   Map<String, String> getLeaseKeyToDatabase() {
     return ImmutableMap.copyOf(this.leaseKeyToDatabase);
   }
@@ -1234,6 +1244,16 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
         refreshLeaseFromDatabase(leaseKey);
         becomeFollower(generationId);
         return false;
+      }
+
+      // Skip renewal if the lease still has more than half its TTL remaining.
+      // This avoids a concurrent mutation race with updateCommitInfo/updateReplicationStatus,
+      // which also extend the lease expiration as a side effect of their DB writes.
+      // TODO(CLOUDP-397647): Consider plumbing the actual heartbeat interval here instead of
+      // using a fixed TTL/2 threshold, to ensure sufficient buffer for non-default intervals.
+      Instant renewThreshold = now.plusMillis(Lease.LEASE_EXPIRATION_MS / 2);
+      if (currentLease.leaseExpiration().isAfter(renewThreshold)) {
+        return true;
       }
 
       Lease renewedLease = currentLease.withRenewedOwnership(this.hostname);

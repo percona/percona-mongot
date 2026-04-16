@@ -6,6 +6,7 @@ import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatVi
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -435,6 +436,10 @@ public class DynamicLeaderLeaseManagerTest {
     this.leaseManager.tryAcquireLeadership(generationId);
     assertThat(this.leaseManager.isLeader(generationId)).isTrue();
 
+    // Put the lease into the renewal window (< 50% TTL remaining) so heartbeat
+    // actually attempts renewal instead of skipping it.
+    putLeaseInRenewalWindow(generationId);
+
     // Act - heartbeat to renew
     setupSuccessfulLeaseUpdate();
     this.leaseManager.heartbeat();
@@ -457,6 +462,10 @@ public class DynamicLeaderLeaseManagerTest {
     this.leaseManager.pollFollowerStatuses();
     this.leaseManager.tryAcquireLeadership(generationId);
     assertThat(this.leaseManager.isLeader(generationId)).isTrue();
+
+    // Put the lease into the renewal window (< 50% TTL remaining) so heartbeat
+    // actually attempts renewal instead of skipping it.
+    putLeaseInRenewalWindow(generationId);
 
     // Setup renewal to fail (version mismatch - another instance took over)
     setupFailedLeaseUpdate();
@@ -513,6 +522,38 @@ public class DynamicLeaderLeaseManagerTest {
 
     // gen2: still a leader (heartbeat continued past gen1's error)
     assertThat(this.leaseManager.isLeader(genId2)).isTrue();
+  }
+
+  @Test
+  public void heartbeat_asLeader_skipsRenewalWhenLeaseRecentlyExtended() {
+    // Arrange - acquire leadership
+    MaterializedViewIndexGeneration indexGeneration = createTestIndexGeneration();
+    MaterializedViewGenerationId generationId = indexGeneration.getGenerationId();
+    this.leaseManager.add(indexGeneration);
+
+    Lease expiredLease = createLease(generationId, OTHER_HOSTNAME, Instant.now().minusSeconds(60));
+    setupFindLeaseFromDatabase(expiredLease);
+    setupSuccessfulLeaseUpdate();
+    this.leaseManager.pollFollowerStatuses();
+    this.leaseManager.tryAcquireLeadership(generationId);
+    assertThat(this.leaseManager.isLeader(generationId)).isTrue();
+
+    // Act - update commit info, which extends the lease to now+5min
+    setupSuccessfulLeaseUpdate();
+    this.leaseManager.updateCommitInfo(generationId, EncodedUserData.EMPTY);
+
+    // Record how many replaceOne calls happened so far (acquisition + commitInfo update)
+    int replaceOneCallsBeforeHeartbeat = 2;
+
+    // Act - heartbeat should skip renewal because lease was recently extended
+    this.leaseManager.heartbeat();
+
+    // Assert - still leader
+    assertThat(this.leaseManager.isLeader(generationId)).isTrue();
+    // replaceOne should NOT have been called again by heartbeat because the lease still
+    // has more than half its TTL remaining after the commit info update
+    verify(this.mockCollection, times(replaceOneCallsBeforeHeartbeat))
+        .replaceOne(any(), any(BsonDocument.class));
   }
 
   // ==================== Leader-Only Operations ====================
@@ -1269,6 +1310,30 @@ public class DynamicLeaderLeaseManagerTest {
   /** Returns the lease key (collection name) for the given generation from the catalog. */
   private String getLeaseKeyFromCatalog(MaterializedViewGenerationId generationId) {
     return this.mvMetadataCatalog.getMetadata(generationId).collectionName();
+  }
+
+  /**
+   * Replaces the in-memory lease with one that has less than 50% TTL remaining, so that
+   * heartbeat's skip-renewal optimization does not short-circuit the renewal attempt.
+   */
+  private void putLeaseInRenewalWindow(MaterializedViewGenerationId generationId) {
+    String leaseKey = getLeaseKeyFromCatalog(generationId);
+    Lease current = this.leaseManager.getLeases().get(leaseKey);
+    Lease nearExpiry =
+        new Lease(
+            current.id(),
+            Lease.SCHEMA_VERSION,
+            current.collectionUuid(),
+            current.collectionName(),
+            current.leaseOwner(),
+            Instant.now().plusMillis(Lease.LEASE_EXPIRATION_MS / 4),
+            current.leaseVersion(),
+            current.commitInfo(),
+            current.latestIndexDefinitionVersion(),
+            current.indexDefinitionVersionStatusMap(),
+            current.materializedViewCollectionMetadata(),
+            current.steadyAsOfOplogPosition());
+    this.leaseManager.putLease(leaseKey, nearExpiry);
   }
 
   private Lease createLease(

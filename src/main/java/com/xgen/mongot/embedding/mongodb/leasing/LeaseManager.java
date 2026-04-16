@@ -212,6 +212,14 @@ public interface LeaseManager {
   }
 
   /**
+   * Releases leadership for the given generation, transitioning it to follower state. Used by
+   * MaterializedViewManager to release zombie leases (generator dead but lease still held).
+   *
+   * @param generationId the generation ID to release leadership for
+   */
+  default void releaseLeadership(MaterializedViewGenerationId generationId) {}
+
+  /**
    * Initializes an unowned Lease by trying to insert the proposed lease document into the database.
    * This operation should be synchronized across all mongots in the same replicaSet, so only one
    * Mongot wins in insertOne and the winner Lease with MaterializedViewCollectionMetadata should be

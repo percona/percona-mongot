@@ -1726,6 +1726,71 @@ public class MaterializedViewManagerTest {
         mocks.manager.pendingShutdowns.containsKey(matViewGenId));
   }
 
+  // ==================== Stale generator guard in refreshStatus ====================
+
+  @Test
+  public void dynamicLeader_acquireLease_releasesLeaseWhenGeneratorTerminalAfterAcquisition() {
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+
+    // When tryAcquireLeadership is called, simulate transitionToFollower running concurrently
+    // by changing the generator to a terminal state.
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId))
+        .thenAnswer(
+            invocation -> {
+              doReturn(ReplicationIndexManager.State.SHUT_DOWN).when(generator).getState();
+              return true;
+            });
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(generator, never()).becomeLeader();
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+  }
+
+  // ==================== Zombie lease detection in emitHeartbeat ====================
+
+  @Test
+  public void dynamicLeader_heartbeat_releasesZombieLease() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator).becomeLeader();
+    assertTrue(generator.isLeader());
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    // Simulate the zombie state: generator failed with isLeader=false,
+    // but leaseManager still has it as leader
+    doReturn(ReplicationIndexManager.State.FAILED).when(generator).getState();
+    doReturn(false).when(generator).isLeader();
+    assertTrue("leaseManager should still consider it a leader",
+        mocks.leaseManager.isLeader(matViewGenId));
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+  }
+
   // ==================== getMatViewGenerator Tests ====================
 
   @Test

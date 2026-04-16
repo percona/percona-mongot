@@ -1010,12 +1010,25 @@ public class MaterializedViewManager implements ReplicationManager {
           continue;
         }
         if (this.leaseManager.tryAcquireLeadership(generationId)) {
-          // Successfully acquired leadership - transition generator to leader mode.
-          LOG.atInfo()
-              .addKeyValue("indexId", generationId.indexId)
-              .addKeyValue("generationId", generationId)
-              .log("Acquired leadership for materialized view, transitioning to leader mode");
-          generator.get().becomeLeader();
+          // Synchronize on the manager monitor (same lock as transitionToFollower) to
+          // prevent the generator from being replaced between re-read and becomeLeader().
+          synchronized (this) {
+            var currentGenerator = getMatViewGenerator(generationId);
+            if (currentGenerator.isEmpty()
+                || TERMINAL_STATES.contains(currentGenerator.get().getState())) {
+              LOG.atWarn()
+                  .addKeyValue("generationId", generationId)
+                  .log("Generator gone or in terminal state after leadership acquisition, "
+                      + "releasing lease");
+              this.leaseManager.releaseLeadership(generationId);
+              continue;
+            }
+            LOG.atInfo()
+                .addKeyValue("indexId", generationId.indexId)
+                .addKeyValue("generationId", generationId)
+                .log("Acquired leadership for materialized view, transitioning to leader mode");
+            currentGenerator.get().becomeLeader();
+          }
         }
       }
       if (!skippedForShutdown.isEmpty()) {
@@ -1102,12 +1115,28 @@ public class MaterializedViewManager implements ReplicationManager {
           .forEach(
               (uuid, generator) -> {
                 var generationId = generator.getIndexGeneration().getGenerationId();
-                if (generator.isLeader() && !this.leaseManager.isLeader(generationId)) {
-                  LOG.atInfo()
-                      .addKeyValue("indexId", generationId.indexId)
+                if (generator.isLeader()) {
+                  if (!this.leaseManager.isLeader(generationId)) {
+                    LOG.atInfo()
+                        .addKeyValue("indexId", generationId.indexId)
+                        .addKeyValue("generationId", generationId)
+                        .log("Detected leadership loss, replacing with follower generator");
+                    transitionToFollower(uuid, generator);
+                  }
+                } else if (TERMINAL_STATES.contains(generator.getState())
+                    && this.leaseManager.isLeader(generationId)) {
+                  // Zombie lease: generator is in a terminal state but the lease manager
+                  // still has it in leaderGenerationIds. This can happen if becomeLeader()
+                  // -> initReplication() fails -> failAndDropIndex() puts the generator in
+                  // FAILED with isLeader=false, but nobody called becomeFollower() on the
+                  // lease manager. Without this, the heartbeat renews the lease indefinitely,
+                  // blocking all other nodes from acquiring it.
+                  LOG.atWarn()
                       .addKeyValue("generationId", generationId)
-                      .log("Detected leadership loss, replacing with follower generator");
-                  transitionToFollower(uuid, generator);
+                      .addKeyValue("state", generator.getState())
+                      .log("Generator in terminal state but lease still held — "
+                          + "releasing lease so another node can acquire");
+                  this.leaseManager.releaseLeadership(generationId);
                 }
               });
     }
