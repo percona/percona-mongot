@@ -185,6 +185,40 @@ public class VoyageClientTest {
               false,
               Optional.empty()));
 
+  /** Same workload credentials as {@link #VOYAGE_3_LARGE}; model id supports Voyage flex tier. */
+  private static final EmbeddingModelConfig VOYAGE_4 =
+      EmbeddingModelConfig.create(
+          "voyage-4",
+          EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+          new EmbeddingServiceConfig.EmbeddingConfig(
+              Optional.empty(),
+              new EmbeddingServiceConfig.VoyageModelConfig(
+                  Optional.of(1024),
+                  Optional.of(EmbeddingServiceConfig.TruncationOption.NONE),
+                  Optional.of(100),
+                  Optional.of(120_000)),
+              RETRY_CONFIG,
+              new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
+                  "token123", "2024-10-15T22:32:20.925Z"),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              true,
+              Optional.empty(),
+              false,
+              Optional.empty()));
+
+  @Test
+  public void supportsFlexTierForModel_onlyListedModels() {
+    assertTrue(VoyageClient.supportsFlexTierForModel("voyage-4"));
+    assertTrue(VoyageClient.supportsFlexTierForModel("VOYAGE-4-LITE"));
+    assertTrue(VoyageClient.supportsFlexTierForModel("voyage-4-large"));
+    assertTrue(VoyageClient.supportsFlexTierForModel("voyage-code-3"));
+    assertFalse(VoyageClient.supportsFlexTierForModel("voyage-3-large"));
+    assertFalse(VoyageClient.supportsFlexTierForModel(null));
+  }
+
   @Test
   public void testEmbed_okStatus() throws Exception {
     HttpClient mockClient = mock(HttpClient.class);
@@ -661,6 +695,46 @@ public class VoyageClientTest {
 
     VoyageClient voyageClient =
         new VoyageClient(
+            VOYAGE_4,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_4.collectionScan(),
+            METRICS_FACTORY,
+            Optional.empty(),
+            false,
+            true);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    voyageClient.embed(List.of("test"), dummyContext());
+
+    ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
+    verify(mockClient).send(requestCaptor.capture(), any(HttpResponse.BodyHandler.class));
+
+    String requestBody = extractRequestBody(requestCaptor.getValue());
+    assertTrue(
+        "Request body should contain service_tier for COLLECTION_SCAN tier with flex model",
+        requestBody.contains("\"service_tier\""));
+    assertTrue(
+        "service_tier should be 'flex' for COLLECTION_SCAN tier with flex model",
+        requestBody.contains("\"" + VOYAGE_API_FLEX_TIER + "\""));
+  }
+
+  @Test
+  public void collectionScan_useFlexUnsupportedModel_omitsServiceTierFlex() throws Exception {
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(200).when(mockResponse).statusCode();
+    doReturn(
+            "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\","
+                + "\"embedding\":\"AKBEPACgSbw=\",\"index\":0}],\"model\":\"voyage-3-large\","
+                + "\"usage\":{\"total_tokens\":1}}")
+        .when(mockResponse)
+        .body();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+
+    VoyageClient voyageClient =
+        new VoyageClient(
             VOYAGE_3_LARGE,
             EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
             VOYAGE_3_LARGE.collectionScan(),
@@ -676,12 +750,9 @@ public class VoyageClientTest {
     verify(mockClient).send(requestCaptor.capture(), any(HttpResponse.BodyHandler.class));
 
     String requestBody = extractRequestBody(requestCaptor.getValue());
-    assertTrue(
-        "Request body should contain service_tier for COLLECTION_SCAN tier",
+    assertFalse(
+        "Flex is unsupported for voyage-3-large; body must not request flex service_tier",
         requestBody.contains("\"service_tier\""));
-    assertTrue(
-        "service_tier should be 'flex' for COLLECTION_SCAN tier",
-        requestBody.contains("\"" + VOYAGE_API_FLEX_TIER + "\""));
   }
 
   @Test
@@ -794,9 +865,9 @@ public class VoyageClientTest {
 
     VoyageClient queryWithFlexTier =
         new VoyageClient(
-            VOYAGE_3_LARGE,
+            VOYAGE_4,
             EmbeddingServiceConfig.ServiceTier.QUERY,
-            VOYAGE_3_LARGE.query(),
+            VOYAGE_4.query(),
             METRICS_FACTORY,
             Optional.empty(),
             false,
@@ -867,9 +938,9 @@ public class VoyageClientTest {
 
     VoyageClient flexClient =
         new VoyageClient(
-            VOYAGE_3_LARGE,
+            VOYAGE_4,
             EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
-            VOYAGE_3_LARGE.collectionScan(),
+            VOYAGE_4.collectionScan(),
             METRICS_FACTORY,
             Optional.empty(),
             false,
@@ -879,7 +950,7 @@ public class VoyageClientTest {
 
     verify(mockClient, times(3)).send(captor.capture(), any(HttpResponse.BodyHandler.class));
     HttpRequest flex = captor.getValue();
-    assertEquals(List.of("voyage-3-large"), flex.headers().allValues(VOYAGE_HEADER_MODEL));
+    assertEquals(List.of("voyage-4"), flex.headers().allValues(VOYAGE_HEADER_MODEL));
     assertEquals(List.of(VOYAGE_API_FLEX_TIER), flex.headers().allValues(VOYAGE_HEADER_TIER));
     assertEquals(Optional.of(Duration.ofSeconds(310)), flex.timeout());
   }
@@ -1060,9 +1131,9 @@ public class VoyageClientTest {
     HttpClient mockClient = createMockHttpClient();
     VoyageClient voyageClient =
         new VoyageClient(
-            VOYAGE_3_LARGE,
+            VOYAGE_4,
             EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
-            VOYAGE_3_LARGE.collectionScan(),
+            VOYAGE_4.collectionScan(),
             metricsFactory,
             Optional.empty(),
             false,
@@ -1094,9 +1165,9 @@ public class VoyageClientTest {
 
     VoyageClient voyageClient =
         new VoyageClient(
-            VOYAGE_3_LARGE,
+            VOYAGE_4,
             EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
-            VOYAGE_3_LARGE.collectionScan(),
+            VOYAGE_4.collectionScan(),
             metricsFactory,
             Optional.empty(),
             false,
@@ -1146,9 +1217,9 @@ public class VoyageClientTest {
 
     VoyageClient voyageClient =
         new VoyageClient(
-            VOYAGE_3_LARGE,
+            VOYAGE_4,
             EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
-            VOYAGE_3_LARGE.collectionScan(),
+            VOYAGE_4.collectionScan(),
             metricsFactory,
             Optional.empty(),
             false,
@@ -1178,9 +1249,9 @@ public class VoyageClientTest {
     HttpClient mockClient = mock(HttpClient.class);
     VoyageClient voyageClient =
         new VoyageClient(
-            VOYAGE_3_LARGE,
+            VOYAGE_4,
             EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
-            VOYAGE_3_LARGE.collectionScan(),
+            VOYAGE_4.collectionScan(),
             metricsFactory,
             Optional.empty(),
             false,

@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLException;
 import org.bson.BsonDocument;
@@ -111,6 +112,24 @@ public class VoyageClient implements ClientInterface {
   @VisibleForTesting public static final String VOYAGE_API_FLEX_TIER = "flex";
 
   /**
+   * Voyage models that support the flex API tier ({@value #VOYAGE_API_FLEX_TIER}). Other models use
+   * standard query/document tier routing even when flex is requested upstream.
+   */
+  private static final Set<String> VOYAGE_MODELS_SUPPORTING_FLEX_TIER =
+      Set.of("voyage-4", "voyage-4-lite", "voyage-4-large", "voyage-code-3");
+
+  /**
+   * Returns whether {@code modelId} may use Voyage flex tier ({@link #VOYAGE_API_FLEX_TIER}).
+   * Comparison is case-insensitive.
+   */
+  public static boolean supportsFlexTierForModel(String modelId) {
+    if (modelId == null) {
+      return false;
+    }
+    return VOYAGE_MODELS_SUPPORTING_FLEX_TIER.contains(modelId.toLowerCase(Locale.ROOT));
+  }
+
+  /**
    * HTTP headers for Voyage Client API
    */
   @VisibleForTesting public static final String VOYAGE_HEADER_MODEL = "X-Voyage-Model";
@@ -150,12 +169,19 @@ public class VoyageClient implements ClientInterface {
     // TODO(CLOUDP-370950): Support truncation parameter from configs or query time.
     // Enable truncation in indexing time only.
     this.truncation = tier != EmbeddingServiceConfig.ServiceTier.QUERY;
-    this.useFlexTier = useFlexTier;
-    this.serviceTierApiValue = useFlexTier ? Optional.of(VOYAGE_API_FLEX_TIER) : Optional.empty();
     this.modelId = embeddingModelConfig.name();
+    this.useFlexTier = useFlexTier && supportsFlexTierForModel(this.modelId);
+    if (useFlexTier && !this.useFlexTier) {
+      LOG.debug(
+          "Voyage flex tier not supported for model {}; using standard tier (service tier: {})",
+          this.modelId,
+          tier);
+    }
+    this.serviceTierApiValue =
+        this.useFlexTier ? Optional.of(VOYAGE_API_FLEX_TIER) : Optional.empty();
     this.serviceTier = tier;
-    this.requestTimeout = resolveVoyageHttpTimeout(tier, useFlexTier);
-    if (useFlexTier) {
+    this.requestTimeout = resolveVoyageHttpTimeout(tier, this.useFlexTier);
+    if (this.useFlexTier) {
       LOG.debug(
           "Using Voyage flex tier for embedding model {} (service tier: {})", this.modelId, tier);
     }

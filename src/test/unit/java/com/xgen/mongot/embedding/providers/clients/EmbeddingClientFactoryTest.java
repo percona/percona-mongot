@@ -50,7 +50,7 @@ public class EmbeddingClientFactoryTest {
             EmbeddingServiceConfig.EmbeddingConfig.DEFAULT_USE_FLEX_TIER,
             Optional.empty());
     return EmbeddingModelConfig.create(
-        "voyage-3-large", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, config);
+        "voyage-4", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, config);
   }
 
   private static EmbeddingModelConfig voyageModelFlexTierDisabled() {
