@@ -55,7 +55,6 @@ import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.mongot.util.mongodb.BatchMongoClient;
 import com.xgen.mongot.util.mongodb.MongoDbReplSetStatus;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import java.nio.file.Path;
@@ -99,6 +98,12 @@ public class MaterializedViewManager implements ReplicationManager {
   private static final Duration DEFAULT_COMMIT_INTERVAL = Duration.ofSeconds(30);
 
   public static final String OPTIME_UPDATER_ERROR_COUNTER_NAME = "matViewOptimeUpdaterError";
+
+  public static final String GENERATOR_SHUTDOWN_FAILURE_COUNTER_NAME =
+      "matViewGeneratorShutdownFailures";
+
+  public static final String GENERATOR_CREATION_FAILURE_COUNTER_NAME =
+      "matViewGeneratorCreationFailures";
 
   public static final String STATE_LABEL = "state";
 
@@ -158,8 +163,6 @@ public class MaterializedViewManager implements ReplicationManager {
 
   private final ScheduledFuture<?> optimeUpdaterFuture;
 
-  private final Counter optimeUpdaterErrorCounter;
-
   /** Executor for the leader heartbeat task. Used when acting as leader. */
   private final NamedScheduledExecutorService heartbeatExecutor;
 
@@ -175,11 +178,11 @@ public class MaterializedViewManager implements ReplicationManager {
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
 
   /**
-   * Tracks generators with a pending async shutdown from {@link #transitionToFollower}.
-   * {@link #refreshStatus()} skips leadership acquisition for these ids to avoid a race where
-   * a new generator tries to enqueue init-sync before the old generator finishes cleanup.
-   * Removed in {@link #refreshStatus()} once the shutdown future completes and the
-   * InitialSyncQueue confirms the stale entry is gone.
+   * Tracks generators with a pending async shutdown from {@link #transitionToFollower}. {@link
+   * #refreshStatus()} skips leadership acquisition for these ids to avoid a race where a new
+   * generator tries to enqueue init-sync before the old generator finishes cleanup. Removed in
+   * {@link #refreshStatus()} once the shutdown future completes and the InitialSyncQueue confirms
+   * the stale entry is gone.
    */
   @VisibleForTesting
   final Map<MaterializedViewGenerationId, CompletableFuture<Void>> pendingShutdowns =
@@ -257,7 +260,6 @@ public class MaterializedViewManager implements ReplicationManager {
     this.optimeUpdaterExecutor = optimeUpdaterExecutor;
     this.leaseManager = leaseManager;
     this.matViewMetadataCatalog = matViewMetadataCatalog;
-    this.optimeUpdaterErrorCounter = this.meterRegistry.counter(OPTIME_UPDATER_ERROR_COUNTER_NAME);
     this.isReplicationEnabled = false;
     this.materializedViewConfig = materializedViewConfig;
 
@@ -531,8 +533,7 @@ public class MaterializedViewManager implements ReplicationManager {
     // lower definition version than the existing generator (would revert MV schema/mapping).
     long existingVersion =
         existingGenerator.getIndexGeneration().getDefinition().getDefinitionVersion().orElse(0L);
-    long newVersion =
-        matViewIndexGeneration.getDefinition().getDefinitionVersion().orElse(0L);
+    long newVersion = matViewIndexGeneration.getDefinition().getDefinitionVersion().orElse(0L);
     if (newVersion < existingVersion) {
       LOG.atWarn()
           .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
@@ -552,8 +553,15 @@ public class MaterializedViewManager implements ReplicationManager {
   private MaterializedViewGenerator createNewGenerator(
       MaterializedViewIndexGeneration matViewIndexGeneration) {
     this.leaseManager.add(matViewIndexGeneration, false);
-    MaterializedViewGenerator generator =
-        this.matViewGeneratorFactory.create(matViewIndexGeneration);
+    MaterializedViewGenerator generator;
+    try {
+      generator = this.matViewGeneratorFactory.create(matViewIndexGeneration);
+    } catch (RuntimeException e) {
+      // TODO(CLOUDP-398177): add retry mechanism for generator creation failure.
+      recordGeneratorCreationFailure(
+          matViewIndexGeneration.getGenerationId(), e, "CREATE_NEW_GENERATOR");
+      throw e;
+    }
     // For static leader election only - activates leader mode immediately since leadership is
     // determined at startup. For dynamic leader election, generators start as followers and
     // leadership is acquired later via refreshStatus() when expired leases are detected.
@@ -630,8 +638,15 @@ public class MaterializedViewManager implements ReplicationManager {
     boolean wasLeader = this.leaseManager.isLeader(oldGenerationId);
     this.pendingShutdowns.put(newGenerationId, new CompletableFuture<>());
     try {
-      MaterializedViewGenerator newGenerator =
-          this.matViewGeneratorFactory.create(matViewIndexGeneration);
+      MaterializedViewGenerator newGenerator;
+      try {
+        newGenerator = this.matViewGeneratorFactory.create(matViewIndexGeneration);
+      } catch (RuntimeException e) {
+        // TODO(CLOUDP-398177): add retry mechanism for generator creation failure.
+        recordGeneratorCreationFailure(
+            matViewIndexGeneration.getGenerationId(), e, "REPLACE_GENERATOR");
+        throw e;
+      }
       CompletableFuture<Void> shutdownFuture =
           existingGenerator
               .shutdown()
@@ -656,8 +671,7 @@ public class MaterializedViewManager implements ReplicationManager {
                       this.leaseManager.add(matViewIndexGeneration, skipInitialSync);
                       if (this.leaseManager instanceof StaticLeaderLeaseManager) {
                         activateStaticLeadership(
-                            newGenerator,
-                            matViewIndexGeneration.getGenerationId());
+                            newGenerator, matViewIndexGeneration.getGenerationId());
                       } else if (wasLeader) {
                         LOG.atInfo()
                             .addKeyValue("oldGenerationId", oldGenerationId)
@@ -709,25 +723,40 @@ public class MaterializedViewManager implements ReplicationManager {
           this.matViewGeneratorFactory.create(matViewIndexGeneration);
       // Replace in the map immediately so subsequent operations use the new follower generator.
       this.managedMaterializedViewGenerators.put(uuid, newGenerator);
-      // Replace the placeholder with the real shutdown future. Removal from pendingShutdowns is
-      // deferred to refreshStatus() which checks both the future and the queue.
-      CompletableFuture<Void> shutdownFuture =
-          existingGenerator
-              .shutdown()
-              .whenComplete(
-                  (ignored, throwable) -> {
-                    if (throwable != null) {
-                      LOG.atError()
-                          .addKeyValue("generationId", generationId)
-                          .setCause(throwable)
-                          .log("Old generator shutdown completed exceptionally");
-                    }
-                  });
-      this.pendingShutdowns.put(generationId, shutdownFuture);
-    } catch (RuntimeException e) {
-      this.pendingShutdowns.remove(generationId);
-      throw e;
+    } catch (Throwable e) {
+      // Do not rethrow: this runs on the leader heartbeat thread, which must keep scheduling.
+      // TODO(CLOUDP-398177): add retry mechanism for generator creation failure.
+      recordGeneratorCreationFailure(generationId, e, "FACTORY_CREATE_AFTER_LEADERSHIP_LOSS");
+    } finally {
+      // Have to shut down existing generator no matter new generator is created or not
+      CompletableFuture<Void> shutdownFuture;
+      try {
+        shutdownFuture = existingGenerator.shutdown();
+        this.pendingShutdowns.put(generationId, shutdownFuture);
+        LOG.atDebug()
+            .addKeyValue("generationId", generationId)
+            .log("Old generator shutdown completed successfully");
+      } catch (Throwable throwable) {
+        // Will be retried in the next heartbeat cycle
+        this.meterRegistry.counter(GENERATOR_SHUTDOWN_FAILURE_COUNTER_NAME).increment();
+        this.pendingShutdowns.remove(generationId);
+        LOG.atWarn()
+            .addKeyValue("generationId", generationId)
+            .setCause(throwable)
+            .log("Old generator shutdown completed exceptionally");
+      }
     }
+  }
+
+  private void recordGeneratorCreationFailure(
+      MaterializedViewGenerationId generationId, Throwable failure, String errorType) {
+    this.meterRegistry.counter(GENERATOR_CREATION_FAILURE_COUNTER_NAME).increment();
+    LOG.atWarn()
+        .addKeyValue("generationId", generationId)
+        .addKeyValue("indexId", generationId.indexId)
+        .addKeyValue("errorType", errorType)
+        .setCause(failure)
+        .log("Materialized view generator creation failed.");
   }
 
   /**
@@ -1002,7 +1031,7 @@ public class MaterializedViewManager implements ReplicationManager {
             gen.get().becomeLeader();
           }
         }
-      } catch (RuntimeException e) {
+      } catch (Throwable e) {
         LOG.atError()
             .addKeyValue("generationId", genId)
             .setCause(e)
@@ -1051,8 +1080,9 @@ public class MaterializedViewManager implements ReplicationManager {
                 || TERMINAL_STATES.contains(currentGenerator.get().getState())) {
               LOG.atWarn()
                   .addKeyValue("generationId", generationId)
-                  .log("Generator gone or in terminal state after leadership acquisition, "
-                      + "releasing lease");
+                  .log(
+                      "Generator gone or in terminal state after leadership acquisition, "
+                          + "releasing lease");
               this.leaseManager.releaseLeadership(generationId);
               continue;
             }
@@ -1060,7 +1090,18 @@ public class MaterializedViewManager implements ReplicationManager {
                 .addKeyValue("indexId", generationId.indexId)
                 .addKeyValue("generationId", generationId)
                 .log("Acquired leadership for materialized view, transitioning to leader mode");
-            currentGenerator.get().becomeLeader();
+            try {
+              currentGenerator.get().becomeLeader();
+            } catch (Throwable becomeLeaderFailure) {
+              LOG.atWarn()
+                  .addKeyValue("generationId", generationId)
+                  .addKeyValue("indexId", generationId.indexId)
+                  .setCause(becomeLeaderFailure)
+                  .log(
+                      "becomeLeader failed after acquiring lease in refreshStatus; releasing "
+                          + "leadership");
+              this.leaseManager.releaseLeadership(generationId);
+            }
           }
         }
       }
@@ -1120,7 +1161,7 @@ public class MaterializedViewManager implements ReplicationManager {
               });
     } catch (Exception e) {
       LOG.error("Failed to update max optime for materialized views", e);
-      this.optimeUpdaterErrorCounter.increment();
+      this.meterRegistry.counter(OPTIME_UPDATER_ERROR_COUNTER_NAME).increment();
     }
   }
 
@@ -1167,8 +1208,9 @@ public class MaterializedViewManager implements ReplicationManager {
                   LOG.atWarn()
                       .addKeyValue("generationId", generationId)
                       .addKeyValue("state", generator.getState())
-                      .log("Generator in terminal state but lease still held — "
-                          + "releasing lease so another node can acquire");
+                      .log(
+                          "Generator in terminal state but lease still held — "
+                              + "releasing lease so another node can acquire");
                   this.leaseManager.releaseLeadership(generationId);
                 }
               });
@@ -1454,8 +1496,7 @@ public class MaterializedViewManager implements ReplicationManager {
             }
             long newVersion =
                 matViewIndexGeneration.getDefinition().getDefinitionVersion().orElse(0L);
-            long existingVersion =
-                existing.getDefinition().getDefinitionVersion().orElse(0L);
+            long existingVersion = existing.getDefinition().getDefinitionVersion().orElse(0L);
             if (newVersion >= existingVersion) {
               return matViewIndexGeneration;
             }

@@ -1,6 +1,5 @@
 package com.xgen.mongot.replication.mongodb.autoembedding;
 
-
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -73,7 +72,8 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
    * cause {@code whenComplete} callbacks to fire before the real shutdown finishes.
    */
   @GuardedBy("this")
-  @Nullable private CompletableFuture<Void> shutdownFuture = null;
+  @Nullable
+  private CompletableFuture<Void> shutdownFuture = null;
 
   /** Executor for scheduling lifecycle tasks. Stored here since parent's field is private. */
   private final Executor lifecycleExecutor;
@@ -156,7 +156,8 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
             .handleAsync(
                 (ignored, throwable) -> {
                   if (throwable != null) {
-                    this.logger.atWarn()
+                    this.logger
+                        .atWarn()
                         .setCause(throwable)
                         .log("Leader initialization failed, dropping index for resync");
                     // For materialized views, data is stored in MongoDB. Always drop on failure,
@@ -183,17 +184,15 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   @Override
   public synchronized CompletableFuture<Void> shutdown() {
     if (this.shutdownFuture != null) {
-      this.logger.atInfo()
-          .log("Shutdown already in progress");
+      this.logger.atInfo().log("Shutdown already in progress");
       return this.shutdownFuture;
     }
-    this.logger.atInfo()
-        .log("Shutting down materialized view generator");
+    this.logger.atInfo().log("Shutting down materialized view generator");
+    this.shutdownFuture = super.shutdown();
     this.matViewIndex.setLeaderMode(false);
     // Once shutdown, this generator is no longer the leader, as becomeLeader will be no-op because
     // of shutdown checks in ReplicationIndexManager
     this.isLeader = false;
-    this.shutdownFuture = super.shutdown();
     return this.shutdownFuture;
   }
 
@@ -245,7 +244,8 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   // For auto-embedding index, we always resync instead of leaving the index in
   // RECOVERING_NON_TRANSIENT state.
   protected void handleSteadyStateNonInvalidatingResync(SteadyStateException steadyStateException) {
-    this.logger.atInfo()
+    this.logger
+        .atInfo()
         .setCause(steadyStateException)
         .log("Resync triggered during steady state replication for auto-embedding index");
     if (isOplogFalloff(steadyStateException)) {
