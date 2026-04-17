@@ -291,7 +291,7 @@ class LuceneUnifiedHighlighter {
       OffsetSource result = super.getOptimizedOffsetSource(components);
       Explain.getQueryInfo()
           .flatMap(e -> e.getFeatureExplainer(HighlightFeatureExplainer.class))
-          .ifPresent(h -> h.addOffsetSource(components.getField(), result));
+          .ifPresent(h -> h.addOffsetSource(components.field(), result));
       return result;
     }
 

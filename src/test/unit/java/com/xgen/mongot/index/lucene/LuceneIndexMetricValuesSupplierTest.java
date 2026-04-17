@@ -45,6 +45,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
@@ -488,8 +489,7 @@ public class LuceneIndexMetricValuesSupplierTest {
     var indexReader = Mockito.mock(LuceneSearchIndexReader.class);
     var indexWriter = Mockito.mock(SingleLuceneIndexWriter.class);
 
-    Mockito.when(indexReader.getFieldInfos())
-        .thenThrow(new RuntimeException("Unexpected error"));
+    Mockito.when(indexReader.getFieldInfos()).thenThrow(new RuntimeException("Unexpected error"));
 
     List<Runnable> capturedTasks = new ArrayList<>();
     Executor capturingExecutor = capturedTasks::add;
@@ -625,7 +625,8 @@ public class LuceneIndexMetricValuesSupplierTest {
         false,
         IndexOptions.NONE,
         DocValuesType.NONE,
-        -1,
+        DocValuesSkipIndexType.NONE,
+        -1L,
         Collections.emptyMap(),
         0,
         0,
@@ -652,7 +653,8 @@ public class LuceneIndexMetricValuesSupplierTest {
             false,
             IndexOptions.NONE,
             DocValuesType.NONE,
-            -1,
+            DocValuesSkipIndexType.NONE,
+            -1L,
             Collections.emptyMap(),
             0,
             0,
@@ -711,7 +713,8 @@ public class LuceneIndexMetricValuesSupplierTest {
             false,
             IndexOptions.NONE,
             DocValuesType.NONE,
-            -1,
+            DocValuesSkipIndexType.NONE,
+            -1L,
             Collections.emptyMap(),
             0,
             0,
@@ -752,8 +755,7 @@ public class LuceneIndexMetricValuesSupplierTest {
     Mockito.doReturn(1000).when(indexWriter).getNumFields();
     Mockito.doReturn(1).when(indexWriter).getNumWriters();
     IndexBackingStrategy indexBackingStrategy = mock(IndexBackingStrategy.class);
-    when(indexBackingStrategy.getDiskStats())
-        .thenReturn(new DiskStats(1234L, 1111L, 1112));
+    when(indexBackingStrategy.getDiskStats()).thenReturn(new DiskStats(1234L, 1111L, 1112));
 
     for (IndexDefinition.Type type : IndexDefinition.Type.values()) {
       @Var IndexReader indexReader = Mockito.mock(LuceneVectorIndexReader.class);
@@ -894,8 +896,7 @@ public class LuceneIndexMetricValuesSupplierTest {
     Mockito.doReturn(2).when(indexWriter).getNumWriters();
     Mockito.doReturn(24L).when(indexWriter).getNumLuceneMaxDocs();
     IndexBackingStrategy indexBackingStrategy = mock(IndexBackingStrategy.class);
-    when(indexBackingStrategy.getDiskStats())
-        .thenReturn(new DiskStats(1234, 1, 1));
+    when(indexBackingStrategy.getDiskStats()).thenReturn(new DiskStats(1234, 1, 1));
     when(indexBackingStrategy.getIndexSizeForIndexPartition(0)).thenReturn(610L);
     when(indexBackingStrategy.getIndexSizeForIndexPartition(1)).thenReturn(611L);
     MeterRegistry meterRegistry = new SimpleMeterRegistry();

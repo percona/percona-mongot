@@ -49,6 +49,7 @@ import java.util.function.Supplier;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.ScoreDoc;
@@ -634,7 +635,7 @@ public class LuceneSearchBatchProducerTest {
         };
 
     StoredFields mockStoredFields = new FakeStoredFields(id -> docGenerator.get());
-    IndexReader mockReader = mock(IndexReader.class);
+    IndexReader mockReader = mock(LeafReader.class);
     when(mockReader.storedFields()).thenReturn(mockStoredFields);
 
     when(searcher.storedFields()).thenReturn(mockStoredFields);
@@ -782,7 +783,7 @@ public class LuceneSearchBatchProducerTest {
         };
 
     StoredFields mockStoredFields = new FakeStoredFields(docGenerator);
-    IndexReader mockReader = mock(IndexReader.class);
+    IndexReader mockReader = mock(LeafReader.class);
     when(mockReader.storedFields()).thenReturn(mockStoredFields);
 
     when(searcher.storedFields()).thenReturn(mockStoredFields);

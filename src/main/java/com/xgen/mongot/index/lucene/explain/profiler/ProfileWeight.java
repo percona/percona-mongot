@@ -29,17 +29,6 @@ public class ProfileWeight extends Weight {
     return this.subQueryWeight.explain(context, doc);
   }
 
-  /** A scorer for ProfileWeight. May return null. */
-  @Override
-  @Nullable
-  public Scorer scorer(LeafReaderContext context) throws IOException {
-    Optional<ScorerSupplier> supplier = optionalScorerSupplier(context);
-    if (supplier.isEmpty()) {
-      return null;
-    }
-    return supplier.get().get(Long.MAX_VALUE);
-  }
-
   /** Get a ScorerSupplier. May be null. */
   @Override
   @Nullable
@@ -75,9 +64,18 @@ public class ProfileWeight extends Weight {
           @Override
           public Scorer get(long leadCost) throws IOException {
             try (var ignored = weight.timings.split(ExplainTimings.Type.CREATE_SCORER)) {
-              return new ProfileScorer(
-                  weight, subqueryScorerSupplier.get(leadCost), weight.timings);
+              return new ProfileScorer(subqueryScorerSupplier.get(leadCost), weight.timings);
             }
+          }
+
+          @Override
+          public BulkScorer bulkScorer() throws IOException {
+            return subqueryScorerSupplier.bulkScorer();
+          }
+
+          @Override
+          public void setTopLevelScoringClause() throws IOException {
+            subqueryScorerSupplier.setTopLevelScoringClause();
           }
 
           @Override
@@ -87,26 +85,6 @@ public class ProfileWeight extends Weight {
             }
           }
         });
-  }
-
-  @Override
-  @Nullable
-  public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
-    var bulkScorer = super.bulkScorer(context);
-    if (bulkScorer != null) {
-      return bulkScorer;
-    }
-
-    // Lucene's DrillSidewaysQuery does not implement scorer()/scorerSupplier(), so
-    // Weight#bulkScorer() returns null. In this case, we must explicitly
-    // delegate to the subQueryWeight's bulkScorer for scoring to proceed.
-    if (this.parentQuery
-        .getClass()
-        .getName()
-        .equals("org.apache.lucene.facet.DrillSidewaysQuery")) {
-      return this.subQueryWeight.bulkScorer(context);
-    }
-    return null;
   }
 
   @Override

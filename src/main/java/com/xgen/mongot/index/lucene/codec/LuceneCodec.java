@@ -21,12 +21,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.FilterCodec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.StoredFieldsFormat;
 import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -60,6 +60,13 @@ import org.apache.lucene.store.Directory;
  * is required to upgrade to the next major Lucene version.
  */
 public class LuceneCodec extends FilterCodec {
+
+  /**
+   * The Lucene major version used when creating new index segments. This is passed to {@link
+   * org.apache.lucene.index.IndexWriterConfig#setIndexCreatedVersionMajor} to decouple the codec
+   * upgrade lifecycle from the Lucene library upgrade lifecycle.
+   */
+  public static final int CODEC_VERSION_MAJOR = 9;
 
   private static final FluentLogger FLOGGER = FluentLogger.forEnclosingClass();
 

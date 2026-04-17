@@ -61,10 +61,7 @@ public class MqlNullnessSortFieldTest {
 
     ImmutableList<Document> docs =
         ImmutableList.of(
-            createPresentDoc(),
-            createPresentDoc(),
-            createMissingDoc(),
-            createMissingDoc());
+            createPresentDoc(), createPresentDoc(), createMissingDoc(), createMissingDoc());
 
     try (var writer = new RandomSegmentingIndexWriter(this.directory)) {
       writer.addDocuments(docs);
@@ -87,8 +84,7 @@ public class MqlNullnessSortFieldTest {
 
     assertThat(values)
         .asList()
-        .containsExactly(
-            BsonUtils.MIN_KEY, BsonUtils.MIN_KEY, new BsonInt64(0L), new BsonInt64(0L))
+        .containsExactly(BsonUtils.MIN_KEY, BsonUtils.MIN_KEY, new BsonInt64(0L), new BsonInt64(0L))
         .inOrder();
   }
 
@@ -101,8 +97,7 @@ public class MqlNullnessSortFieldTest {
 
     assertThat(values)
         .asList()
-        .containsExactly(
-            new BsonInt64(0L), new BsonInt64(0L), BsonUtils.MAX_KEY, BsonUtils.MAX_KEY)
+        .containsExactly(new BsonInt64(0L), new BsonInt64(0L), BsonUtils.MAX_KEY, BsonUtils.MAX_KEY)
         .inOrder();
   }
 
@@ -114,17 +109,12 @@ public class MqlNullnessSortFieldTest {
 
     TopDocs topDocs = this.searcher.search(query, 2, sort);
 
-    Object[] values =
-        Arrays.stream(topDocs.scoreDocs).map(s -> ((FieldDoc) s).fields[0]).toArray();
+    Object[] values = Arrays.stream(topDocs.scoreDocs).map(s -> ((FieldDoc) s).fields[0]).toArray();
     assertThat(values).asList().containsExactly(BsonUtils.MIN_KEY, BsonUtils.MIN_KEY).inOrder();
 
     TopDocs afterDocs =
         this.searcher.searchAfter(
-            topDocs.scoreDocs[topDocs.scoreDocs.length - 1],
-            query,
-            Integer.MAX_VALUE,
-            sort,
-            false);
+            topDocs.scoreDocs[topDocs.scoreDocs.length - 1], query, Integer.MAX_VALUE, sort, false);
 
     Object[] afterValues =
         Arrays.stream(afterDocs.scoreDocs).map(s -> ((FieldDoc) s).fields[0]).toArray();
@@ -145,17 +135,12 @@ public class MqlNullnessSortFieldTest {
 
     TopDocs topDocs = this.searcher.search(query, 2, sort);
 
-    Object[] values =
-        Arrays.stream(topDocs.scoreDocs).map(s -> ((FieldDoc) s).fields[0]).toArray();
+    Object[] values = Arrays.stream(topDocs.scoreDocs).map(s -> ((FieldDoc) s).fields[0]).toArray();
     assertThat(values).asList().containsExactly(new BsonInt64(0L), new BsonInt64(0L)).inOrder();
 
     TopDocs afterDocs =
         this.searcher.searchAfter(
-            topDocs.scoreDocs[topDocs.scoreDocs.length - 1],
-            query,
-            Integer.MAX_VALUE,
-            sort,
-            false);
+            topDocs.scoreDocs[topDocs.scoreDocs.length - 1], query, Integer.MAX_VALUE, sort, false);
 
     Object[] afterValues =
         Arrays.stream(afterDocs.scoreDocs).map(s -> ((FieldDoc) s).fields[0]).toArray();
@@ -196,7 +181,7 @@ public class MqlNullnessSortFieldTest {
       }
 
       try (DirectoryReader reader = DirectoryReader.open(dir)) {
-        Sort reloaded = reader.leaves().get(0).reader().getMetaData().getSort();
+        Sort reloaded = reader.leaves().get(0).reader().getMetaData().sort();
         SortField deserialized = reloaded.getSort()[0];
 
         assertThat(deserialized).isNotInstanceOf(MqlNullnessSortField.class);
@@ -236,7 +221,7 @@ public class MqlNullnessSortFieldTest {
       }
 
       try (DirectoryReader reader = DirectoryReader.open(dir)) {
-        Sort reloaded = reader.leaves().get(0).reader().getMetaData().getSort();
+        Sort reloaded = reader.leaves().get(0).reader().getMetaData().sort();
         SortField deserialized = reloaded.getSort()[0];
 
         assertThat(deserialized).isNotInstanceOf(MqlSortedSetSortField.class);

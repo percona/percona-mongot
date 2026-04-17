@@ -747,7 +747,7 @@ public class MqlDoubleSortTest {
         // Missing values after the first 3 docs are non-competitive since we are performing a
         // single sort. Only values that are strictly weaker than bottom should be considered
         // competitive.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(4);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(4);
         SortPruningTestUtils.assertNullOptimizedSort(
             topDocs, numHits, numDocs, NullEmptySortPosition.LOWEST);
       }
@@ -886,7 +886,7 @@ public class MqlDoubleSortTest {
         // Collect 3 hits into sort queue. Collecting 4th hit triggers pruning of remaining docs in
         // segment. In ascending sort with nulls: highest, docs with missing values are
         // non-competitive.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(4);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(4);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       }
       return List.of(topDocs);
@@ -951,7 +951,7 @@ public class MqlDoubleSortTest {
       if (enablePruning) {
         // In doubleSort documents with the lowest possible double (Double.NaN) are not considered
         // competitive
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7000);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7000);
         SortPruningTestUtils.assertNullOptimizedSort(
             topDocs, numHits, numDocs, NullEmptySortPosition.LOWEST);
       }
@@ -1017,7 +1017,7 @@ public class MqlDoubleSortTest {
         // < Long.MIN_VALUE instead of < Long.MAX_VALUE and all 4000 documents in the second segment
         // would be pruned. The resulting queue would be unchanged and end up as
         // [null, null, null (bottom)], which is incorrect.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7003);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7003);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocsContainingField);
       }
       return List.of(topDocs);

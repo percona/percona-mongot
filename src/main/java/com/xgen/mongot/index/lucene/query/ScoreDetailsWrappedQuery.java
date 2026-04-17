@@ -38,7 +38,7 @@ public class ScoreDetailsWrappedQuery extends Query {
       case BooleanQuery booleanQuery -> {
         BooleanQuery.Builder booleanQueryBuilder = new BooleanQuery.Builder();
         for (var clause : booleanQuery.clauses()) {
-          booleanQueryBuilder.add(wrap(clause.getQuery()), clause.getOccur());
+          booleanQueryBuilder.add(wrap(clause.query()), clause.occur());
         }
         booleanQueryBuilder.setMinimumNumberShouldMatch(booleanQuery.getMinimumNumberShouldMatch());
         yield new ScoreDetailsWrappedQuery(booleanQueryBuilder.build());

@@ -105,7 +105,9 @@ public class LuceneDocumentIdEncoderTest {
       // Ensure that we found one document.
       TopDocs topDocs = searcher.search(query, 10);
       Assert.assertEquals(
-          "expected to only find one document with the matching _id", 1L, topDocs.totalHits.value);
+          "expected to only find one document with the matching _id",
+          1L,
+          topDocs.totalHits.value());
 
       // Ensure that the document we found was the intended document.
       Document returned = searcher.storedFields().document(topDocs.scoreDocs[0].doc);

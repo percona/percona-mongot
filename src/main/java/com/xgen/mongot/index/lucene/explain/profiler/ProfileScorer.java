@@ -24,8 +24,7 @@ class ProfileScorer extends Scorer {
   private final ExplainTimings timings;
 
   /** Constructs a ProfileScorer. */
-  protected ProfileScorer(Weight weight, Scorer scorer, ExplainTimings timings) {
-    super(weight);
+  protected ProfileScorer(Scorer scorer, ExplainTimings timings) {
     this.scorer = scorer;
     this.timings = timings;
   }
@@ -93,11 +92,6 @@ class ProfileScorer extends Scorer {
   @Override
   public int docID() {
     return this.scorer.docID();
-  }
-
-  @Override
-  public Weight getWeight() {
-    return this.weight;
   }
 
   @Override

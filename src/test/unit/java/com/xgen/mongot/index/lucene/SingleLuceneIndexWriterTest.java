@@ -75,7 +75,7 @@ import java.util.stream.IntStream;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.facet.DrillDownQuery;
-import org.apache.lucene.facet.FacetsCollector;
+import org.apache.lucene.facet.FacetsCollectorManager;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.facet.sortedset.DefaultSortedSetDocValuesReaderState;
 import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetCounts;
@@ -625,7 +625,7 @@ public class SingleLuceneIndexWriterTest {
         writer.commit(EncodedUserData.EMPTY);
         try (DirectoryReader reader = DirectoryReader.open(writer.getLuceneWriter())) {
           IndexSearcher searcher = new IndexSearcher(reader);
-          assertEquals(2, searcher.search(new MatchAllDocsQuery(), 10).totalHits.value);
+          assertEquals(2, searcher.search(new MatchAllDocsQuery(), 10).totalHits.value());
         }
 
         // Delete all of documents and ensure we can't retrieve any.
@@ -675,7 +675,7 @@ public class SingleLuceneIndexWriterTest {
         writer.commit(EncodedUserData.EMPTY);
         try (DirectoryReader reader = DirectoryReader.open(writer.getLuceneWriter())) {
           IndexSearcher searcher = new IndexSearcher(reader);
-          assertEquals(2, searcher.search(new MatchAllDocsQuery(), 10).totalHits.value);
+          assertEquals(2, searcher.search(new MatchAllDocsQuery(), 10).totalHits.value());
         }
 
         // Acquire a snapshot, and verify that while deletions can happen, the snapshot files are
@@ -1080,7 +1080,7 @@ public class SingleLuceneIndexWriterTest {
       try (DirectoryReader reader = DirectoryReader.open(writer.getLuceneWriter())) {
         IndexSearcher searcher = new IndexSearcher(reader);
         TopDocs docs = searcher.search(new MatchAllDocsQuery(), 10);
-        assertEquals(1, docs.totalHits.value);
+        assertEquals(1, docs.totalHits.value());
 
         // Ensure the indexed document matches the expected.
         Document storedFields = searcher.storedFields().document(docs.scoreDocs[0].doc);
@@ -1116,7 +1116,7 @@ public class SingleLuceneIndexWriterTest {
                     VectorSimilarityFunction.EUCLIDEAN,
                     new FieldExistsQuery("$type:knnVector/field")),
                 10);
-        assertEquals(1, docs.totalHits.value);
+        assertEquals(1, docs.totalHits.value());
         // Ensure the indexed document matches the expected.
         Document storedFields = searcher.storedFields().document(docs.scoreDocs[0].doc);
         // Embeddings are not stored, only exists in index.
@@ -1135,7 +1135,7 @@ public class SingleLuceneIndexWriterTest {
       try (DirectoryReader reader = DirectoryReader.open(writer.getLuceneWriter())) {
         IndexSearcher searcher = new IndexSearcher(reader);
         TopDocs docs = searcher.search(new MatchAllDocsQuery(), 10);
-        assertEquals(0, docs.totalHits.value);
+        assertEquals(0, docs.totalHits.value());
       }
     }
 
@@ -1394,17 +1394,17 @@ public class SingleLuceneIndexWriterTest {
                 mockMetricsFactory())) {
 
           var searcher = manager.acquire();
-          var collector = new FacetsCollector();
           var query = new DrillDownQuery(new FacetsConfig());
           query.add("nested.field2", "value22");
 
-          var docs = FacetsCollector.search(searcher, query, 10, collector);
-          assertEquals(1, docs.totalHits.value);
+          var collectorManager = new FacetsCollectorManager();
+          var result = FacetsCollectorManager.search(searcher, query, 10, collectorManager);
+          assertEquals(1, result.topDocs().totalHits.value());
 
           var state =
               new DefaultSortedSetDocValuesReaderState(
                   searcher.getIndexReader(), new FacetsConfig());
-          var facets = new SortedSetDocValuesFacetCounts(state, collector);
+          var facets = new SortedSetDocValuesFacetCounts(state, result.facetsCollector());
           assertEquals(1, facets.getTopChildren(10, "field1").childCount);
           assertEquals(2, facets.getTopChildren(10, "nested.field2").childCount);
         }

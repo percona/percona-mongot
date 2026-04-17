@@ -4,6 +4,7 @@ import com.xgen.mongot.index.analyzer.attributes.TokenStreamType;
 import com.xgen.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinition;
 import com.xgen.mongot.index.analyzer.definition.StockAnalyzerNames;
 import com.xgen.testing.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinitionBuilder;
+import java.util.Set;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.analysis.StopwordAnalyzerBase;
@@ -209,7 +210,9 @@ public class AnalyzerProvidersTest {
 
     private boolean supportsStemExclusion(Class<A> analyzerClass) {
       // do not want to support overridden functionality for newly added analyzers.
-      if (analyzerClass.equals(UkrainianMorfologikAnalyzer.class)) {
+      Set<Class<? extends Analyzer>> unsupportedAnalyzers =
+          Set.of(UkrainianMorfologikAnalyzer.class, PersianAnalyzer.class);
+      if (unsupportedAnalyzers.contains(analyzerClass)) {
         return false;
       }
 

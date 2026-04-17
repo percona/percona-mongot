@@ -185,7 +185,7 @@ class SortPruningTestUtils {
             .getOrDefault(ExplainTimings.Type.NEXT_DOC.getName(), Long.MAX_VALUE);
     Truth.assertWithMessage("PruningIterator.nextDoc cannot be less than totalHits.value")
         .that(collectedHits)
-        .isAtLeast(topDocs.totalHits.value);
+        .isAtLeast(topDocs.totalHits.value());
 
     Truth.assertWithMessage("PruningIterator.nextDoc cannot be greater than numDocs")
         .that(collectedHits)
@@ -198,7 +198,7 @@ class SortPruningTestUtils {
    */
   static void assertUnoptimizedSort(TopDocs topDocs, int numHits, int numDocs) {
     Truth.assertThat(topDocs.scoreDocs.length).isEqualTo(numHits);
-    Truth.assertThat(topDocs.totalHits.value)
+    Truth.assertThat(topDocs.totalHits.value())
         .isEqualTo(numDocs); // assert that all documents were collected => optimization was not run
   }
 
@@ -220,7 +220,7 @@ class SortPruningTestUtils {
   static void assertOptimizedSort(
       TopDocs topDocs, int numHits, int numDocs, Function<Object, Comparable<?>> toComparable) {
     Truth.assertThat(topDocs.scoreDocs.length).isEqualTo(numHits);
-    Truth.assertThat(topDocs.totalHits.relation)
+    Truth.assertThat(topDocs.totalHits.relation())
         .isEqualTo(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO);
 
     Truth.assertThat(
@@ -230,7 +230,7 @@ class SortPruningTestUtils {
                 .toList())
         .isInOrder();
 
-    assertNonCompetitiveHitsAreSkipped(topDocs.totalHits.value, numDocs);
+    assertNonCompetitiveHitsAreSkipped(topDocs.totalHits.value(), numDocs);
   }
 
   /**
@@ -250,7 +250,7 @@ class SortPruningTestUtils {
   static void assertReversedOptimizedSort(
       TopDocs topDocs, int numHits, int numDocs, Function<Object, Comparable<?>> toComparable) {
     Truth.assertThat(topDocs.scoreDocs.length).isEqualTo(numHits);
-    Truth.assertThat(topDocs.totalHits.relation)
+    Truth.assertThat(topDocs.totalHits.relation())
         .isEqualTo(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO);
 
     Truth.assertThat(
@@ -260,13 +260,13 @@ class SortPruningTestUtils {
                 .toList())
         .isInOrder(Comparator.reverseOrder());
 
-    assertNonCompetitiveHitsAreSkipped(topDocs.totalHits.value, numDocs);
+    assertNonCompetitiveHitsAreSkipped(topDocs.totalHits.value(), numDocs);
   }
 
   static void assertNullOptimizedSort(
       TopDocs topDocs, int numHits, int numDocs, NullEmptySortPosition nullEmptySortPosition) {
     Truth.assertThat(topDocs.scoreDocs.length).isEqualTo(numHits);
-    Truth.assertThat(topDocs.totalHits.relation)
+    Truth.assertThat(topDocs.totalHits.relation())
         .isEqualTo(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO);
 
     List<Object> values =
@@ -278,7 +278,7 @@ class SortPruningTestUtils {
             : BsonUtils.MIN_KEY;
     Truth.assertThat(values).isEqualTo(Collections.nCopies(numHits, uniformValue));
 
-    assertNonCompetitiveHitsAreSkipped(topDocs.totalHits.value, numDocs);
+    assertNonCompetitiveHitsAreSkipped(topDocs.totalHits.value(), numDocs);
   }
 
   static void assertOptimizedSortForNullFieldType(

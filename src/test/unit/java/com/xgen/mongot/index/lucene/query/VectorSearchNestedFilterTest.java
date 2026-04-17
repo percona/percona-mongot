@@ -122,8 +122,7 @@ public class VectorSearchNestedFilterTest {
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .parentFilter(eqClauseFilter("name", "value1"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -142,8 +141,7 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
     Assert.assertEquals("Nested vector query with parentFilter:", expected, result);
@@ -164,8 +162,7 @@ public class VectorSearchNestedFilterTest {
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .filter(eqClauseFilter("sections.section_name", "value3"))
                     .parentFilter(eqClauseFilter("name", "value1"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -187,12 +184,10 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
-    Assert.assertEquals(
-        "Nested vector query with filter and parentFilter:", expected, result);
+    Assert.assertEquals("Nested vector query with filter and parentFilter:", expected, result);
   }
 
   @Test
@@ -208,8 +203,7 @@ public class VectorSearchNestedFilterTest {
                     .numCandidates(NUM_CANDIDATES)
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -242,8 +236,7 @@ public class VectorSearchNestedFilterTest {
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .filter(eqClauseFilter("sections.section_name", "value3"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -261,8 +254,8 @@ public class VectorSearchNestedFilterTest {
             new QueryBitSetProducer(EmbeddedDocumentQueryFactory.ROOT_DOCUMENTS_QUERY),
             ScoreMode.Max);
 
-    Assert.assertEquals("With filter only, query should be blockJoin (no outer FILTER):",
-        expected, result);
+    Assert.assertEquals(
+        "With filter only, query should be blockJoin (no outer FILTER):", expected, result);
   }
 
   @Test
@@ -330,8 +323,7 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
     Assert.assertEquals(
@@ -412,8 +404,7 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
     Assert.assertEquals(
@@ -421,7 +412,6 @@ public class VectorSearchNestedFilterTest {
         expected,
         result);
   }
-
 
   @Test
   public void testIsIndexWithEmbeddedFieldsForNestedVectorIndex() {
@@ -465,26 +455,24 @@ public class VectorSearchNestedFilterTest {
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .parentFilter(eqClauseFilter("name", "value1"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
     Query result = translate(definition, query);
 
-    Assert.assertTrue(
-        "Result should be BooleanQuery", result instanceof BooleanQuery);
+    Assert.assertTrue("Result should be BooleanQuery", result instanceof BooleanQuery);
     BooleanQuery boolQuery = (BooleanQuery) result;
 
     BooleanClause filterClause =
         boolQuery.clauses().stream()
-            .filter(c -> c.getOccur() == BooleanClause.Occur.FILTER)
+            .filter(c -> c.occur() == BooleanClause.Occur.FILTER)
             .findFirst()
             .orElseThrow(() -> new AssertionError("No FILTER clause"));
 
     // Structurally inspect the query tree for TermQuery field names instead of relying on
     // Query#toString(), which can change across Lucene versions.
-    Set<String> termFields = collectTermFields(filterClause.getQuery());
+    Set<String> termFields = collectTermFields(filterClause.query());
 
     Assert.assertTrue(
         "parentFilter should reference the root field ($type:token/name), found fields: "
@@ -504,8 +492,7 @@ public class VectorSearchNestedFilterTest {
 
     VectorSearchQuery query =
         buildNestedQuery(
-            eqClauseFilter("sections.section_name", "value3"),
-            eqClauseFilter("name", "value1"));
+            eqClauseFilter("sections.section_name", "value3"), eqClauseFilter("name", "value1"));
 
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
@@ -557,8 +544,7 @@ public class VectorSearchNestedFilterTest {
           2,
           results.scoreDocs.length);
       Set<String> names = getStoredDocNames(reader, results);
-      Assert.assertEquals(
-          "All returned docs should have name='value1'", Set.of("value1"), names);
+      Assert.assertEquals("All returned docs should have name='value1'", Set.of("value1"), names);
     }
   }
 
@@ -608,8 +594,7 @@ public class VectorSearchNestedFilterTest {
     // and both have at least one child with section_name != "value3").
     VectorSearchQuery query =
         buildNestedQuery(
-            neClauseFilter("sections.section_name", "value3"),
-            neClauseFilter("name", "value7"));
+            neClauseFilter("sections.section_name", "value3"), neClauseFilter("name", "value7"));
 
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
@@ -631,10 +616,8 @@ public class VectorSearchNestedFilterTest {
           2,
           results.scoreDocs.length);
       Set<String> names = getStoredDocNames(reader, results);
-      Assert.assertEquals(
-          "All returned docs should have name='value1'", Set.of("value1"), names);
-      Assert.assertFalse(
-          "Should NOT return doc with name='value7'", names.contains("value7"));
+      Assert.assertEquals("All returned docs should have name='value1'", Set.of("value1"), names);
+      Assert.assertFalse("Should NOT return doc with name='value7'", names.contains("value7"));
     }
   }
 
@@ -681,8 +664,7 @@ public class VectorSearchNestedFilterTest {
 
   private static Query eqQuery(String luceneField, String value) {
     return new IndexOrDocValuesQuery(
-        new ConstantScoreQuery(
-            new TermQuery(new Term(luceneField, new BytesRef(value)))),
+        new ConstantScoreQuery(new TermQuery(new Term(luceneField, new BytesRef(value)))),
         SortedSetDocValuesField.newSlowExactQuery(luceneField, new BytesRef(value)));
   }
 
@@ -702,7 +684,7 @@ public class VectorSearchNestedFilterTest {
       fields.add(termQuery.getTerm().field());
     } else if (query instanceof BooleanQuery boolQuery) {
       for (BooleanClause clause : boolQuery.clauses()) {
-        collectTermFieldsRecursive(clause.getQuery(), fields);
+        collectTermFieldsRecursive(clause.query(), fields);
       }
     } else if (query instanceof ConstantScoreQuery csQuery) {
       collectTermFieldsRecursive(csQuery.getQuery(), fields);
@@ -782,8 +764,7 @@ public class VectorSearchNestedFilterTest {
     Document doc = new Document();
     doc.add(new StringField("$meta/embeddedPath", "sections", Field.Store.NO));
     doc.add(
-        new KnnFloatVectorField(
-            EMBEDDED_VECTOR_FIELD, vector, VectorSimilarityFunction.EUCLIDEAN));
+        new KnnFloatVectorField(EMBEDDED_VECTOR_FIELD, vector, VectorSimilarityFunction.EUCLIDEAN));
     doc.add(new StringField(EMBEDDED_TOKEN_FIELD, sectionName, Field.Store.NO));
     doc.add(new SortedSetDocValuesField(EMBEDDED_TOKEN_FIELD, new BytesRef(sectionName)));
     return doc;

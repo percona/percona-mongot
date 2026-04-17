@@ -36,7 +36,6 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.IOContext;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
 import org.junit.runner.RunWith;
@@ -71,7 +70,7 @@ public class LuceneCodecBloomFilterTest {
 
     /**
      * Critical check to validate that BloomFilteredTermsEnum being used prefers seek exact, which
-     * is critical to bloom filter performance. 
+     * is critical to bloom filter performance.
      */
     @Test
     public void bloomFilteredTermsEnum_prefersSeekExact() throws IOException {
@@ -361,8 +360,8 @@ public class LuceneCodecBloomFilterTest {
   }
 
   /**
-   * Asserts whether each segment contains a bloom filter {@code .blm} file. When compound files
-   * are enabled, {@code .blm} is stored inside the {@code .cfs} stream; the check uses the segment
+   * Asserts whether each segment contains a bloom filter {@code .blm} file. When compound files are
+   * enabled, {@code .blm} is stored inside the {@code .cfs} stream; the check uses the segment
    * codec's compound reader or {@link SegmentInfo#files()} as appropriate.
    */
   private static void assertAllSegmentsHaveBlmFiles(Directory dir, boolean expectBlm)
@@ -372,8 +371,7 @@ public class LuceneCodecBloomFilterTest {
       for (LeafReaderContext ctx : reader.leaves()) {
         SegmentReader segReader = (SegmentReader) ctx.reader();
         boolean hasBlm = segmentContainsBlmFile(dir, segReader);
-        assertWithMessage(
-                "BLM file presence for segment %s", segReader.getSegmentInfo().info.name)
+        assertWithMessage("BLM file presence for segment %s", segReader.getSegmentInfo().info.name)
             .that(hasBlm)
             .isEqualTo(expectBlm);
       }
@@ -385,8 +383,7 @@ public class LuceneCodecBloomFilterTest {
     SegmentInfo si = segReader.getSegmentInfo().info;
     Codec codec = si.getCodec();
     if (si.getUseCompoundFile()) {
-      try (CompoundDirectory compoundDir =
-          codec.compoundFormat().getCompoundReader(dir, si, IOContext.DEFAULT)) {
+      try (CompoundDirectory compoundDir = codec.compoundFormat().getCompoundReader(dir, si)) {
         for (String name : compoundDir.listAll()) {
           if (name.endsWith(BLM_FILE_SUFFIX)) {
             return true;

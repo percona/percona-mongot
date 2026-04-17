@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene.codec.flat;
 
 import com.google.auto.service.AutoService;
+import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042BinaryQuantizedFlatVectorsFormat;
 import java.io.IOException;
 import org.apache.lucene.codecs.KnnVectorsFormat;
@@ -17,8 +18,8 @@ import org.apache.lucene.index.SegmentWriteState;
  * exhaustive brute-force search by scanning all vectors in the index to find the k-nearest
  * neighbors.
  *
- * <p>The format delegates to {@link Mongot01042BinaryQuantizedFlatVectorsFormat} for the
- * underlying storage and retrieval, which applies binary quantization to reduce memory footprint
+ * <p>The format delegates to {@link Mongot01042BinaryQuantizedFlatVectorsFormat} for the underlying
+ * storage and retrieval, which applies binary quantization to reduce memory footprint
  *
  * @see KnnVectorsFormat
  * @see Mongot01042BinaryQuantizedFlatVectorsFormat
@@ -42,5 +43,12 @@ public class BinaryQuantizedFlatVectorsFormat extends KnnVectorsFormat {
   @Override
   public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
     return new FullScanFlatVectorsReaderDecorator(this.format.fieldsReader(state));
+  }
+
+  @Override
+  public int getMaxDimensions(String fieldName) {
+    // [Changed from Lucene]
+    // Changed the max allowed vector dimensions.
+    return VectorFieldSpecification.MAX_DIMENSIONS;
   }
 }

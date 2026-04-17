@@ -44,6 +44,7 @@ import org.apache.lucene.search.VectorScorer;
 import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.ReadAdvice;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -88,7 +89,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
             state.segmentSuffix,
             Mongot01042BinaryQuantizedFlatVectorsFormat.META_EXTENSION);
     @Var boolean success = false;
-    try (ChecksumIndexInput meta = state.directory.openChecksumInput(metaFileName, state.context)) {
+    try (ChecksumIndexInput meta = state.directory.openChecksumInput(metaFileName)) {
       @Var Throwable priorE = null;
       try {
         versionMeta =
@@ -113,7 +114,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
               Mongot01042BinaryQuantizedFlatVectorsFormat.VECTOR_DATA_CODEC_NAME,
               // Quantized vectors are accessed randomly from their node ID stored in the HNSW
               // graph.
-              state.context.withRandomAccess());
+              state.context.withReadAdvice(ReadAdvice.RANDOM));
       success = true;
     } finally {
       if (success == false) {
@@ -191,7 +192,6 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
   }
 
   @Override
-  @Nullable
   public FloatVectorValues getFloatVectorValues(String field) throws IOException {
     FieldEntry fieldEntry = getFieldEntry(field);
     FloatVectorValues rawVectorValues = this.rawVectorsReader.getFloatVectorValues(field);
@@ -395,7 +395,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
 
     @Override
     public long ramBytesUsed() {
-      return SHALLOW_SIZE + RamUsageEstimator.sizeOf(this.ordToDoc);
+      return SHALLOW_SIZE;
     }
   }
 
@@ -420,34 +420,24 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
     }
 
     @Override
-    public float[] vectorValue() throws IOException {
-      return this.rawVectorValues.vectorValue();
+    public float[] vectorValue(int ord) throws IOException {
+      return this.rawVectorValues.vectorValue(ord);
     }
 
     @Override
-    public int docID() {
-      return this.rawVectorValues.docID();
-    }
-
-    @Override
-    public int nextDoc() throws IOException {
-      int rawDocId = this.rawVectorValues.nextDoc();
-      int quantizedDocId = this.quantizedVectorValues.nextDoc();
-      assert rawDocId == quantizedDocId;
-      return quantizedDocId;
-    }
-
-    @Override
-    public int advance(int target) throws IOException {
-      int rawDocId = this.rawVectorValues.advance(target);
-      int quantizedDocId = this.quantizedVectorValues.advance(target);
-      assert rawDocId == quantizedDocId;
-      return quantizedDocId;
+    public FloatVectorValues copy() throws IOException {
+      return new QuantizedVectorValues(
+          this.rawVectorValues.copy(), this.quantizedVectorValues.copy());
     }
 
     @Override
     public VectorScorer scorer(float[] query) throws IOException {
       return this.quantizedVectorValues.scorer(query);
+    }
+
+    @Override
+    public DocIndexIterator iterator() {
+      return this.rawVectorValues.iterator();
     }
   }
 }

@@ -11,6 +11,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocumentEvent;
@@ -264,6 +265,12 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             vectorIndexDefinitionGeneration.generation().indexFormatVersion,
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             metricsFactory);
+    FeatureFlags featureFlags =
+        enableConcurrentPartitionSearch
+            ? FeatureFlags.withDefaults()
+                .enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH)
+                .build()
+            : FeatureFlags.getDefault();
     InitializedVectorIndex initializedIndex =
         InitializedLuceneVectorIndex.create(
             this.index,
@@ -271,7 +278,7 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             directoryFactory,
             mock(IndexDirectoryHelper.class),
             Optional.empty(),
-            FeatureFlags.getDefault(),
+            featureFlags,
             DynamicFeatureFlagRegistry.empty(),
             false);
     this.indexWriter = initializedIndex.getWriter();

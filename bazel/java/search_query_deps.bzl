@@ -1,7 +1,7 @@
 load("//bazel/java:dep_utils.bzl", "append_version", "as_test_only")
 
 # Upstream Apache Lucene release version.
-_LUCENE_UPSTREAM_VERSION = "9.11.1"
+_LUCENE_UPSTREAM_VERSION = "10.1.0"
 
 _LUCENE_UPSTREAM_ARTIFACTS = append_version(
     _LUCENE_UPSTREAM_VERSION,
@@ -39,9 +39,9 @@ _LUCENE_UPSTREAM_ARTIFACTS = append_version(
 # These are resolved via the separate "lucene_fork" maven_install in deps.bzl and override the
 # upstream artifacts in the main maven_install via override_targets.
 # Changes included in this fork are documented in
-# https://github.com/mongodb-forks/lucene-mongot/blob/mongot_9_11_1/lucene/CHANGES.txt#L6-L12
+# https://github.com/mongodb-forks/lucene-mongot/blob/mongot_10_1_0/lucene/CHANGES.txt#L6-L12
 # Major change - Support for Bloom Filter for id field
-_LUCENE_FORK_VERSION = "9.11.1-3"
+_LUCENE_FORK_VERSION = "10.1.0-2"
 
 _LUCENE_FORK_ARTIFACT_NAMES = [
     "org.apache.lucene:lucene-backward-codecs",

@@ -18,6 +18,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/util",
         "@maven//:com_google_flogger_flogger",
         "@maven//:com_google_guava_guava",
+        "@maven//:org_apache_lucene_lucene_backward_codecs",
         "@maven//:org_apache_lucene_lucene_codecs",
         "@maven//:org_apache_lucene_lucene_core",
     ],

@@ -16,6 +16,7 @@ import org.apache.lucene.search.PhraseWeight;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.Weight;
 
@@ -152,8 +153,8 @@ public class WrappedExplainWeight extends Weight {
 
   @Override
   @Nullable
-  public Scorer scorer(LeafReaderContext context) throws IOException {
-    return this.weight.scorer(context);
+  public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+    return this.weight.scorerSupplier(context);
   }
 
   @Override

@@ -1,14 +1,14 @@
 package com.xgen.mongot.index.lucene.query.weights;
 
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
-import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * {@link EmptyWeight} provides a {@link Weight#explain(LeafReaderContext, int)} implementation
@@ -33,7 +33,7 @@ class EmptyWeight extends Weight {
 
   @Override
   @Nullable
-  public Scorer scorer(LeafReaderContext context) throws IOException {
+  public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
     return null;
   }
 

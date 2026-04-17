@@ -191,7 +191,7 @@ public class LuceneSearcherManagerTest {
                 SearchIndex.mockMetricsFactory());
 
         var resultAfterRefresh = manager.acquire().search(new MatchAllDocsQuery(), 10);
-        Assert.assertEquals(1, resultAfterRefresh.totalHits.value);
+        Assert.assertEquals(1, resultAfterRefresh.totalHits.value());
       }
     }
   }
@@ -219,12 +219,12 @@ public class LuceneSearcherManagerTest {
         writer.addDocument(doc);
 
         var resultBeforeRefresh = manager.acquire().search(new MatchAllDocsQuery(), 10);
-        Assert.assertEquals(0, resultBeforeRefresh.totalHits.value);
+        Assert.assertEquals(0, resultBeforeRefresh.totalHits.value());
 
         manager.maybeRefreshBlocking();
 
         var resultAfterRefresh = manager.acquire().search(new MatchAllDocsQuery(), 10);
-        Assert.assertEquals(1, resultAfterRefresh.totalHits.value);
+        Assert.assertEquals(1, resultAfterRefresh.totalHits.value());
       }
     }
   }

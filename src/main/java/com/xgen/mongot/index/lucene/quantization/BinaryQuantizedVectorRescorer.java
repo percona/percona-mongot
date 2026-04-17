@@ -26,6 +26,7 @@ import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnFloatVectorQuery;
@@ -284,22 +285,23 @@ public class BinaryQuantizedVectorRescorer {
     }
 
     private VectorScorer createScorer(LeafReader leafReader) throws IOException {
-
       FloatVectorValues vectorValues = leafReader.getFloatVectorValues(this.query.getField());
+      FloatVectorValues copy = vectorValues.copy();
+      FloatVectorValues.DocIndexIterator iterator = copy.iterator();
+
       VectorSimilarityFunction similarityFunction =
           getFieldInfo(leafReader, this.query).getVectorSimilarityFunction();
       float[] target = this.query.getTargetCopy();
-
       return new VectorScorer() {
 
         @Override
         public float score() throws IOException {
-          return similarityFunction.compare(target, iterator().vectorValue());
+          return similarityFunction.compare(target, copy.vectorValue(iterator.index()));
         }
 
         @Override
-        public FloatVectorValues iterator() {
-          return vectorValues;
+        public DocIdSetIterator iterator() {
+          return iterator;
         }
       };
     }

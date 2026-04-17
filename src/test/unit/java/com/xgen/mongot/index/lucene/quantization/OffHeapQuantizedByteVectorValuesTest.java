@@ -34,6 +34,7 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.KnnVectorValues.DocIndexIterator;
 import org.apache.lucene.search.VectorScorer;
 import org.apache.lucene.store.Directory;
 import org.junit.After;
@@ -128,15 +129,17 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void docID_uninitialized_returnsNegativeOne() {
-    int currentDoc = this.vectorValues.docID();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    int currentDoc = iter.docID();
 
     assertEquals(-1, currentDoc);
   }
 
   @Test
   public void docID_afterNextDoc_returnsSameDocId() throws IOException {
-    int firstDoc = this.vectorValues.nextDoc();
-    int currentDoc = this.vectorValues.docID();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    int firstDoc = iter.nextDoc();
+    int currentDoc = iter.docID();
 
     assertEquals(0, firstDoc);
     assertEquals(firstDoc, currentDoc);
@@ -144,11 +147,12 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void vectorValue_calledTwice_returnsCachedValue() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
 
-    byte[] ref1 = this.vectorValues.vectorValue();
+    byte[] ref1 = this.vectorValues.vectorValue(iter.index());
     byte[] value1 = ref1.clone();
-    byte[] ref2 = this.vectorValues.vectorValue();
+    byte[] ref2 = this.vectorValues.vectorValue(iter.index());
 
     assertSame(ref1, ref2);
     assertArrayEquals(value1, ref2);
@@ -156,12 +160,13 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void vectorValue_subsequentVectors_shareBuffer() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
 
-    byte[] ref1 = this.vectorValues.vectorValue();
+    byte[] ref1 = this.vectorValues.vectorValue(iter.index());
     byte[] value1 = ref1.clone();
-    this.vectorValues.nextDoc();
-    byte[] ref2 = this.vectorValues.vectorValue();
+    iter.nextDoc();
+    byte[] ref2 = this.vectorValues.vectorValue(iter.index());
 
     assertSame(ref1, ref2);
     assertThat(ref2).isNotEqualTo(value1);
@@ -176,22 +181,24 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void getScoreCorrectionConstant_isIdempotent() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
 
-    float correction = this.vectorValues.getScoreCorrectionConstant();
-    float correctionCopy = this.vectorValues.getScoreCorrectionConstant();
+    float correction = this.vectorValues.getScoreCorrectionConstant(iter.index());
+    float correctionCopy = this.vectorValues.getScoreCorrectionConstant(iter.index());
 
     assertEquals(correction, correctionCopy, TestUtils.EPSILON);
   }
 
   @Test
   public void getScoreCorrectionConstant_doesNotDiscardVector() throws IOException {
-    this.vectorValues.nextDoc();
-    byte[] ref1 = this.vectorValues.vectorValue();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
+    byte[] ref1 = this.vectorValues.vectorValue(iter.index());
     byte[] value1 = ref1.clone();
 
-    this.vectorValues.getScoreCorrectionConstant();
-    byte[] ref2 = this.vectorValues.vectorValue();
+    this.vectorValues.getScoreCorrectionConstant(iter.index());
+    byte[] ref2 = this.vectorValues.vectorValue(iter.index());
 
     assertSame(ref1, ref2);
     assertArrayEquals(value1, ref2);
@@ -206,7 +213,8 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void scorer_withoutNextDoc_returnsNegativeOne() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
 
     VectorScorer scorer = this.vectorValues.scorer(new float[VEC_DIM]);
 
@@ -215,10 +223,11 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void scorer_exactMatch_returnsOne() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
     float[] query = new float[this.vectorValues.dimension()];
     // Create query vector that scores perfectly against first vector.
-    BinaryQuantizationUtils.dequantize(this.vectorValues.vectorValue(), query);
+    BinaryQuantizationUtils.dequantize(this.vectorValues.vectorValue(iter.index()), query);
 
     VectorScorer scorer = this.vectorValues.scorer(query);
     scorer.iterator().nextDoc();
@@ -228,10 +237,11 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void scorer_exactInverse_returnsMinScore() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
     float[] query = new float[this.vectorValues.dimension()];
     // Create query vector that complements first vector
-    BinaryQuantizationUtils.dequantize(this.vectorValues.vectorValue(), query);
+    BinaryQuantizationUtils.dequantize(this.vectorValues.vectorValue(iter.index()), query);
     for (int i = 0; i < query.length; ++i) {
       query[i] *= -1;
     }
@@ -245,7 +255,8 @@ public class OffHeapQuantizedByteVectorValuesTest {
 
   @Test
   public void scorer_scoreAllDocs_returnsValidScore() throws IOException {
-    this.vectorValues.nextDoc();
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
     float[] query = VectorTestUtils.createUnitVector(VEC_DIM);
     VectorScorer scorer = this.vectorValues.scorer(query);
 

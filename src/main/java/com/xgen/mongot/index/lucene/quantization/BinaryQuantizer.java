@@ -24,6 +24,7 @@ import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 import com.google.errorprone.annotations.Var;
 import java.io.IOException;
 import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.KnnVectorValues.DocIndexIterator;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.quantization.ScalarQuantizer;
 
@@ -68,8 +69,9 @@ public class BinaryQuantizer extends ScalarQuantizer {
     // TODO(corecursion): can we just provide dummy (0, 1?) values for these min and max quantiles
     @Var float min = Float.POSITIVE_INFINITY;
     @Var float max = Float.NEGATIVE_INFINITY;
-    while (floatVectorValues.nextDoc() != NO_MORE_DOCS) {
-      for (float v : floatVectorValues.vectorValue()) {
+    DocIndexIterator iterator = floatVectorValues.iterator();
+    while (iterator.nextDoc() != NO_MORE_DOCS) {
+      for (float v : floatVectorValues.vectorValue(iterator.index())) {
         min = Math.min(min, v);
         max = Math.max(max, v);
       }

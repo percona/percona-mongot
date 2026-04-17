@@ -26,6 +26,7 @@ java_test_suite(
         "@maven//:com_google_truth_truth",
         "@maven//:io_micrometer_micrometer_core",
         "@maven//:junit_junit",
+        "@maven//:org_apache_lucene_lucene_backward_codecs",
         "@maven//:org_apache_lucene_lucene_core",
         "@maven//:org_apache_lucene_lucene_test_framework",
     ],

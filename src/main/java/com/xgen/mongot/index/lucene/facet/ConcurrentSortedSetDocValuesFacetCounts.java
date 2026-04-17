@@ -102,7 +102,7 @@ public class ConcurrentSortedSetDocValuesFacetCounts extends AbstractSortedSetDo
     @Override
     public Void call() throws IOException {
       // If we're counting collected hits but there were none, short-circuit:
-      if (this.hits != null && this.hits.totalHits == 0) {
+      if (this.hits != null && this.hits.totalHits() == 0) {
         return null;
       }
 
@@ -125,7 +125,8 @@ public class ConcurrentSortedSetDocValuesFacetCounts extends AbstractSortedSetDo
         it = (liveDocs != null) ? FacetUtils.liveDocsDISI(valuesIt, liveDocs) : valuesIt;
       } else {
         it =
-            ConjunctionUtils.intersectIterators(Arrays.asList(this.hits.bits.iterator(), valuesIt));
+            ConjunctionUtils.intersectIterators(
+                Arrays.asList(this.hits.bits().iterator(), valuesIt));
       }
 
       if (this.ordinalMap != null) {
@@ -133,7 +134,7 @@ public class ConcurrentSortedSetDocValuesFacetCounts extends AbstractSortedSetDo
 
         int numSegOrds = (int) multiValues.getValueCount();
 
-        if (this.hits != null && this.hits.totalHits < numSegOrds / 10) {
+        if (this.hits != null && this.hits.totalHits() < numSegOrds / 10) {
           // Remap every ord to global ord as we iterate:
           if (singleValues != null) {
             if (singleValues == it) {
@@ -283,7 +284,7 @@ public class ConcurrentSortedSetDocValuesFacetCounts extends AbstractSortedSetDo
       // the top-level reader passed to the
       // SortedSetDocValuesReaderState, else cryptic
       // AIOOBE can happen:
-      if (ReaderUtil.getTopLevelContext(hits.context).reader() != reader) {
+      if (ReaderUtil.getTopLevelContext(hits.context()).reader() != reader) {
         throw new IllegalStateException(
             "the TokenSsdvFacetState provided to this class does not "
                 + "match the reader being searched; you must create a new TokenSsdvFacetState "
@@ -292,7 +293,7 @@ public class ConcurrentSortedSetDocValuesFacetCounts extends AbstractSortedSetDo
 
       results.add(
           this.exec.submit(
-              new CountOneSegment(hits.context.reader(), hits, ordinalMap, hits.context.ord)));
+              new CountOneSegment(hits.context().reader(), hits, ordinalMap, hits.context().ord)));
     }
 
     for (Future<Void> result : results) {

@@ -7,7 +7,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99Codec;
+import org.apache.lucene.codecs.lucene101.Lucene101Codec;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.KnnFloatVectorField;
@@ -18,6 +18,7 @@ import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.KnnVectorValues.DocIndexIterator;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.index.Term;
@@ -35,7 +36,7 @@ public class Mongot01042HnswBinaryQuantizedVectorsFormatTest extends BaseKnnVect
 
   @Override
   protected Codec getCodec() {
-    return new Lucene99Codec() {
+    return new Lucene101Codec() {
       @Override
       public KnnVectorsFormat getKnnVectorsFormatForField(String field) {
         return Mongot01042HnswBinaryQuantizedVectorsFormatTest.this.format;
@@ -122,11 +123,11 @@ public class Mongot01042HnswBinaryQuantizedVectorsFormatTest extends BaseKnnVect
               ctx.reader()
                   .searchNearestVectors(
                       fieldName, randomNormalizedVector(dimension), k, liveDocs, visitedLimit);
-          if (results.totalHits.relation == TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO) {
-            assertEquals(visitedLimit, results.totalHits.value);
+          if (results.totalHits.relation() == TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO) {
+            assertEquals(visitedLimit, results.totalHits.value());
           } else {
-            assertEquals(TotalHits.Relation.EQUAL_TO, results.totalHits.relation);
-            assertTrue(results.totalHits.value <= visitedLimit);
+            assertEquals(TotalHits.Relation.EQUAL_TO, results.totalHits.relation());
+            assertTrue(results.totalHits.value() <= visitedLimit);
           }
 
           k = vectorValues.size();
@@ -135,8 +136,8 @@ public class Mongot01042HnswBinaryQuantizedVectorsFormatTest extends BaseKnnVect
               ctx.reader()
                   .searchNearestVectors(
                       fieldName, randomNormalizedVector(dimension), k, liveDocs, visitedLimit);
-          assertEquals(TotalHits.Relation.EQUAL_TO, secondResults.totalHits.relation);
-          assertTrue(secondResults.totalHits.value <= visitedLimit);
+          assertEquals(TotalHits.Relation.EQUAL_TO, secondResults.totalHits.relation());
+          assertTrue(secondResults.totalHits.value() <= visitedLimit);
         }
       }
     }
@@ -175,10 +176,11 @@ public class Mongot01042HnswBinaryQuantizedVectorsFormatTest extends BaseKnnVect
             continue;
           }
           StoredFields storedFields = ctx.reader().storedFields();
+          DocIndexIterator iter = vectorValues.iterator();
           @Var int docId;
           @Var int numLiveDocsWithVectors = 0;
-          while ((docId = vectorValues.nextDoc()) != NO_MORE_DOCS) {
-            float[] v = vectorValues.vectorValue();
+          while ((docId = iter.nextDoc()) != NO_MORE_DOCS) {
+            float[] v = vectorValues.vectorValue(iter.index());
             assertEquals(dimension, v.length);
             String idString = storedFields.document(docId).getField("id").stringValue();
             int id = Integer.parseInt(idString);

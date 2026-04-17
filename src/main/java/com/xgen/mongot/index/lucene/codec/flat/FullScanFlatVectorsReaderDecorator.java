@@ -50,11 +50,6 @@ class FullScanFlatVectorsReaderDecorator extends KnnVectorsReader {
     this.reader.close();
   }
 
-  @Override
-  public long ramBytesUsed() {
-    return this.reader.ramBytesUsed();
-  }
-
   /**
    * Executes an exhaustive k-nearest neighbor search for float32 vectors.
    *

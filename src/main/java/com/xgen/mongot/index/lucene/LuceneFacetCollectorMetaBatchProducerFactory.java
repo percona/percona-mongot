@@ -43,7 +43,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
       throws IOException, InterruptedException, InvalidQueryException {
     // Ensure that we have an exact count.
     checkState(
-        topDocs.totalHits.relation == TotalHits.Relation.EQUAL_TO,
+        topDocs.totalHits.relation() == TotalHits.Relation.EQUAL_TO,
         "LuceneFacetCollectorMetaBatchProducer requires an exact count.");
     var returnScopePath = collectorQuery.returnScope().map(ReturnScope::path);
     switch (collectorQuery.collector()) {
@@ -58,7 +58,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
                 typeToFacetToDefinition.get(FacetDefinition.Type.NUMBER),
                 facetContext,
                 facetsCollector,
-                topDocs.totalHits.value,
+                topDocs.totalHits.value(),
                 returnScopePath));
 
         bucketProducers.addAll(
@@ -66,7 +66,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
                 typeToFacetToDefinition.get(FacetDefinition.Type.DATE),
                 facetContext,
                 facetsCollector,
-                topDocs.totalHits.value,
+                topDocs.totalHits.value(),
                 returnScopePath));
 
         bucketProducers.addAll(
@@ -79,7 +79,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
                 concurrentSearchExecutor));
 
         return new LuceneFacetCollectorMetaBatchProducer(
-            topDocs.totalHits.value, bucketProducers, facetCollector);
+            topDocs.totalHits.value(), bucketProducers, facetCollector);
     }
   }
 

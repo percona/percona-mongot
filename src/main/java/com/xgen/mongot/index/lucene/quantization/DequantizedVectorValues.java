@@ -3,6 +3,7 @@ package com.xgen.mongot.index.lucene.quantization;
 import java.io.IOException;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.VectorScorer;
 import org.apache.lucene.util.quantization.QuantizedByteVectorValues;
 
@@ -12,7 +13,7 @@ public class DequantizedVectorValues extends FloatVectorValues {
   private final VectorSimilarityFunction similarityFunction;
 
   /**
-   * A reusable buffer that enables vectorValues() to skip array allocations. This is valid because
+   * A reusable buffer that enables vectorValue() to skip array allocations. This is valid because
    * the contract of FloatVectorValues specifies that the caller is responsible for copying the
    * result of vectorValue() if it needs to reuse it.
    */
@@ -27,13 +28,6 @@ public class DequantizedVectorValues extends FloatVectorValues {
   }
 
   @Override
-  public float[] vectorValue() throws IOException {
-    byte[] packedBits = this.quantizedVectorValues.vectorValue();
-    BinaryQuantizationUtils.dequantize(packedBits, this.scratchBuffer);
-    return this.scratchBuffer;
-  }
-
-  @Override
   public int dimension() {
     return this.quantizedVectorValues.dimension();
   }
@@ -44,34 +38,37 @@ public class DequantizedVectorValues extends FloatVectorValues {
   }
 
   @Override
-  public int docID() {
-    return this.quantizedVectorValues.docID();
+  public float[] vectorValue(int ord) throws IOException {
+    byte[] packedBits = this.quantizedVectorValues.vectorValue(ord);
+    BinaryQuantizationUtils.dequantize(packedBits, this.scratchBuffer);
+    return this.scratchBuffer;
   }
 
   @Override
-  public int nextDoc() throws IOException {
-    return this.quantizedVectorValues.nextDoc();
-  }
-
-  @Override
-  public int advance(int target) throws IOException {
-    return this.quantizedVectorValues.advance(target);
+  public FloatVectorValues copy() throws IOException {
+    return new DequantizedVectorValues(this.quantizedVectorValues.copy(), this.similarityFunction);
   }
 
   @Override
   public VectorScorer scorer(float[] query) throws IOException {
+    DocIndexIterator itr = DequantizedVectorValues.this.quantizedVectorValues.iterator();
     return new VectorScorer() {
 
       @Override
       public float score() throws IOException {
         return DequantizedVectorValues.this.similarityFunction.compare(
-            query, iterator().vectorValue());
+            query, vectorValue(itr.index()));
       }
 
       @Override
-      public FloatVectorValues iterator() {
-        return DequantizedVectorValues.this;
+      public DocIdSetIterator iterator() {
+        return itr;
       }
     };
+  }
+
+  @Override
+  public DocIndexIterator iterator() {
+    return this.quantizedVectorValues.iterator();
   }
 }

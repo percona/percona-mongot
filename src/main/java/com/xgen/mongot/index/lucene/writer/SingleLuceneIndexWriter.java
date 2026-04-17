@@ -200,6 +200,8 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
                     vectorFields,
                     bloomFilterForIdFieldEnabledSupplier,
                     Optional.of(indexingMetricsUpdater)))
+            // This is needed to separate lucene codec upgrade from code upgrade.
+            .setIndexCreatedVersionMajor(LuceneCodec.CODEC_VERSION_MAJOR)
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)
             .setMergeScheduler(mergeScheduler)
@@ -276,6 +278,8 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
                     pathToField,
                     bloomFilterForIdFieldEnabledSupplier,
                     Optional.of(indexingMetricsUpdater)))
+            // This is needed to separate lucene codec upgrade from code upgrade.
+            .setIndexCreatedVersionMajor(LuceneCodec.CODEC_VERSION_MAJOR)
             .setSimilarity(similarity)
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)

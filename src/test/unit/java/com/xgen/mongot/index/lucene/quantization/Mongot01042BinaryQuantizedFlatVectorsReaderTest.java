@@ -238,7 +238,7 @@ public class Mongot01042BinaryQuantizedFlatVectorsReaderTest {
               case FLOAT32 -> leafReader.getFloatVectorValues(field);
             };
         assertNotNull(vectorValues);
-        assertEquals(NO_MORE_DOCS, vectorValues.nextDoc());
+        assertEquals(NO_MORE_DOCS, vectorValues.iterator().nextDoc());
       }
     }
   }
@@ -287,7 +287,7 @@ public class Mongot01042BinaryQuantizedFlatVectorsReaderTest {
 
         assertNotNull(quantized);
         assertThat(quantized).isInstanceOf(OffHeapQuantizedByteVectorValues.class);
-        assertEquals(NO_MORE_DOCS, quantized.nextDoc());
+        assertEquals(NO_MORE_DOCS, quantized.iterator().nextDoc());
       }
     }
   }

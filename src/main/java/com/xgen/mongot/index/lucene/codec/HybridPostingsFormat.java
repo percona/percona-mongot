@@ -4,9 +4,9 @@ import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 
 /**

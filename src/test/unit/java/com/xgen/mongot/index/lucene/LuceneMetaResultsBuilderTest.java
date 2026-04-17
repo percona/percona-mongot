@@ -39,7 +39,7 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StringField;
-import org.apache.lucene.facet.FacetsCollector;
+import org.apache.lucene.facet.FacetsCollectorManager;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetField;
 import org.apache.lucene.index.IndexWriter;
@@ -163,13 +163,16 @@ public class LuceneMetaResultsBuilderTest {
               FeatureFlags.getDefault());
 
       // Collect facets
-      var facetsCollector = new FacetsCollector();
+      var facetsCollectorManager = new FacetsCollectorManager();
       var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-      var topDocs =
-          FacetsCollector.search(searcherReference.getIndexSearcher(), query, 100, facetsCollector);
+      FacetsCollectorManager.FacetsResult result =
+          FacetsCollectorManager.search(
+              searcherReference.getIndexSearcher(), query, 100, facetsCollectorManager);
+      var topDocs = result.topDocs();
+      var facetsCollector = result.facetsCollector();
 
       // Verify we found the expected number of documents
-      assertEquals(6, topDocs.totalHits.value);
+      assertEquals(6, topDocs.totalHits.value());
 
       // Create and invoke LuceneMetaResultsBuilder
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
@@ -260,12 +263,15 @@ public class LuceneMetaResultsBuilderTest {
               SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),
               FeatureFlags.getDefault());
 
-      var facetsCollector = new FacetsCollector();
+      var facetsCollectorManager = new FacetsCollectorManager();
       var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-      var topDocs =
-          FacetsCollector.search(searcherReference.getIndexSearcher(), query, 100, facetsCollector);
+      FacetsCollectorManager.FacetsResult result =
+          FacetsCollectorManager.search(
+              searcherReference.getIndexSearcher(), query, 100, facetsCollectorManager);
+      var topDocs = result.topDocs();
+      var facetsCollector = result.facetsCollector();
 
-      assertEquals(6, topDocs.totalHits.value);
+      assertEquals(6, topDocs.totalHits.value());
 
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
@@ -343,12 +349,15 @@ public class LuceneMetaResultsBuilderTest {
               SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),
               FeatureFlags.getDefault());
 
-      var facetsCollector = new FacetsCollector();
+      var facetsCollectorManager = new FacetsCollectorManager();
       var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-      var topDocs =
-          FacetsCollector.search(searcherReference.getIndexSearcher(), query, 100, facetsCollector);
+      FacetsCollectorManager.FacetsResult result =
+          FacetsCollectorManager.search(
+              searcherReference.getIndexSearcher(), query, 100, facetsCollectorManager);
+      var topDocs = result.topDocs();
+      var facetsCollector = result.facetsCollector();
 
-      assertEquals(0, topDocs.totalHits.value);
+      assertEquals(0, topDocs.totalHits.value());
 
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
@@ -428,12 +437,15 @@ public class LuceneMetaResultsBuilderTest {
               SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),
               FeatureFlags.getDefault());
 
-      var facetsCollector = new FacetsCollector();
+      var facetsCollectorManager = new FacetsCollectorManager();
       var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-      var topDocs =
-          FacetsCollector.search(searcherReference.getIndexSearcher(), query, 100, facetsCollector);
+      FacetsCollectorManager.FacetsResult result =
+          FacetsCollectorManager.search(
+              searcherReference.getIndexSearcher(), query, 100, facetsCollectorManager);
+      var topDocs = result.topDocs();
+      var facetsCollector = result.facetsCollector();
 
-      assertEquals(6, topDocs.totalHits.value);
+      assertEquals(6, topDocs.totalHits.value());
 
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
@@ -526,17 +538,21 @@ public class LuceneMetaResultsBuilderTest {
               SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),
               FeatureFlags.getDefault());
 
-      var facetsCollector = new FacetsCollector();
-      var topDocs =
-          FacetsCollector.search(
-              searcherReference.getIndexSearcher(), new MatchAllDocsQuery(), 100, facetsCollector);
+      var facetsCollectorManager = new FacetsCollectorManager();
+      FacetsCollectorManager.FacetsResult result =
+          FacetsCollectorManager.search(
+              searcherReference.getIndexSearcher(),
+              new MatchAllDocsQuery(),
+              100,
+              facetsCollectorManager);
+      var topDocs = result.topDocs();
 
-      assertEquals(10, topDocs.totalHits.value);
+      assertEquals(10, topDocs.totalHits.value());
 
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
           metaResultsBuilder.buildFacetMetaResults(
-              searcherReference, topDocs, facetsCollector, collectorQuery, false);
+              searcherReference, topDocs, result.facetsCollector(), collectorQuery, false);
 
       assertThat(metaResults.facet()).isPresent();
 

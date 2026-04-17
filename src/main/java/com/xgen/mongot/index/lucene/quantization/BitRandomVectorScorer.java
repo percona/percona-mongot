@@ -2,12 +2,12 @@ package com.xgen.mongot.index.lucene.quantization;
 
 import com.xgen.mongot.index.lucene.util.VectorSearchUtil;
 import java.io.IOException;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 
 public class BitRandomVectorScorer implements RandomVectorScorer {
-  private final RandomAccessVectorValues.Bytes vectorValues;
+  private final ByteVectorValues vectorValues;
 
   /** Number of bits to consider when scoring (i.e. query.length * 8 - padding) */
   private final int bitDimensions;
@@ -21,7 +21,7 @@ public class BitRandomVectorScorer implements RandomVectorScorer {
    * @param vectorValues an iterator over densely packed bit vectors
    * @param query a bit vector densely packed into a byte[] to score against
    */
-  BitRandomVectorScorer(RandomAccessVectorValues.Bytes vectorValues, byte[] query) {
+  BitRandomVectorScorer(ByteVectorValues vectorValues, byte[] query) {
     this.query = query;
     // Note: scaling bitDimensions is correct and necessary to avoid negative scores on
     // pre-quantized BitVectors. For auto-quantized bit vectors, it incorrectly scales dimensions

@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Optional;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -77,8 +78,7 @@ public class NestedAvgVectorRescorer {
 
     @Var int i = 0;
     while (i < scoreDocs.length) {
-      LeafReaderContext segment =
-          segments.get(ReaderUtil.subIndex(scoreDocs[i].doc, segments));
+      LeafReaderContext segment = segments.get(ReaderUtil.subIndex(scoreDocs[i].doc, segments));
       int maxDoc = segment.docBase + segment.reader().maxDoc();
 
       int start = i;
@@ -98,8 +98,7 @@ public class NestedAvgVectorRescorer {
       scoreDocs = Arrays.copyOf(scoreDocs, limit);
     }
 
-    return new TopDocs(
-        new TotalHits(scoreDocs.length, TotalHits.Relation.EQUAL_TO), scoreDocs);
+    return new TopDocs(new TotalHits(scoreDocs.length, TotalHits.Relation.EQUAL_TO), scoreDocs);
   }
 
   private static void rescoreSegment(
@@ -125,8 +124,7 @@ public class NestedAvgVectorRescorer {
 
     for (int i = start; i < end; i++) {
       int localParentDoc = scoreDocs[i].doc - segment.docBase;
-      int prevParent =
-          (localParentDoc > 0) ? parentBitSet.prevSetBit(localParentDoc - 1) : -1;
+      int prevParent = (localParentDoc > 0) ? parentBitSet.prevSetBit(localParentDoc - 1) : -1;
       int firstChild = prevParent + 1;
 
       if (firstChild >= localParentDoc) {
@@ -138,16 +136,19 @@ public class NestedAvgVectorRescorer {
         continue;
       }
 
+      KnnVectorValues.DocIndexIterator vectorIterator = childVectors.iterator();
       @Var float scoreSum = 0;
       @Var int childCount = 0;
       @Var int docId = firstChild;
 
       while (docId < localParentDoc) {
-        int found = childVectors.advance(docId);
+        int found = vectorIterator.advance(docId);
         if (found == NO_MORE_DOCS || found >= localParentDoc) {
           break;
         }
-        scoreSum += similarityFunction.compare(queryVector, childVectors.vectorValue());
+        scoreSum +=
+            similarityFunction.compare(
+                queryVector, childVectors.vectorValue(vectorIterator.index()));
         childCount++;
         docId = found + 1;
       }
@@ -165,7 +166,7 @@ public class NestedAvgVectorRescorer {
     }
     if (query instanceof BooleanQuery bq) {
       for (BooleanClause clause : bq.clauses()) {
-        if (clause.getQuery() instanceof WrappedToParentBlockJoinQuery bjq) {
+        if (clause.query() instanceof WrappedToParentBlockJoinQuery bjq) {
           return Optional.of(bjq);
         }
       }

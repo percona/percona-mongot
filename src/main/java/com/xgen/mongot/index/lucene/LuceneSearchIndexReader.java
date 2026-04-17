@@ -938,7 +938,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
             scoreDetailsManager,
             queryCursorOptions,
             queryOptimizationFlags),
-        new CountMetaBatchProducer(queryInfo.topDocs.totalHits.value));
+        new CountMetaBatchProducer(queryInfo.topDocs.totalHits.value()));
   }
 
   private SearchProducerAndMetaProducer intermediateCollectorQuery(
@@ -1406,7 +1406,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
                       state.getPrefixToOrdRange().values().stream()
                           // get cardinality of each field using the range of ordinal numbers
                           // representing the unique values for a facet field
-                          .mapToInt(ordRange -> ordRange.end - ordRange.start + 1)
+                          .mapToInt(ordRange -> ordRange.end() - ordRange.start() + 1)
                           .max()
                           .orElse(0))
               .orElse(0);

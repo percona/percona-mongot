@@ -69,11 +69,11 @@ import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FilterLeafReader;
-import org.apache.lucene.index.FilterVectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.index.KnnVectorValues.DocIndexIterator;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.TieredMergePolicy;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -120,7 +120,7 @@ public class LuceneVectorIndexReaderTest {
           }
 
           @Override
-          public byte[] vectorValue() {
+          public byte[] vectorValue(int ord) {
             return new byte[dimension];
           }
 
@@ -130,28 +130,24 @@ public class LuceneVectorIndexReaderTest {
           }
 
           @Override
-          public int docID() {
-            return 0;
+          public ByteVectorValues copy() {
+            return this;
           }
 
           @Override
-          public int nextDoc() {
-            return 0;
-          }
-
-          @Override
-          public int advance(int target) {
-            return 0;
+          public DocIndexIterator iterator() {
+            return createDenseIterator();
           }
         };
       }
 
       @Override
       public FloatVectorValues getFloatVectorValues(String field) throws IOException {
-        return new FilterVectorValues(this.in.getFloatVectorValues(field)) {
+        FloatVectorValues delegate = this.in.getFloatVectorValues(field);
+        return new FloatVectorValues() {
           @Override
           public VectorScorer scorer(float[] query) throws IOException {
-            return super.in.scorer(query);
+            return delegate.scorer(query);
           }
 
           @Override
@@ -162,6 +158,21 @@ public class LuceneVectorIndexReaderTest {
           @Override
           public int dimension() {
             return dimension;
+          }
+
+          @Override
+          public float[] vectorValue(int ord) throws IOException {
+            return delegate.vectorValue(ord);
+          }
+
+          @Override
+          public FloatVectorValues copy() throws IOException {
+            return this;
+          }
+
+          @Override
+          public DocIndexIterator iterator() {
+            return delegate.iterator();
           }
         };
       }

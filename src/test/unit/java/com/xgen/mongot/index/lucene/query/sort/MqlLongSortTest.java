@@ -606,7 +606,7 @@ public class MqlLongSortTest {
 
       if (enablePruning) {
         // in LongSort documents with Long.MIN_VALUE are considered competitive and are evaluated
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7300);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7300);
         SortPruningTestUtils.assertNullOptimizedSort(
             topDocs, numHits, numDocs, NullEmptySortPosition.LOWEST);
       }
@@ -673,7 +673,7 @@ public class MqlLongSortTest {
         // Long.MAX_VALUE and all 4000 documents in the second segment would be pruned. The
         // resulting queue would be unchanged and end up as [null, null, null (bottom)], which is
         // incorrect.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7003);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7003);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocsContainingField);
       }
 
@@ -720,7 +720,7 @@ public class MqlLongSortTest {
       TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
 
       if (enablePruning) {
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       }
       return List.of(topDocs);
@@ -766,7 +766,7 @@ public class MqlLongSortTest {
       TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
 
       if (enablePruning) {
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7);
         SortPruningTestUtils.assertReversedOptimizedSort(topDocs, numHits, numDocs);
       }
       return List.of(topDocs);
@@ -1527,7 +1527,7 @@ public class MqlLongSortTest {
         // Collect 3 hits into sort queue. Collecting 4th hit triggers pruning of remaining docs in
         // segment. In ascending sort with nulls: highest, docs with missing values are
         // non-competitive.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(4);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(4);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       }
       return List.of(topDocs);

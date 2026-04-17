@@ -193,7 +193,9 @@ def java_deps():
     maven_install(
         name = "lucene_fork",
         artifacts = LUCENE_FORK_ARTIFACTS,
-        repositories = ["https://downloads.mongodb.com/lucene-mongot/maven"],
+        repositories = [
+            "https://downloads.mongodb.com/lucene-mongot/maven",
+        ],
         fetch_sources = True,
         maven_install_json = "//bazel/java:lucene_fork_pin_info.json",
     )

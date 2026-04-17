@@ -27,7 +27,7 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.facet.FacetResult;
-import org.apache.lucene.facet.FacetsCollector;
+import org.apache.lucene.facet.FacetsCollectorManager;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -203,12 +203,15 @@ public class LuceneFacetResultUtilTest {
         IndexSearcher searcher = new IndexSearcher(reader);
 
         // Collect facets for "hit" documents
-        var collector = new FacetsCollector();
+        var facetsCollectorManager = new FacetsCollectorManager();
         var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-        var topDocs = FacetsCollector.search(searcher, query, 100, collector);
+        FacetsCollectorManager.FacetsResult facetsResult =
+            FacetsCollectorManager.search(searcher, query, 100, facetsCollectorManager);
+        var topDocs = facetsResult.topDocs();
+        var collector = facetsResult.facetsCollector();
 
         // Verify we found the expected number of documents
-        assertThat(topDocs.totalHits.value).isEqualTo(6);
+        assertThat(topDocs.totalHits.value()).isEqualTo(6);
 
         // Call the method under test
         FacetResult result =
@@ -256,9 +259,11 @@ public class LuceneFacetResultUtilTest {
         IndexSearcher searcher = new IndexSearcher(reader);
 
         // Collect facets for "hit" documents (none exist)
-        var collector = new FacetsCollector();
+        var facetsCollectorManager = new FacetsCollectorManager();
         var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-        FacetsCollector.search(searcher, query, 100, collector);
+        FacetsCollectorManager.FacetsResult facetsResult =
+            FacetsCollectorManager.search(searcher, query, 100, facetsCollectorManager);
+        var collector = facetsResult.facetsCollector();
 
         FacetResult result =
             LuceneFacetResultUtil.getBoundaryFacetResult(

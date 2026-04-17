@@ -72,7 +72,7 @@ public class RescoringTest {
       TopDocs topDocs = searcher.search(query, 10);
       IntUnaryOperator idGetter = idForTopDocsIdx(searcher, topDocs);
 
-      Assert.assertEquals("should return four docs", 4L, topDocs.totalHits.value);
+      Assert.assertEquals("should return four docs", 4L, topDocs.totalHits.value());
 
       Assert.assertEquals("first document has _id=1", 1, idGetter.applyAsInt(0));
       Assert.assertEquals("doc1 should score to value of six", 9, topDocs.scoreDocs[0].score, 0);
@@ -159,7 +159,7 @@ public class RescoringTest {
       Query query = Rescoring.rewriteScore(new MatchAllDocsQuery(), expression, mappings);
       TopDocs topDocs = searcher.search(query, 10);
 
-      Assert.assertEquals("should return one document", 1L, topDocs.totalHits.value);
+      Assert.assertEquals("should return one document", 1L, topDocs.totalHits.value());
       Assert.assertEquals(
           "document should have expected score", expectedScore, topDocs.scoreDocs[0].score, 1E-6);
     }

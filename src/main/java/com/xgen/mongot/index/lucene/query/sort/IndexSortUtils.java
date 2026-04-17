@@ -30,7 +30,7 @@ public class IndexSortUtils {
     if (reader.leaves().isEmpty()) {
       return Optional.empty();
     }
-    return Optional.ofNullable(reader.leaves().get(0).reader().getMetaData().getSort());
+    return Optional.ofNullable(reader.leaves().get(0).reader().getMetaData().sort());
   }
 
   /**

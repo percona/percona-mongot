@@ -3,15 +3,25 @@ package com.xgen.mongot.index.lucene.explain.profiler;
 import com.xgen.mongot.index.lucene.explain.timing.ExplainTimings;
 import java.io.IOException;
 import org.apache.lucene.search.LeafCollector;
-import org.apache.lucene.search.TopScoreDocCollector;
+import org.apache.lucene.search.Scorable;
 import org.junit.Assert;
 import org.junit.Test;
 
 public class ProfileLeafCollectorTest {
+
   private static LeafCollector createCollector() {
-    return new TopScoreDocCollector.ScorerLeafCollector() {
+    return new LeafCollector() {
+      private Scorable scorer;
+
       @Override
-      public void collect(int doc) throws IOException {}
+      public void setScorer(Scorable scorer) {
+        this.scorer = scorer;
+      }
+
+      @Override
+      public void collect(int doc) {
+        // You can use scorer.score() if needed
+      }
     };
   }
 

@@ -33,7 +33,7 @@ public class ByteReadCollectorTest {
     doReturn(mockIndexInput)
         .when(spyDirectory)
         .openInputBase(eq(testFileName), any(IOContext.class));
-    var result = spyDirectory.openInput(testFileName, new IOContext()).readByte();
+    var result = spyDirectory.openInput(testFileName, IOContext.DEFAULT).readByte();
     assertEquals(1, result); // Verify the byte read is correct
     verify(mockIndexInput).readByte(); // Ensure the underlying IndexInput is called
   }
@@ -52,7 +52,7 @@ public class ByteReadCollectorTest {
     doReturn(mockIndexInput)
         .when(spyDirectory)
         .openInputBase(eq(testFileName), any(IOContext.class));
-    spyDirectory.openInput(testFileName, new IOContext()).readByte();
+    spyDirectory.openInput(testFileName, IOContext.DEFAULT).readByte();
     assertEquals(
         1,
         (int)
@@ -71,7 +71,7 @@ public class ByteReadCollectorTest {
         .when(spyDirectory)
         .openInputBase(eq(testFileName), any(IOContext.class));
     var buf = new byte[100];
-    spyDirectory.openInput(testFileName, new IOContext()).readBytes(buf, 50, 20, false);
+    spyDirectory.openInput(testFileName, IOContext.DEFAULT).readBytes(buf, 50, 20, false);
     verify(mockIndexInput).readBytes(buf, 50, 20, false);
   }
 
@@ -89,7 +89,7 @@ public class ByteReadCollectorTest {
         .when(spyDirectory)
         .openInputBase(eq(testFileName), any(IOContext.class));
     var buf = new byte[100];
-    spyDirectory.openInput(testFileName, new IOContext()).readBytes(buf, 50, 20);
+    spyDirectory.openInput(testFileName, IOContext.DEFAULT).readBytes(buf, 50, 20);
     assertEquals(
         20,
         (int)
@@ -112,7 +112,7 @@ public class ByteReadCollectorTest {
         .when(spyDirectory)
         .openInputBase(eq(testFileName), any(IOContext.class));
     var buf = new byte[100];
-    var indexInput = spyDirectory.openInput(testFileName, new IOContext());
+    var indexInput = spyDirectory.openInput(testFileName, IOContext.DEFAULT);
     indexInput.readBytes(buf, 50, 20);
     indexInput.readBytes(buf, 50, 20);
     verify(mockIndexInput, times(2)).readBytes(buf, 50, 20);

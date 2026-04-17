@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.lucene.backward_codecs.lucene99.Lucene94FieldInfosFormatV1;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
@@ -37,10 +39,8 @@ import org.apache.lucene.codecs.lucene90.Lucene90LiveDocsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90NormsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90PointsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90TermVectorsFormat;
-import org.apache.lucene.codecs.lucene94.Lucene94FieldInfosFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99SegmentInfoFormat;
 import org.apache.lucene.codecs.perfield.PerFieldDocValuesFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -232,7 +232,7 @@ public class LuceneCodecTest {
     // Remaining formats delegated from Lucene99Codec (except storedFieldsFormat, which LuceneCodec
     // overrides with its own LuceneStoredFieldsFormat).
     assertThat(codec.storedFieldsFormat()).isInstanceOf(LuceneStoredFieldsFormat.class);
-    assertThat(codec.fieldInfosFormat()).isInstanceOf(Lucene94FieldInfosFormat.class);
+    assertThat(codec.fieldInfosFormat()).isInstanceOf(Lucene94FieldInfosFormatV1.class);
     assertThat(codec.segmentInfoFormat()).isInstanceOf(Lucene99SegmentInfoFormat.class);
     assertThat(codec.termVectorsFormat()).isInstanceOf(Lucene90TermVectorsFormat.class);
     assertThat(codec.liveDocsFormat()).isInstanceOf(Lucene90LiveDocsFormat.class);

@@ -41,6 +41,7 @@ import java.util.Optional;
 import java.util.function.IntFunction;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
@@ -465,7 +466,7 @@ public class SearchMergingBatchProducerTest {
         };
 
     StoredFields mockStoredFields = new FakeStoredFields(docGenerator);
-    IndexReader mockReader = mock(IndexReader.class);
+    IndexReader mockReader = mock(LeafReader.class);
     when(mockReader.storedFields()).thenReturn(mockStoredFields);
 
     LuceneIndexSearcherReference ref = mock(LuceneIndexSearcherReference.class);

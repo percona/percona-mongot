@@ -157,7 +157,8 @@ public class ScoreDetailsWrappedQueryTest {
       ScoreDetailsWrappedQuery scoreDetailsWrappedQuery =
           ScoreDetailsWrappedQuery.wrap(new PrefixQuery(new Term("path", "hello")));
 
-      Query result = scoreDetailsWrappedQuery.rewrite(new IndexSearcher(reader));
+      var searcher = new IndexSearcher(reader);
+      Query result = scoreDetailsWrappedQuery.rewrite(searcher);
       Assert.assertNotEquals(
           "wrapped PrefixQuery should be rewritten into a different query",
           scoreDetailsWrappedQuery,
@@ -168,7 +169,7 @@ public class ScoreDetailsWrappedQueryTest {
           ScoreDetailsWrappedQueryBuilder.builder()
               .query(
                   MultiTermQuery.CONSTANT_SCORE_BLENDED_REWRITE.rewrite(
-                      reader, new PrefixQuery(new Term("path", "hello"))))
+                      searcher, new PrefixQuery(new Term("path", "hello"))))
               .build();
 
       Assert.assertEquals(

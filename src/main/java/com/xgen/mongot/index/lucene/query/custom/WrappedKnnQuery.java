@@ -3,7 +3,6 @@ package com.xgen.mongot.index.lucene.query.custom;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.Optional;
-import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnByteVectorQuery;
@@ -31,16 +30,6 @@ public class WrappedKnnQuery extends Query {
   @Override
   public Query rewrite(IndexSearcher indexSearcher) throws IOException {
     Query rewrittenQuery = this.query.rewrite(indexSearcher);
-    if (!Objects.equals(this.query, rewrittenQuery)) {
-      return new WrappedKnnQuery(rewrittenQuery);
-    }
-
-    return this;
-  }
-
-  @Override
-  public Query rewrite(IndexReader reader) throws IOException {
-    Query rewrittenQuery = this.query.rewrite(reader);
     if (!Objects.equals(this.query, rewrittenQuery)) {
       return new WrappedKnnQuery(rewrittenQuery);
     }

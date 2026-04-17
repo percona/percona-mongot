@@ -27,6 +27,7 @@ mongot_java_unit_test_suite(
         "org.apache.lucene:lucene-analysis-smartcn",
         "org.apache.lucene:lucene-analysis-stempel",
         "org.apache.lucene:lucene-backward-codecs",
+        "org.apache.lucene:lucene-codecs",
         "org.apache.lucene:lucene-core",
         "org.apache.lucene:lucene-expressions",
         "org.apache.lucene:lucene-facet",

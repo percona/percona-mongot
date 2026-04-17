@@ -205,30 +205,30 @@ public class NumericNearQueryFactoriesTest {
 
     Assert.assertEquals(
         "$type:double field is correct boolean clause type",
-        expected.clauses().get(1).getOccur(),
-        result.clauses().get(1).getOccur());
+        expected.clauses().get(1).occur(),
+        result.clauses().get(1).occur());
 
-    BooleanQuery expectedDoubleQuery = (BooleanQuery) getClause(expected, 1).getQuery();
-    BooleanQuery resultDoubleQuery = (BooleanQuery) getClause(result, 1).getQuery();
+    BooleanQuery expectedDoubleQuery = (BooleanQuery) getClause(expected, 1).query();
+    BooleanQuery resultDoubleQuery = (BooleanQuery) getClause(result, 1).query();
 
     Assert.assertEquals(
         "$type:double lower half has expected filter clause",
-        expectedDoubleQuery.clauses().get(0).getOccur(),
-        resultDoubleQuery.clauses().get(0).getOccur());
+        expectedDoubleQuery.clauses().get(0).occur(),
+        resultDoubleQuery.clauses().get(0).occur());
     Assert.assertEquals(
         "$type:double field upper half has correct boolean clause type",
-        expectedDoubleQuery.clauses().get(1).getOccur(),
-        resultDoubleQuery.clauses().get(1).getOccur());
+        expectedDoubleQuery.clauses().get(1).occur(),
+        resultDoubleQuery.clauses().get(1).occur());
 
     BooleanQuery expectedDoubleLowerHalfQuery =
-        (BooleanQuery) getClause(expectedDoubleQuery, 0).getQuery();
+        (BooleanQuery) getClause(expectedDoubleQuery, 0).query();
     BooleanQuery expectedDoubleUpperHalfQuery =
-        (BooleanQuery) getClause(expectedDoubleQuery, 1).getQuery();
+        (BooleanQuery) getClause(expectedDoubleQuery, 1).query();
 
     BooleanQuery resultDoubleLowerHalfQuery =
-        (BooleanQuery) getClause(resultDoubleQuery, 0).getQuery();
+        (BooleanQuery) getClause(resultDoubleQuery, 0).query();
     BooleanQuery resultDoubleUpperHalfQuery =
-        (BooleanQuery) getClause(resultDoubleQuery, 1).getQuery();
+        (BooleanQuery) getClause(resultDoubleQuery, 1).query();
 
     Assert.assertEquals(
         "$type:double field lower half has correct filter clause",
@@ -241,21 +241,21 @@ public class NumericNearQueryFactoriesTest {
 
     Assert.assertEquals(
         "$type:double field lower half scoring clause has correct boolean type",
-        expectedDoubleLowerHalfQuery.clauses().get(1).getOccur(),
-        resultDoubleLowerHalfQuery.clauses().get(1).getOccur());
+        expectedDoubleLowerHalfQuery.clauses().get(1).occur(),
+        resultDoubleLowerHalfQuery.clauses().get(1).occur());
     Assert.assertEquals(
         "$type:double field upper half scoring clause has correct boolean type",
-        expectedDoubleUpperHalfQuery.clauses().get(1).getOccur(),
-        resultDoubleUpperHalfQuery.clauses().get(1).getOccur());
+        expectedDoubleUpperHalfQuery.clauses().get(1).occur(),
+        resultDoubleUpperHalfQuery.clauses().get(1).occur());
 
     FunctionScoreQuery expectedLowerScoredQuery =
-        (FunctionScoreQuery) getClause(expectedDoubleLowerHalfQuery, 1).getQuery();
+        (FunctionScoreQuery) getClause(expectedDoubleLowerHalfQuery, 1).query();
     FunctionScoreQuery expectedUpperScoredQuery =
-        (FunctionScoreQuery) getClause(expectedDoubleUpperHalfQuery, 1).getQuery();
+        (FunctionScoreQuery) getClause(expectedDoubleUpperHalfQuery, 1).query();
     FunctionScoreQuery resultLowerScoredQuery =
-        (FunctionScoreQuery) getClause(resultDoubleLowerHalfQuery, 1).getQuery();
+        (FunctionScoreQuery) getClause(resultDoubleLowerHalfQuery, 1).query();
     FunctionScoreQuery resultUpperScoredQuery =
-        (FunctionScoreQuery) getClause(resultDoubleUpperHalfQuery, 1).getQuery();
+        (FunctionScoreQuery) getClause(resultDoubleUpperHalfQuery, 1).query();
 
     Assert.assertEquals(
         "$type:double field lower half scoring function has correct query",

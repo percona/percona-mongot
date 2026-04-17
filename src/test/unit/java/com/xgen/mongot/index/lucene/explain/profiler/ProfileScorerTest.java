@@ -61,7 +61,6 @@ public class ProfileScorerTest {
 
   private static Scorer wrapScorerWithConstant(Scorer scorer) throws IOException {
     return new ConstantScoreScorer(
-        scorer.getWeight(),
         scorer.score(),
         ScoreMode.COMPLETE,
         new TwoPhaseIterator(scorer.iterator()) {
@@ -81,7 +80,7 @@ public class ProfileScorerTest {
   public void testIteratorAdvance() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     checkIteratorAdvance(scorer.iterator(), timings);
   }
@@ -90,7 +89,7 @@ public class ProfileScorerTest {
   public void testIteratorNextDoc() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     checkIteratorNextDoc(scorer.iterator(), timings);
   }
@@ -98,9 +97,7 @@ public class ProfileScorerTest {
   @Test
   public void testIteratorDocId() throws Exception {
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer =
-        new ProfileScorer(
-            wrappedScorer.getWeight(), wrappedScorer, ExplainTimings.builder().build());
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, ExplainTimings.builder().build());
 
     checkIteratorDocId(scorer.iterator());
   }
@@ -109,7 +106,7 @@ public class ProfileScorerTest {
   public void testTwoPhaseIteratorApproximationAdvance() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = wrapScorerWithConstant(createScorer());
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     checkIteratorAdvance(scorer.twoPhaseIterator().approximation(), timings);
   }
@@ -118,7 +115,7 @@ public class ProfileScorerTest {
   public void testTwoPhaseIteratorApproximationNextDoc() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = wrapScorerWithConstant(createScorer());
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     checkIteratorNextDoc(scorer.twoPhaseIterator().approximation(), timings);
   }
@@ -127,7 +124,7 @@ public class ProfileScorerTest {
   public void testTwoPhaseIteratorApproximationDocId() throws Exception {
     ExplainTimings timings = ExplainTimings.builder().build();
     Scorer wrappedScorer = wrapScorerWithConstant(createScorer());
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     checkIteratorDocId(scorer.twoPhaseIterator().approximation());
   }
@@ -136,7 +133,7 @@ public class ProfileScorerTest {
   public void testTwoPhaseIteratorMatches() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = wrapScorerWithConstant(createScorer());
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
     TwoPhaseIterator twoPhaseIterator = scorer.twoPhaseIterator();
     DocIdSetIterator approximation = twoPhaseIterator.approximation();
     while (approximation.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
@@ -151,7 +148,7 @@ public class ProfileScorerTest {
   public void testAdvanceShallow() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     scorer.advanceShallow(0);
     verify(timings).split(ExplainTimings.Type.SHALLOW_ADVANCE);
@@ -162,7 +159,7 @@ public class ProfileScorerTest {
   public void testGetMaxScore() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     // getMaxScore returns the maximum score that documents between the last target docID that the
     // scorer was advanceShallow'ed to and upTo, inclusive. advanceShallow to the first (only) docID
@@ -178,7 +175,7 @@ public class ProfileScorerTest {
   public void testSetMinCompetitiveScore() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     scorer.setMinCompetitiveScore(0.5f);
     verify(timings).split(ExplainTimings.Type.SET_MIN_COMPETITIVE_SCORE);
@@ -189,7 +186,7 @@ public class ProfileScorerTest {
   public void testScore() throws Exception {
     ExplainTimings timings = spy(ExplainTimings.builder().build());
     Scorer wrappedScorer = createScorer();
-    ProfileScorer scorer = new ProfileScorer(wrappedScorer.getWeight(), wrappedScorer, timings);
+    ProfileScorer scorer = new ProfileScorer(wrappedScorer, timings);
 
     // score returns the score of the current document matching the query. Advance to the first
     // document before calling score.

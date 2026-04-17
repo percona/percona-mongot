@@ -74,8 +74,8 @@ public class SortedSetDocValuesFacetCounts extends AbstractSortedSetDocValuesFac
       @Var int totalHits = 0;
       @Var int totalDocs = 0;
       for (FacetsCollector.MatchingDocs matchingDocs : hits) {
-        totalHits += matchingDocs.totalHits;
-        totalDocs += matchingDocs.context.reader().maxDoc();
+        totalHits += matchingDocs.totalHits();
+        totalDocs += matchingDocs.context().reader().maxDoc();
       }
 
       // No counting needed if there are no hits:
@@ -144,7 +144,7 @@ public class SortedSetDocValuesFacetCounts extends AbstractSortedSetDocValuesFac
       @Nullable MatchingDocs hits,
       @Nullable Bits liveDocs)
       throws IOException {
-    if (hits != null && hits.totalHits == 0) {
+    if (hits != null && hits.totalHits() == 0) {
       return;
     }
 
@@ -168,7 +168,7 @@ public class SortedSetDocValuesFacetCounts extends AbstractSortedSetDocValuesFac
       assert liveDocs != null;
       it = FacetUtils.liveDocsDISI(valuesIt, liveDocs);
     } else {
-      it = ConjunctionUtils.intersectIterators(Arrays.asList(hits.bits.iterator(), valuesIt));
+      it = ConjunctionUtils.intersectIterators(Arrays.asList(hits.bits().iterator(), valuesIt));
     }
 
     if (ordinalMap == null) {
@@ -193,7 +193,7 @@ public class SortedSetDocValuesFacetCounts extends AbstractSortedSetDocValuesFac
       LongValues ordMap = ordinalMap.getGlobalOrds(segOrd);
       int segmentCardinality = (int) multiValues.getValueCount();
 
-      if (hits != null && hits.totalHits < segmentCardinality / 10) {
+      if (hits != null && hits.totalHits() < segmentCardinality / 10) {
         // Remap every ord to global ord as we iterate:
         if (singleValues != null) {
           for (int doc = it.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = it.nextDoc()) {
@@ -251,7 +251,7 @@ public class SortedSetDocValuesFacetCounts extends AbstractSortedSetDocValuesFac
     IndexReader reader = this.state.getReader();
 
     for (MatchingDocs hits : matchingDocs) {
-      if (ReaderUtil.getTopLevelContext(hits.context).reader() != reader) {
+      if (ReaderUtil.getTopLevelContext(hits.context()).reader() != reader) {
         throw new IllegalStateException(
             "the SortedSetDocValuesReaderState provided to this class "
                 + "does not match the reader being searched;"
@@ -259,7 +259,7 @@ public class SortedSetDocValuesFacetCounts extends AbstractSortedSetDocValuesFac
                 + "every time you open a new IndexReader");
       }
 
-      countOneSegment(ordinalMap, hits.context.reader(), hits.context.ord, hits, null);
+      countOneSegment(ordinalMap, hits.context().reader(), hits.context().ord, hits, null);
     }
   }
 

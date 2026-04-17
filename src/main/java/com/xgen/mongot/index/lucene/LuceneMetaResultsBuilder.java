@@ -59,7 +59,7 @@ class LuceneMetaResultsBuilder {
   }
 
   public MetaResults getCountMetaResults(TopDocs topDocs, Count.Type countType) {
-    return new MetaResults(LuceneFacetResultUtil.getCount(topDocs.totalHits.value, countType));
+    return new MetaResults(LuceneFacetResultUtil.getCount(topDocs.totalHits.value(), countType));
   }
 
   public MetaResults buildFacetMetaResults(
@@ -72,9 +72,9 @@ class LuceneMetaResultsBuilder {
 
     // Ensure that we have an exact count.
     checkState(
-        topDocs.totalHits.relation == TotalHits.Relation.EQUAL_TO,
+        topDocs.totalHits.relation() == TotalHits.Relation.EQUAL_TO,
         "FacetsCollector did not provide an exact count");
-    var totalCount = topDocs.totalHits.value;
+    var totalCount = topDocs.totalHits.value();
     var returnScopePath = collectorQuery.returnScope().map(ReturnScope::path);
     return switch (collectorQuery.collector()) {
       case FacetCollector facetCollector -> {
@@ -105,7 +105,8 @@ class LuceneMetaResultsBuilder {
                 .collect(CollectionUtils.toMapUnsafe(Map.Entry::getKey, Map.Entry::getValue));
 
         yield new MetaResults(
-            LuceneFacetResultUtil.getCount(topDocs.totalHits.value, collectorQuery.count().type()),
+            LuceneFacetResultUtil.getCount(
+                topDocs.totalHits.value(), collectorQuery.count().type()),
             Optional.of(facets));
       }
     };
@@ -119,9 +120,9 @@ class LuceneMetaResultsBuilder {
       throws IOException, InvalidQueryException {
     // Ensure that we have an exact count.
     checkState(
-        topDocs.totalHits.relation == TotalHits.Relation.EQUAL_TO,
+        topDocs.totalHits.relation() == TotalHits.Relation.EQUAL_TO,
         "FacetsCollector did not provide an exact count");
-    var totalCount = topDocs.totalHits.value;
+    var totalCount = topDocs.totalHits.value();
     return switch (collectorQuery.collector()) {
       case FacetCollector facetCollector -> {
         Map<FacetDefinition.Type, Map<String, FacetDefinition>> typeToFacetToDefinition =
@@ -156,7 +157,8 @@ class LuceneMetaResultsBuilder {
                           format("Found multiple facets with same name : %s and %s", v1, v2));
                     });
         yield new MetaResults(
-            LuceneFacetResultUtil.getCount(topDocs.totalHits.value, collectorQuery.count().type()),
+            LuceneFacetResultUtil.getCount(
+                topDocs.totalHits.value(), collectorQuery.count().type()),
             Optional.of(facets));
       }
     };

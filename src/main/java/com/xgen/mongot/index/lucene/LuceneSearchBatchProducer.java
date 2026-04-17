@@ -344,7 +344,7 @@ class LuceneSearchBatchProducer implements BatchProducer {
       // these metrics.
       this.metricsUpdater.getBatchDocumentCount().record(builder.getDocumentCount());
       this.metricsUpdater.getBatchDataSize().record(builder.getDataSize().toBytes());
-      this.metricsUpdater.getTotalHitsLowerBoundCount().increment(topDocs.totalHits.value);
+      this.metricsUpdater.getTotalHitsLowerBoundCount().increment(topDocs.totalHits.value());
 
       if (builder.getDocumentCount() > 0) {
         this.avgDocSize =

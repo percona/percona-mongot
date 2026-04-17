@@ -53,7 +53,7 @@ public class FacetFeatureExplainer implements FeatureExplainer {
 
     SortedSetDocValuesReaderState.OrdRange range = maybeRange.get();
     // Range is inclusive on both ends
-    this.totalStringFacetCardinalities.put(facetName, range.end - range.start + 1);
+    this.totalStringFacetCardinalities.put(facetName, range.end() - range.start() + 1);
   }
 
   /** Records string facet cardinality across the queried set of documents, by count. */

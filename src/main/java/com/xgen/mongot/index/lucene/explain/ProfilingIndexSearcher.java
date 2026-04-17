@@ -15,7 +15,6 @@ import com.xgen.mongot.trace.Tracing;
 import com.xgen.mongot.util.Check;
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import org.apache.lucene.index.LeafReaderContext;
@@ -44,6 +43,7 @@ public class ProfilingIndexSearcher extends LuceneIndexSearcher {
   private final MetadataFeatureExplainer metadataFeatureExplainer;
 
   @Var private boolean isLuceneKnnVectorQuery;
+  @Var private int rewriteDepth;
 
   public ProfilingIndexSearcher(
       LuceneIndexSearcher other,
@@ -55,6 +55,7 @@ public class ProfilingIndexSearcher extends LuceneIndexSearcher {
     this.collectorExplainer = collectorExplainer;
     this.metadataFeatureExplainer = metadataFeatureExplainer;
     this.isLuceneKnnVectorQuery = false;
+    this.rewriteDepth = 0;
   }
 
   public ProfilingIndexSearcher(
@@ -68,10 +69,18 @@ public class ProfilingIndexSearcher extends LuceneIndexSearcher {
     this.collectorExplainer = collectorExplainer;
     this.metadataFeatureExplainer = metadataFeatureExplainer;
     this.isLuceneKnnVectorQuery = false;
+    this.rewriteDepth = 0;
   }
 
   @Override
   public Weight createWeight(Query query, ScoreMode scoreMode, float boost) throws IOException {
+    // During a nested rewrite (rewriteDepth > 0), sub-queries like KNN filters may call
+    // createWeight internally (e.g. AbstractKnnVectorQuery creates a filter Weight during rewrite).
+    // Skip profiling for these to prevent sub-queries from accidentally becoming the explain root.
+    if (this.rewriteDepth > 0) {
+      return query.createWeight(this, scoreMode, boost);
+    }
+
     Optional<? extends QueryExecutionContextNode> contextNodeIfProfiled =
         this.queryProfiler.getOrCreateNode(query);
 
@@ -112,12 +121,26 @@ public class ProfilingIndexSearcher extends LuceneIndexSearcher {
     if (maybeLuceneVectorQuery) {
       return luceneVectorQueryRewrite(original);
     }
-    Query rewritten = super.rewrite(original);
+
+    // Track rewrite depth so that only the top-level rewrite updates the profiler tree.
+    // super.rewrite() runs an iterative loop that may trigger nested calls back into this method
+    // (e.g. when a KNN query's filter is rewritten by AbstractKnnVectorQuery). Those nested
+    // replaceNode calls must be suppressed to prevent sub-queries from accidentally becoming the
+    // explain tree root.
+    this.rewriteDepth++;
+    Query rewritten;
+    try {
+      rewritten = super.rewrite(original);
+    } finally {
+      this.rewriteDepth--;
+    }
     Check.argNotNull(rewritten, "rewritten query");
 
     // Replace the original query's subtree with a new one for the rewritten query. The profiler
     // will handle special cases (e.g. if original == rewritten, original is the root node, etc.).
-    this.queryProfiler.replaceNode(original, rewritten);
+    if (this.rewriteDepth == 0) {
+      this.queryProfiler.replaceNode(original, rewritten);
+    }
 
     return rewritten;
   }
@@ -171,23 +194,28 @@ public class ProfilingIndexSearcher extends LuceneIndexSearcher {
     super.search(query, results);
   }
 
-  /**
-   * We implement this specially here to avoid using a {@link BulkScorer} in scoring our documents.
-   * Using a BulkScorer makes profiling queries more complicated, and limits our ability to measure
-   * the independent parts of scoring with as much granularity.
-   */
   @Override
-  protected void search(List<LeafReaderContext> leaves, Weight weight, Collector collector)
+  protected void searchLeaf(
+      LeafReaderContext ctx, int minDocId, int maxDocId, Weight weight, Collector collector)
       throws IOException {
-    try (var guard = Tracing.simpleSpanGuard("ProfilingIndexSearcher.search")) {
-      for (LeafReaderContext ctx : leaves) { // search each subreader
-        searchLeaf(ctx, weight, collector, this.collectorExplainer.getAllCollectorTimings());
-      }
+    try (var guard = Tracing.simpleSpanGuard("ProfilingIndexSearcher.searchLeaf")) {
+      searchLeaf(
+          ctx,
+          minDocId,
+          maxDocId,
+          weight,
+          collector,
+          this.collectorExplainer.getAllCollectorTimings());
     }
   }
 
   private void searchLeaf(
-      LeafReaderContext ctx, Weight weight, Collector collector, ExplainTimings explainTimings)
+      LeafReaderContext ctx,
+      int minDocId,
+      int maxDocId,
+      Weight weight,
+      Collector collector,
+      ExplainTimings explainTimings)
       throws IOException {
 
     try (var guard = Tracing.simpleSpanGuard("searchLeaf")) {
@@ -209,7 +237,7 @@ public class ProfilingIndexSearcher extends LuceneIndexSearcher {
         if (bulkScorer.isPresent()) {
           try {
             // Second arg is "acceptDocs", which is null because liveDocs is empty.
-            bulkScorer.get().score(leafCollector, null);
+            bulkScorer.get().score(leafCollector, null, minDocId, maxDocId);
           } catch (CollectionTerminatedException e) {
             // Collection terminated, continue with next leaf.
           }

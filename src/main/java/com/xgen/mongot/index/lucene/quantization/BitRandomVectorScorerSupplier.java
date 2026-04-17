@@ -1,18 +1,18 @@
 package com.xgen.mongot.index.lucene.quantization;
 
 import java.io.IOException;
-import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
 
 public class BitRandomVectorScorerSupplier implements RandomVectorScorerSupplier {
-  protected final RandomAccessVectorValues.Bytes vectorValues;
-  protected final RandomAccessVectorValues.Bytes vectorValues1;
-  protected final RandomAccessVectorValues.Bytes vectorValues2;
+  protected final ByteVectorValues vectorValues;
+  protected final ByteVectorValues vectorValues1;
+  protected final ByteVectorValues vectorValues2;
 
-  public BitRandomVectorScorerSupplier(RandomAccessVectorValues.Bytes vectorValues)
+  public BitRandomVectorScorerSupplier(ByteVectorValues vectorValues)
       throws IOException {
-    this.vectorValues = vectorValues;
+    this.vectorValues = vectorValues.copy();
     this.vectorValues1 = vectorValues.copy();
     this.vectorValues2 = vectorValues.copy();
   }

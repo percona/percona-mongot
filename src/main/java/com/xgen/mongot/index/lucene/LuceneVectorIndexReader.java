@@ -290,7 +290,7 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
             new VectorSearchResult(id, scoreDoc.score, ps.project(scoreDoc.doc)));
       }
 
-      this.metricsUpdater.getTotalHitsLowerBoundCount().increment(topDocs.totalHits.value);
+      this.metricsUpdater.getTotalHitsLowerBoundCount().increment(topDocs.totalHits.value());
       sp.getSpan()
           .setAttribute("num vector results", vectorSearchResults.size())
           .setAttribute("time", stopwatch.toString());
