@@ -154,8 +154,11 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
     IndexStatus status = this.statusRef.get();
     // If the index was previously queryable but is now rebuilding (e.g. fell off the oplog),
     // report RECOVERING_TRANSIENT (reported externally as STALE) so Atlas reflects "queryable but
-    // potentially out of date" while the resync is in progress.
-    if (this.wasQueryable.get() && status.getStatusCode() == IndexStatus.StatusCode.INITIAL_SYNC) {
+    // potentially out of date" while the resync is in progress. Include NOT_STARTED: replication
+    // clears the index to NOT_STARTED before the async initial-sync callback sets INITIAL_SYNC.
+    if (this.wasQueryable.get()
+        && (status.getStatusCode() == IndexStatus.StatusCode.INITIAL_SYNC
+            || status.getStatusCode() == IndexStatus.StatusCode.NOT_STARTED)) {
       return IndexStatus.recoveringTransient("Recovering via resync");
     }
     return status;

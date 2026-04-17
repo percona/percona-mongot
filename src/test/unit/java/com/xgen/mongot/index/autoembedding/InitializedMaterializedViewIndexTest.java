@@ -46,11 +46,32 @@ public class InitializedMaterializedViewIndexTest {
   }
 
   @Test
+  public void getStatus_returnsRecoveringTransient_whenPreviouslyQueryableAndNowNotStarted()
+      throws Exception {
+    InitializedMaterializedViewIndex index = createIndex(IndexStatus.unknown());
+
+    index.setStatus(IndexStatus.steady());
+    assertEquals(IndexStatus.StatusCode.STEADY, index.getStatus().getStatusCode());
+
+    // ReplicationManager clears to NOT_STARTED before enqueueing initial sync
+    index.setStatus(IndexStatus.notStarted());
+    assertEquals(IndexStatus.StatusCode.RECOVERING_TRANSIENT, index.getStatus().getStatusCode());
+  }
+
+  @Test
   public void getStatus_returnsInitialSync_whenNeverQueryableAndNowInitialSync() throws Exception {
     InitializedMaterializedViewIndex index = createIndex(IndexStatus.unknown());
 
     index.setStatus(IndexStatus.initialSync());
     assertEquals(IndexStatus.StatusCode.INITIAL_SYNC, index.getStatus().getStatusCode());
+  }
+
+  @Test
+  public void getStatus_returnsNotStarted_whenNeverQueryableAndNowNotStarted() throws Exception {
+    InitializedMaterializedViewIndex index = createIndex(IndexStatus.unknown());
+
+    index.setStatus(IndexStatus.notStarted());
+    assertEquals(IndexStatus.StatusCode.NOT_STARTED, index.getStatus().getStatusCode());
   }
 
   @Test
