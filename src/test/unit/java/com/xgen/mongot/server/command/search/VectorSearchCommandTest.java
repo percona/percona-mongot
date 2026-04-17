@@ -1851,8 +1851,7 @@ public class VectorSearchCommandTest {
             () ->
                 VectorSearchCommand.checkSupportForVectorStoredSource(
                     bootstrapperMetadata(), query, Optional.of(mockIndex)));
-    Assert.assertTrue(
-        ex.getMessage().contains("Before using returnStoredSource, index must be created"));
+    Assert.assertTrue(ex.getMessage().contains("storedSource is not configured for this index"));
   }
 
   @Test

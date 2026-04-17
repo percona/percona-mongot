@@ -119,7 +119,8 @@ public final class VectorIndexDefinition implements IndexDefinition {
         storedSourceDefinition ->
             Check.checkArg(
                 !storedSourceDefinition.isAllIncluded(),
-                "storedSource true not allowed for vector indexes"));
+                "storedSource: true is not supported for vector indexes. "
+                    + "Accepted values are include, exclude, or false."));
     this.indexIdAtCreationTime = indexIdAtCreationTime;
     this.autoEmbeddingDefinitionVersion = autoEmbeddingDefinitionVersion;
     this.materializedViewNameFormatVersion = materializedViewNameFormatVersion;

@@ -217,8 +217,7 @@ public class VectorSearchCommand implements Command {
     StoredSourceDefinition storedSourceDefinition = indexDefinition.getStoredSource();
 
     if (storedSourceDefinition.isAllExcluded()) { // storedSource: false
-      throw new InvalidQueryException(
-          "Before using returnStoredSource, index must be created with storedSource defined.");
+      throw new InvalidQueryException("storedSource is not configured for this index.");
       // Vector Stored Source requested by user but not defined.
     }
 
