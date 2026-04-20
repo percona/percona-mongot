@@ -213,7 +213,8 @@ public class LuceneSearchQueryFactoryDistributor {
     ExistsQueryFactory existsQueryFactory = new ExistsQueryFactory(queryFactoryContext);
     RangeQueryFactory rangeQueryFactory =
         new RangeQueryFactory(queryFactoryContext, equalsQueryFactory, dateRangeQueryFactory);
-    InQueryFactory inQueryFactory = new InQueryFactory(queryFactoryContext);
+    InQueryFactory inQueryFactory =
+        new InQueryFactory(queryFactoryContext, dynamicFeatureFlagRegistry);
 
     AllDocsQueryFactory allDocsQueryFactory = new AllDocsQueryFactory(queryFactoryContext);
     return new LuceneSearchQueryFactoryDistributor(

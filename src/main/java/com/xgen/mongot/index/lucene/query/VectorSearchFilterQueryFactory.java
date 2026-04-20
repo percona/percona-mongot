@@ -53,7 +53,7 @@ public class VectorSearchFilterQueryFactory {
     var existsQueryFactory = new ExistsQueryFactory(factoryContext);
     var rangeQueryFactory =
         new RangeQueryFactory(factoryContext, equalsQueryFactory, dateRangeQueryFactory);
-    var inQueryFactory = new InQueryFactory(factoryContext);
+    var inQueryFactory = new InQueryFactory(factoryContext, dynamicFeatureFlagRegistry);
     return new VectorSearchFilterQueryFactory(
         factoryContext, rangeQueryFactory, inQueryFactory, existsQueryFactory, equalsQueryFactory);
   }
