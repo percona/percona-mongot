@@ -47,6 +47,8 @@ public class GrpcMetadata {
       Metadata.Key.of("mongodb-clientid", UUID_MARSHALLER);
   public static final Metadata.Key<String> MONGODB_CLIENT_METADATA_KEY =
       Metadata.Key.of("mongodb-client", Metadata.ASCII_STRING_MARSHALLER);
+  public static final Metadata.Key<String> ENVOY_ATTEMPT_COUNT_KEY =
+      Metadata.Key.of("x-envoy-attempt-count", Metadata.ASCII_STRING_MARSHALLER);
 
   // Response headers for MongoDB gRPC protocol.
   public static final Metadata.Key<Integer> MONGODB_MAX_WIRE_VERSION_METADATA_KEY =

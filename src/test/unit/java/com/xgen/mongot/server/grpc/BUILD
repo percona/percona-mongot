@@ -15,6 +15,7 @@ java_test_suite(
     deps = [
         "//src/main/java/com/xgen/mongot/config/manager",
         "//src/main/java/com/xgen/mongot/cursor",
+        "//src/main/java/com/xgen/mongot/featureflag",
         "//src/main/java/com/xgen/mongot/server/command",
         "//src/main/java/com/xgen/mongot/server/command/registry",
         "//src/main/java/com/xgen/mongot/server/executors",

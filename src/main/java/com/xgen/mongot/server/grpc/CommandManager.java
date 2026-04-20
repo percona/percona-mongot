@@ -1,8 +1,11 @@
 package com.xgen.mongot.server.grpc;
 
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class is used to manage the commands in a single gRPC stream.
@@ -31,6 +34,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </ol>
  */
 public class CommandManager<T> {
+  private static final Logger LOG = LoggerFactory.getLogger(CommandManager.class);
+
   private final StreamObserver<T> responseObserver;
 
   // Total number of pending `responseObserver.onNext` and `responseObserver.onCompleted` calls.
@@ -41,7 +46,21 @@ public class CommandManager<T> {
   // It can only be set in `onStreamCancellation`.
   private volatile Runnable cleanupCallback;
 
+  // Set when the client cancels the stream (`onStreamCancellation`). Running commands poll this
+  // via `isStreamCancelled()` to short-circuit themselves.
   private volatile boolean streamCancelled;
+
+  // Set when the stream was terminated by a gRPC error via `onCommandFailure`. Read in
+  // `sendSeverHalfCloseAndRunCleanupCallback` to decide whether to call `onCompleted` — gRPC
+  // treats `onError` and `onCompleted` as mutually exclusive terminal operations, and calling
+  // `onCompleted` after `onError` throws IllegalStateException from the underlying ServerCall.
+  //
+  // Orthogonal to `streamCancelled` above: `streamCancelled` signals running commands to abort,
+  // while `terminatedWithError` signals the half-close callback not to re-complete the stream.
+  // Both may be true in a race (e.g. load-shedding fires RESOURCE_EXHAUSTED concurrently with a
+  // client-initiated cancel); the `!terminatedWithError` guard below is what keeps the half-close
+  // path safe regardless of ordering.
+  private volatile boolean terminatedWithError;
 
   CommandManager(StreamObserver<T> responseObserver) {
     this.responseObserver = responseObserver;
@@ -49,6 +68,7 @@ public class CommandManager<T> {
     // receiving `onHalfClosedByClient` or `onStreamCancellation`.
     this.numPendingResponseObserverCalls = new AtomicInteger(1);
     this.streamCancelled = false;
+    this.terminatedWithError = false;
     this.cleanupCallback =
         () -> {
           // Do nothing.
@@ -66,10 +86,34 @@ public class CommandManager<T> {
       try {
         this.responseObserver.onNext(replyMsg);
       } catch (StatusRuntimeException e) {
-        // The RPC stream is already cancelled.
+        // The RPC stream is already cancelled. Log at debug so we have a breadcrumb for
+        // investigating unexpected cancellations without spamming warn on every client hangup.
+        LOG.debug("onNext failed because stream was already cancelled", e);
       }
     }
     replySentCallback.run();
+
+    if (this.numPendingResponseObserverCalls.decrementAndGet() == 0) {
+      sendSeverHalfCloseAndRunCleanupCallback();
+    }
+  }
+
+  /**
+   * Terminates the current command by sending a gRPC error status to the client. This is used when
+   * the server wants to signal envoy to retry on a different host (e.g., load shedding with
+   * RESOURCE_EXHAUSTED), rather than returning a BSON error response via onNext.
+   */
+  void onCommandFailure(Status status) {
+    synchronized (this) {
+      try {
+        this.responseObserver.onError(status.asRuntimeException());
+        this.terminatedWithError = true;
+      } catch (StatusRuntimeException e) {
+        // The RPC stream is already cancelled. Mirrors the debug log in `onCommandComplete` —
+        // same "client disconnected before we could respond" scenario, just on the error path.
+        LOG.debug("onError failed because stream was already cancelled", e);
+      }
+    }
 
     if (this.numPendingResponseObserverCalls.decrementAndGet() == 0) {
       sendSeverHalfCloseAndRunCleanupCallback();
@@ -112,10 +156,15 @@ public class CommandManager<T> {
   private void sendSeverHalfCloseAndRunCleanupCallback() {
     // Synchronization is not necessary here because there should be no concurrent calls to the
     // responseObserver.
-    try {
-      this.responseObserver.onCompleted();
-    } catch (StatusRuntimeException e) {
-      // The RPC stream is already cancelled.
+    // Skip onCompleted if the stream was already terminated by onError — calling onCompleted
+    // after onError violates the gRPC contract and throws IllegalStateException. Cleanup must
+    // still run to release resources.
+    if (!this.terminatedWithError) {
+      try {
+        this.responseObserver.onCompleted();
+      } catch (StatusRuntimeException e) {
+        // The RPC stream is already cancelled.
+      }
     }
 
     this.cleanupCallback.run();

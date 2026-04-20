@@ -12,6 +12,8 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.cursor.MongotCursorManager;
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.server.command.CommandFactory;
@@ -25,6 +27,7 @@ import com.xgen.mongot.server.message.MessageSection;
 import com.xgen.mongot.server.message.MessageSectionBody;
 import com.xgen.mongot.server.message.OpCode;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.cumulative.CumulativeTimer;
@@ -66,6 +69,8 @@ public class StreamingMessageHandlerTest {
           this.executorManager.commandExecutor,
           this.cursorManager,
           SearchEnvoyMetadata.getDefaultInstance(),
+          /* envoyAttemptCount */ 1,
+          FeatureFlags.getDefault(),
           this.responseObserver);
 
   final InOrder inOrder = Mockito.inOrder(this.responseObserver, this.cursorManager);
@@ -587,6 +592,8 @@ public class StreamingMessageHandlerTest {
             boundedExecutorManager.commandExecutor,
             this.cursorManager,
             SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 1,
+            FeatureFlags.getDefault(),
             boundedResponseObserver);
 
     CountDownLatch blockingLatch = new CountDownLatch(1);
@@ -709,6 +716,267 @@ public class StreamingMessageHandlerTest {
           "Expected SystemOverloadedError label in rejection response", hasSystemOverloadedError);
       Assert.assertTrue(
           "Expected RetryableError label in rejection response", hasRetryableError);
+    } finally {
+      blockingLatch.countDown();
+      boundedExecutorManager.commandExecutor.close();
+    }
+  }
+
+  @Test
+  public void onNext_loadShedding_flagDisabled_returnsBsonError() throws InterruptedException {
+    // Feature flag disabled (default) — load shedding should return BSON error, not gRPC error
+    SimpleMeterRegistry boundedMeterRegistry = new SimpleMeterRegistry();
+    CommandRegistry boundedCommandRegistry = CommandRegistry.create(boundedMeterRegistry);
+    RegularBlockingRequestSettings settings =
+        RegularBlockingRequestSettings.create(
+            Optional.of(0.001), Optional.of(0.001), Optional.of(false));
+    ExecutorManager boundedExecutorManager =
+        new ExecutorManager(boundedMeterRegistry, settings);
+    StreamObserver<MessageMessage> boundedResponseObserver =
+        mock(MessageMessageStreamObserver.class);
+
+    FeatureFlags flagsOff = FeatureFlags.getDefault();
+    // attempt count = 1 would trigger retry if the flag were on.
+    WireMessageCallHandler boundedHandler =
+        new WireMessageCallHandler(
+            boundedCommandRegistry,
+            boundedExecutorManager.commandExecutor,
+            this.cursorManager,
+            SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 1,
+            flagsOff,
+            boundedResponseObserver);
+
+    CountDownLatch blockingLatch = new CountDownLatch(1);
+    CountDownLatch taskStartedLatch = new CountDownLatch(1);
+    boundedCommandRegistry.registerCommand(
+        "blockingCommand",
+        (CommandFactory)
+            ignored ->
+                new Command() {
+                  @Override
+                  public String name() {
+                    return "blockingCommand";
+                  }
+
+                  @Override
+                  public BsonDocument run() {
+                    taskStartedLatch.countDown();
+                    try {
+                      blockingLatch.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                    }
+                    return new BsonDocument();
+                  }
+
+                  @Override
+                  public ExecutionPolicy getExecutionPolicy() {
+                    return ExecutionPolicy.ASYNC;
+                  }
+                },
+        true);
+    boundedCommandRegistry.registerCommand(
+        IdentityCommand.Name,
+        (CommandFactory) args -> new IdentityCommand(args, Command.ExecutionPolicy.ASYNC),
+        true);
+
+    try {
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      taskStartedLatch.await(5, TimeUnit.SECONDS);
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      Thread.sleep(50);
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+
+      // Should get BSON error via onNext, not gRPC error via onError
+      ArgumentCaptor<MessageMessage> captor = ArgumentCaptor.forClass(MessageMessage.class);
+      verify(boundedResponseObserver, timeout(5000).atLeast(1)).onNext(captor.capture());
+      verify(boundedResponseObserver, after(1000).never()).onError(any());
+
+      boolean foundBsonError = captor.getAllValues().stream().anyMatch(msg -> {
+        BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
+        return doc.containsKey("code") && doc.getInt32("code").getValue() == 462;
+      });
+      Assert.assertTrue("Expected BSON error with code 462 when flag is off", foundBsonError);
+    } finally {
+      blockingLatch.countDown();
+      boundedExecutorManager.commandExecutor.close();
+    }
+  }
+
+  @Test
+  public void onNext_loadShedding_flagEnabled_attemptLessThan3_sendsResourceExhausted()
+      throws InterruptedException {
+    SimpleMeterRegistry boundedMeterRegistry = new SimpleMeterRegistry();
+    CommandRegistry boundedCommandRegistry = CommandRegistry.create(boundedMeterRegistry);
+    RegularBlockingRequestSettings settings =
+        RegularBlockingRequestSettings.create(
+            Optional.of(0.001), Optional.of(0.001), Optional.of(false));
+    ExecutorManager boundedExecutorManager =
+        new ExecutorManager(boundedMeterRegistry, settings);
+    StreamObserver<MessageMessage> boundedResponseObserver =
+        mock(MessageMessageStreamObserver.class);
+
+    FeatureFlags flagsOn =
+        FeatureFlags.withDefaults().enable(Feature.OVERLOAD_RETRY_SIGNAL).build();
+    // attempt count = 1 (< 3), so rejection should trigger gRPC RESOURCE_EXHAUSTED.
+    WireMessageCallHandler boundedHandler =
+        new WireMessageCallHandler(
+            boundedCommandRegistry,
+            boundedExecutorManager.commandExecutor,
+            this.cursorManager,
+            SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 1,
+            flagsOn,
+            boundedResponseObserver);
+
+    CountDownLatch blockingLatch = new CountDownLatch(1);
+    CountDownLatch taskStartedLatch = new CountDownLatch(1);
+    boundedCommandRegistry.registerCommand(
+        "blockingCommand",
+        (CommandFactory)
+            ignored ->
+                new Command() {
+                  @Override
+                  public String name() {
+                    return "blockingCommand";
+                  }
+
+                  @Override
+                  public BsonDocument run() {
+                    taskStartedLatch.countDown();
+                    try {
+                      blockingLatch.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                    }
+                    return new BsonDocument();
+                  }
+
+                  @Override
+                  public ExecutionPolicy getExecutionPolicy() {
+                    return ExecutionPolicy.ASYNC;
+                  }
+                },
+        true);
+    boundedCommandRegistry.registerCommand(
+        IdentityCommand.Name,
+        (CommandFactory) args -> new IdentityCommand(args, Command.ExecutionPolicy.ASYNC),
+        true);
+
+    try {
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      taskStartedLatch.await(5, TimeUnit.SECONDS);
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      Thread.sleep(50);
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+
+      // Should get gRPC RESOURCE_EXHAUSTED via onError
+      ArgumentCaptor<Throwable> errorCaptor = ArgumentCaptor.forClass(Throwable.class);
+      verify(boundedResponseObserver, timeout(5000).atLeastOnce()).onError(errorCaptor.capture());
+
+      boolean foundResourceExhausted = errorCaptor.getAllValues().stream().anyMatch(t -> {
+        if (t instanceof StatusRuntimeException sre) {
+          return sre.getStatus().getCode() == Status.Code.RESOURCE_EXHAUSTED;
+        }
+        return false;
+      });
+      Assert.assertTrue(
+          "Expected gRPC RESOURCE_EXHAUSTED when flag on and attempt < 3",
+          foundResourceExhausted);
+    } finally {
+      blockingLatch.countDown();
+      boundedExecutorManager.commandExecutor.close();
+    }
+  }
+
+  @Test
+  public void onNext_loadShedding_flagEnabled_attemptAtMax_returnsBsonError()
+      throws InterruptedException {
+    SimpleMeterRegistry boundedMeterRegistry = new SimpleMeterRegistry();
+    CommandRegistry boundedCommandRegistry = CommandRegistry.create(boundedMeterRegistry);
+    RegularBlockingRequestSettings settings =
+        RegularBlockingRequestSettings.create(
+            Optional.of(0.001), Optional.of(0.001), Optional.of(false));
+    ExecutorManager boundedExecutorManager =
+        new ExecutorManager(boundedMeterRegistry, settings);
+    StreamObserver<MessageMessage> boundedResponseObserver =
+        mock(MessageMessageStreamObserver.class);
+
+    FeatureFlags flagsOn =
+        FeatureFlags.withDefaults().enable(Feature.OVERLOAD_RETRY_SIGNAL).build();
+    // attempt count = 3 (>= MAX_ENVOY_RETRY_ATTEMPTS), so rejection should return BSON error.
+    WireMessageCallHandler boundedHandler =
+        new WireMessageCallHandler(
+            boundedCommandRegistry,
+            boundedExecutorManager.commandExecutor,
+            this.cursorManager,
+            SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 3,
+            flagsOn,
+            boundedResponseObserver);
+
+    CountDownLatch blockingLatch = new CountDownLatch(1);
+    CountDownLatch taskStartedLatch = new CountDownLatch(1);
+    boundedCommandRegistry.registerCommand(
+        "blockingCommand",
+        (CommandFactory)
+            ignored ->
+                new Command() {
+                  @Override
+                  public String name() {
+                    return "blockingCommand";
+                  }
+
+                  @Override
+                  public BsonDocument run() {
+                    taskStartedLatch.countDown();
+                    try {
+                      blockingLatch.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                    }
+                    return new BsonDocument();
+                  }
+
+                  @Override
+                  public ExecutionPolicy getExecutionPolicy() {
+                    return ExecutionPolicy.ASYNC;
+                  }
+                },
+        true);
+    boundedCommandRegistry.registerCommand(
+        IdentityCommand.Name,
+        (CommandFactory) args -> new IdentityCommand(args, Command.ExecutionPolicy.ASYNC),
+        true);
+
+    try {
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      taskStartedLatch.await(5, TimeUnit.SECONDS);
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      Thread.sleep(50);
+      boundedHandler.onNext(createOpMsgFromBsonDocument(
+          new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+
+      // Should get BSON error via onNext, not gRPC error
+      ArgumentCaptor<MessageMessage> captor = ArgumentCaptor.forClass(MessageMessage.class);
+      verify(boundedResponseObserver, timeout(5000).atLeast(1)).onNext(captor.capture());
+      verify(boundedResponseObserver, after(1000).never()).onError(any());
+
+      boolean foundBsonError = captor.getAllValues().stream().anyMatch(msg -> {
+        BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
+        return doc.containsKey("code") && doc.getInt32("code").getValue() == 462;
+      });
+      Assert.assertTrue(
+          "Expected BSON error with code 462 when attempt >= 3", foundBsonError);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();

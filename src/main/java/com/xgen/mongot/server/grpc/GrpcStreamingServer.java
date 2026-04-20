@@ -9,6 +9,7 @@ import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.util.TlsMode;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.mongot.server.auth.SecurityConfig;
 import com.xgen.mongot.server.command.registry.CommandRegistry;
@@ -19,6 +20,7 @@ import com.xgen.mongot.server.message.MessageMessage;
 import com.xgen.mongot.server.util.NettyUtil;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Crash;
+import io.grpc.Context;
 import io.grpc.Server;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.Status;
@@ -96,7 +98,15 @@ public class GrpcStreamingServer implements CommandServer {
         inboundMessageSizeLimit);
   }
 
-  /** GRPC Streaming server class for mms. Used for testing, too. */
+  /**
+   * Test-only convenience overload that defaults feature flags to {@link
+   * FeatureFlags#getDefault()}.
+   *
+   * <p>Production callers (e.g. {@code MmsMongotBootstrapper}) must go through the overload below
+   * that takes an explicit {@link FeatureFlags}, so that flags enabled by mms are honored on the
+   * gRPC path.
+   */
+  @VisibleForTesting
   public static GrpcStreamingServer create(
       SocketAddress address,
       Optional<SecurityConfig> securityConfig,
@@ -110,6 +120,37 @@ public class GrpcStreamingServer implements CommandServer {
       Bytes bsonSizeSoftLimit,
       Bytes inboundMessageSizeLimit,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier) {
+    return create(
+        address,
+        securityConfig,
+        cursorManager,
+        configManager,
+        meterRegistry,
+        executorManager,
+        indexCatalog,
+        initializedIndexCatalog,
+        metadata,
+        bsonSizeSoftLimit,
+        inboundMessageSizeLimit,
+        embeddingServiceManagerSupplier,
+        FeatureFlags.getDefault());
+  }
+
+  /** GRPC Streaming server class for mms with explicit feature flags. */
+  public static GrpcStreamingServer create(
+      SocketAddress address,
+      Optional<SecurityConfig> securityConfig,
+      MongotCursorManager cursorManager,
+      ConfigManager configManager,
+      MeterRegistry meterRegistry,
+      ExecutorManager executorManager,
+      IndexCatalog indexCatalog,
+      InitializedIndexCatalog initializedIndexCatalog,
+      SearchCommandsRegister.BootstrapperMetadata metadata,
+      Bytes bsonSizeSoftLimit,
+      Bytes inboundMessageSizeLimit,
+      Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
+      FeatureFlags featureFlags) {
     CommandRegistry commandRegistry =
         registerCommands(
             meterRegistry,
@@ -121,8 +162,6 @@ public class GrpcStreamingServer implements CommandServer {
             bsonSizeSoftLimit,
             embeddingServiceManagerSupplier);
 
-    // Initialize the `HealthStatusManager`. It will mark the state as serving after the
-    // `configManager` is initialized.
     HealthManager healthManager = new HealthManager(configManager, meterRegistry);
     return create(
         address,
@@ -131,7 +170,8 @@ public class GrpcStreamingServer implements CommandServer {
         executorManager,
         commandRegistry,
         healthManager,
-        inboundMessageSizeLimit);
+        inboundMessageSizeLimit,
+        featureFlags);
   }
 
   /** Create a gRPC Streaming server class according to the {@link CommandRegistry}. */
@@ -144,6 +184,28 @@ public class GrpcStreamingServer implements CommandServer {
       CommandRegistry commandRegistry,
       HealthManager healthManager,
       Bytes inboundMessageSizeLimit) {
+    return create(
+        address,
+        securityConfigOpt,
+        cursorManager,
+        executorManager,
+        commandRegistry,
+        healthManager,
+        inboundMessageSizeLimit,
+        FeatureFlags.getDefault());
+  }
+
+  /** Create a gRPC Streaming server class according to the {@link CommandRegistry}. */
+  @VisibleForTesting
+  public static GrpcStreamingServer create(
+      SocketAddress address,
+      Optional<SecurityConfig> securityConfigOpt,
+      MongotCursorManager cursorManager,
+      ExecutorManager executorManager,
+      CommandRegistry commandRegistry,
+      HealthManager healthManager,
+      Bytes inboundMessageSizeLimit,
+      FeatureFlags featureFlags) {
     NettyUtil.SocketType socketType = NettyUtil.getSocketType(address);
 
     var wireMessageCallHandler =
@@ -154,11 +216,19 @@ public class GrpcStreamingServer implements CommandServer {
               if (!healthManager.isHealthy()) {
                 throw new StatusRuntimeException(Status.UNAVAILABLE);
               }
+              // Fetch per-stream gRPC context values once here so that the handler does not
+              // re-resolve them for each command in the stream. SearchEnvoyMetadataInterceptor
+              // always populates ENVOY_ATTEMPT_COUNT_KEY (with a fallback of 1 on missing/
+              // malformed headers), so .get() returns a non-null Integer on the gRPC ingress
+              // path.
+              Context context = Context.current();
               return new WireMessageCallHandler(
                   commandRegistry,
                   executorManager.commandExecutor,
                   cursorManager,
-                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(),
+                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(context),
+                  GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get(context),
+                  featureFlags,
                   responseStream);
             });
 
@@ -168,11 +238,14 @@ public class GrpcStreamingServer implements CommandServer {
               if (!healthManager.isHealthy()) {
                 throw new StatusRuntimeException(Status.UNAVAILABLE);
               }
+              Context context = Context.current();
               return new BsonMessageCallHandler(
                   commandRegistry,
                   executorManager.commandExecutor,
                   cursorManager,
-                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(),
+                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(context),
+                  GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get(context),
+                  featureFlags,
                   responseStream);
             });
 

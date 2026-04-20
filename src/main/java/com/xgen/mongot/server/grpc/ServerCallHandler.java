@@ -5,6 +5,8 @@ import static com.xgen.mongot.util.Check.checkArg;
 
 import com.google.common.base.Stopwatch;
 import com.xgen.mongot.cursor.MongotCursorManager;
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
@@ -17,6 +19,7 @@ import com.xgen.mongot.server.executors.LoadSheddingRejectedException;
 import com.xgen.mongot.server.message.MessageUtils;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.mongodb.Errors;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.util.Collections;
 import java.util.List;
@@ -38,11 +41,19 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
   private static final List<String> LOAD_SHEDDING_ERROR_LABELS =
       List.of("SystemOverloadedError", "RetryableError");
 
+  private static final int MAX_ENVOY_RETRY_ATTEMPTS = 3;
+
   private final CommandRegistry commandRegistry;
   private final BulkheadCommandExecutor commandExecutor;
   private final MongotCursorManager cursorManager;
   private final CommandManager<T> commandManager;
   private final SearchEnvoyMetadata searchEnvoyMetadata;
+  // Envoy's per-stream `x-envoy-attempt-count` header value, extracted once at stream creation
+  // in GrpcStreamingServer. SearchEnvoyMetadataInterceptor always sets this context key (with a
+  // fallback of 1 on missing/malformed headers), and tests that bypass the interceptor construct
+  // handlers directly with an explicit value, so a non-null int is a safe invariant here.
+  private final int envoyAttemptCount;
+  private final FeatureFlags featureFlags;
 
   // Newly created cursors in this gRPC stream.
   // 1. This variable is at most written once. Each stream will have at most one $search command.
@@ -55,11 +66,15 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
       BulkheadCommandExecutor commandExecutor,
       MongotCursorManager cursorManager,
       SearchEnvoyMetadata searchEnvoyMetadata,
+      int envoyAttemptCount,
+      FeatureFlags featureFlags,
       StreamObserver<T> responseObserver) {
     this.commandRegistry = commandRegistry;
     this.commandExecutor = commandExecutor;
     this.cursorManager = cursorManager;
     this.searchEnvoyMetadata = searchEnvoyMetadata;
+    this.envoyAttemptCount = envoyAttemptCount;
+    this.featureFlags = featureFlags;
     this.commandManager = new CommandManager<T>(responseObserver);
     this.createdCursorIds = Collections.emptyList();
   }
@@ -74,15 +89,26 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
             (replyMsg, cause) -> {
               if (cause != null) {
                 Throwable unwrapped = FutureUtils.unwrapCause(cause);
-                this.commandManager.onCommandComplete(
-                    getErrorMessage(requestMsg, cause),
-                    () -> {
-                      if (!(unwrapped instanceof InterruptedException)
-                          && !(unwrapped instanceof CancelledStreamSkipException)) {
-                        handlingContext.commandRegistration.ifPresent(
-                            registration -> registration.failureCounter.increment());
-                      }
-                    });
+                if (shouldRetryViaEnvoy(unwrapped)) {
+                  // Count this as a failure from the host's perspective so load-shedding
+                  // alerting/dashboards remain accurate. Envoy may retry on another host, but
+                  // this host did reject the command.
+                  handlingContext.commandRegistration.ifPresent(
+                      registration -> registration.failureCounter.increment());
+                  this.commandManager.onCommandFailure(
+                      Status.RESOURCE_EXHAUSTED.withDescription(
+                          "Search server at capacity"));
+                } else {
+                  this.commandManager.onCommandComplete(
+                      getErrorMessage(requestMsg, cause),
+                      () -> {
+                        if (!(unwrapped instanceof InterruptedException)
+                            && !(unwrapped instanceof CancelledStreamSkipException)) {
+                          handlingContext.commandRegistration.ifPresent(
+                              registration -> registration.failureCounter.increment());
+                        }
+                      });
+                }
               } else {
                 Stopwatch serializationTime = Stopwatch.createStarted();
                 this.commandManager.onCommandComplete(
@@ -190,6 +216,16 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
   }
 
   abstract T serializeError(T request, BsonDocument error);
+
+  private boolean shouldRetryViaEnvoy(Throwable cause) {
+    if (!(cause instanceof LoadSheddingRejectedException)) {
+      return false;
+    }
+    if (!this.featureFlags.isEnabled(Feature.OVERLOAD_RETRY_SIGNAL)) {
+      return false;
+    }
+    return this.envoyAttemptCount < MAX_ENVOY_RETRY_ATTEMPTS;
+  }
 
   static class HandlingContext {
     // After command execution, corresponding metrics in the following registration will be updated.
