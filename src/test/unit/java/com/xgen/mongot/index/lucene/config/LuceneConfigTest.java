@@ -22,11 +22,11 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {LuceneConfigTest.TestSerialization.class, LuceneConfigTest.TestConfig.class})
+    value = {LuceneConfigTest.SerializationTest.class, LuceneConfigTest.ConfigTest.class})
 public class LuceneConfigTest {
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "lucene-config-serialization";
     private static final BsonSerializationTestSuite<LuceneConfig> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(
@@ -34,7 +34,7 @@ public class LuceneConfigTest {
 
     private final BsonSerializationTestSuite.TestSpec<LuceneConfig> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<LuceneConfig> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<LuceneConfig> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -86,7 +86,7 @@ public class LuceneConfigTest {
     }
   }
 
-  public static class TestConfig {
+  public static class ConfigTest {
     @Test
     public void testRefreshIntervalExplicit() {
       // Shouldn't throw

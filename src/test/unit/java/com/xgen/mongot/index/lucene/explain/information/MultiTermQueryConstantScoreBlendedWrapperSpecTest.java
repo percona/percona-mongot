@@ -20,8 +20,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      MultiTermQueryConstantScoreBlendedWrapperSpecTest.TestDeserialization.class,
-      MultiTermQueryConstantScoreBlendedWrapperSpecTest.TestSerialization.class,
+      MultiTermQueryConstantScoreBlendedWrapperSpecTest.DeserializationTest.class,
+      MultiTermQueryConstantScoreBlendedWrapperSpecTest.SerializationTest.class,
     })
 public class MultiTermQueryConstantScoreBlendedWrapperSpecTest {
   private static final QueryExplainInformation TERM_EXPLAIN_INFO =
@@ -40,7 +40,7 @@ public class MultiTermQueryConstantScoreBlendedWrapperSpecTest {
           .build();
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "multi-term-query-deserialization";
     private static final BsonDeserializationTestSuite<MultiTermQueryConstantScoreBlendedWrapperSpec>
         TEST_SUITE =
@@ -53,7 +53,7 @@ public class MultiTermQueryConstantScoreBlendedWrapperSpecTest {
             MultiTermQueryConstantScoreBlendedWrapperSpec>
         testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<MultiTermQueryConstantScoreBlendedWrapperSpec>
             testSpec) {
       this.testSpec = testSpec;
@@ -96,7 +96,7 @@ public class MultiTermQueryConstantScoreBlendedWrapperSpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "multi-term-query-serialization";
     private static final BsonSerializationTestSuite<MultiTermQueryConstantScoreBlendedWrapperSpec>
         TEST_SUITE = fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
@@ -104,7 +104,7 @@ public class MultiTermQueryConstantScoreBlendedWrapperSpecTest {
     private final BsonSerializationTestSuite.TestSpec<MultiTermQueryConstantScoreBlendedWrapperSpec>
         testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<MultiTermQueryConstantScoreBlendedWrapperSpec>
             testSpec) {
       this.testSpec = testSpec;

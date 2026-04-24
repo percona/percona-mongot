@@ -19,8 +19,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      DisjunctionMaxQuerySpecTest.TestDeserialization.class,
-      DisjunctionMaxQuerySpecTest.TestSerialization.class,
+      DisjunctionMaxQuerySpecTest.DeserializationTest.class,
+      DisjunctionMaxQuerySpecTest.SerializationTest.class,
     })
 public class DisjunctionMaxQuerySpecTest {
   private static final QueryExplainInformation TERM_EXPLAIN_INFO_1 =
@@ -38,7 +38,7 @@ public class DisjunctionMaxQuerySpecTest {
           .build();
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "dismax-query-deserialization";
     private static final BsonDeserializationTestSuite<DisjunctionMaxQuerySpec> TEST_SUITE =
         fromDocument(
@@ -48,7 +48,7 @@ public class DisjunctionMaxQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<DisjunctionMaxQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<DisjunctionMaxQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -86,14 +86,14 @@ public class DisjunctionMaxQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "dismax-query-serialization";
     private static final BsonSerializationTestSuite<DisjunctionMaxQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<DisjunctionMaxQuerySpec> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<DisjunctionMaxQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }

@@ -18,12 +18,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      LongDistanceFeatureQuerySpecTest.TestDeserialization.class,
-      LongDistanceFeatureQuerySpecTest.TestSerialization.class,
+      LongDistanceFeatureQuerySpecTest.DeserializationTest.class,
+      LongDistanceFeatureQuerySpecTest.SerializationTest.class,
     })
 public class LongDistanceFeatureQuerySpecTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "long-dist-feature-query-deserialization";
     private static final BsonDeserializationTestSuite<LongDistanceFeatureQuerySpec> TEST_SUITE =
         fromDocument(
@@ -34,7 +34,7 @@ public class LongDistanceFeatureQuerySpecTest {
     private final BsonDeserializationTestSuite.TestSpecWrapper<LongDistanceFeatureQuerySpec>
         testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<LongDistanceFeatureQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -99,14 +99,14 @@ public class LongDistanceFeatureQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "long-dist-feature-query-serialization";
     private static final BsonSerializationTestSuite<LongDistanceFeatureQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<LongDistanceFeatureQuerySpec> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<LongDistanceFeatureQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }

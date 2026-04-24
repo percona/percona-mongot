@@ -19,8 +19,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      FunctionScoreQuerySpecTest.TestDeserialization.class,
-      FunctionScoreQuerySpecTest.TestSerialization.class,
+      FunctionScoreQuerySpecTest.DeserializationTest.class,
+      FunctionScoreQuerySpecTest.SerializationTest.class,
     })
 public class FunctionScoreQuerySpecTest {
   private static final LongDistanceFeatureQuerySpec LONG_DIST_QUERY =
@@ -38,7 +38,7 @@ public class FunctionScoreQuerySpecTest {
           .build();
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "function-score-query-deserialization";
     private static final BsonDeserializationTestSuite<FunctionScoreQuerySpec> TEST_SUITE =
         fromDocument(
@@ -48,7 +48,7 @@ public class FunctionScoreQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<FunctionScoreQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<FunctionScoreQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -77,14 +77,14 @@ public class FunctionScoreQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "function-score-query-serialization";
     private static final BsonSerializationTestSuite<FunctionScoreQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<FunctionScoreQuerySpec> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<FunctionScoreQuerySpec> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<FunctionScoreQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
 

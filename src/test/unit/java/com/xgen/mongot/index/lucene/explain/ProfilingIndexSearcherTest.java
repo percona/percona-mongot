@@ -76,15 +76,15 @@ import org.mockito.Mockito;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      ProfilingIndexSearcherTest.TestClass.class,
-      ProfilingIndexSearcherTest.TestConcurrency.class
+      ProfilingIndexSearcherTest.ClassTest.class,
+      ProfilingIndexSearcherTest.ConcurrencyTest.class
     })
 public class ProfilingIndexSearcherTest {
 
   private static final IndexMetricsUpdater.QueryingMetricsUpdater metrics =
       new IndexMetricsUpdater.QueryingMetricsUpdater(SearchIndex.mockMetricsFactory());
 
-  public static class TestClass {
+  public static class ClassTest {
     @Rule public final LuceneIndexRule validator = new LuceneIndexRule();
 
     @Test
@@ -628,7 +628,7 @@ public class ProfilingIndexSearcherTest {
     }
   }
 
-  public static class TestConcurrency {
+  public static class ConcurrencyTest {
     private Directory directory;
     private IndexWriter writer;
     private IndexReader reader;

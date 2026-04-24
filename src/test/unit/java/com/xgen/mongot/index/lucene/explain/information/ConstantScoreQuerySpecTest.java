@@ -18,8 +18,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      ConstantScoreQuerySpecTest.TestDeserialization.class,
-      ConstantScoreQuerySpecTest.TestSerialization.class,
+      ConstantScoreQuerySpecTest.DeserializationTest.class,
+      ConstantScoreQuerySpecTest.SerializationTest.class,
     })
 public class ConstantScoreQuerySpecTest {
   private static final QueryExplainInformation TERM_EXPLAIN_INFO =
@@ -30,7 +30,7 @@ public class ConstantScoreQuerySpecTest {
           .build();
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "constant-score-query-deserialization";
     private static final BsonDeserializationTestSuite<ConstantScoreQuerySpec> TEST_SUITE =
         fromDocument(
@@ -40,7 +40,7 @@ public class ConstantScoreQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<ConstantScoreQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<ConstantScoreQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -64,14 +64,14 @@ public class ConstantScoreQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "constant-score-query-serialization";
     private static final BsonSerializationTestSuite<ConstantScoreQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<ConstantScoreQuerySpec> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<ConstantScoreQuerySpec> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<ConstantScoreQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
 

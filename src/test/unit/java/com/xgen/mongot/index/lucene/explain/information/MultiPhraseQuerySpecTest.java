@@ -16,12 +16,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      MultiPhraseQuerySpecTest.TestDeserialization.class,
-      MultiPhraseQuerySpecTest.TestSerialization.class,
+      MultiPhraseQuerySpecTest.DeserializationTest.class,
+      MultiPhraseQuerySpecTest.SerializationTest.class,
     })
 public class MultiPhraseQuerySpecTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "multi-phrase-query-deserialization";
     private static final BsonDeserializationTestSuite<MultiPhraseQuerySpec> TEST_SUITE =
         fromDocument(
@@ -29,7 +29,7 @@ public class MultiPhraseQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<MultiPhraseQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<MultiPhraseQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -53,14 +53,14 @@ public class MultiPhraseQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "multi-phrase-query-serialization";
     private static final BsonSerializationTestSuite<MultiPhraseQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<MultiPhraseQuerySpec> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<MultiPhraseQuerySpec> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<MultiPhraseQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
 
