@@ -51,6 +51,7 @@ import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
+import com.xgen.mongot.replication.mongodb.ReplicationIndexManager.FailedIndexAction;
 import com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State;
 import com.xgen.mongot.replication.mongodb.common.BufferlessIdOrderInitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
@@ -650,6 +651,8 @@ public class ReplicationIndexManagerTest {
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
 
       mocks.assertDropMetric(Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.INITIAL_SYNC, InitialSyncException.class);
     }
   }
 
@@ -679,6 +682,8 @@ public class ReplicationIndexManagerTest {
 
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.INITIAL_SYNC, RuntimeException.class);
     }
   }
 
@@ -708,6 +713,8 @@ public class ReplicationIndexManagerTest {
           .startsWith(REPLICATION_FAILED_REASON_PREFIX);
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLOSE, State.INITIAL_SYNC, InitialSyncException.class);
     }
   }
 
@@ -736,6 +743,8 @@ public class ReplicationIndexManagerTest {
           .startsWith(REPLICATION_FAILED_REASON_PREFIX);
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.INITIAL_SYNC, InitialSyncException.class);
     }
   }
 
@@ -763,6 +772,8 @@ public class ReplicationIndexManagerTest {
 
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLOSE, State.INITIAL_SYNC, RuntimeException.class);
     }
   }
 
@@ -789,6 +800,8 @@ public class ReplicationIndexManagerTest {
 
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.INITIAL_SYNC, RuntimeException.class);
     }
   }
 
@@ -838,6 +851,8 @@ public class ReplicationIndexManagerTest {
 
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.INITIAL_SYNC, AssertionError.class);
     }
   }
 
@@ -1126,6 +1141,8 @@ public class ReplicationIndexManagerTest {
           ReplicationIndexManager.State.STEADY_STATE_SHUT_DOWN,
           ReplicationIndexManager.State.FAILED);
       mocks.assertMetric(RuntimeException.class, "None", "None", "None");
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.STEADY_STATE_SHUT_DOWN, RuntimeException.class);
     }
   }
 
@@ -1147,6 +1164,8 @@ public class ReplicationIndexManagerTest {
           ReplicationIndexManager.State.STEADY_STATE_SHUT_DOWN,
           ReplicationIndexManager.State.FAILED);
       mocks.assertMetric(AssertionError.class, "None", "None", "None");
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.STEADY_STATE_SHUT_DOWN, AssertionError.class);
     }
   }
 
@@ -1216,6 +1235,8 @@ public class ReplicationIndexManagerTest {
           ReplicationIndexManager.State.FAILED);
       verify(mocks.index, timeout(1000)).close();
       verify(mocks.index, never()).drop();
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLOSE, State.STEADY_STATE_SHUT_DOWN, IllegalArgumentException.class);
     }
   }
 
@@ -1247,6 +1268,8 @@ public class ReplicationIndexManagerTest {
       verify(mocks.index, timeout(1000)).drop();
 
       mocks.assertDropMetric(Reason.STEADY_STATE_REPLICATION_FAILED);
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.DROP, State.STEADY_STATE_SHUT_DOWN, IllegalArgumentException.class);
     }
   }
 
@@ -1383,6 +1406,8 @@ public class ReplicationIndexManagerTest {
       Assert.assertSame(
           IndexStatus.Reason.INITIALIZATION_FAILED,
           mocks.index.getStatus().getReason().orElseThrow());
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLOSE, State.STEADY_STATE, Exception.class);
     }
   }
 
@@ -2073,6 +2098,26 @@ public class ReplicationIndexManagerTest {
                       cause,
                       "causeCategory",
                       causeCategory))
+              .count(),
+          0.01);
+    }
+
+    public void assertFailedIndexMetric(
+        FailedIndexAction action, State state, Class<?> errorClass) {
+      assertFailedIndexMetric(action, state, errorClass.getSimpleName());
+    }
+
+    public void assertFailedIndexMetric(
+        FailedIndexAction action, State state, String error) {
+      assertEquals(
+          1.0,
+          this.meterRegistry
+              .counter(
+                  "replicationIndexManager.failed_index",
+                  Tags.of(
+                      "action", action.name(),
+                      "state", state.name(),
+                      "error", error))
               .count(),
           0.01);
     }

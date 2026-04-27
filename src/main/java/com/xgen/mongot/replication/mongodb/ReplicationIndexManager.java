@@ -94,6 +94,12 @@ public class ReplicationIndexManager {
     SHUT_DOWN,
   }
 
+  /** The action taken when an index fails. */
+  enum FailedIndexAction {
+    DROP,
+    CLOSE,
+  }
+
   /**
    * The next step to be performed during the replication init process, determined by processing the
    * IndexCommitUserData (or lack thereof).
@@ -1224,6 +1230,7 @@ public class ReplicationIndexManager {
 
   protected void failAndDropIndex(Throwable throwable, IndexStatus.Reason reason) {
     this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.DROP, getState(), throwable);
     transitionState(State.FAILED);
     dropIndex(
         IndexStatus.failed(REPLICATION_FAILED_REASON_PREFIX + throwable.getMessage(), reason));
@@ -1231,9 +1238,23 @@ public class ReplicationIndexManager {
 
   protected void failAndCloseIndex(Throwable throwable, IndexStatus.Reason reason) {
     this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.CLOSE, getState(), throwable);
     transitionState(State.FAILED);
     String failureMessage = REPLICATION_FAILED_REASON_PREFIX + throwable.getMessage();
     closeIndex(IndexStatus.failed(failureMessage, reason));
+  }
+
+  private void incrementFailedIndexCounter(
+      FailedIndexAction action, State state, Throwable throwable) {
+    if (throwable == null) {
+      return;
+    }
+    this.metricsFactory
+        .counter(
+            "failed_index",
+            Tags.of("action", action.name(), "state", state.name(), "error",
+                    exceptionClassWithErrorCode(throwable)))
+        .increment();
   }
 
   private void closeIndex(IndexStatus status) {
