@@ -9,21 +9,27 @@
 #   ./scripts/sysroots/generate_sysroot.sh [OPTIONS]
 #
 # Options:
-#   --distro DISTRO       Linux distribution name used as the Docker image name (default: ubuntu)
+#   --distro DISTRO       Linux distribution Docker image name (default: ubuntu)
 #   --version VERSION     Distribution version tag (default: 18.04)
 #   --arch ARCH           Target architecture: x86_64 or aarch64 (default: x86_64)
 #   --output-tar PATH     Output tarball path (default: sysroots/<name>.tar.gz)
-#   --packages PKGS       Space-separated extra apt packages to install alongside the defaults
+#   --packages PKGS       Space-separated extra packages to install alongside the defaults
 #   -h, --help            Show this message and exit
 #
-# Default packages installed:
-#   libc6-dev libstdc++-7-dev linux-libc-dev
-#   Note: libstdc++ version is Ubuntu 18.04 specific. For 20.04 use libstdc++-9-dev, etc.
+# Supported distros and their default packages:
+#   ubuntu / debian  (apt)   libc6-dev libstdc++-7-dev linux-libc-dev
+#                            Note: libstdc++ version is Ubuntu 18.04 specific.
+#                                  For 20.04 use --packages libstdc++-9-dev, etc.
+#   amazonlinux / centos / rhel / fedora  (yum)  glibc-devel libstdc++-devel kernel-headers
 #
 # Examples:
 #   # Ubuntu 20.04 aarch64.
 #   ./scripts/sysroots/generate_sysroot.sh --version 20.04 --arch aarch64 \
 #       --output-tar /tmp/ubuntu2004-aarch64.tar.gz
+#
+#   # Amazon Linux 2 x86_64 (glibc 2.26).
+#   ./scripts/sysroots/generate_sysroot.sh --distro amazonlinux --version 2 \
+#       --output-tar /tmp/amazonlinux2-x86_64.tar.gz
 
 set -euo pipefail
 
@@ -36,11 +42,6 @@ VERSION="18.04"
 ARCH="x86_64"
 OUTPUT_TAR=""
 EXTRA_PACKAGES=""
-
-# Packages required for C/Rust cross-compilation on Ubuntu 18.04.
-# Provides: glibc headers + startup objects (libc6-dev), C++ stdlib (libstdc++-7-dev),
-# and kernel headers (linux-libc-dev).
-DEFAULT_PACKAGES="libc6-dev libstdc++-7-dev linux-libc-dev"
 
 # --- Argument parsing ---
 usage() {
@@ -55,10 +56,10 @@ die() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --distro)      DISTRO="$2";        shift 2 ;;
-        --version)     VERSION="$2";       shift 2 ;;
-        --arch)        ARCH="$2";          shift 2 ;;
-        --output-tar)  OUTPUT_TAR="$2";    shift 2 ;;
+        --distro)      DISTRO="$2";         shift 2 ;;
+        --version)     VERSION="$2";        shift 2 ;;
+        --arch)        ARCH="$2";           shift 2 ;;
+        --output-tar)  OUTPUT_TAR="$2";     shift 2 ;;
         --packages)    EXTRA_PACKAGES="$2"; shift 2 ;;
         -h|--help)     usage ;;
         *) die "unknown option: $1" ;;
@@ -70,6 +71,28 @@ case "$ARCH" in
     x86_64)  DOCKER_PLATFORM="linux/amd64" ;;
     aarch64) DOCKER_PLATFORM="linux/arm64" ;;
     *) die "unsupported architecture: ${ARCH} (supported: x86_64, aarch64)" ;;
+esac
+
+# --- Resolve distro-specific values ---
+# Sets PKG_MANAGER and DEFAULT_PACKAGES based on the distro family.
+case "$DISTRO" in
+    ubuntu|debian)
+        PKG_MANAGER="apt"
+        # Provides: glibc headers + startup objects (libc6-dev), C++ stdlib
+        # (libstdc++-7-dev), and kernel headers (linux-libc-dev).
+        # libstdc++ version is Ubuntu 18.04 specific; use --packages to override
+        # for other versions (e.g. libstdc++-9-dev for Ubuntu 20.04).
+        DEFAULT_PACKAGES="libc6-dev libstdc++-7-dev linux-libc-dev"
+        ;;
+    amazonlinux|centos|rhel|fedora)
+        PKG_MANAGER="yum"
+        # Provides: glibc headers + startup objects (glibc-devel), C++ stdlib
+        # (libstdc++-devel), and kernel headers (kernel-headers).
+        DEFAULT_PACKAGES="glibc-devel libstdc++-devel kernel-headers"
+        ;;
+    *)
+        die "unsupported distro: ${DISTRO} (supported: ubuntu, debian, amazonlinux, centos, rhel, fedora)"
+        ;;
 esac
 
 VERSION_NODOT="${VERSION//./}"
@@ -87,6 +110,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required but not found"
 
 echo "Generating sysroot: ${SYSROOT_NAME}"
 echo "  Docker image:  ${DOCKER_IMAGE} (${DOCKER_PLATFORM})"
+echo "  Package mgr:   ${PKG_MANAGER}"
 echo "  Output:        ${OUTPUT_TAR}"
 echo "  Packages:      ${PACKAGES}"
 echo
@@ -111,17 +135,33 @@ echo "==> Pulling ${DOCKER_IMAGE} for ${DOCKER_PLATFORM}..."
 docker pull --platform "${DOCKER_PLATFORM}" "${DOCKER_IMAGE}"
 
 echo "==> Installing packages..."
-docker run \
-    --name "${CONTAINER_NAME}" \
-    --platform "${DOCKER_PLATFORM}" \
-    "${DOCKER_IMAGE}" \
-    bash -c "
-        set -e
-        apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${PACKAGES}
-        apt-get clean
-        rm -rf /var/lib/apt/lists/*
-    "
+case "$PKG_MANAGER" in
+    apt)
+        docker run \
+            --name "${CONTAINER_NAME}" \
+            --platform "${DOCKER_PLATFORM}" \
+            "${DOCKER_IMAGE}" \
+            bash -c "
+                set -e
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${PACKAGES}
+                apt-get clean
+                rm -rf /var/lib/apt/lists/*
+            "
+        ;;
+    yum)
+        docker run \
+            --name "${CONTAINER_NAME}" \
+            --platform "${DOCKER_PLATFORM}" \
+            "${DOCKER_IMAGE}" \
+            bash -c "
+                set -e
+                yum install -y ${PACKAGES}
+                yum clean all
+                rm -rf /var/cache/yum
+            "
+        ;;
+esac
 
 echo "==> Exporting filesystem..."
 docker export "${CONTAINER_NAME}" -o "${EXPORT_TAR}"
@@ -130,9 +170,17 @@ echo "==> Extracting sysroot directories..."
 # docker export produces a flat tar with paths relative to / (no leading slash).
 # We extract only the directories needed for linking; the rest (binaries, docs,
 # etc.) are not useful in a sysroot and would bloat the output.
-for dir in lib lib64 usr/lib usr/include; do
+# usr/lib64 is required for RHEL-family distros (AL2, CentOS, etc.) which place
+# libstdc++ and other runtime libs there rather than in usr/lib.
+for dir in lib lib64 usr/lib usr/lib64 usr/include; do
     tar -xf "${EXPORT_TAR}" -C "${SYSROOT_DIR}" "${dir}" 2>/dev/null || true
 done
+
+# Docker-exported tars preserve container permissions (e.g. r-xr-xr-x directories).
+# Ownership falls back to the current user since we're not root, but the restrictive
+# permission bits remain and would cause the symlink-fix step and cleanup to fail
+# with "permission denied". Make everything user-writable before proceeding.
+chmod -R u+rwX "${SYSROOT_DIR}"
 
 echo "==> Fixing absolute symlinks..."
 # Docker exports preserve absolute symlinks (e.g. /lib/x86_64-linux-gnu/libc.so.6).

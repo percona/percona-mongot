@@ -14,11 +14,11 @@ def cc_bazel_deps():
         name = "llvm_toolchain",
         llvm_versions = {
             "": "17.0.6",
-            "linux-x86_64": "15.0.6",
             "linux-aarch64": "17.0.6",
+            "linux-x86_64": "15.0.6",
         },
         sysroot = {
-            "linux-aarch64": "@sysroot_ubuntu1804_aarch64//:sysroot",
-            "linux-x86_64": "@sysroot_ubuntu1804_x86_64//:sysroot",
+            "linux-aarch64": "@sysroot_amazonlinux2_aarch64//:sysroot",
+            "linux-x86_64": "@sysroot_amazonlinux2_x86_64//:sysroot",
         },
     )

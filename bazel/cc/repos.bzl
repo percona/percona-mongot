@@ -36,3 +36,21 @@ def cc_repos():
             "https://search-build-and-release-3p-tools.s3.us-east-2.amazonaws.com/sysroots/ubuntu1804-x86_64.tar.gz",
         ],
     )
+
+    http_archive(
+        name = "sysroot_amazonlinux2_aarch64",
+        integrity = "sha256-yuTUkRdmeSBUTCZ8rH+0ma2uDVJimlf9Bcwvj0s35+c=",
+        strip_prefix = "amazonlinux2-aarch64",
+        urls = [
+            "https://search-build-and-release-3p-tools.s3.us-east-2.amazonaws.com/sysroots/amazonlinux2-aarch64.tar.gz",
+        ],
+    )
+
+    http_archive(
+        name = "sysroot_amazonlinux2_x86_64",
+        integrity = "sha256-VaSnDDhpZzc3liZGhXUogkXzSrB2x91YJv2Nq3A6V2Y=",
+        strip_prefix = "amazonlinux2-x86_64",
+        urls = [
+            "https://search-build-and-release-3p-tools.s3.us-east-2.amazonaws.com/sysroots/amazonlinux2-x86_64.tar.gz",
+        ],
+    )
