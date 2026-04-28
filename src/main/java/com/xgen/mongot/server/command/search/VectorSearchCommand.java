@@ -617,8 +617,12 @@ public class VectorSearchCommand implements Command {
       }
     }
     var fieldPath = vectorSearchQuery.criteria().path();
-    Optional<String> indexModel =
-        Optional.ofNullable(vectorIndexDef.getModelNamePerPath().get(fieldPath));
+    if (!vectorIndexDef.getModelNamePerPath().containsKey(fieldPath)) {
+      throw new InvalidQueryException(
+          "Path '%s' is not defined in Automated Embedding index '%s'"
+              .formatted(fieldPath, vectorSearchQuery.index()));
+    }
+    String indexModelName = vectorIndexDef.getModelNamePerPath().get(fieldPath);
 
     Optional<String> queryModel =
         vectorSearchQuery.criteria().query().flatMap(VectorSearchQueryInput::getModel);
@@ -626,10 +630,10 @@ public class VectorSearchCommand implements Command {
     // If the user didn't specify a model, use the indexing model.
     if (queryModel.isEmpty()) {
       LOG.atDebug()
-          .addKeyValue("indexModel", indexModel.orElse("none"))
+          .addKeyValue("indexModel", indexModelName)
           .addKeyValue("fieldPath", fieldPath.toString())
           .log("Using indexing model for embedding query (no query model specified)");
-      return Optional.of(new EmbedRequestInfo(indexModel, vectorIndexDef));
+      return Optional.of(new EmbedRequestInfo(Optional.of(indexModelName), vectorIndexDef));
     }
 
     // Check if the query model is allowed
@@ -641,23 +645,17 @@ public class VectorSearchCommand implements Command {
     }
 
     // Then, check if the query model is compatible with the index's model
-    if (indexModel.isEmpty()) {
-      throw new InvalidQueryException(
-          String.format(
-              "cannot specify query model '%s' for an index without an embedding model",
-              queryModel.get()));
-    }
     Set<String> compatibleIndexModels =
         EmbeddingModelCatalog.getCompatibleIndexModels(queryModel.get());
-    if (!compatibleIndexModels.contains(indexModel.get())) {
+    if (!compatibleIndexModels.contains(indexModelName)) {
       throw new InvalidQueryException(
           String.format(
               "query model '%s' is not compatible with the index model '%s'",
-              queryModel.get(), indexModel.get()));
+              queryModel.get(), indexModelName));
     }
     LOG.atDebug()
         .addKeyValue("queryModel", queryModel.get())
-        .addKeyValue("indexModel", indexModel.get())
+        .addKeyValue("indexModel", indexModelName)
         .addKeyValue("fieldPath", fieldPath.toString())
         .log("Using user-specified model for embedding (compatible with indexing model)");
     return Optional.of(new EmbedRequestInfo(queryModel, vectorIndexDef));
@@ -865,8 +863,9 @@ public class VectorSearchCommand implements Command {
             .orElseThrow(
                 () ->
                     new InvalidQueryException(
-                        "Vector index for this text based query is invalid: "
-                            + "no embedding field for path '%s'".formatted(sourcePath)));
+                        ("Error when preparing embedding request context: path '%s' is not defined "
+                                + "in Automated Embedding index")
+                            .formatted(sourcePath)));
 
     return new EmbeddingRequestContext(
         sourceIndexDefinition.getDatabase(),

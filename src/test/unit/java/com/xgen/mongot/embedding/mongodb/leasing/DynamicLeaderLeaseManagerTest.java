@@ -218,8 +218,7 @@ public class DynamicLeaderLeaseManagerTest {
     assertThat(this.leaseManager.getLeaderGenerationIds()).doesNotContain(generationId);
     String leaseKey = getLeaseKeyFromCatalog(generationId);
     assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey(leaseKey);
-    assertThat(this.leaseManager.getLeaseKeyToDatabase().get(leaseKey))
-        .isEqualTo(DATABASE_NAME);
+    assertThat(this.leaseManager.getLeaseKeyToDatabase().get(leaseKey)).isEqualTo(DATABASE_NAME);
   }
 
   @Test
@@ -240,10 +239,8 @@ public class DynamicLeaderLeaseManagerTest {
     assertThat(this.leaseManager.getLeaderGenerationIds()).isEmpty();
     String leaseKey1 = getLeaseKeyFromCatalog(generationId1);
     String leaseKey2 = getLeaseKeyFromCatalog(generationId2);
-    assertThat(this.leaseManager.getLeaseKeyToDatabase())
-        .containsKey(leaseKey1);
-    assertThat(this.leaseManager.getLeaseKeyToDatabase())
-        .containsKey(leaseKey2);
+    assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey(leaseKey1);
+    assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey(leaseKey2);
 
     // Act - drop one
     this.leaseManager.drop(generationId1);
@@ -253,10 +250,8 @@ public class DynamicLeaderLeaseManagerTest {
     assertThat(this.leaseManager.getLeaderGenerationIds()).isEmpty();
     // leaseKeyToDatabase is associated with the lease, not the generation tracking sets,
     // and is only cleaned up by dropLease().
-    assertThat(this.leaseManager.getLeaseKeyToDatabase())
-        .containsKey(leaseKey1);
-    assertThat(this.leaseManager.getLeaseKeyToDatabase())
-        .containsKey(leaseKey2);
+    assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey(leaseKey1);
+    assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey(leaseKey2);
   }
 
   @Test
@@ -922,8 +917,7 @@ public class DynamicLeaderLeaseManagerTest {
 
     // Verify lease was stored in memory
     assertThat(this.leaseManager.getLeases()).containsKey("mv-collection-name");
-    assertThat(this.leaseManager.getLeaseKeyToDatabase())
-        .containsKey("mv-collection-name");
+    assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey("mv-collection-name");
     assertThat(this.leaseManager.getLeaseKeyToDatabase().get("mv-collection-name"))
         .isEqualTo(DATABASE_NAME);
   }
@@ -1197,10 +1191,8 @@ public class DynamicLeaderLeaseManagerTest {
     when(this.mockFindIterable.into(any())).thenReturn(leaseList);
 
     // Mock getCollectionInfo to fail — triggers normalizeLeaseIfNeeded returning null
-    ListCollectionsIterable<BsonDocument> emptyIterable =
-        mock(ListCollectionsIterable.class);
-    when(this.mockDatabase.listCollections(BsonDocument.class))
-        .thenReturn(emptyIterable);
+    ListCollectionsIterable<BsonDocument> emptyIterable = mock(ListCollectionsIterable.class);
+    when(this.mockDatabase.listCollections(BsonDocument.class)).thenReturn(emptyIterable);
     MongoCursor<BsonDocument> emptyCursor = mock(MongoCursor.class);
     when(emptyCursor.hasNext()).thenReturn(false);
     when(emptyIterable.iterator()).thenReturn(emptyCursor);
@@ -1218,7 +1210,8 @@ public class DynamicLeaderLeaseManagerTest {
 
     // Assert
     assertThat(
-            metricsFactory.meterRegistry
+            metricsFactory
+                .meterRegistry
                 .counter(metricsFactory.namespace + ".corruptedLeases")
                 .count())
         .isEqualTo(1.0);
@@ -1246,7 +1239,8 @@ public class DynamicLeaderLeaseManagerTest {
 
     // Assert - counter incremented by parseLeaseOrThrow, lease not stored
     assertThat(
-            metricsFactory.meterRegistry
+            metricsFactory
+                .meterRegistry
                 .counter(metricsFactory.namespace + ".corruptedLeases")
                 .count())
         .isEqualTo(1.0);
@@ -1276,7 +1270,8 @@ public class DynamicLeaderLeaseManagerTest {
 
     // Assert - counter incremented, lease not stored, no crash
     assertThat(
-            metricsFactory.meterRegistry
+            metricsFactory
+                .meterRegistry
                 .counter(metricsFactory.namespace + ".corruptedLeases")
                 .count())
         .isEqualTo(1.0);
@@ -1313,8 +1308,8 @@ public class DynamicLeaderLeaseManagerTest {
   }
 
   /**
-   * Replaces the in-memory lease with one that has less than 50% TTL remaining, so that
-   * heartbeat's skip-renewal optimization does not short-circuit the renewal attempt.
+   * Replaces the in-memory lease with one that has less than 50% TTL remaining, so that heartbeat's
+   * skip-renewal optimization does not short-circuit the renewal attempt.
    */
   private void putLeaseInRenewalWindow(MaterializedViewGenerationId generationId) {
     String leaseKey = getLeaseKeyFromCatalog(generationId);
@@ -1453,26 +1448,20 @@ public class DynamicLeaderLeaseManagerTest {
   @Test
   public void materializedViewTransientException_legacyConstructors_defaultToUnknown() {
     var ex1 = new MaterializedViewTransientException("test");
-    assertThat(ex1.getReason())
-        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+    assertThat(ex1.getReason()).isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
 
     var ex2 = new MaterializedViewTransientException(new RuntimeException("cause"));
-    assertThat(ex2.getReason())
-        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+    assertThat(ex2.getReason()).isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
 
-    var ex3 =
-        new MaterializedViewTransientException("msg", new RuntimeException("cause"));
-    assertThat(ex3.getReason())
-        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+    var ex3 = new MaterializedViewTransientException("msg", new RuntimeException("cause"));
+    assertThat(ex3.getReason()).isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
   }
 
   @Test
   public void materializedViewTransientException_nullReason_defaultsToUnknown() {
     MaterializedViewTransientException.Reason nullReason = null;
-    var ex =
-        new MaterializedViewTransientException("test", nullReason);
-    assertThat(ex.getReason())
-        .isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
+    var ex = new MaterializedViewTransientException("test", nullReason);
+    assertThat(ex.getReason()).isEqualTo(MaterializedViewTransientException.Reason.UNKNOWN);
   }
 
   @SuppressWarnings("unchecked")

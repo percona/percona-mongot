@@ -279,7 +279,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append(
                 "errmsg",
                 new BsonString(
-                    "Automated Embedding index query is invalid due to missing model")),
+                    "Path 'testPath.invalid_child' is not defined in Automated Embedding "
+                        + "index 'default'")),
         result);
   }
 
@@ -366,6 +367,37 @@ public class VectorSearchCommandAutoEmbedTest {
                         .build(),
                     queryWithInvalidModel));
     assertThat(exception.getMessage()).contains("model 'invalid-model' is not allowed");
+  }
+
+  @Test
+  public void findEmbedRequestInfo_throwsException_whenPathHasNoEmbeddingField_withQueryModel()
+      throws Exception {
+    var mocks = new Mocks();
+    var queryWithModelAndBadPath =
+        VectorQueryBuilder.builder()
+            .index(MAT_VIEW_INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .query(
+                        new VectorSearchQueryInput.Text("test query", Optional.of("voyage-4-lite")))
+                    .path(PATH.newChild("wrong"))
+                    .filter(getFilter())
+                    .build())
+            .build();
+    var command = buildAutoEmbeddingVectorSearchCommandWithMocks(mocks, queryWithModelAndBadPath);
+    var exception =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                command.findEmbedRequestInfo(
+                    VectorIndexDefinitionBuilder.builder()
+                        .withDotProductVectorField(PATH.toString(), 1024)
+                        .build(),
+                    queryWithModelAndBadPath));
+    assertThat(exception.getMessage()).contains("not defined in Automated Embedding index");
+    assertThat(exception.getMessage()).contains("testPath.wrong");
   }
 
   @Test
@@ -742,7 +774,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append(
                 "errmsg",
                 new BsonString(
-                    "Automated Embedding index query is invalid due to missing model")),
+                    "Path 'testPath.invalid_child' is not defined in Automated Embedding "
+                        + "index 'default'")),
         result);
   }
 
