@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
@@ -83,7 +84,26 @@ public class InitializedMaterializedViewIndexTest {
     assertEquals(IndexStatus.StatusCode.RECOVERING_TRANSIENT, index.getStatus().getStatusCode());
   }
 
+  @Test
+  public void getStatus_returnsRecoveringTransient_whenLeaseQueryableAndNowInitialSync()
+      throws Exception {
+    // Process restart while MV is mid-resync: statusRef is fresh IndexStatus.unknown(), but
+    // the persisted lease records isQueryable=true. The constructor must seed wasQueryable
+    // from the lease so the leader reports RECOVERING_TRANSIENT (STALE), matching followers,
+    // not raw INITIAL_SYNC (BUILDING).
+    InitializedMaterializedViewIndex index =
+        createIndex(IndexStatus.unknown(), /* leaseQueryable= */ true);
+
+    index.setStatus(IndexStatus.initialSync());
+    assertEquals(IndexStatus.StatusCode.RECOVERING_TRANSIENT, index.getStatus().getStatusCode());
+  }
+
   private InitializedMaterializedViewIndex createIndex(IndexStatus initialStatus) throws Exception {
+    return createIndex(initialStatus, /* leaseQueryable= */ false);
+  }
+
+  private InitializedMaterializedViewIndex createIndex(
+      IndexStatus initialStatus, boolean leaseQueryable) throws Exception {
     MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
     MaterializedViewIndexDefinitionGeneration defGen =
         MaterializedViewIndex.mockMatViewDefinitionGeneration(INDEX_ID);
@@ -102,6 +122,9 @@ public class InitializedMaterializedViewIndexTest {
         org.mockito.ArgumentMatchers.any(),
         org.mockito.ArgumentMatchers.anyLong(),
         org.mockito.ArgumentMatchers.any());
+    when(leaseManager.isCurrentVersionQueryable(
+            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+        .thenReturn(leaseQueryable);
     AtomicReference<IndexStatus> statusRef = new AtomicReference<>(initialStatus);
     MaterializedViewSchemaMetadata schemaMetadata =
         new MaterializedViewSchemaMetadata(0, java.util.Map.of());

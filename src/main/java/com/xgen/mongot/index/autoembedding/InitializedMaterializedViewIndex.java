@@ -67,8 +67,9 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
     this.indexMetricsUpdater = indexMetricsUpdater;
     this.materializedViewWriter = materializedViewWriter;
     this.statusRef = statusRef;
-    this.wasQueryable = new AtomicBoolean(statusRef.get().canServiceQueries());
     this.leaseManager = leaseManager;
+    this.wasQueryable = new AtomicBoolean(
+        statusRef.get().canServiceQueries() || isCurrentVersionQueryablePerLease());
     this.schemaMetadata = schemaMetadata;
     this.matViewDatabaseName = matViewDatabaseName;
     this.leaderStatusGauge =
@@ -195,7 +196,9 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
 
   /**
    * Returns true if the current definition version has ever been queryable, as persisted in the
-   * lease. Used to initialize the composite index's queryable ratchet after a restart.
+   * lease. Used to seed both this index's in-memory {@code wasQueryable} ratchet and the
+   * {@code AutoEmbeddingCompositeIndex} ratchet across restarts so the leader's effective status
+   * matches followers (which read the lease directly via {@code StatusResolutionUtils}).
    */
   public boolean isCurrentVersionQueryablePerLease() {
     return this.leaseManager.isCurrentVersionQueryable(
