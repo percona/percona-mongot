@@ -415,7 +415,7 @@ public class VectorSearchCommandIndexSizeMetricsTest {
     var taggedCounter =
         metricsFactory
             .get(
-                "nestedVectorSearchQueries",
+                "nestedVectorSearchQueryTags",
                 Tags.of("hasFilter", "true", "hasParentFilter", "false", "scoreMode", "max"))
             .counter();
     assertThat(taggedCounter).isNotNull();
@@ -487,7 +487,7 @@ public class VectorSearchCommandIndexSizeMetricsTest {
     var taggedCounter =
         metricsFactory
             .get(
-                "nestedVectorSearchQueries",
+                "nestedVectorSearchQueryTags",
                 Tags.of("hasFilter", "false", "hasParentFilter", "true", "scoreMode", "avg"))
             .counter();
     assertThat(taggedCounter).isNotNull();
@@ -561,7 +561,7 @@ public class VectorSearchCommandIndexSizeMetricsTest {
     var taggedCounter =
         metricsFactory
             .get(
-                "nestedVectorSearchQueries",
+                "nestedVectorSearchQueryTags",
                 Tags.of("hasFilter", "true", "hasParentFilter", "true", "scoreMode", "max"))
             .counter();
     assertThat(taggedCounter).isNotNull();
@@ -630,7 +630,7 @@ public class VectorSearchCommandIndexSizeMetricsTest {
     var taggedCounter =
         metricsFactory
             .get(
-                "nestedVectorSearchQueries",
+                "nestedVectorSearchQueryTags",
                 Tags.of("hasFilter", "false", "hasParentFilter", "false", "scoreMode", "max"))
             .counter();
     assertThat(taggedCounter).isNotNull();

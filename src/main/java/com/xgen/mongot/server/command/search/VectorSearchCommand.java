@@ -1022,7 +1022,7 @@ public class VectorSearchCommand implements Command {
             Tag.of("hasParentFilter", hasParentFilter),
             Tag.of("scoreMode", scoreMode));
 
-    this.metrics.metricsFactory.counter("nestedVectorSearchQueries", tags).increment();
+    this.metrics.metricsFactory.counter("nestedVectorSearchQueryTags", tags).increment();
   }
 
   /**
