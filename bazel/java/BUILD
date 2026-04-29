@@ -203,6 +203,7 @@ _EXTRA_CHECKS = [
     "StaticQualifiedUsingExpression",
     "StringEquality",
     "StringFormatWithLiteral",
+    "StreamResourceLeak",
     "ThreadSafe",
     "TryWithResourcesVariable",
     "TruthContainsExactlyElementsInUsage",
