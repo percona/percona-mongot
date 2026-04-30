@@ -60,10 +60,8 @@ public class MaterializedViewCollectionResolver {
 
   private final MaterializedViewCollectionMetadataCatalog metadataCatalog;
 
-  @SuppressWarnings("UnusedVariable") // will be used later for schema mapping and GC logic
   private final LeaseManager leaseManager;
 
-  @SuppressWarnings("UnusedVariable") // will be used later for schema mapping and GC logic
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
 
   private final InternalDatabaseResolver dbResolver;
@@ -137,6 +135,15 @@ public class MaterializedViewCollectionResolver {
                   indexDefinitionGeneration.getIndexDefinition().asVectorDefinition(),
                   this.materializedViewConfig.materializedViewSchemaVersion.orElse(
                       CURRENT_MAT_VIEW_SCHEMA_VERSION)));
+      try {
+        this.leaseManager.executeOpsCommandsAfterInitializeLease(
+            materializedViewCollectionMetadata.collectionName());
+      } catch (RuntimeException e) {
+        LOG.atError()
+            .setCause(e)
+            .addKeyValue("collectionName", materializedViewCollectionMetadata.collectionName())
+            .log("Ops hook failed during MV initialization; continuing catalog registration");
+      }
       this.metadataCatalog.addMetadata(
           indexDefinitionGeneration.getGenerationId(), materializedViewCollectionMetadata);
       this.metadataCatalog.addDatabaseName(indexDefinitionGeneration.getGenerationId(), matViewDb);

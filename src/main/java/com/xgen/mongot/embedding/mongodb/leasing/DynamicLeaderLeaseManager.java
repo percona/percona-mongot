@@ -53,6 +53,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.jetbrains.annotations.TestOnly;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,6 +78,9 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
 
   private static final long GIVE_UP_BLACKOUT_SECONDS = 60;
 
+  static final String OPS_GIVE_UP_LEASE_SUCCESS_COUNTER_NAME = "opsGiveUpLeaseSuccess";
+  static final String OPS_GIVE_UP_LEASE_FAILURE_COUNTER_NAME = "opsGiveUpLeaseFailure";
+
   private final MongoClientOperationExecutor operationExecutor;
   private final String hostname;
   // Mapping of lease keys to leases.
@@ -94,13 +98,34 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
   // End of give-up blackout (epoch ms). While now < this, do not acquire leadership.
   private final AtomicLong giveUpBlackoutEndTimeMs = new AtomicLong(0);
   private final Counter corruptedLeaseCounter;
+  private final MetricsFactory metricsFactory;
+  // Ops commands. Populated at construction but not executed until the source mongod is ready.
+  private final LeaseManagerOpsCommands opsCommands;
 
+  @TestOnly
   public DynamicLeaderLeaseManager(
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MetricsFactory metricsFactory,
       String hostname,
       InternalDatabaseResolver dbResolver,
       MaterializedViewCollectionMetadataCatalog mvMetadataCatalog) {
+    this(
+        autoEmbeddingMongoClient,
+        metricsFactory,
+        hostname,
+        dbResolver,
+        mvMetadataCatalog,
+        LeaseManagerOpsCommands.NONE);
+  }
+
+  private DynamicLeaderLeaseManager(
+      AutoEmbeddingMongoClient autoEmbeddingMongoClient,
+      MetricsFactory metricsFactory,
+      String hostname,
+      InternalDatabaseResolver dbResolver,
+      MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
+      LeaseManagerOpsCommands opsCommands) {
+    this.metricsFactory = metricsFactory;
     this.operationExecutor =
         new MongoClientOperationExecutor(metricsFactory, "leaseTableCollection");
     this.corruptedLeaseCounter = metricsFactory.counter("corruptedLeases");
@@ -113,6 +138,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
     this.dbResolver = dbResolver;
     this.leaseKeyToDatabase = new ConcurrentHashMap<>();
     this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;
+    this.opsCommands = opsCommands;
   }
 
   public static DynamicLeaderLeaseManager create(
@@ -122,97 +148,131 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       InternalDatabaseResolver dbResolver,
       MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
       LeaseManagerOpsCommands opsCommands) {
-    DynamicLeaderLeaseManager manager =
-        new DynamicLeaderLeaseManager(
-            autoEmbeddingMongoClient,
-            new MetricsFactory(METRICS_NAMESPACE, meterAndFtdcRegistry.meterRegistry()),
-            hostname,
-            dbResolver,
-            mvMetadataCatalog);
-    manager.opsGiveUpLease(opsCommands.opsGiveUpLease());
-    return manager;
+    return new DynamicLeaderLeaseManager(
+        autoEmbeddingMongoClient,
+        new MetricsFactory(METRICS_NAMESPACE, meterAndFtdcRegistry.meterRegistry()),
+        hostname,
+        dbResolver,
+        mvMetadataCatalog,
+        opsCommands);
   }
 
-  /**
-   * Applies the ops give-up lease command if applicable (instance match, not expired). When
-   * leaseNames is non-empty, gives up those leases (best-effort) and sets a 60s blackout. When
-   * leaseNames is empty, only sets blackout (instance signals overloaded, step away from taking new
-   * leases).
-   */
-  void opsGiveUpLease(Optional<LeaseManagerOpsCommands.OpsGiveUpLeaseCommand> opsGiveUpLease) {
-    if (opsGiveUpLease.isEmpty()) {
+  @Override
+  public void executeOpsCommandsAfterInitializeLease(String leaseKey) {
+    if (this.opsCommands.opsGiveUpLease().isEmpty()) {
       return;
     }
-    LeaseManagerOpsCommands.OpsGiveUpLeaseCommand cmd = opsGiveUpLease.get();
+    LeaseManagerOpsCommands.OpsGiveUpLeaseCommand cmd = this.opsCommands.opsGiveUpLease().get();
+    if (!isValidGiveUpLeaseCommand(cmd, leaseKey)) {
+      return;
+    }
+    // ops command is valid. Enter execution phase.
+    if (updateLeaseToGiveUpLeadership(leaseKey)) {
+      long blackoutEnd = System.currentTimeMillis() + GIVE_UP_BLACKOUT_SECONDS * 1000L;
+      this.giveUpBlackoutEndTimeMs.set(blackoutEnd);
+      LOG.atInfo()
+          .addKeyValue("leaseKey", leaseKey)
+          .addKeyValue("blackoutSeconds", GIVE_UP_BLACKOUT_SECONDS)
+          .addKeyValue("blackoutEnd", Instant.ofEpochMilli(blackoutEnd))
+          .log("Applied lease give-up & blackout ops command");
+    }
+  }
+
+  private boolean isValidGiveUpLeaseCommand(
+      LeaseManagerOpsCommands.OpsGiveUpLeaseCommand cmd, String leaseKey) {
     if (!cmd.instance().equals(this.hostname)) {
       LOG.atDebug()
+          .addKeyValue("leaseKey", leaseKey)
           .addKeyValue("commandInstance", cmd.instance())
           .addKeyValue("hostname", this.hostname)
-          .log("Ignoring ops give-up lease - instance mismatch");
-      return;
+          .log("Skipping give-up lease ops command - instance mismatch");
+      return false;
     }
     if (Instant.now().isAfter(cmd.expiresAt())) {
       LOG.atDebug()
+          .addKeyValue("leaseKey", leaseKey)
           .addKeyValue("expiresAt", cmd.expiresAt())
-          .log("Ignoring ops give-up lease - expired");
-      return;
+          .log("Skipping give-up lease ops command - command expired");
+      return false;
     }
-    if (!cmd.leaseNames().isEmpty()) {
-      applyGiveUpLease(cmd.leaseNames());
+    if (cmd.leaseNames().isEmpty() || !cmd.leaseNames().contains(leaseKey)) {
+      LOG.atDebug()
+          .addKeyValue("leaseKey", leaseKey)
+          .log("Skipping give-up lease ops command - lease not targeted");
+      return false;
     }
-    long blackoutEnd = System.currentTimeMillis() + GIVE_UP_BLACKOUT_SECONDS * 1000;
-    this.giveUpBlackoutEndTimeMs.set(blackoutEnd);
-    LOG.atInfo()
-        .addKeyValue("leaseNames", cmd.leaseNames())
-        .addKeyValue("blackoutSeconds", GIVE_UP_BLACKOUT_SECONDS)
-        .log("Applied ops give-up lease and set blackout");
+    Lease lease = this.leases.get(leaseKey);
+    if (lease == null) {
+      LOG.atDebug()
+          .addKeyValue("leaseKey", leaseKey)
+          .log("Skipping give-up lease ops command - lease not found");
+      return false;
+    }
+    if (!this.hostname.equals(lease.leaseOwner())) {
+      LOG.atDebug()
+          .addKeyValue("leaseKey", leaseKey)
+          .addKeyValue("hostname", lease.leaseOwner())
+          .addKeyValue("realHostname", this.hostname)
+          .log("Skipping give-up lease ops command - lease not owned");
+      return false;
+    }
+    return true;
   }
 
   /**
-   * Gives up ownership of the specified leases: expires them in the database and clears local
-   * leader state. Only affects leases owned by this instance.
+   * Update the lease document to officially give up ownership. This method expires the lease in the
+   * database and clears local leader state.
+   *
+   * @return true if give-up is successful, false otherwise
    */
-  private void applyGiveUpLease(List<String> giveUpLeaseNames) {
-    for (String leaseKeyToGiveUp : giveUpLeaseNames) {
+  private boolean updateLeaseToGiveUpLeadership(String leaseKeyToGiveUp) {
+    Lease lease = this.leases.get(leaseKeyToGiveUp);
+    if (lease == null) {
+      LOG.atError()
+          .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
+          .log("Lease not found, skipping give-up. Please try later.");
+      return false;
+    }
+    Lease released = lease.withReleasedOwnership();
+    Bson filter =
+        createUpdateFilterForOwnedLease(
+            leaseKeyToGiveUp, lease.leaseVersion(), released.leaseVersion());
+    UpdateResult result;
+    try {
+      result =
+          this.operationExecutor.execute(
+              "giveUpLease",
+              () ->
+                  this.getCollection(getDatabaseForLease(leaseKeyToGiveUp))
+                      .replaceOne(filter, released.toBson()));
+    } catch (Exception e) {
+      this.metricsFactory.counter(OPS_GIVE_UP_LEASE_FAILURE_COUNTER_NAME).increment();
+      LOG.atError()
+          .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
+          .addKeyValue("hostname", this.hostname)
+          .setCause(e)
+          .log("Failed to execute lease update command for give-up");
+      return false;
+    }
+    if (result.getModifiedCount() != 1) {
+      this.metricsFactory.counter(OPS_GIVE_UP_LEASE_FAILURE_COUNTER_NAME).increment();
       LOG.atInfo()
           .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
           .addKeyValue("hostname", this.hostname)
-          .log("Attempting to give up lease");
-      Lease lease = this.leases.get(leaseKeyToGiveUp);
-      if (lease == null || !this.hostname.equals(lease.leaseOwner())) {
-        LOG.atInfo()
-            .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
-            .addKeyValue("hostname", lease != null ? lease.leaseOwner() : "")
-            .addKeyValue("realHostname", this.hostname)
-            .log("Empty in-mem lease or we don't own it - not giving up");
-        continue;
-      }
-      Lease released = lease.withReleasedOwnership();
-      Bson filter =
-          createUpdateFilterForOwnedLease(
-              leaseKeyToGiveUp, lease.leaseVersion(), released.leaseVersion());
-      try {
-        UpdateResult result =
-            this.operationExecutor.execute(
-                "giveUpLease",
-                () -> this.getCollection(getDatabaseForLease(leaseKeyToGiveUp))
-                    .replaceOne(filter, released.toBson()));
-        if (result.getModifiedCount() == 1) {
-          this.leases.put(leaseKeyToGiveUp, released);
-          LOG.atInfo()
-              .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
-              .addKeyValue("hostname", this.hostname)
-              .log("Gave up lease for rebalance");
-        } else {
-          LOG.atError()
-              .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
-              .addKeyValue("hostname", this.hostname)
-              .log("No lease document updated, rebalance failed");
-        }
-      } catch (Exception e) {
-        LOG.warn("Failed to give up lease for {}", leaseKeyToGiveUp, e);
-      }
+          .addKeyValue("matchedCount", result.getMatchedCount())
+          .addKeyValue("modifiedCount", result.getModifiedCount())
+          .log(
+              "Lease give-up did not modify the document (filter/version mismatch or no longer"
+                  + " owner); skipping local update and blackout");
+      return false;
     }
+    this.leases.put(leaseKeyToGiveUp, released);
+    this.metricsFactory.counter(OPS_GIVE_UP_LEASE_SUCCESS_COUNTER_NAME).increment();
+    LOG.atDebug()
+        .addKeyValue("leaseKeyToGiveUp", leaseKeyToGiveUp)
+        .addKeyValue("hostname", this.hostname)
+        .log("Gave up lease successfully for rebalance");
+    return true;
   }
 
   /**
@@ -237,8 +297,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       String defaultDb = this.dbResolver.resolveDefault();
       List<BsonDocument> rawLeases =
           this.operationExecutor.execute(
-              "getLeases",
-              () -> this.getCollection(defaultDb).find().into(new ArrayList<>()));
+              "getLeases", () -> this.getCollection(defaultDb).find().into(new ArrayList<>()));
       List<String> corruptedLeaseIds = new ArrayList<>();
       for (BsonDocument rawLease : rawLeases) {
         try {
@@ -903,8 +962,7 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       throws Exception {
     this.leaseKeyToDatabase.put(
         proposedMetadata.collectionName(),
-        this.dbResolver.resolve(
-            indexDefinitionGeneration.getIndexDefinition().getDatabase()));
+        this.dbResolver.resolve(indexDefinitionGeneration.getIndexDefinition().getDatabase()));
     @Var var existingLease = this.leases.get(proposedMetadata.collectionName());
     if (existingLease == null) {
       // Try to get lease from database and update in memory state.
@@ -983,8 +1041,8 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
     try {
       this.operationExecutor.execute(
           "createLease",
-          () -> this.getCollection(getDatabaseForLease(newLease.id()))
-              .insertOne(newLease.toBson()));
+          () ->
+              this.getCollection(getDatabaseForLease(newLease.id())).insertOne(newLease.toBson()));
       // Insert succeeded - we created the lease and synchronized in-memory lease state.
       this.leases.put(newLease.id(), newLease);
       // Don't add or remove generationId into this.followerGenerationIds or
@@ -1054,8 +1112,9 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
     var result =
         this.operationExecutor.execute(
             "acquireLease",
-            () -> this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
-                .replaceOne(filter, newLease.toBson()));
+            () ->
+                this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
+                    .replaceOne(filter, newLease.toBson()));
 
     if (result.getMatchedCount() > 0) {
       this.leases.put(getLeaseKey(generationId), newLease);
@@ -1264,8 +1323,9 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       var result =
           this.operationExecutor.execute(
               "renewLease",
-              () -> this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
-                  .replaceOne(filter, renewedLease.toBson()));
+              () ->
+                  this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
+                      .replaceOne(filter, renewedLease.toBson()));
 
       if (result.getMatchedCount() > 0) {
         // Successfully renewed.
@@ -1383,9 +1443,10 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
     BsonDocument rawLease =
         this.operationExecutor.execute(
             "getLease",
-            () -> this.getCollection(getDatabaseForLease(collectionName))
-                .find(new Document("_id", collectionName))
-                .first());
+            () ->
+                this.getCollection(getDatabaseForLease(collectionName))
+                    .find(new Document("_id", collectionName))
+                    .first());
     if (rawLease == null) {
       return null;
     }
@@ -1448,8 +1509,9 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
       var result =
           this.operationExecutor.execute(
               "updateLease",
-              () -> this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
-                  .replaceOne(filter, updatedLease.toBson()));
+              () ->
+                  this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
+                      .replaceOne(filter, updatedLease.toBson()));
       if (result.getMatchedCount() == 0) {
         // OCC failure - we lost leadership (or lease was deleted during index drop).
         becomeFollower(generationId);
@@ -1485,12 +1547,11 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
     return db;
   }
 
-  private MongoCollection<BsonDocument> getCollection(
-      String databaseName) throws MaterializedViewTransientException {
+  private MongoCollection<BsonDocument> getCollection(String databaseName)
+      throws MaterializedViewTransientException {
     try {
       return Check.isPresent(
-              this.autoEmbeddingMongoClient.getLeaseManagerMongoClient(),
-              "leaseManagerMongoClient")
+              this.autoEmbeddingMongoClient.getLeaseManagerMongoClient(), "leaseManagerMongoClient")
           .getDatabase(databaseName)
           .getCollection(LEASE_COLLECTION_NAME, BsonDocument.class)
           .withReadConcern(ReadConcern.LINEARIZABLE)

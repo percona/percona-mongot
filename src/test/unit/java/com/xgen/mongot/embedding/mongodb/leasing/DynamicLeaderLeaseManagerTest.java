@@ -4,6 +4,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata.VERSION_ZERO;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewIndexGeneration;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -33,11 +34,13 @@ import com.xgen.mongot.index.autoembedding.MaterializedViewIndexGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
+import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import com.xgen.testing.mongot.metrics.SimpleMetricsFactory;
 import com.xgen.testing.mongot.mock.index.MaterializedViewIndex;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -113,94 +116,175 @@ public class DynamicLeaderLeaseManagerTest {
 
   @Test
   public void isInLeaseAcquisitionBlackout_whenGiveUpExpired_returnsFalse() {
-    // Create a lease manager with an ops command that has already expired
     LeaseManagerOpsCommands expiredOpsCommand =
         new LeaseManagerOpsCommands(
-            java.util.Optional.of(
+            Optional.of(
                 new LeaseManagerOpsCommands.OpsGiveUpLeaseCommand(
                     HOSTNAME,
-                    java.util.List.of(
-                        "69a7ab02ac4c64cd5800caaf-66392faf9727adb4c26e76dc37b98b9f-1"),
+                    List.of("69a7ab02ac4c64cd5800caaf-66392faf9727adb4c26e76dc37b98b9f-1"),
                     Instant.now().minusSeconds(60))));
 
     DynamicLeaderLeaseManager managerWithExpiredOps =
-        new DynamicLeaderLeaseManager(
+        DynamicLeaderLeaseManager.create(
             this.mockAutoEmbeddingMongoClient,
-            new SimpleMetricsFactory(),
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
             HOSTNAME,
             DB_RESOLVER,
-            this.mvMetadataCatalog);
-    // Call opsGiveUpLease via reflection since it is private
-    try {
-      java.lang.reflect.Method method =
-          DynamicLeaderLeaseManager.class.getDeclaredMethod(
-              "opsGiveUpLease", java.util.Optional.class);
-      method.setAccessible(true);
-      method.invoke(managerWithExpiredOps, expiredOpsCommand.opsGiveUpLease());
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
+            this.mvMetadataCatalog,
+            expiredOpsCommand);
+    managerWithExpiredOps.executeOpsCommandsAfterInitializeLease("any-lease-key");
 
-    // Blackout should NOT be set because the command is expired
     assertThat(managerWithExpiredOps.isInLeaseAcquisitionBlackout()).isFalse();
   }
 
   @Test
-  public void isInLeaseAcquisitionBlackout_whenGiveUpEmptyLeaseNames_stillSetsBlackout() {
+  public void isInLeaseAcquisitionBlackout_whenGiveUpEmptyLeaseNames_returnsFalse() {
     LeaseManagerOpsCommands emptyLeaseNamesCommand =
         new LeaseManagerOpsCommands(
-            java.util.Optional.of(
+            Optional.of(
                 new LeaseManagerOpsCommands.OpsGiveUpLeaseCommand(
-                    HOSTNAME, java.util.List.of(), Instant.now().plusSeconds(60))));
+                    HOSTNAME, List.of(), Instant.now().plusSeconds(60))));
 
     DynamicLeaderLeaseManager manager =
-        new DynamicLeaderLeaseManager(
+        DynamicLeaderLeaseManager.create(
             this.mockAutoEmbeddingMongoClient,
-            new SimpleMetricsFactory(),
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
             HOSTNAME,
             DB_RESOLVER,
-            this.mvMetadataCatalog);
-    try {
-      java.lang.reflect.Method method =
-          DynamicLeaderLeaseManager.class.getDeclaredMethod(
-              "opsGiveUpLease", java.util.Optional.class);
-      method.setAccessible(true);
-      method.invoke(manager, emptyLeaseNamesCommand.opsGiveUpLease());
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-    assertThat(manager.isInLeaseAcquisitionBlackout()).isTrue();
+            this.mvMetadataCatalog,
+            emptyLeaseNamesCommand);
+    manager.executeOpsCommandsAfterInitializeLease("any-lease-key");
+    assertThat(manager.isInLeaseAcquisitionBlackout()).isFalse();
+  }
+
+  @Test
+  public void isInLeaseAcquisitionBlackout_whenGiveUpMismatchingLeaseNames_returnsFalse() {
+    LeaseManagerOpsCommands emptyLeaseNamesCommand =
+        new LeaseManagerOpsCommands(
+            Optional.of(
+                new LeaseManagerOpsCommands.OpsGiveUpLeaseCommand(
+                    HOSTNAME,
+                    List.of("69a7ab02ac4c64cd5800caaf-66392faf9727adb4c26e76dc37b98b9f-1"),
+                    Instant.now().plusSeconds(60))));
+
+    DynamicLeaderLeaseManager manager =
+        DynamicLeaderLeaseManager.create(
+            this.mockAutoEmbeddingMongoClient,
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            HOSTNAME,
+            DB_RESOLVER,
+            this.mvMetadataCatalog,
+            emptyLeaseNamesCommand);
+    manager.executeOpsCommandsAfterInitializeLease("any-lease-key");
+    assertThat(manager.isInLeaseAcquisitionBlackout()).isFalse();
   }
 
   @Test
   public void isInLeaseAcquisitionBlackout_whenGiveUpNotExpired_returnsTrue() {
-    // Create a lease manager with an ops command that has not expired
+    MaterializedViewIndexGeneration indexGeneration = createTestIndexGeneration();
+    MaterializedViewGenerationId generationId = indexGeneration.getGenerationId();
+    String leaseKey = getLeaseKeyFromCatalog(generationId);
     LeaseManagerOpsCommands notExpiredOpsCommand =
         new LeaseManagerOpsCommands(
-            java.util.Optional.of(
+            Optional.of(
                 new LeaseManagerOpsCommands.OpsGiveUpLeaseCommand(
-                    HOSTNAME,
-                    java.util.List.of(
-                        "69a7ab02ac4c64cd5800caaf-66392faf9727adb4c26e76dc37b98b9f-1"),
-                    Instant.now().plusSeconds(60))));
+                    HOSTNAME, List.of(leaseKey), Instant.now().plusSeconds(60))));
 
     DynamicLeaderLeaseManager managerWithNotExpiredOps =
-        new DynamicLeaderLeaseManager(
+        DynamicLeaderLeaseManager.create(
             this.mockAutoEmbeddingMongoClient,
-            new SimpleMetricsFactory(),
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
             HOSTNAME,
             DB_RESOLVER,
-            this.mvMetadataCatalog);
-    try {
-      java.lang.reflect.Method method =
-          DynamicLeaderLeaseManager.class.getDeclaredMethod(
-              "opsGiveUpLease", java.util.Optional.class);
-      method.setAccessible(true);
-      method.invoke(managerWithNotExpiredOps, notExpiredOpsCommand.opsGiveUpLease());
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
+            this.mvMetadataCatalog,
+            notExpiredOpsCommand);
+    managerWithNotExpiredOps.add(indexGeneration);
+    managerWithNotExpiredOps.putLease(
+        leaseKey, createLease(generationId, HOSTNAME, Instant.now().plusSeconds(3600)));
+
+    UpdateResult updateResult = mock(UpdateResult.class);
+    when(updateResult.getModifiedCount()).thenReturn(1L);
+    when(this.mockCollection.replaceOne(any(), any(BsonDocument.class))).thenReturn(updateResult);
+
+    managerWithNotExpiredOps.executeOpsCommandsAfterInitializeLease(leaseKey);
     assertThat(managerWithNotExpiredOps.isInLeaseAcquisitionBlackout()).isTrue();
+  }
+
+  @Test
+  public void executeOpsCommandsAfterInitializeLease_successIncrementsCounter() {
+    MaterializedViewIndexGeneration indexGeneration = createTestIndexGeneration();
+    MaterializedViewGenerationId generationId = indexGeneration.getGenerationId();
+    String leaseKey = getLeaseKeyFromCatalog(generationId);
+    LeaseManagerOpsCommands opsCommand =
+        new LeaseManagerOpsCommands(
+            Optional.of(
+                new LeaseManagerOpsCommands.OpsGiveUpLeaseCommand(
+                    HOSTNAME, List.of(leaseKey), Instant.now().plusSeconds(60))));
+
+    MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    String successMeterName =
+        "embedding.leasing.stats."
+            + DynamicLeaderLeaseManager.OPS_GIVE_UP_LEASE_SUCCESS_COUNTER_NAME;
+    assertThat(meterAndFtdcRegistry.meterRegistry().find(successMeterName).counter()).isNull();
+
+    DynamicLeaderLeaseManager manager =
+        DynamicLeaderLeaseManager.create(
+            this.mockAutoEmbeddingMongoClient,
+            meterAndFtdcRegistry,
+            HOSTNAME,
+            DB_RESOLVER,
+            this.mvMetadataCatalog,
+            opsCommand);
+    manager.add(indexGeneration);
+    manager.putLease(
+        leaseKey, createLease(generationId, HOSTNAME, Instant.now().plusSeconds(3600)));
+
+    UpdateResult updateResult = mock(UpdateResult.class);
+    when(updateResult.getModifiedCount()).thenReturn(1L);
+    when(this.mockCollection.replaceOne(any(), any(BsonDocument.class))).thenReturn(updateResult);
+
+    manager.executeOpsCommandsAfterInitializeLease(leaseKey);
+
+    assertThat(meterAndFtdcRegistry.meterRegistry().find(successMeterName).counter()).isNotNull();
+    assertThat(meterAndFtdcRegistry.meterRegistry().find(successMeterName).counter().count())
+        .isEqualTo(1.0);
+  }
+
+  @Test
+  public void executeOpsCommandsAfterInitializeLease_replaceNoopDoesNotRegisterSuccessCounter() {
+    MaterializedViewIndexGeneration indexGeneration = createTestIndexGeneration();
+    MaterializedViewGenerationId generationId = indexGeneration.getGenerationId();
+    String leaseKey = getLeaseKeyFromCatalog(generationId);
+    LeaseManagerOpsCommands opsCommand =
+        new LeaseManagerOpsCommands(
+            Optional.of(
+                new LeaseManagerOpsCommands.OpsGiveUpLeaseCommand(
+                    HOSTNAME, List.of(leaseKey), Instant.now().plusSeconds(60))));
+
+    MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    String successMeterName =
+        "embedding.leasing.stats."
+            + DynamicLeaderLeaseManager.OPS_GIVE_UP_LEASE_SUCCESS_COUNTER_NAME;
+
+    DynamicLeaderLeaseManager manager =
+        DynamicLeaderLeaseManager.create(
+            this.mockAutoEmbeddingMongoClient,
+            meterAndFtdcRegistry,
+            HOSTNAME,
+            DB_RESOLVER,
+            this.mvMetadataCatalog,
+            opsCommand);
+    manager.add(indexGeneration);
+    manager.putLease(
+        leaseKey, createLease(generationId, HOSTNAME, Instant.now().plusSeconds(3600)));
+
+    UpdateResult updateResult = mock(UpdateResult.class);
+    when(updateResult.getModifiedCount()).thenReturn(0L);
+    when(this.mockCollection.replaceOne(any(), any(BsonDocument.class))).thenReturn(updateResult);
+
+    manager.executeOpsCommandsAfterInitializeLease(leaseKey);
+
+    assertThat(meterAndFtdcRegistry.meterRegistry().find(successMeterName).counter()).isNull();
   }
 
   @Test
@@ -1020,6 +1104,106 @@ public class DynamicLeaderLeaseManagerTest {
     assertThat(result.collectionName()).isEqualTo("mv-collection-name");
     assertThat(result.schemaMetadata().materializedViewSchemaVersion()).isEqualTo(1L);
     assertThat(result.collectionUuid()).isEqualTo(winnerUuid);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void executeOpsCommandsAfterInitializeLease_whenOwnedTarget_appliesGiveUpReplace()
+      throws Exception {
+    MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    MaterializedViewCollectionMetadataCatalog catalog =
+        new MaterializedViewCollectionMetadataCatalog();
+    String collectionName = "mv-collection-name";
+    LeaseManagerOpsCommands ops =
+        LeaseManagerOpsCommands.create(HOSTNAME, List.of(collectionName), "2099-01-01T00:00:00Z");
+    DynamicLeaderLeaseManager manager =
+        DynamicLeaderLeaseManager.create(
+            this.mockAutoEmbeddingMongoClient,
+            meterAndFtdcRegistry,
+            HOSTNAME,
+            DB_RESOLVER,
+            catalog,
+            ops);
+
+    ObjectId indexId = new ObjectId();
+    MaterializedViewIndexDefinitionGeneration indexDefGen =
+        MaterializedViewIndex.mockMatViewDefinitionGeneration(indexId);
+
+    MaterializedViewCollectionMetadata proposedMetadata =
+        new MaterializedViewCollectionMetadata(VERSION_ZERO, UUID.randomUUID(), collectionName);
+
+    Lease ownedLeaseOnDb =
+        Lease.initialLease(
+                collectionName,
+                indexDefGen.getIndexDefinition().getCollectionUuid(),
+                indexDefGen.getIndexDefinition().getLastObservedCollectionName(),
+                "0",
+                IndexStatus.unknown(),
+                proposedMetadata)
+            .withRenewedOwnership(HOSTNAME);
+
+    FindIterable<BsonDocument> findIterable = mock(FindIterable.class);
+    when(this.mockCollection.find(any(Document.class))).thenReturn(findIterable);
+    when(findIterable.first()).thenReturn(ownedLeaseOnDb.toBson());
+
+    manager.initializeLease(indexDefGen, proposedMetadata);
+
+    UpdateResult updateResult = mock(UpdateResult.class);
+    when(updateResult.getModifiedCount()).thenReturn(1L);
+    when(this.mockCollection.replaceOne(any(), any(BsonDocument.class))).thenReturn(updateResult);
+    clearInvocations(this.mockCollection);
+
+    manager.executeOpsCommandsAfterInitializeLease(collectionName);
+
+    verify(this.mockCollection).replaceOne(any(), any(BsonDocument.class));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void executeOpsCommandsAfterInitializeLease_whenLeaseNotListed_doesNotApplyGiveUp()
+      throws Exception {
+    MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    MaterializedViewCollectionMetadataCatalog catalog =
+        new MaterializedViewCollectionMetadataCatalog();
+    String collectionName = "mv-collection-name";
+    LeaseManagerOpsCommands ops =
+        LeaseManagerOpsCommands.create(HOSTNAME, List.of(collectionName), "2099-01-01T00:00:00Z");
+    DynamicLeaderLeaseManager manager =
+        DynamicLeaderLeaseManager.create(
+            this.mockAutoEmbeddingMongoClient,
+            meterAndFtdcRegistry,
+            HOSTNAME,
+            DB_RESOLVER,
+            catalog,
+            ops);
+
+    ObjectId indexId = new ObjectId();
+    MaterializedViewIndexDefinitionGeneration indexDefGen =
+        MaterializedViewIndex.mockMatViewDefinitionGeneration(indexId);
+
+    MaterializedViewCollectionMetadata proposedMetadata =
+        new MaterializedViewCollectionMetadata(VERSION_ZERO, UUID.randomUUID(), collectionName);
+
+    Lease ownedLeaseOnDb =
+        Lease.initialLease(
+                collectionName,
+                indexDefGen.getIndexDefinition().getCollectionUuid(),
+                indexDefGen.getIndexDefinition().getLastObservedCollectionName(),
+                "0",
+                IndexStatus.unknown(),
+                proposedMetadata)
+            .withRenewedOwnership(HOSTNAME);
+
+    FindIterable<BsonDocument> findIterable = mock(FindIterable.class);
+    when(this.mockCollection.find(any(Document.class))).thenReturn(findIterable);
+    when(findIterable.first()).thenReturn(ownedLeaseOnDb.toBson());
+
+    manager.initializeLease(indexDefGen, proposedMetadata);
+    clearInvocations(this.mockCollection);
+
+    manager.executeOpsCommandsAfterInitializeLease("unrelated-lease-key");
+
+    verify(this.mockCollection, never()).replaceOne(any(), any(BsonDocument.class));
   }
 
   // ==================== normalizeLeaseIfNeeded ====================

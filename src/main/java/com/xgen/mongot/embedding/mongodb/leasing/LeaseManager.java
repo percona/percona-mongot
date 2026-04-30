@@ -234,6 +234,16 @@ public interface LeaseManager {
       throws Exception;
 
   /**
+   * Invoked after {@link #initializeLease} has finished for the materialized view lease key (the
+   * materialized view collection name, which is also the lease document {@code _id}).
+   *
+   * <p>Implementations may use this to apply bootstrap-time ops that are not run at lease-manager
+   * construction because the lease store may not be ready yet (for example {@code opsGiveUpLease}
+   * rebalance commands).
+   */
+  default void executeOpsCommandsAfterInitializeLease(String leaseKey) {}
+
+  /**
    * Returns true if the lease manager is in a lease-acquisition blackout period (e.g. after
    * applying an ops give-up command). During blackout, this instance must not acquire new
    * leadership.

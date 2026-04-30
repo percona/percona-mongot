@@ -9,8 +9,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Aggregates ops commands applied to the lease manager at bootstrap (e.g. give-up lease for
- * rebalance). Extensible for future command types.
+ * Aggregates ops commands for the lease manager (e.g. give-up lease for rebalance). Extensible for
+ * future command types.
+ *
+ * <p>{@link DynamicLeaderLeaseManager} stores this payload at construction (without executing it)
+ * and applies it from {@link LeaseManager#executeOpsCommandsAfterInitializeLease(String)} once the
+ * lease client and in-memory lease state for a materialized view are available.
  */
 public record LeaseManagerOpsCommands(Optional<OpsGiveUpLeaseCommand> opsGiveUpLease) {
 

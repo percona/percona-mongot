@@ -160,6 +160,8 @@ public class MaterializedViewCollectionResolverTest {
     assertThat(metadata.collectionName()).contains("-");
     assertThat(metadata.collectionUuid()).isNotNull();
 
+    verify(this.leaseManager).executeOpsCommandsAfterInitializeLease(eq(metadata.collectionName()));
+
     ArgumentCaptor<String> createCollectionCaptor = ArgumentCaptor.forClass(String.class);
     verify(this.mongoDatabase).createCollection(createCollectionCaptor.capture());
     assertThat(createCollectionCaptor.getValue()).isEqualTo(metadata.collectionName());
