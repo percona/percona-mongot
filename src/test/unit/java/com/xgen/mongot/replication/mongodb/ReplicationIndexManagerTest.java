@@ -1395,6 +1395,12 @@ public class ReplicationIndexManagerTest {
   @Test
   public void testFailAndCloseIndex() throws Exception {
     try (Mocks mocks = Mocks.validUserData()) {
+      // Wait for the manager to reach STEADY_STATE before forcing state via reflection,
+      // otherwise the background init thread may overwrite our state change.
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
       Method method =
           ReplicationIndexManager.class.getDeclaredMethod(
               "failAndCloseIndex", Throwable.class, IndexStatus.Reason.class);
