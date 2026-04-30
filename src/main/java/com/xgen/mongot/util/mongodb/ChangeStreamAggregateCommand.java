@@ -253,6 +253,7 @@ public class ChangeStreamAggregateCommand {
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
+        Optional.empty(),
         Optional.empty());
   }
 

@@ -12,6 +12,7 @@ import static org.mockito.Mockito.verify;
 
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
+import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -521,6 +522,112 @@ public class HeuristicChangeStreamModeSelectorTest {
         .until(() -> modeSelector.getMode(generationId) == ChangeStreamMode.getDefault());
 
     Mockito.verify(statsClient, after(100).never()).getStats(Mockito.any());
+  }
+
+  @Test
+  public void testViewWithMatchStageSkipsSamplingAndReturnsAllFields() {
+
+    var statsClient = Mockito.mock(CollectionStatsMongoClient.class);
+    var samplingClient = Mockito.mock(CollectionSamplingMongoClient.class);
+
+    // stats report large collection — would normally trigger sampling
+    Mockito.when(statsClient.getStats(Mockito.any()))
+        .thenReturn(new CollectionStatsResponse(100_000, 50_000));
+
+    SearchIndexDefinition definitionWithMatchView =
+        mockDefinitionBuilder()
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .dynamic(false)
+                    .field(
+                        "data",
+                        FieldDefinitionBuilder.builder()
+                            .string(StringFieldDefinitionBuilder.builder().build())
+                            .build())
+                    .build())
+            .view(
+                ViewDefinition.existing(
+                    "myView",
+                    List.of(
+                        BsonDocument.parse("{\"$match\": {\"$expr\": {\"$gt\": [\"$x\", 0]}}}"))))
+            .build();
+
+    var modeSelector =
+        new HeuristicChangeStreamModeSelector(
+            statsClient,
+            samplingClient,
+            getScheduler(),
+            Optional.empty(),
+            new MetricsFactory("factory", new SimpleMeterRegistry()),
+            50,
+            TimeUnit.MILLISECONDS);
+
+    var generationId = getGenerationId();
+    modeSelector.register(
+        generationId, definitionWithMatchView, new MongoNamespace("test", "test"));
+
+    // Block for several scheduler cycles (interval is 50ms) to confirm neither stats nor sampling
+    // were invoked. Using after() ensures the scheduler has had time to run; if the $match
+    // short-circuit is broken, getStats/getSamples would be called and the test would fail.
+    Mockito.verify(statsClient, Mockito.after(500).never()).getStats(Mockito.any());
+    Mockito.verify(samplingClient, Mockito.never())
+        .getSamples(any(), Mockito.anyInt(), any(), any());
+    Assert.assertEquals(ChangeStreamMode.ALL_FIELDS, modeSelector.getMode(generationId));
+  }
+
+  @Test
+  public void testViewWithAddFieldsOnlyStillSamples() {
+
+    var statsClient = Mockito.mock(CollectionStatsMongoClient.class);
+    var samplingClient = Mockito.mock(CollectionSamplingMongoClient.class);
+
+    // stats report large collection of avg doc size ~ 50Kb — ratio will trigger INDEXED_FIELDS
+    Mockito.when(statsClient.getStats(Mockito.any()))
+        .thenReturn(new CollectionStatsResponse(100_000, 50_000));
+
+    // sampling returns small documents after projection
+    Mockito.when(
+            samplingClient.getSamples(
+                Mockito.any(), Mockito.anyInt(), Mockito.any(), Mockito.any()))
+        .thenReturn(getSampleDocuments(1_000));
+
+    SearchIndexDefinition definitionWithAddFieldsView =
+        mockDefinitionBuilder()
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .dynamic(false)
+                    .field(
+                        "data",
+                        FieldDefinitionBuilder.builder()
+                            .string(StringFieldDefinitionBuilder.builder().build())
+                            .build())
+                    .build())
+            .view(
+                ViewDefinition.existing(
+                    "myView", List.of(BsonDocument.parse("{\"$addFields\": {\"computed\": 1}}"))))
+            .build();
+
+    var modeSelector =
+        new HeuristicChangeStreamModeSelector(
+            statsClient,
+            samplingClient,
+            getScheduler(),
+            Optional.empty(),
+            new MetricsFactory("factory", new SimpleMeterRegistry()),
+            50,
+            TimeUnit.MILLISECONDS);
+
+    var generationId = getGenerationId();
+    modeSelector.register(
+        generationId, definitionWithAddFieldsView, new MongoNamespace("test", "test"));
+
+    Condition.await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() -> modeSelector.getMode(generationId) == ChangeStreamMode.INDEXED_FIELDS);
+
+    // sampling must be called for a view without $match
+    Mockito.verify(samplingClient, Mockito.atLeastOnce())
+        .getSamples(any(), Mockito.anyInt(), any(), any());
   }
 
   private List<RawBsonDocument> getSampleDocuments(int sizeInBytes) {

@@ -15,6 +15,9 @@ import org.bson.conversions.Bson;
 
 public class CollectionSamplingMongoClient {
 
+  /** Maximum time budget for a single sampling query, as a safety net against slow $sample. */
+  private static final long SAMPLING_MAX_TIME_MS = 30_000L;
+
   private final MongoClient mongoClient;
 
   public CollectionSamplingMongoClient(MongoClient mongoClient) {
@@ -38,7 +41,8 @@ public class CollectionSamplingMongoClient {
         new SamplingAggregateCommand.Builder()
             .collection(namespace.getCollectionName())
             .batchSize(sampleLimit)
-            .sampleLimit(sampleLimit);
+            .sampleLimit(sampleLimit)
+            .maxTimeMs(SAMPLING_MAX_TIME_MS);
 
     viewDefinedStages.ifPresent(command::viewDefinedStages);
 

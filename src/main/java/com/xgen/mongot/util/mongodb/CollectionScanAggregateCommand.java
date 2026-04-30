@@ -240,6 +240,7 @@ public class CollectionScanAggregateCommand {
         this.hint,
         this.readConcernDocument,
         this.requestResumeToken,
-        this.startAt);
+        this.startAt,
+        Optional.empty());
   }
 }
