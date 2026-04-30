@@ -22,6 +22,7 @@ import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
@@ -559,7 +560,11 @@ public class CommunityReadinessCheckerTest {
       SearchIndexDefinition definition, IndexStatus status) {
     IndexDetailedStatus.Search mainIndex =
         new IndexDetailedStatus.Search(
-            Collections.emptyMap(), definition, status, Optional.empty());
+            Collections.emptyMap(),
+            definition,
+            status,
+            Generation.CURRENT.generationId(definition.getIndexId()),
+            Optional.empty());
 
     return new IndexInformation.Search(
         definition,

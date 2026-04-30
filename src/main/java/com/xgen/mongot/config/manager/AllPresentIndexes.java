@@ -244,11 +244,13 @@ class AllPresentIndexes {
                     .getDetailedStatuses(),
                 indexGeneration.getDefinition().asSearchDefinition(),
                 this.indexStatuses.get(indexGeneration),
+                indexGeneration.getGenerationId(),
                 indexMetrics);
         case VECTOR, AUTO_EMBEDDING ->
             new IndexDetailedStatus.Vector(
                 indexGeneration.getIndex().getDefinition().asVectorDefinition(),
                 this.indexStatuses.get(indexGeneration),
+                indexGeneration.getGenerationId(),
                 indexMetrics);
       };
     }

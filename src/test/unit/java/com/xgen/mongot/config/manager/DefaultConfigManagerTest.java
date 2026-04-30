@@ -608,6 +608,7 @@ public class DefaultConfigManagerTest {
                         MOCK_SYNONYM_DETAILED_STATUS,
                         MOCK_INDEX_DEFINITION,
                         MOCK_INDEX_STATUS,
+                        MOCK_INDEX_DEFINITION_GENERATION_CURRENT.getGenerationId(),
                         Optional.of(new AggregatedIndexMetrics(0, 0, new BsonTimestamp(0), 0)))),
                 Optional.empty(),
                 MOCK_SYNONYM_STATUS),
@@ -620,6 +621,7 @@ public class DefaultConfigManagerTest {
                     new IndexDetailedStatus.Vector(
                         MOCK_VECTOR_DEFINITION,
                         IndexStatus.steady(),
+                        MOCK_VECTOR_INDEX_DEFINITION_GENERATION_CURRENT.getGenerationId(),
                         Optional.of(new AggregatedIndexMetrics(0, 0, new BsonTimestamp(0), 0)))),
                 Optional.empty()));
 

@@ -31,6 +31,7 @@ import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.index.version.Generation;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SynonymMappingDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
@@ -702,7 +703,11 @@ public class CommunityMetadataUpdaterTest {
       SearchIndexDefinition definition, IndexStatus status) {
     IndexDetailedStatus.Search detailedStatus =
         new IndexDetailedStatus.Search(
-            Collections.emptyMap(), definition, status, Optional.empty());
+            Collections.emptyMap(),
+            definition,
+            status,
+            Generation.CURRENT.generationId(definition.getIndexId()),
+            Optional.empty());
 
     return new IndexInformation.Search(
         definition,
@@ -717,7 +722,11 @@ public class CommunityMetadataUpdaterTest {
   private IndexInformation.Vector createVectorIndexInformation(
       VectorIndexDefinition definition, IndexStatus status) {
     IndexDetailedStatus.Vector detailedStatus =
-        new IndexDetailedStatus.Vector(definition, status, Optional.empty());
+        new IndexDetailedStatus.Vector(
+            definition,
+            status,
+            Generation.CURRENT.generationId(definition.getIndexId()),
+            Optional.empty());
 
     return new IndexInformation.Vector(
         definition,
