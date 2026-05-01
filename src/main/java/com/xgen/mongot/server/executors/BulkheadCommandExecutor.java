@@ -1,5 +1,8 @@
 package com.xgen.mongot.server.executors;
 
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.concurrent.Executors;
@@ -10,6 +13,7 @@ import java.io.Closeable;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.function.BooleanSupplier;
 import org.bson.BsonDocument;
@@ -40,7 +44,12 @@ public class BulkheadCommandExecutor implements Closeable {
       Optional<Counter> wouldHaveRejectedCounter) {}
 
   public BulkheadCommandExecutor(MeterRegistry meterRegistry) {
-    this(meterRegistry, RegularBlockingRequestSettings.defaults());
+    this(meterRegistry, RegularBlockingRequestSettings.defaults(), FeatureFlags.getDefault());
+  }
+
+  public BulkheadCommandExecutor(
+      MeterRegistry meterRegistry, RegularBlockingRequestSettings settings) {
+    this(meterRegistry, settings, FeatureFlags.getDefault());
   }
 
   /**
@@ -48,9 +57,12 @@ public class BulkheadCommandExecutor implements Closeable {
    *
    * @param meterRegistry registry for executor metrics
    * @param settings pool/queue sizing configuration
+   * @param featureFlags gates optional metrics (e.g. per-pool allocation/CPU attribution)
    */
   public BulkheadCommandExecutor(
-      MeterRegistry meterRegistry, RegularBlockingRequestSettings settings) {
+      MeterRegistry meterRegistry,
+      RegularBlockingRequestSettings settings,
+      FeatureFlags featureFlags) {
     int numCpus = Runtime.INSTANCE.getNumCpus();
     int poolSize = settings.resolvedPoolSize(numCpus);
     OptionalInt queueCapacity = settings.maybeResolvedQueueCapacity(numCpus);
@@ -117,6 +129,13 @@ public class BulkheadCommandExecutor implements Closeable {
     this.skippedDueToCancelledStreamCounter =
         meterRegistry.counter(
             "loadShedding.skippedDueToCancelledStream", "executor", REGULAR_EXECUTOR_NAME);
+
+    // Per-pool heap allocation + CPU attribution.
+    if (featureFlags.isEnabled(Feature.QUERY_MEMORY_ATTRIBUTION_METRICS)) {
+      ThreadPoolResourceMetrics resourceMetrics = ThreadPoolResourceMetrics.create("query");
+      resourceMetrics.register(this.regularBlockingCommandExecutor, meterRegistry);
+      resourceMetrics.register(this.guaranteedBlockingCommandExecutor, meterRegistry);
+    }
   }
 
   private RejectedExecutionHandler rejectionHandler(

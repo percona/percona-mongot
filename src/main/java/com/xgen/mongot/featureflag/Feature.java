@@ -78,7 +78,8 @@ public enum Feature {
   KNN_FULL_SCAN_HEURISTIC("enableKnnFullScanHeuristic", State.DISABLED),
   CUSTOM_VECTOR_ENGINE("customVectorEngine", State.DISABLED),
   OVERLOAD_RETRY_SIGNAL("overloadRetrySignal", State.DISABLED),
-  NESTED_VECTOR("nestedVector", State.ENABLED);
+  NESTED_VECTOR("nestedVector", State.ENABLED),
+  QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.DISABLED);
 
   private final String name;
   private final State defaultState;

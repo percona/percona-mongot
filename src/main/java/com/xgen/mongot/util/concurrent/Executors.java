@@ -5,7 +5,11 @@ import com.xgen.mongot.util.Crash;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
 import java.time.Duration;
+import java.util.Collection;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledExecutorService;
@@ -37,15 +41,16 @@ public class Executors {
       String name, int size, MeterRegistry meterRegistry) {
     Check.argIsPositive(size, "size");
 
+    CountingNamedThreadFactory threadFactory = new CountingNamedThreadFactory(name);
     ExecutorService executor =
-        java.util.concurrent.Executors.newFixedThreadPool(
-            size, new CountingNamedThreadFactory(name));
+        java.util.concurrent.Executors.newFixedThreadPool(size, threadFactory);
 
     return new DefaultNamedExecutorService(
         ExecutorServiceMetrics.monitor(meterRegistry, executor, "executorMetrics", name),
         executor,
         name,
-        meterRegistry);
+        meterRegistry,
+        Optional.of(threadFactory));
   }
 
   /**
@@ -67,6 +72,7 @@ public class Executors {
       MeterRegistry meterRegistry) {
     Check.argIsPositive(poolSize, "poolSize");
     Check.argIsPositive(queueSize, "queueSize");
+    CountingNamedThreadFactory threadFactory = new CountingNamedThreadFactory(name);
     ExecutorService executor =
         new ThreadPoolExecutor(
             poolSize,
@@ -74,13 +80,14 @@ public class Executors {
             0L,
             TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(queueSize),
-            new CountingNamedThreadFactory(name),
+            threadFactory,
             handler);
     return new DefaultNamedExecutorService(
         ExecutorServiceMetrics.monitor(meterRegistry, executor, "executorMetrics", name),
         executor,
         name,
-        meterRegistry);
+        meterRegistry,
+        Optional.of(threadFactory));
   }
 
   /** Exposes a counting thread factory so other components can create named pools with counters. */
@@ -103,14 +110,16 @@ public class Executors {
    */
   public static NamedExecutorService unboundedCachingThreadPool(
       String name, MeterRegistry meterRegistry) {
+    CountingNamedThreadFactory threadFactory = new CountingNamedThreadFactory(name);
     ExecutorService executor =
-        java.util.concurrent.Executors.newCachedThreadPool(new CountingNamedThreadFactory(name));
+        java.util.concurrent.Executors.newCachedThreadPool(threadFactory);
 
     return new DefaultNamedExecutorService(
         ExecutorServiceMetrics.monitor(meterRegistry, executor, "executorMetrics", name),
         executor,
         name,
-        meterRegistry);
+        meterRegistry,
+        Optional.of(threadFactory));
   }
 
   /**
@@ -152,11 +161,14 @@ public class Executors {
 
   public static NamedExecutorService namedExecutor(
       String name, ExecutorService executor, MeterRegistry meterRegistry) {
+    // The supplied executor was built externally, so there is no thread factory to track its
+    // threads.
     return new DefaultNamedExecutorService(
         ExecutorServiceMetrics.monitor(meterRegistry, executor, "executorMetrics", name),
         executor,
         name,
-        meterRegistry);
+        meterRegistry,
+        Optional.empty());
   }
 
   public static NamedScheduledExecutorService namedExecutor(
@@ -231,9 +243,14 @@ public class Executors {
     }
   }
 
-  private static class CountingNamedThreadFactory extends NamedThreadFactory {
+  /**
+   * Thread factory that names threads with an incrementing index and records the IDs of every
+   * thread it creates. Uses a {@link ConcurrentHashMap} key-set so dead thread IDs can be removed.
+   */
+  static class CountingNamedThreadFactory extends NamedThreadFactory {
 
     private final AtomicInteger threadCounter;
+    private final Set<Long> threadIds = ConcurrentHashMap.newKeySet();
 
     CountingNamedThreadFactory(String name) {
       super(name);
@@ -243,6 +260,21 @@ public class Executors {
     @Override
     protected String getName() {
       return String.format("%s-%d", this.name, this.threadCounter.getAndIncrement());
+    }
+
+    @Override
+    public Thread newThread(Runnable runnable) {
+      Thread thread = super.newThread(runnable);
+      this.threadIds.add(thread.threadId());
+      return thread;
+    }
+
+    /**
+     * Live, mutable view of the IDs of every thread this factory has created. Callers that detect
+     * a dead thread may remove it directly.
+     */
+    Collection<Long> getMutableThreadIds() {
+      return this.threadIds;
     }
   }
 }

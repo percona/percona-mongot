@@ -3,7 +3,9 @@ package com.xgen.mongot.util.concurrent;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
+import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ExecutorService;
 
@@ -71,5 +73,18 @@ public interface NamedExecutorService extends ExecutorService {
    */
   default OptionalInt getQueueSize() {
     return OptionalInt.empty();
+  }
+
+  /**
+   * Returns the IDs of every thread the underlying pool has ever created, as a live, mutable view.
+   * Callers may remove entries directly when they detect the thread has terminated.
+   * The collection may include IDs of dead threads until pruned.
+   *
+   * <p>Returns {@link Optional#empty()} for executors that do not track per-thread IDs.
+   *
+   * @return live, mutable view of created thread IDs, or empty if not supported
+   */
+  default Optional<Collection<Long>> getMutableThreadIds() {
+    return Optional.empty();
   }
 }
