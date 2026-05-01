@@ -3,9 +3,11 @@ load("//bazel/java:package.bzl", "java_library")
 java_library(
     name = "system",
     srcs = [
+        "CpuInfoMetrics.java",
         "DiskMetrics.java",
         "MemoryMetrics.java",
         "NetstatMetrics.java",
+        "NumaInfoMetrics.java",
         "ProcessMetrics.java",
         "SystemMetricsInstrumentation.java",
     ],

@@ -16,6 +16,13 @@ public class SystemMetricsInstrumentation {
   private final NetstatMetrics netstatMetrics;
   private final ProcessMetrics processMetrics;
   private final MemoryMetrics memoryMetrics;
+
+  @SuppressWarnings("unused") // held to prevent GC of the gauge's referenced object
+  private final CpuInfoMetrics cpuInfoMetrics;
+
+  @SuppressWarnings("unused") // held to prevent GC of the gauge's referenced object
+  private final NumaInfoMetrics numaInfoMetrics;
+
   private final NamedScheduledExecutorService updater;
   private static final Logger LOG = LoggerFactory.getLogger(SystemMetricsInstrumentation.class);
 
@@ -27,7 +34,9 @@ public class SystemMetricsInstrumentation {
         DiskMetrics.create(systemInfo, meterRegistry, dataPath),
         NetstatMetrics.create(systemInfo, meterRegistry),
         ProcessMetrics.create(systemInfo, meterRegistry),
-        MemoryMetrics.create(systemInfo, meterRegistry));
+        MemoryMetrics.create(systemInfo, meterRegistry),
+        CpuInfoMetrics.create(systemInfo, meterRegistry),
+        NumaInfoMetrics.create(systemInfo, meterRegistry));
   }
 
   @VisibleForTesting
@@ -36,12 +45,16 @@ public class SystemMetricsInstrumentation {
       DiskMetrics diskMetrics,
       NetstatMetrics netstatMetrics,
       ProcessMetrics processMetrics,
-      MemoryMetrics memoryMetrics) {
+      MemoryMetrics memoryMetrics,
+      CpuInfoMetrics cpuInfoMetrics,
+      NumaInfoMetrics numaInfoMetrics) {
     this.meterRegistry = meterRegistry;
     this.diskMetrics = diskMetrics;
     this.netstatMetrics = netstatMetrics;
     this.processMetrics = processMetrics;
     this.memoryMetrics = memoryMetrics;
+    this.cpuInfoMetrics = cpuInfoMetrics;
+    this.numaInfoMetrics = numaInfoMetrics;
     this.updater =
         Executors.singleThreadScheduledExecutor("system-metrics-updater", this.meterRegistry);
   }
