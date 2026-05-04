@@ -14,20 +14,20 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      EmbeddedScoreTest.TestDeserialization.class,
-      EmbeddedScoreTest.TestSerialization.class
+      EmbeddedScoreTest.DeserializationTest.class,
+      EmbeddedScoreTest.SerializationTest.class
     })
 public class EmbeddedScoreTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "embedded-score-deserialization";
     private static final BsonDeserializationTestSuite<EmbeddedScore> TEST_SUITE =
         fromDocument(ScoreTests.RESOURCES_PATH, SUITE_NAME, EmbeddedScore::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<EmbeddedScore> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<EmbeddedScore> testSpec) {
       this.testSpec = testSpec;
     }
@@ -73,14 +73,14 @@ public class EmbeddedScoreTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "embedded-score-serialization";
     private static final BsonSerializationTestSuite<EmbeddedScore> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(ScoreTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<EmbeddedScore> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<EmbeddedScore> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<EmbeddedScore> testSpec) {
       this.testSpec = testSpec;
     }
 

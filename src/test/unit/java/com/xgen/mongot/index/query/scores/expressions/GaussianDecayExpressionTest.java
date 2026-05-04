@@ -15,13 +15,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      GaussianDecayExpressionTest.TestDeserialization.class,
-      GaussianDecayExpressionTest.TestSerialization.class,
+      GaussianDecayExpressionTest.DeserializationTest.class,
+      GaussianDecayExpressionTest.SerializationTest.class,
     })
 public class GaussianDecayExpressionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "gaussian-decay-expression-deserialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -30,7 +30,7 @@ public class GaussianDecayExpressionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<GaussianDecayExpression> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<GaussianDecayExpression> testSpec) {
       this.testSpec = testSpec;
     }
@@ -73,7 +73,7 @@ public class GaussianDecayExpressionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "gaussian-decay-expression-serialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -82,7 +82,7 @@ public class GaussianDecayExpressionTest {
 
     private final BsonSerializationTestSuite.TestSpec<GaussianDecayExpression> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<GaussianDecayExpression> testSpec) {
       this.testSpec = testSpec;
     }

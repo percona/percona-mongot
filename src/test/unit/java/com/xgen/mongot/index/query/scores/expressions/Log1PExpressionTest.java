@@ -17,13 +17,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      Log1PExpressionTest.TestDeserialization.class,
-      Log1PExpressionTest.TestSerialization.class,
+      Log1PExpressionTest.DeserializationTest.class,
+      Log1PExpressionTest.SerializationTest.class,
     })
 public class Log1PExpressionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "log1p-expression-deserialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -32,7 +32,7 @@ public class Log1PExpressionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Log1PExpression> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<Log1PExpression> testSpec) {
       this.testSpec = testSpec;
     }
@@ -114,7 +114,7 @@ public class Log1PExpressionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "log1p-expression-serialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -123,7 +123,7 @@ public class Log1PExpressionTest {
 
     private final BsonSerializationTestSuite.TestSpec<Log1PExpression> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Log1PExpression> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Log1PExpression> testSpec) {
       this.testSpec = testSpec;
     }
 

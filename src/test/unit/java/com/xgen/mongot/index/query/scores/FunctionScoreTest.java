@@ -22,20 +22,20 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      FunctionScoreTest.TestDeserialization.class,
-      FunctionScoreTest.TestSerialization.class,
+      FunctionScoreTest.DeserializationTest.class,
+      FunctionScoreTest.SerializationTest.class,
     })
 public class FunctionScoreTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "function-score-deserialization";
     private static final BsonDeserializationTestSuite<FunctionScore> TEST_SUITE =
         fromDocument(ScoreTests.RESOURCES_PATH, SUITE_NAME, FunctionScore::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<FunctionScore> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<FunctionScore> testSpec) {
       this.testSpec = testSpec;
     }
@@ -244,7 +244,7 @@ public class FunctionScoreTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "function-score-serialization";
     private static final String RESOURCES_PATH = "src/test/unit/resources/index/query/scores/";
     public static final BsonSerializationTestSuite<FunctionScore> TEST_SUITE =
@@ -252,7 +252,7 @@ public class FunctionScoreTest {
 
     private final BsonSerializationTestSuite.TestSpec<FunctionScore> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<FunctionScore> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<FunctionScore> testSpec) {
       this.testSpec = testSpec;
     }
 

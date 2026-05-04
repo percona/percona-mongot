@@ -14,13 +14,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      PathExpressionTest.TestDeserialization.class,
-      PathExpressionTest.TestSerialization.class,
+      PathExpressionTest.DeserializationTest.class,
+      PathExpressionTest.SerializationTest.class,
     })
 public class PathExpressionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "path-expression-deserialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -29,7 +29,7 @@ public class PathExpressionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<PathExpression> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<PathExpression> testSpec) {
       this.testSpec = testSpec;
     }
@@ -85,7 +85,7 @@ public class PathExpressionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "path-expression-serialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -94,7 +94,7 @@ public class PathExpressionTest {
 
     private final BsonSerializationTestSuite.TestSpec<PathExpression> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<PathExpression> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<PathExpression> testSpec) {
       this.testSpec = testSpec;
     }
 

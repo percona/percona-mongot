@@ -17,13 +17,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      AddExpressionTest.TestDeserialization.class,
-      AddExpressionTest.TestSerialization.class,
+      AddExpressionTest.DeserializationTest.class,
+      AddExpressionTest.SerializationTest.class,
     })
 public class AddExpressionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "add-multiply-expression-deserialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -32,7 +32,7 @@ public class AddExpressionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<AddExpression> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<AddExpression> testSpec) {
       this.testSpec = testSpec;
     }
@@ -60,7 +60,7 @@ public class AddExpressionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "add-expression-serialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -69,7 +69,7 @@ public class AddExpressionTest {
 
     private final BsonSerializationTestSuite.TestSpec<AddExpression> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<AddExpression> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<AddExpression> testSpec) {
       this.testSpec = testSpec;
     }
 
