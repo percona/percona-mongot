@@ -20,17 +20,17 @@ import org.junit.runners.Parameterized;
 import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
-@Suite.SuiteClasses(value = {PaginationTest.TestDeserialization.class})
+@Suite.SuiteClasses(value = {PaginationTest.DeserializationTest.class})
 public class PaginationTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "pagination-deserialization";
     private static final BsonDeserializationTestSuite<SearchQuery> TEST_SUITE =
         fromRootDocument("src/test/unit/resources/index/query/", SUITE_NAME, SearchQuery::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<SearchQuery> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<SearchQuery> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<SearchQuery> testSpec) {
       this.testSpec = testSpec;
     }
 

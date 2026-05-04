@@ -21,20 +21,20 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      TextOperatorTest.TestDeserialization.class,
-      TextOperatorTest.TestSerialization.class,
+      TextOperatorTest.DeserializationTest.class,
+      TextOperatorTest.SerializationTest.class,
     })
 public class TextOperatorTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "text-deserialization";
     private static final BsonDeserializationTestSuite<TextOperator> TEST_SUITE =
         fromDocument(DefinitionTests.RESOURCES_PATH, SUITE_NAME, TextOperator::fromBson);
 
     private final TestSpecWrapper<TextOperator> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<TextOperator> testSpec) {
+    public DeserializationTest(TestSpecWrapper<TextOperator> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -199,14 +199,14 @@ public class TextOperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "text-serialization";
     public static final BsonSerializationTestSuite<TextOperator> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(DefinitionTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<TextOperator> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<TextOperator> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<TextOperator> testSpec) {
       this.testSpec = testSpec;
     }
 

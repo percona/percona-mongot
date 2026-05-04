@@ -20,21 +20,21 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      StringPathTest.TestDeserialization.class,
-      StringPathTest.TestSerialization.class,
-      StringPathTest.TestClass.class,
+      StringPathTest.DeserializationTest.class,
+      StringPathTest.SerializationTest.class,
+      StringPathTest.ClassTest.class,
     })
 public class StringPathTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "string-path-deserialization";
     private static final BsonDeserializationTestSuite<StringPath> TEST_SUITE =
         fromValue("src/test/unit/resources/index/path/string/", SUITE_NAME, StringPath::fromBson);
 
     private final TestSpecWrapper<StringPath> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<StringPath> testSpec) {
+    public DeserializationTest(TestSpecWrapper<StringPath> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -77,7 +77,7 @@ public class StringPathTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "string-path-serialization";
     private static final BsonSerializationTestSuite<StringPath> TEST_SUITE =
@@ -85,7 +85,7 @@ public class StringPathTest {
 
     private final BsonSerializationTestSuite.TestSpec<StringPath> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<StringPath> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<StringPath> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -111,7 +111,7 @@ public class StringPathTest {
     }
   }
 
-  public static class TestClass {
+  public static class ClassTest {
 
     @Test
     public void testField() {

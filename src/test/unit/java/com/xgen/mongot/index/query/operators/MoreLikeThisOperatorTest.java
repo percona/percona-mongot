@@ -15,8 +15,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      MoreLikeThisOperatorTest.TestDeserialization.class,
-      MoreLikeThisOperatorTest.TestSerialization.class,
+      MoreLikeThisOperatorTest.DeserializationTest.class,
+      MoreLikeThisOperatorTest.SerializationTest.class,
     })
 public class MoreLikeThisOperatorTest {
 
@@ -33,14 +33,14 @@ public class MoreLikeThisOperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "more-like-this-deserialization";
     private static final BsonDeserializationTestSuite<MoreLikeThisOperator> TEST_SUITE =
         fromDocument(DefinitionTests.RESOURCES_PATH, SUITE_NAME, MoreLikeThisOperator::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<MoreLikeThisOperator> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<MoreLikeThisOperator> testSpec) {
       this.testSpec = testSpec;
     }
@@ -74,14 +74,14 @@ public class MoreLikeThisOperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "more-like-this-serialization";
     public static final BsonSerializationTestSuite<MoreLikeThisOperator> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(DefinitionTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<MoreLikeThisOperator> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<MoreLikeThisOperator> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<MoreLikeThisOperator> testSpec) {
       this.testSpec = testSpec;
     }
 

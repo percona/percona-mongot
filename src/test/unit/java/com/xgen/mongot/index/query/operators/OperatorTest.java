@@ -19,11 +19,11 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {OperatorTest.TestDeserialization.class, OperatorTest.TestSerialization.class})
+    value = {OperatorTest.DeserializationTest.class, OperatorTest.SerializationTest.class})
 public class OperatorTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
 
     private static final String SUITE_NAME = "operator-deserialization";
     private static final BsonDeserializationTestSuite<Operator> TEST_SUITE =
@@ -31,7 +31,7 @@ public class OperatorTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Operator> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Operator> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Operator> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -153,7 +153,7 @@ public class OperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "operator-serialization";
     private static final BsonSerializationTestSuite<Operator> TEST_SUITE =
@@ -161,7 +161,7 @@ public class OperatorTest {
 
     private final BsonSerializationTestSuite.TestSpec<Operator> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Operator> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Operator> testSpec) {
       this.testSpec = testSpec;
     }
 
