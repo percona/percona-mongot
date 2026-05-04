@@ -113,13 +113,14 @@ public class IndexMapper {
   }
 
   /**
-   * Takes the main index stats, the staged index status and if the main index is on the latest
-   * index definition to determine the overall status of the index.
+   * Takes the main index status, the staged index status, and if the main and staged indexes are
+   * on the latest index definition to determine the overall status of the index.
    */
   public static StatusCode calculateStatus(
       StatusCode mainIndexStatusCode,
       StatusCode stagedIndexStatusCode,
-      boolean isMainIndexLatestVersion) {
+      boolean isMainIndexLatestVersion,
+      boolean isStagedIndexLatestVersion) {
 
     ExternalStatus mainIndexStatus = ExternalStatus.fromStatusCode(mainIndexStatusCode);
     ExternalStatus stagedIndexStatus = ExternalStatus.fromStatusCode(stagedIndexStatusCode);
@@ -141,6 +142,9 @@ public class IndexMapper {
     if (mainIndexStatus == ExternalStatus.READY || mainIndexStatus == ExternalStatus.FAILED) {
       if (isMainIndexLatestVersion) {
         return mainIndexStatusCode;
+      }
+      if (!isStagedIndexLatestVersion) {
+        return StatusCode.INITIAL_SYNC;
       }
       if (stagedIndexStatus == ExternalStatus.FAILED) {
         return StatusCode.FAILED;

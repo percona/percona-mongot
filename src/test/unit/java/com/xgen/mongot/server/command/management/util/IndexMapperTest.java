@@ -87,13 +87,13 @@ public class IndexMapperTest {
     // When main index is PENDING, return main status regardless of staged status
     assertEquals(
         StatusCode.NOT_STARTED,
-        IndexMapper.calculateStatus(StatusCode.NOT_STARTED, StatusCode.STEADY, true));
+        IndexMapper.calculateStatus(StatusCode.NOT_STARTED, StatusCode.STEADY, true, false));
     assertEquals(
         StatusCode.NOT_STARTED,
-        IndexMapper.calculateStatus(StatusCode.NOT_STARTED, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(StatusCode.NOT_STARTED, StatusCode.FAILED, false, true));
     assertEquals(
         StatusCode.UNKNOWN,
-        IndexMapper.calculateStatus(StatusCode.UNKNOWN, StatusCode.INITIAL_SYNC, true));
+        IndexMapper.calculateStatus(StatusCode.UNKNOWN, StatusCode.INITIAL_SYNC, true, false));
   }
 
   @Test
@@ -101,13 +101,14 @@ public class IndexMapperTest {
     // When main index is BUILDING, return main status regardless of staged status
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.INITIAL_SYNC, StatusCode.STEADY, true));
+        IndexMapper.calculateStatus(StatusCode.INITIAL_SYNC, StatusCode.STEADY, true, false));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.INITIAL_SYNC, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(StatusCode.INITIAL_SYNC, StatusCode.FAILED, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.INITIAL_SYNC, StatusCode.DOES_NOT_EXIST, true));
+        IndexMapper.calculateStatus(
+            StatusCode.INITIAL_SYNC, StatusCode.DOES_NOT_EXIST, true, false));
   }
 
   @Test
@@ -116,7 +117,7 @@ public class IndexMapperTest {
     // swap)
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.STEADY, true));
+        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.STEADY, true, false));
   }
 
   @Test
@@ -124,15 +125,15 @@ public class IndexMapperTest {
     // When main doesn't exist and staged is STALE, return INITIAL_SYNC
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.STALE, false));
+        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.STALE, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
         IndexMapper.calculateStatus(
-            StatusCode.DOES_NOT_EXIST, StatusCode.RECOVERING_TRANSIENT, true));
+            StatusCode.DOES_NOT_EXIST, StatusCode.RECOVERING_TRANSIENT, true, false));
     assertEquals(
         StatusCode.INITIAL_SYNC,
         IndexMapper.calculateStatus(
-            StatusCode.DOES_NOT_EXIST, StatusCode.RECOVERING_NON_TRANSIENT, false));
+            StatusCode.DOES_NOT_EXIST, StatusCode.RECOVERING_NON_TRANSIENT, false, true));
   }
 
   @Test
@@ -140,13 +141,15 @@ public class IndexMapperTest {
     // When main doesn't exist and staged is not READY/STALE, return staged status
     assertEquals(
         StatusCode.FAILED,
-        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.FAILED, true));
+        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.FAILED, true, false));
     assertEquals(
         StatusCode.NOT_STARTED,
-        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.NOT_STARTED, false));
+        IndexMapper.calculateStatus(
+            StatusCode.DOES_NOT_EXIST, StatusCode.NOT_STARTED, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.DOES_NOT_EXIST, StatusCode.INITIAL_SYNC, true));
+        IndexMapper.calculateStatus(
+            StatusCode.DOES_NOT_EXIST, StatusCode.INITIAL_SYNC, true, false));
   }
 
   @Test
@@ -154,21 +157,21 @@ public class IndexMapperTest {
     // When main is READY and is latest version, return main status
     assertEquals(
         StatusCode.STEADY,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.DOES_NOT_EXIST, true));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.DOES_NOT_EXIST, true, false));
     assertEquals(
         StatusCode.STEADY,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.FAILED, true));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.FAILED, true, false));
     assertEquals(
         StatusCode.STEADY,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.INITIAL_SYNC, true));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.INITIAL_SYNC, true, false));
   }
 
   @Test
   public void testCalculateStatus_mainReady_notLatestVersion_stagedFailed_returnsFailed() {
-    // When main is READY but not latest version and staged is FAILED, return FAILED
+    // When main is READY but not latest version and staged is FAILED and on latest, return FAILED
     assertEquals(
         StatusCode.FAILED,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.FAILED, false, true));
   }
 
   @Test
@@ -176,13 +179,44 @@ public class IndexMapperTest {
     // When main is READY but not latest version and staged is not FAILED, return INITIAL_SYNC
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.INITIAL_SYNC, false));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.INITIAL_SYNC, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.NOT_STARTED, false));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.NOT_STARTED, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.DOES_NOT_EXIST, false));
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.DOES_NOT_EXIST, false, false));
+  }
+
+  @Test
+  public void testCalculateStatus_mainReady_stagedNotLatestVersion_returnsInitialSync() {
+    // When main is READY but not latest version, and staged is also NOT latest version,
+    // return INITIAL_SYNC regardless of staged status (even if staged is FAILED)
+    // This represents a state where neither main nor staged has the latest definition
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.FAILED, false, false));
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.INITIAL_SYNC, false, false));
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(StatusCode.STEADY, StatusCode.STEADY, false, false));
+  }
+
+  @Test
+  public void testCalculateStatus_mainFailed_stagedNotLatestVersion_returnsInitialSync() {
+    // When main is FAILED but not latest version, and staged is also NOT latest version,
+    // return INITIAL_SYNC regardless of staged status
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.FAILED, false, false));
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.INITIAL_SYNC, false, false));
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.STEADY, false, false));
   }
 
   @Test
@@ -190,10 +224,10 @@ public class IndexMapperTest {
     // When main is FAILED and is latest version, return main status
     assertEquals(
         StatusCode.FAILED,
-        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.DOES_NOT_EXIST, true));
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.DOES_NOT_EXIST, true, false));
     assertEquals(
         StatusCode.FAILED,
-        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.INITIAL_SYNC, true));
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.INITIAL_SYNC, true, false));
   }
 
   @Test
@@ -201,7 +235,7 @@ public class IndexMapperTest {
     // When main is FAILED and not latest version and staged is FAILED, return FAILED
     assertEquals(
         StatusCode.FAILED,
-        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.FAILED, false, true));
   }
 
   @Test
@@ -209,10 +243,10 @@ public class IndexMapperTest {
     // When main is FAILED and not latest version and staged is not FAILED, return INITIAL_SYNC
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.INITIAL_SYNC, false));
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.INITIAL_SYNC, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.NOT_STARTED, false));
+        IndexMapper.calculateStatus(StatusCode.FAILED, StatusCode.NOT_STARTED, false, true));
   }
 
   @Test
@@ -221,18 +255,18 @@ public class IndexMapperTest {
     // When main is STALE and is latest version and staged is BUILDING or READY, return INITIAL_SYNC
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.INITIAL_SYNC, true));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.INITIAL_SYNC, true, false));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.STEADY, true));
-    assertEquals(
-        StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(
-            StatusCode.RECOVERING_TRANSIENT, StatusCode.INITIAL_SYNC, true));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.STEADY, true, false));
     assertEquals(
         StatusCode.INITIAL_SYNC,
         IndexMapper.calculateStatus(
-            StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.STEADY, true));
+            StatusCode.RECOVERING_TRANSIENT, StatusCode.INITIAL_SYNC, true, false));
+    assertEquals(
+        StatusCode.INITIAL_SYNC,
+        IndexMapper.calculateStatus(
+            StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.STEADY, true, false));
   }
 
   @Test
@@ -240,17 +274,18 @@ public class IndexMapperTest {
     // When main is STALE and is latest version and staged is not BUILDING/READY, return main status
     assertEquals(
         StatusCode.STALE,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.DOES_NOT_EXIST, true));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.DOES_NOT_EXIST, true, false));
     assertEquals(
         StatusCode.STALE,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.FAILED, true));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.FAILED, true, false));
     assertEquals(
         StatusCode.RECOVERING_TRANSIENT,
         IndexMapper.calculateStatus(
-            StatusCode.RECOVERING_TRANSIENT, StatusCode.DOES_NOT_EXIST, true));
+            StatusCode.RECOVERING_TRANSIENT, StatusCode.DOES_NOT_EXIST, true, false));
     assertEquals(
         StatusCode.RECOVERING_NON_TRANSIENT,
-        IndexMapper.calculateStatus(StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.FAILED, true));
+        IndexMapper.calculateStatus(
+            StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.FAILED, true, false));
   }
 
   @Test
@@ -258,13 +293,15 @@ public class IndexMapperTest {
     // When main is STALE and not latest version and staged is FAILED, return main status
     assertEquals(
         StatusCode.STALE,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.FAILED, false, true));
     assertEquals(
         StatusCode.RECOVERING_TRANSIENT,
-        IndexMapper.calculateStatus(StatusCode.RECOVERING_TRANSIENT, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(
+            StatusCode.RECOVERING_TRANSIENT, StatusCode.FAILED, false, true));
     assertEquals(
         StatusCode.RECOVERING_NON_TRANSIENT,
-        IndexMapper.calculateStatus(StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.FAILED, false));
+        IndexMapper.calculateStatus(
+            StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.FAILED, false, true));
   }
 
   @Test
@@ -272,28 +309,29 @@ public class IndexMapperTest {
     // When main is STALE and not latest version and staged is not FAILED, return INITIAL_SYNC
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.INITIAL_SYNC, false));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.INITIAL_SYNC, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.STEADY, false));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.STEADY, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.DOES_NOT_EXIST, false));
+        IndexMapper.calculateStatus(StatusCode.STALE, StatusCode.DOES_NOT_EXIST, false, false));
     assertEquals(
         StatusCode.INITIAL_SYNC,
         IndexMapper.calculateStatus(
-            StatusCode.RECOVERING_TRANSIENT, StatusCode.NOT_STARTED, false));
+            StatusCode.RECOVERING_TRANSIENT, StatusCode.NOT_STARTED, false, true));
     assertEquals(
         StatusCode.INITIAL_SYNC,
-        IndexMapper.calculateStatus(StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.STALE, false));
+        IndexMapper.calculateStatus(
+            StatusCode.RECOVERING_NON_TRANSIENT, StatusCode.STALE, false, true));
   }
 
   @Test
   public void testCalculateStatus_allStatusCodesHandled_noIllegalStateException() {
     // This test validates that all possible StatusCode combinations are handled
     // and that the IllegalStateException at the end of calculateStatus is unreachable.
-    // We test all combinations of mainIndexStatusCode, stagedIndexStatusCode, and
-    // isMainIndexLatestVersion to ensure complete coverage.
+    // We test all combinations of mainIndexStatusCode, stagedIndexStatusCode,
+    // isMainIndexLatestVersion, and isStagedIndexLatestVersion to ensure complete coverage.
 
     StatusCode[] allStatusCodes = StatusCode.values();
     boolean[] latestVersionFlags = {true, false};
@@ -301,16 +339,20 @@ public class IndexMapperTest {
     // Test all combinations - none should throw IllegalStateException
     for (StatusCode mainStatus : allStatusCodes) {
       for (StatusCode stagedStatus : allStatusCodes) {
-        for (boolean isLatest : latestVersionFlags) {
-          // This should not throw IllegalStateException for any valid StatusCode combination
-          StatusCode result = IndexMapper.calculateStatus(mainStatus, stagedStatus, isLatest);
-          // Verify we got a valid result (not null)
-          assertEquals(
-              String.format(
-                  "Expected non-null result for main=%s, staged=%s, isLatest=%s",
-                  mainStatus, stagedStatus, isLatest),
-              true,
-              result != null);
+        for (boolean isMainLatest : latestVersionFlags) {
+          for (boolean isStagedLatest : latestVersionFlags) {
+            // This should not throw IllegalStateException for any valid StatusCode combination
+            StatusCode result =
+                IndexMapper.calculateStatus(mainStatus, stagedStatus, isMainLatest, isStagedLatest);
+            // Verify we got a valid result (not null)
+            assertEquals(
+                String.format(
+                    "Expected non-null result for main=%s, staged=%s, "
+                        + "isMainLatest=%s, isStagedLatest=%s",
+                    mainStatus, stagedStatus, isMainLatest, isStagedLatest),
+                true,
+                result != null);
+          }
         }
       }
     }
