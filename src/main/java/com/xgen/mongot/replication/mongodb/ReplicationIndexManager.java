@@ -72,7 +72,6 @@ public class ReplicationIndexManager {
   public static final Duration DEFAULT_TRANSIENT_BACKOFF = Duration.ofSeconds(30);
   private static final String EMPTY_EXCEPTION_METRIC_FIELD = "None";
   private static final String INDEX_DROPPED_COUNTER_UNKNOWN_TAG = "unknown";
-  @VisibleForTesting static final String REPLICATION_FAILED_REASON_PREFIX = "Replication failed: ";
   @VisibleForTesting static final String EXCEEDED_LIMIT_REASON_PREFIX = "Exceeded max limit: ";
 
   /**
@@ -1233,15 +1232,20 @@ public class ReplicationIndexManager {
     incrementFailedIndexCounter(FailedIndexAction.DROP, getState(), throwable);
     transitionState(State.FAILED);
     dropIndex(
-        IndexStatus.failed(REPLICATION_FAILED_REASON_PREFIX + throwable.getMessage(), reason));
+        IndexStatus.failed(failureMessage(FailedIndexAction.DROP, throwable), reason));
   }
 
   protected void failAndCloseIndex(Throwable throwable, IndexStatus.Reason reason) {
     this.logger.error("Failing due to unexpected error.", throwable);
     incrementFailedIndexCounter(FailedIndexAction.CLOSE, getState(), throwable);
     transitionState(State.FAILED);
-    String failureMessage = REPLICATION_FAILED_REASON_PREFIX + throwable.getMessage();
-    closeIndex(IndexStatus.failed(failureMessage, reason));
+    closeIndex(IndexStatus.failed(failureMessage(FailedIndexAction.CLOSE, throwable), reason));
+  }
+
+  private String failureMessage(FailedIndexAction action, Throwable throwable) {
+    return String.format("replication failed (action=%s)%s",
+                         action.name().toLowerCase(),
+                         throwable == null ? "" : ": " + throwable.getMessage());
   }
 
   private void incrementFailedIndexCounter(

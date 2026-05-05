@@ -3,7 +3,6 @@ package com.xgen.mongot.replication.mongodb;
 import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.mongot.index.status.StaleStatusReason.UNEXPECTED_ERROR;
 import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.EXCEEDED_LIMIT_REASON_PREFIX;
-import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.REPLICATION_FAILED_REASON_PREFIX;
 import static com.xgen.mongot.util.Condition.await;
 import static com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionGeneration;
 import static com.xgen.testing.mongot.mock.index.IndexGeneration.mockIndexGeneration;
@@ -144,7 +143,7 @@ public class ReplicationIndexManagerTest {
       inOrder.verify(mocks.index, timeout(1000)).close();
       inOrder.verify(mocks.index, timeout(1000)).drop();
       assertThat(mocks.index.getStatus().getMessage().orElseThrow())
-          .startsWith(REPLICATION_FAILED_REASON_PREFIX);
+          .startsWith("replication failed (action=drop): ");
       verifyNoInteractions(mocks.initialSyncQueue, mocks.steadyStateManager);
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIALIZING, ReplicationIndexManager.State.FAILED);
@@ -646,7 +645,7 @@ public class ReplicationIndexManagerTest {
                   IndexStatus.StatusCode.FAILED,
                   IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
       assertThat(mocks.index.getStatus().getMessage().orElseThrow())
-          .startsWith(REPLICATION_FAILED_REASON_PREFIX);
+          .startsWith("replication failed (action=drop): ");
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
 
@@ -710,7 +709,7 @@ public class ReplicationIndexManagerTest {
                   IndexStatus.StatusCode.FAILED,
                   IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
       assertThat(mocks.index.getStatus().getMessage().orElseThrow())
-          .startsWith(REPLICATION_FAILED_REASON_PREFIX);
+          .startsWith("replication failed (action=close): ");
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
       mocks.assertFailedIndexMetric(
@@ -740,7 +739,7 @@ public class ReplicationIndexManagerTest {
                   IndexStatus.StatusCode.FAILED,
                   IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED));
       assertThat(mocks.index.getStatus().getMessage().orElseThrow())
-          .startsWith(REPLICATION_FAILED_REASON_PREFIX);
+          .startsWith("replication failed (action=drop): ");
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.INITIAL_SYNC, ReplicationIndexManager.State.FAILED);
       mocks.assertFailedIndexMetric(
@@ -1225,7 +1224,7 @@ public class ReplicationIndexManagerTest {
       verify(mocks.index, timeout(1000))
           .setStatus(
               indexStatusWithMessage(
-                  IndexStatus.StatusCode.FAILED, REPLICATION_FAILED_REASON_PREFIX));
+                  IndexStatus.StatusCode.FAILED, "replication failed (action=close): "));
 
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.STEADY_STATE,
@@ -1256,7 +1255,7 @@ public class ReplicationIndexManagerTest {
       verify(mocks.index, timeout(1000))
           .setStatus(
               indexStatusWithMessage(
-                  IndexStatus.StatusCode.FAILED, REPLICATION_FAILED_REASON_PREFIX));
+                  IndexStatus.StatusCode.FAILED, "replication failed (action=drop): "));
 
       mocks.assertStateTransitions(
           ReplicationIndexManager.State.STEADY_STATE,
