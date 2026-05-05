@@ -36,6 +36,7 @@ import com.xgen.mongot.replication.mongodb.common.StaleStateInfo;
 import com.xgen.mongot.util.Condition;
 import com.xgen.mongot.util.mongodb.ConnectionStringUtil;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
+import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.Optional;
@@ -235,8 +236,17 @@ public class MongoDbNoOpReplicationManagerTest {
           indexCommitUserData = IndexCommitUserData.createExceeded("test");
           break;
         case STALE_INFO:
+          var staleResumeToken = ChangeStreamUtils.resumeToken(STALE_OPTIME);
+          var staleResumeInfo =
+              ChangeStreamResumeInfo.create(new MongoNamespace("db", "coll"), staleResumeToken);
+          var staleIndexCommitData =
+              IndexCommitUserData.createChangeStreamResume(
+                  staleResumeInfo, IndexFormatVersion.CURRENT);
           StaleStateInfo staleStateInfo =
-              StaleStateInfo.create(STALE_OPTIME, StaleStatusReason.DOCS_EXCEEDED);
+              StaleStateInfo.create(
+                  StaleStatusReason.DOCS_EXCEEDED,
+                  StaleStatusReason.DOCS_EXCEEDED.formatMessage(),
+                  staleIndexCommitData);
           indexCommitUserData = IndexCommitUserData.createStale(staleStateInfo);
           break;
         case DOES_NOT_EXIST:

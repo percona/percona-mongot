@@ -66,10 +66,12 @@ public class ReplicationIndexManager {
   // MaterializedViewGenerator. Need to revisit these fields/values for auto-embedding.
   /** Default resync backoff when replication config does not specify {@code resyncBackoffMs}. */
   public static final Duration DEFAULT_RESYNC_BACKOFF = Duration.ofSeconds(30);
+
   /**
    * Default transient backoff when replication config does not specify {@code transientBackoffMs}.
    */
   public static final Duration DEFAULT_TRANSIENT_BACKOFF = Duration.ofSeconds(30);
+
   private static final String EMPTY_EXCEPTION_METRIC_FIELD = "None";
   private static final String INDEX_DROPPED_COUNTER_UNKNOWN_TAG = "unknown";
   @VisibleForTesting static final String EXCEEDED_LIMIT_REASON_PREFIX = "Exceeded max limit: ";
@@ -440,20 +442,23 @@ public class ReplicationIndexManager {
     InitAction initAction = determineInitAction(userData);
     switch (initAction) {
       case RUN_INITIAL_SYNC -> enqueueInitialSync(IndexStatus.initialSync());
-      case RESUME_INITIAL_SYNC -> enqueueInitialSyncResume(
-          userData
-              .getInitialSyncResumeInfo()
-              .orElseThrow(
-                  () ->
-                      new IllegalStateException(
-                          "initial sync resume info should be present to resume initial sync")));
-      case RESUME_STEADY_STATE -> resumeSteadyState(
-          userData
-              .getResumeInfo()
-              .orElseThrow(
-                  () ->
-                      new IllegalStateException(
-                          "resume info should be present to resume steady state.")));
+      case RESUME_INITIAL_SYNC ->
+          enqueueInitialSyncResume(
+              userData
+                  .getInitialSyncResumeInfo()
+                  .orElseThrow(
+                      () ->
+                          new IllegalStateException(
+                              "initial sync resume info should be present "
+                                  + "to resume initial sync")));
+      case RESUME_STEADY_STATE ->
+          resumeSteadyState(
+              userData
+                  .getResumeInfo()
+                  .orElseThrow(
+                      () ->
+                          new IllegalStateException(
+                              "resume info should be present to resume steady state.")));
     }
   }
 
@@ -733,9 +738,9 @@ public class ReplicationIndexManager {
         // requests are enqueued. This ideally should never happen, but adding this here to cover
         // unforeseen corner cases
         if ((initialSyncException.getResumeInfo().isBufferlessIdOrderInitialSyncResumeInfo()
-            && this.isNaturalOrderScanSupported)
+                && this.isNaturalOrderScanSupported)
             || (initialSyncException.getResumeInfo().isBufferlessNaturalOrderInitialSyncResumeInfo()
-            && !this.isNaturalOrderScanSupported)) {
+                && !this.isNaturalOrderScanSupported)) {
           this.isNaturalOrderScanSupported =
               !initialSyncException.getResumeInfo().isBufferlessIdOrderInitialSyncResumeInfo();
           Tags tags =
@@ -1184,12 +1189,16 @@ public class ReplicationIndexManager {
   }
 
   private void staleIndex(StaleStatusReason staleStatusReason, Optional<String> errorMessage) {
-    BsonTimestamp lastOptime = getLastOptime();
-    String message = staleStatusReason.formatMessage(errorMessage.orElse(""));
-    this.logger.warn(
-        "Transitioning to STALE index. Reason: {}. Last optime: {}", message, lastOptime);
+    IndexCommitUserData userData = getIndexCommitUserData();
 
-    StaleStateInfo staleStateInfo = StaleStateInfo.create(lastOptime, staleStatusReason, message);
+    String message = staleStatusReason.formatMessage(errorMessage.orElse(""));
+
+    this.logger.warn(
+        "Transitioning to STALE index. Reason: {}. Last optime: {}",
+        message,
+        getLastOptimeFromUserData(userData));
+
+    StaleStateInfo staleStateInfo = StaleStateInfo.create(staleStatusReason, message, userData);
 
     shutDownReplicationOnStaleIndex(staleStateInfo);
 
@@ -1199,20 +1208,21 @@ public class ReplicationIndexManager {
   }
 
   private BsonTimestamp getLastOptime() {
-    var lastOptime =
-        getIndexCommitUserData()
+    return getLastOptimeFromUserData(getIndexCommitUserData());
+  }
+
+  private BsonTimestamp getLastOptimeFromUserData(IndexCommitUserData userData) {
+    var resumeInfo =
+        userData
             .getResumeInfo()
-            .map(ChangeStreamResumeInfo::getResumeToken)
-            .map(
-                resumeToken ->
-                    Crash.because("failed to parse resume token")
-                        .ifThrows(() -> ResumeTokenUtils.opTimeFromResumeToken(resumeToken)));
-    if (lastOptime.isEmpty()) {
-      Crash.because("Failed to get last optime").now();
-      return Check.unreachable("Crash.now() should have halted the JVM");
-    } else {
-      return lastOptime.get();
-    }
+            .orElseGet(
+                () -> {
+                  Crash.because("Failed to get change stream resume info from user data").now();
+                  return Check.unreachable("Crash.now() should have halted the JVM");
+                });
+    return Crash.because("failed to parse resume token")
+        .ifThrowsExceptionOrError(
+            () -> ResumeTokenUtils.opTimeFromResumeToken(resumeInfo.getResumeToken()));
   }
 
   private void clearIndex(IndexStatus status, IndexCommitUserData indexCommitUserData) {
@@ -1256,8 +1266,13 @@ public class ReplicationIndexManager {
     this.metricsFactory
         .counter(
             "failed_index",
-            Tags.of("action", action.name(), "state", state.name(), "error",
-                    exceptionClassWithErrorCode(throwable)))
+            Tags.of(
+                "action",
+                action.name(),
+                "state",
+                state.name(),
+                "error",
+                exceptionClassWithErrorCode(throwable)))
         .increment();
   }
 

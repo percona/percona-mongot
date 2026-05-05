@@ -10,6 +10,7 @@ import com.xgen.mongot.index.status.StaleStatusReason;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonSerializationTestSuite;
+import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -69,9 +70,19 @@ public class IndexCommitUserDataTest {
                           UUID.fromString("390a604a-4979-4d10-9f4f-3d2552224aee"),
                           UuidRepresentation.STANDARD)),
               Optional.of("testHost")));
-  private static final IndexCommitUserData USER_DATA_WITH_STALE_INFO =
+  private static final IndexCommitUserData USER_DATA_WITH_STALE_INFO_NO_RESUME_TOKEN =
       IndexCommitUserData.createStale(
           StaleStateInfo.create(new BsonTimestamp(1234567890L), StaleStatusReason.DOCS_EXCEEDED));
+  private static final IndexCommitUserData USER_DATA_WITH_STALE_INFO_WITH_RESUME_TOKEN =
+      IndexCommitUserData.createStale(
+          StaleStateInfo.create(
+              StaleStatusReason.DOCS_EXCEEDED,
+              StaleStatusReason.DOCS_EXCEEDED.formatMessage(),
+              IndexCommitUserData.createChangeStreamResume(
+                  ChangeStreamResumeInfo.create(
+                      new MongoNamespace("database", "collection"),
+                      ChangeStreamUtils.resumeToken(new BsonTimestamp(1234567890L))),
+                  IndexFormatVersion.SIX)));
 
   private static final IndexCommitUserData USER_DATA_WITH_INDEX_STATE_INFO =
       IndexCommitUserData.createFromIndexStateInfo(
@@ -103,8 +114,8 @@ public class IndexCommitUserDataTest {
           withResumeInfo(),
           withInitialSyncResume(),
           withNaturalOrderInitialSyncResume(),
-          withStaleInfo(),
-          withStaleInfoUnknownFields(),
+          withStaleInfoNoResumeToken(),
+          withStaleInfoWithResumeToken(),
           withIndexStateInfo());
     }
 
@@ -146,15 +157,16 @@ public class IndexCommitUserDataTest {
           USER_DATA_WITH_NATURAL_ORDER_INITIAL_SYNC_RESUME);
     }
 
-    private static BsonDeserializationTestSuite.ValidSpec<IndexCommitUserData> withStaleInfo() {
+    private static BsonDeserializationTestSuite.ValidSpec<IndexCommitUserData>
+        withStaleInfoNoResumeToken() {
       return BsonDeserializationTestSuite.TestSpec.valid(
-          "with stale info", USER_DATA_WITH_STALE_INFO);
+          "with stale info without resume token", USER_DATA_WITH_STALE_INFO_NO_RESUME_TOKEN);
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<IndexCommitUserData>
-        withStaleInfoUnknownFields() {
+        withStaleInfoWithResumeToken() {
       return BsonDeserializationTestSuite.TestSpec.valid(
-          "with stale info with unknown fields", USER_DATA_WITH_STALE_INFO);
+          "with stale info with resume token", USER_DATA_WITH_STALE_INFO_WITH_RESUME_TOKEN);
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<IndexCommitUserData>
@@ -231,7 +243,7 @@ public class IndexCommitUserDataTest {
 
     private static BsonSerializationTestSuite.TestSpec<IndexCommitUserData> withStaleInfo() {
       return BsonSerializationTestSuite.TestSpec.create(
-          "with stale info", USER_DATA_WITH_STALE_INFO);
+          "with stale info", USER_DATA_WITH_STALE_INFO_NO_RESUME_TOKEN);
     }
 
     private static BsonSerializationTestSuite.TestSpec<IndexCommitUserData> withIndexStateInfo() {
@@ -266,6 +278,39 @@ public class IndexCommitUserDataTest {
           IndexCommitUserData.fromEncodedData(encodedUserData, Optional.empty());
 
       Assert.assertEquals(USER_DATA_WITH_CHANGE_STREAM_RESUME_INFO, data);
+    }
+
+    /**
+     * Tests forwards compatibility: StaleStateInfo with unknown fields should still be parseable.
+     * This simulates the scenario where new mongot writes a StaleStateInfo with a new field (e.g.,
+     * changeStreamResumeInfo), and old mongot (after rollback) tries to read it.
+     */
+    @Test
+    public void testStaleStateInfoForwardsCompatibility_unknownFieldsIgnored() {
+      // Simulate a StaleStateInfo serialized by a newer mongot version with an extra field
+      BsonDocument staleStateWithUnknownField =
+          new BsonDocument()
+              .append("lastOptime", new BsonTimestamp(1234567890L))
+              .append("reason", new BsonString("DOCS_EXCEEDED"))
+              .append("message", new BsonString("Document limit exceeded"))
+              .append(
+                  "futureUnknownField",
+                  new BsonDocument("nested", new BsonString("value"))); // Unknown to old mongot
+
+      BsonDocument userData =
+          new BsonDocument().append("staleStateInfo", staleStateWithUnknownField);
+
+      // This should NOT throw an exception - unknown fields should be ignored
+      IndexCommitUserData parsed =
+          IndexCommitUserData.fromEncodedData(
+              EncodedUserData.fromString(userData.toJson()), Optional.empty());
+
+      // Verify that the known fields were correctly parsed
+      Assert.assertTrue(parsed.getStaleStateInfo().isPresent());
+      Assert.assertEquals(
+          new BsonTimestamp(1234567890L), parsed.getStaleStateInfo().get().getLastOptime());
+      Assert.assertEquals(
+          StaleStatusReason.DOCS_EXCEEDED, parsed.getStaleStateInfo().get().getReason());
     }
   }
 }
