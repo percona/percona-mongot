@@ -8,6 +8,7 @@ import com.xgen.mongot.util.mongodb.MongoClientBuilder;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLContext;
 import org.slf4j.Logger;
@@ -31,6 +32,13 @@ public class AutoEmbeddingMongoClient {
   // Use for LeaseManager for managing leases and metadata.
   private final AtomicReference<MongoClient> leaseManagerMongoClient = new AtomicReference<>();
   private final MeterRegistry meterRegistry;
+
+  /**
+   * Set to true by {@link #close()} so callers (e.g. retry loops in
+   * {@link com.xgen.mongot.embedding.utils.MongoClientOperationExecutor}) can abort in-flight work
+   * during mongot shutdown rather than burning their full retry budget against torn-down clients.
+   */
+  private final AtomicBoolean closed = new AtomicBoolean(false);
 
   private Optional<SyncSourceConfig> syncSourceConfig;
 
@@ -109,9 +117,15 @@ public class AutoEmbeddingMongoClient {
 
   /** Closes all mongo clients, only triggered by ConfigManager::close */
   public void close() {
+    this.closed.set(true);
     getMaterializedViewResolverMongoClient().ifPresent(MongoClient::close);
     getLeaseManagerMongoClient().ifPresent(MongoClient::close);
     getMaterializedViewWriterMongoClient().ifPresent(MongoClient::close);
+  }
+
+  /** Returns true once {@link #close()} has been invoked. */
+  public boolean isClosed() {
+    return this.closed.get();
   }
 
   public Optional<SyncSourceConfig> getSyncSourceConfig() {

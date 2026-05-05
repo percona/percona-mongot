@@ -263,13 +263,15 @@ public class CommonUtils {
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MaterializedViewCollectionMetadataCatalog metadataCatalog,
       LeaseManager leaseManager,
-      AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
+      AutoEmbeddingMaterializedViewConfig materializedViewConfig,
+      MeterRegistry meterRegistry) {
     return MaterializedViewCollectionResolver.create(
         dbResolver,
         autoEmbeddingMongoClient,
         metadataCatalog,
         leaseManager,
-        materializedViewConfig);
+        materializedViewConfig,
+        meterRegistry);
   }
 
   /**

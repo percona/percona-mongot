@@ -685,7 +685,8 @@ public class CommunityMongotBootstrapper {
             autoEmbeddingMongoClient,
             mvMetadataCatalog,
             leaseManager,
-            mongotConfigs.autoEmbeddingMaterializedViewConfig);
+            mongotConfigs.autoEmbeddingMaterializedViewConfig,
+            meterAndFtdcRegistry.meterRegistry());
     var materializedViewIndexFactory =
         CommonUtils.getMaterializedViewIndexFactory(
             autoEmbeddingMongoClient,

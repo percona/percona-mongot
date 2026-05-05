@@ -9,6 +9,7 @@ import com.mongodb.MongoSocketException;
 import com.mongodb.MongoTimeoutException;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
 import io.micrometer.core.instrument.Counter;
@@ -234,58 +235,63 @@ public class MongoClientOperationExecutor {
   }
 
   private static boolean isDiskFull(Throwable e) {
-    return e instanceof MongoException me && me.getCode() == Errors.EXCEEDED_DISK_LIMIT.code;
+    Throwable cause = unwrapCheckedMongoException(e);
+    return cause instanceof MongoException me && me.getCode() == Errors.EXCEEDED_DISK_LIMIT.code;
   }
 
   private static boolean isUserWritesBlocked(Throwable e) {
-    return e instanceof MongoException me && me.getCode() == Errors.USER_WRITES_BLOCKED.code;
+    Throwable cause = unwrapCheckedMongoException(e);
+    return cause instanceof MongoException me && me.getCode() == Errors.USER_WRITES_BLOCKED.code;
   }
 
   private static boolean isSystemOverloaded(Throwable e) {
-    return e instanceof MongoException me
+    Throwable cause = unwrapCheckedMongoException(e);
+    return cause instanceof MongoException me
         && Errors.SYSTEM_OVERLOADED_ERROR_CODES.contains(me.getCode());
   }
 
   private static String classifyError(Throwable e) {
-    if (e instanceof MongoSocketException) {
+    Throwable cause = unwrapCheckedMongoException(e);
+    if (cause instanceof MongoSocketException) {
       return "socket_error";
     }
-    if (e instanceof MongoTimeoutException) {
+    if (cause instanceof MongoTimeoutException) {
       return "timeout";
     }
-    if (e instanceof MongoNotPrimaryException) {
+    if (cause instanceof MongoNotPrimaryException) {
       return "not_primary";
     }
-    if (e instanceof MongoNodeIsRecoveringException) {
+    if (cause instanceof MongoNodeIsRecoveringException) {
       return "node_recovering";
     }
-    if (e instanceof MongoCursorNotFoundException) {
+    if (cause instanceof MongoCursorNotFoundException) {
       return "cursor_not_found";
     }
-    if (e instanceof MongoException mongoException) {
+    if (cause instanceof MongoException mongoException) {
       return "mongo_error_" + mongoException.getCode();
     }
-    if (e instanceof IllegalStateException) {
+    if (cause instanceof IllegalStateException) {
       return "client_closed";
     }
-    if (e instanceof MaterializedViewTransientException) {
+    if (cause instanceof MaterializedViewTransientException) {
       return "mv_transient";
     }
     return "unknown";
   }
 
   private static boolean isRetryable(Throwable e) {
-    if (e instanceof IllegalStateException) {
+    Throwable cause = unwrapCheckedMongoException(e);
+    if (cause instanceof IllegalStateException) {
       // When MongoClient is closed during sync source update, it will throw IllegalStateException.
       // This is not an ideal exception type check as MongoClient throws IllegalStateException when
       // it is closed instead of MongoException.
       return true;
     }
-    if (e instanceof MaterializedViewTransientException) {
+    if (cause instanceof MaterializedViewTransientException) {
       // MaterializedViewTransientException may be thrown when sync source is missing.
       return true;
     }
-    if (!(e instanceof MongoException mongoException)) {
+    if (!(cause instanceof MongoException mongoException)) {
       return false;
     }
     if (mongoException instanceof MongoSocketException
@@ -296,5 +302,20 @@ public class MongoClientOperationExecutor {
       return true;
     }
     return Errors.RETRYABLE_ERROR_CODES.contains(mongoException.getCode());
+  }
+
+  /**
+   * {@link CheckedMongoException} is a thin wrapper around {@link MongoException} used by helpers
+   * like {@link com.xgen.mongot.util.mongodb.MongoDbDatabase#getCollectionInfos}. Returns the
+   * underlying cause so retryability classification, error tagging and transient-condition
+   * detection (disk-full / writes-blocked / overloaded) treat the wrapped exception the same as
+   * a directly-thrown one. Returns the input unchanged when not a {@link CheckedMongoException}
+   * or when the cause is null.
+   */
+  private static Throwable unwrapCheckedMongoException(Throwable e) {
+    if (e instanceof CheckedMongoException && e.getCause() != null) {
+      return e.getCause();
+    }
+    return e;
   }
 }

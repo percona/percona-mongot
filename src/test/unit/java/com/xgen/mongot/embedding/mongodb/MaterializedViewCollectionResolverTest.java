@@ -6,11 +6,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.ListCollectionsIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCursor;
@@ -151,7 +153,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -191,7 +194,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -221,7 +225,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata first =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -258,7 +263,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata1 =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -298,7 +304,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataA =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenA);
@@ -343,7 +350,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataA =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenA);
@@ -395,7 +403,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewTransientException thrown =
         assertThrows(
@@ -451,7 +460,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -509,7 +519,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV1,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -573,7 +584,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -638,7 +650,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV1,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -673,7 +686,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -735,7 +749,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV1,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -796,7 +811,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -826,7 +842,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -861,7 +878,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataV1 =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenV1);
@@ -900,7 +918,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataNoVersion =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenNoVersion);
@@ -963,7 +982,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -994,7 +1014,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -1019,5 +1040,86 @@ public class MaterializedViewCollectionResolverTest {
                     AutoEmbedFieldMappingCreator.createAutoEmbedMapping(definition)));
 
     assertThat(thrown.getMessage()).contains("Legacy TEXT field specification");
+  }
+
+  /**
+   * CLOUDP-401173: A transient {@link MongoTimeoutException} from the source mongod (e.g. while it
+   * is still booting after a maintenance restart) on the resolver's listCollections call should be
+   * retried in-place rather than propagated as a fatal error. Verifies that the resolver can absorb
+   * a single transient failure and still succeed without falling through to
+   * UnresolvedAutoEmbeddingIndex.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void getOrCreateMaterializedViewForIndex_transientListCollectionsError_retriesAndSucceeds()
+      throws Exception {
+    ObjectId indexId = new ObjectId();
+    VectorIndexDefinition definition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withAutoEmbedField("embeddingField")
+            .build();
+    var indexDefGen = createIndexDefinitionGeneration(definition);
+
+    // First listCollections call throws a retryable exception, subsequent calls return the iterable
+    // populated by createCollection. The MongoClientOperationExecutor inside the resolver should
+    // retry past the first failure.
+    when(this.mongoDatabase.listCollections(BsonDocument.class))
+        .thenThrow(new MongoTimeoutException("simulated server selection timeout"))
+        .thenReturn(this.listCollectionsIterable);
+
+    MaterializedViewCollectionResolver resolver =
+        new MaterializedViewCollectionResolver(
+            new DefaultInternalDatabaseResolver(MV_DATABASE_NAME),
+            this.autoEmbeddingMongoClient,
+            this.metadataCatalog,
+            this.materializedViewConfig,
+            this.leaseManager,
+            new SimpleMeterRegistry());
+
+    MaterializedViewCollectionMetadata metadata =
+        resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
+
+    // Resolver must have retried - listCollections invoked at least twice (1 failure + 1+ success)
+    verify(this.mongoDatabase, atLeast(2)).listCollections(BsonDocument.class);
+    // And the final outcome is a fully-resolved metadata, not a thrown transient exception.
+    assertThat(metadata.collectionName()).startsWith(indexId.toHexString());
+    assertThat(this.metadataCatalog.getMetadata(indexDefGen.getGenerationId())).isEqualTo(metadata);
+  }
+
+  /**
+   * CLOUDP-401173: When transient errors persist beyond the retry budget, the resolver should
+   * surface a {@link MaterializedViewTransientException} so the upper retry loop
+   * (IndexRecoveryStager) can take over. Verifies that retries are bounded and the failure mode is
+   * preserved when the budget is exhausted.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void getOrCreateMaterializedViewForIndex_persistentListCollectionsError_propagates() {
+    ObjectId indexId = new ObjectId();
+    VectorIndexDefinition definition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withAutoEmbedField("embeddingField")
+            .build();
+    var indexDefGen = createIndexDefinitionGeneration(definition);
+
+    when(this.mongoDatabase.listCollections(BsonDocument.class))
+        .thenThrow(new MongoTimeoutException("simulated persistent timeout"));
+
+    MaterializedViewCollectionResolver resolver =
+        new MaterializedViewCollectionResolver(
+            new DefaultInternalDatabaseResolver(MV_DATABASE_NAME),
+            this.autoEmbeddingMongoClient,
+            this.metadataCatalog,
+            this.materializedViewConfig,
+            this.leaseManager,
+            new SimpleMeterRegistry());
+
+    assertThrows(
+        MaterializedViewTransientException.class,
+        () -> resolver.getOrCreateMaterializedViewForIndex(indexDefGen));
+    // Retries were attempted (more than 1 invocation).
+    verify(this.mongoDatabase, atLeast(2)).listCollections(BsonDocument.class);
   }
 }

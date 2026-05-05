@@ -19,18 +19,22 @@ import com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient;
 import com.xgen.mongot.embedding.mongodb.common.InternalDatabaseResolver;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
+import com.xgen.mongot.embedding.utils.MongoClientOperationExecutor;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
 import com.xgen.mongot.index.definition.VectorTextFieldSpecification;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FieldPath;
-import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
+import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
@@ -58,6 +62,17 @@ public class MaterializedViewCollectionResolver {
   // (95 bytes).
   private static final int DEFINITION_HASH_BYTES = 16;
 
+  /**
+   * Parent metrics namespace; combined with {@link #METRICS_RESOURCE_NAME} this produces metric
+   * names of the form {@code embedding.materializedView.collectionResolver.requestLatency} etc.
+   * Mirrors the namespace used by other auto-embed components such as
+   * {@link com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory}.
+   */
+  private static final String METRICS_NAMESPACE = "embedding.materializedView";
+
+  /** Per-resource metric name under {@link #METRICS_NAMESPACE}. */
+  private static final String METRICS_RESOURCE_NAME = "collectionResolver";
+
   private final MaterializedViewCollectionMetadataCatalog metadataCatalog;
 
   private final LeaseManager leaseManager;
@@ -68,17 +83,47 @@ public class MaterializedViewCollectionResolver {
 
   private final AutoEmbeddingMongoClient autoEmbeddingMongoClient;
 
+  /**
+   * Wraps the resolver's direct MongoDB calls (listCollections, createCollection) with retries on
+   * transient errors. Lease operations called from this class are already retried by the lease
+   * manager's own executor; this executor covers the remaining DB operations on the index init
+   * path. See {@link com.xgen.mongot.embedding.utils.MongoClientOperationExecutor} for the set of
+   * exceptions classified as retryable (e.g. MongoTimeoutException, MongoSocketException).
+   */
+  private final MongoClientOperationExecutor operationExecutor;
+
+  /** Constructs the resolver. Use {@link #create} from production code. */
   public MaterializedViewCollectionResolver(
       InternalDatabaseResolver dbResolver,
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MaterializedViewCollectionMetadataCatalog metadataCatalog,
       AutoEmbeddingMaterializedViewConfig materializedViewConfig,
-      LeaseManager leaseManager) {
+      LeaseManager leaseManager,
+      MeterRegistry meterRegistry) {
     this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;
     this.metadataCatalog = metadataCatalog;
     this.materializedViewConfig = materializedViewConfig;
     this.leaseManager = leaseManager;
     this.dbResolver = dbResolver;
+    // Tight retry budget: 2 retries (3 attempts total). Each attempt absorbs the driver's 10s
+    // server-selection timeout; combined with backoff this gives a ~31s in-place budget which
+    // covers the typical mongod unreachability window during a maintenance restart. Longer
+    // outages fall through to the async retry path via IndexRecoveryStager rather than
+    // blocking journal-restore / conf-call processing on this thread further. The retry loop
+    // aborts immediately if the underlying mongo client is closed (mongot shutdown) so we don't
+    // delay shutdown by the retry budget.
+    this.operationExecutor =
+        new MongoClientOperationExecutor(
+            new MetricsFactory(METRICS_NAMESPACE, meterRegistry),
+            METRICS_RESOURCE_NAME,
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofMillis(500))
+                .backoffFactor(2)
+                .maxDelay(Duration.ofMillis(1000))
+                .maxRetries(2)
+                .jitter(0.1)
+                .build(),
+            autoEmbeddingMongoClient::isClosed);
   }
 
   public static MaterializedViewCollectionResolver create(
@@ -86,14 +131,16 @@ public class MaterializedViewCollectionResolver {
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MaterializedViewCollectionMetadataCatalog metadataCatalog,
       LeaseManager leaseManager,
-      AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
+      AutoEmbeddingMaterializedViewConfig materializedViewConfig,
+      MeterRegistry meterRegistry) {
     // TODO(CLOUDP-360542): Support sync source change.
     return new MaterializedViewCollectionResolver(
         dbResolver,
         autoEmbeddingMongoClient,
         metadataCatalog,
         materializedViewConfig,
-        leaseManager);
+        leaseManager,
+        meterRegistry);
   }
 
   /**
@@ -109,20 +156,23 @@ public class MaterializedViewCollectionResolver {
   public MaterializedViewCollectionMetadata getOrCreateMaterializedViewForIndex(
       MaterializedViewIndexDefinitionGeneration indexDefinitionGeneration)
       throws MaterializedViewTransientException {
-    var mongoClientOpt = this.autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient();
-    if (mongoClientOpt.isEmpty()) {
+    // Fail fast if no client has been registered yet. Each retried operation below additionally
+    // re-fetches via requireResolverClient() so a sync-source rotation mid-call (which closes
+    // and replaces the resolver client) doesn't leave us retrying against a torn-down reference;
+    // mirrors how DynamicLeaderLeaseManager re-fetches getLeaseManagerMongoClient() per call.
+    if (this.autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient().isEmpty()) {
       throw new MaterializedViewTransientException(
           "Missing materialized view collection client",
           MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE);
     }
-    var mongoClient = mongoClientOpt.get();
     String matViewDb =
         this.dbResolver.resolve(indexDefinitionGeneration.getIndexDefinition().getDatabase());
     try {
-      var collectionName =
-          getOrCreateCollectionName(indexDefinitionGeneration, mongoClient, matViewDb);
+      var collectionName = getOrCreateCollectionName(indexDefinitionGeneration, matViewDb);
       MongoDbCollectionInfo collectionInfo =
-          getCollectionInfo(mongoClient, matViewDb, collectionName);
+          this.operationExecutor.execute(
+              "getCollectionInfo",
+              () -> getCollectionInfo(requireResolverClient(), matViewDb, collectionName));
 
       MaterializedViewCollectionMetadata materializedViewCollectionMetadata =
           this.leaseManager.initializeLease(
@@ -153,6 +203,17 @@ public class MaterializedViewCollectionResolver {
           .addKeyValue("database", matViewDb)
           .log("Registered materialized view metadata and database name");
       return materializedViewCollectionMetadata;
+    } catch (MaterializedViewTransientException e) {
+      // Preserve the executor / lease manager's classified reason (e.g. EXCEEDED_DISK_LIMIT,
+      // USER_WRITES_BLOCKED, SYSTEM_OVERLOADED, LEASE_OPERATION_FAILED) instead of collapsing
+      // every transient failure into COLLECTION_RESOLUTION_FAILED.
+      LOG.atWarn()
+          .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
+          .addKeyValue("database", matViewDb)
+          .addKeyValue("reason", e.getReason())
+          .setCause(e)
+          .log("Failed to resolve materialized view collection");
+      throw e;
     } catch (Exception e) {
       LOG.atWarn()
           .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
@@ -166,11 +227,24 @@ public class MaterializedViewCollectionResolver {
     }
   }
 
+  /**
+   * Returns the current resolver mongo client from the {@link AutoEmbeddingMongoClient}'s atomic
+   * reference, throwing {@link MaterializedViewTransientException} (retryable) if absent. Called
+   * fresh per-attempt inside retried suppliers so a sync-source rotation during retry picks up
+   * the new client rather than continuing against a closed one.
+   */
+  private MongoClient requireResolverClient() throws MaterializedViewTransientException {
+    return this.autoEmbeddingMongoClient
+        .getMaterializedViewResolverMongoClient()
+        .orElseThrow(
+            () ->
+                new MaterializedViewTransientException(
+                    "Missing materialized view collection client",
+                    MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE));
+  }
+
   private String getOrCreateCollectionName(
-      IndexDefinitionGeneration indexDefinitionGeneration,
-      MongoClient mongoClient,
-      String matViewDb)
-      throws CheckedMongoException {
+      IndexDefinitionGeneration indexDefinitionGeneration, String matViewDb) throws Exception {
     // TODO(CLOUDP-384821): Update index catalog service for community to set
     // MaterializedViewNameFormatVersion for new indexes.
     // MMS should set fallback defaultMaterializedViewNameFormatVersion >= 1, community currectly
@@ -213,11 +287,18 @@ public class MaterializedViewCollectionResolver {
               + DELIM
               + autoEmbeddingDefinitionVersion;
     }
-    if (getCollectionInfos(mongoClient, matViewDb)
-        .getCollectionInfo(matViewDb, collectionName)
-        .isEmpty()) {
+    String resolvedName = collectionName;
+    boolean collectionExists =
+        this.operationExecutor
+            .execute(
+                "getCollectionInfos",
+                () ->
+                    getCollectionInfos(requireResolverClient(), matViewDb)
+                        .getCollectionInfo(matViewDb, resolvedName))
+            .isPresent();
+    if (!collectionExists) {
       // Create new mat view collection when it's not found.
-      createCollection(mongoClient, matViewDb, collectionName);
+      createCollection(matViewDb, collectionName);
       LOG.atInfo()
           .addKeyValue("collectionName", collectionName)
           .addKeyValue("database", matViewDb)
@@ -265,22 +346,26 @@ public class MaterializedViewCollectionResolver {
    * Creates a new materialized view collection with the given name while gracefully handling the
    * case where the collection already exists.
    */
-  private void createCollection(MongoClient mongoClient, String matViewDb, String collectionName) {
-    try {
-      mongoClient.getDatabase(matViewDb).createCollection(collectionName);
-    } catch (MongoCommandException e) {
-      if (e.getErrorCode() != NAMESPACE_EXISTS_ERROR_CODE) {
-        throw new MaterializedViewTransientException(
-            String.valueOf(e.getMessage()),
-            e,
-            MaterializedViewTransientException.Reason.COLLECTION_RESOLUTION_FAILED);
-      }
-      // Collection already exists — another instance created it concurrently.
-      LOG.atInfo()
-          .addKeyValue("collectionName", collectionName)
-          .addKeyValue("database", matViewDb)
-          .log("MatView collection already exists, skipping creation");
-    }
+  private void createCollection(String matViewDb, String collectionName) throws Exception {
+    this.operationExecutor.execute(
+        "createCollection",
+        () -> {
+          try {
+            requireResolverClient().getDatabase(matViewDb).createCollection(collectionName);
+          } catch (MongoCommandException e) {
+            if (e.getErrorCode() != NAMESPACE_EXISTS_ERROR_CODE) {
+              throw e;
+            }
+            // Collection already exists — another instance created it concurrently. Treated as a
+            // success so the executor's failedRequests counter doesn't tick on the (common) case
+            // where we re-resolve a previously-created MV collection.
+            LOG.atInfo()
+                .addKeyValue("collectionName", collectionName)
+                .addKeyValue("database", matViewDb)
+                .log("MatView collection already exists, skipping creation");
+          }
+          return null;
+        });
   }
 
   /**
