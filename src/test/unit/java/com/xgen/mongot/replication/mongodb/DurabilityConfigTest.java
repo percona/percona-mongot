@@ -14,11 +14,11 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {DurabilityConfigTest.TestSerialization.class, DurabilityConfigTest.TestConfig.class})
+    value = {DurabilityConfigTest.SerializationTest.class, DurabilityConfigTest.ConfigTest.class})
 public class DurabilityConfigTest {
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "durability-config-serialization";
     private static final BsonSerializationTestSuite<DurabilityConfig> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(
@@ -26,7 +26,7 @@ public class DurabilityConfigTest {
 
     private final BsonSerializationTestSuite.TestSpec<DurabilityConfig> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<DurabilityConfig> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<DurabilityConfig> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -47,7 +47,7 @@ public class DurabilityConfigTest {
     }
   }
 
-  public static class TestConfig {
+  public static class ConfigTest {
     @Test
     public void testCommitIntervalDefault() {
       var config = DurabilityConfig.create(Optional.empty(), Optional.empty());

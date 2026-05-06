@@ -29,9 +29,9 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      IndexCommitUserDataTest.TestDeserialization.class,
-      IndexCommitUserDataTest.TestSerialization.class,
-      IndexCommitUserDataTest.TestEncodedData.class
+      IndexCommitUserDataTest.DeserializationTest.class,
+      IndexCommitUserDataTest.SerializationTest.class,
+      IndexCommitUserDataTest.EncodedDataTest.class
     })
 public class IndexCommitUserDataTest {
 
@@ -89,7 +89,7 @@ public class IndexCommitUserDataTest {
           IndexStateInfo.create(StatusCode.DOES_NOT_EXIST, Reason.COLLECTION_NOT_FOUND));
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "index-commit-user-data-deserialization";
     private static final String SUITE_PATH = "src/test/unit/resources/replication/mongodb/common";
 
@@ -98,7 +98,7 @@ public class IndexCommitUserDataTest {
             SUITE_PATH, SUITE_NAME, IndexCommitUserData::fromBson);
     private final BsonDeserializationTestSuite.TestSpecWrapper<IndexCommitUserData> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<IndexCommitUserData> testSpec) {
       this.testSpec = testSpec;
     }
@@ -177,7 +177,7 @@ public class IndexCommitUserDataTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "index-commit-user-data-serialization";
     private static final String SUITE_PATH = "src/test/unit/resources/replication/mongodb/common";
     private static final BsonSerializationTestSuite<IndexCommitUserData> TEST_SUITE =
@@ -185,7 +185,7 @@ public class IndexCommitUserDataTest {
 
     private final BsonSerializationTestSuite.TestSpec<IndexCommitUserData> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<IndexCommitUserData> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<IndexCommitUserData> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -252,7 +252,7 @@ public class IndexCommitUserDataTest {
     }
   }
 
-  public static class TestEncodedData {
+  public static class EncodedDataTest {
     @Test
     public void testEncodeDecodeAsString() {
       IndexCommitUserData data =

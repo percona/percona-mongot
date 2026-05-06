@@ -19,13 +19,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      ExplainDefinitionTest.TestDeserialization.class,
-      ExplainDefinitionTest.TestSerialization.class,
+      ExplainDefinitionTest.DeserializationTest.class,
+      ExplainDefinitionTest.SerializationTest.class,
     })
 public class ExplainDefinitionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "explain-deserialization";
     private static final BsonDeserializationTestSuite<ExplainDefinition> TEST_SUITE =
         fromDocument(
@@ -35,7 +35,7 @@ public class ExplainDefinitionTest {
 
     private final TestSpecWrapper<ExplainDefinition> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<ExplainDefinition> testSpec) {
+    public DeserializationTest(TestSpecWrapper<ExplainDefinition> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -57,7 +57,7 @@ public class ExplainDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "explain-serialization";
     private static final BsonSerializationTestSuite<ExplainDefinition> TEST_SUITE =
         fromEncodable(
@@ -65,7 +65,7 @@ public class ExplainDefinitionTest {
 
     private final BsonSerializationTestSuite.TestSpec<ExplainDefinition> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<ExplainDefinition> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<ExplainDefinition> testSpec) {
       this.testSpec = testSpec;
     }
 

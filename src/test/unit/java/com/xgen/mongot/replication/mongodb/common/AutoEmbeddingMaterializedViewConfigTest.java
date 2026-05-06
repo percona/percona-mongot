@@ -23,13 +23,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      AutoEmbeddingMaterializedViewConfigTest.TestSerialization.class,
-      AutoEmbeddingMaterializedViewConfigTest.TestConfig.class
+      AutoEmbeddingMaterializedViewConfigTest.SerializationTest.class,
+      AutoEmbeddingMaterializedViewConfigTest.ConfigTest.class
     })
 public class AutoEmbeddingMaterializedViewConfigTest {
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME =
         "auto-embedding-materialized-view-config-serialization";
     private static final BsonSerializationTestSuite<AutoEmbeddingMaterializedViewConfig>
@@ -39,7 +39,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
 
     private final BsonSerializationTestSuite.TestSpec<AutoEmbeddingMaterializedViewConfig> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<AutoEmbeddingMaterializedViewConfig> testSpec) {
       this.testSpec = testSpec;
     }
@@ -97,7 +97,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
     }
   }
 
-  public static class TestConfig {
+  public static class ConfigTest {
     // Makes sure returns expected default config that won't break community version
     @Test
     public void getDefault_returnsExpectedConfig() {

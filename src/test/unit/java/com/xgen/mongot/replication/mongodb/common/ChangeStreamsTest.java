@@ -29,11 +29,11 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
-@Suite.SuiteClasses(value = {ChangeStreamsTest.TestUpdateDescriptionAppliesToIndex.class})
+@Suite.SuiteClasses(value = {ChangeStreamsTest.UpdateDescriptionAppliesToIndexTest.class})
 public class ChangeStreamsTest {
 
   @RunWith(Theories.class)
-  public static class TestUpdateDescriptionAppliesToIndex {
+  public static class UpdateDescriptionAppliesToIndexTest {
 
     @DataPoints
     public static IndexDefinition.Type[] type() {

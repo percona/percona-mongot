@@ -15,13 +15,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      OptimizationFlagsDefinitionTest.TestDeserialization.class,
-      OptimizationFlagsDefinitionTest.TestSerialization.class,
+      OptimizationFlagsDefinitionTest.DeserializationTest.class,
+      OptimizationFlagsDefinitionTest.SerializationTest.class,
     })
 public class OptimizationFlagsDefinitionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "optimization-flags-deserialization";
     private static final BsonDeserializationTestSuite<OptimizationFlagsDefinition> TEST_SUITE =
         fromDocument(
@@ -32,7 +32,7 @@ public class OptimizationFlagsDefinitionTest {
     private final BsonDeserializationTestSuite.TestSpecWrapper<OptimizationFlagsDefinition>
         testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<OptimizationFlagsDefinition> testSpec) {
       this.testSpec = testSpec;
     }
@@ -64,7 +64,7 @@ public class OptimizationFlagsDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "optimization-flags-serialization";
     private static final BsonSerializationTestSuite<OptimizationFlagsDefinition> TEST_SUITE =
         fromEncodable(
@@ -72,7 +72,7 @@ public class OptimizationFlagsDefinitionTest {
 
     private final BsonSerializationTestSuite.TestSpec<OptimizationFlagsDefinition> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<OptimizationFlagsDefinition> testSpec) {
       this.testSpec = testSpec;
     }

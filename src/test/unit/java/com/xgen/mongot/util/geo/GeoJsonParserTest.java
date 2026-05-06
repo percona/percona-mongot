@@ -28,11 +28,11 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      GeoJsonParserTest.TestParsePoint.class,
-      GeoJsonParserTest.TestParseGeometry.class,
+      GeoJsonParserTest.ParsePointTest.class,
+      GeoJsonParserTest.ParseGeometryTest.class,
     })
 public class GeoJsonParserTest {
-  public static class TestParsePoint {
+  public static class ParsePointTest {
     @Test
     public void testParsePointValid() throws BsonParseException {
       var doc =
@@ -61,7 +61,7 @@ public class GeoJsonParserTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestParseGeometry {
+  public static class ParseGeometryTest {
     private static final String RESOURCES_PATH = "src/test/unit/resources/util/geo/";
     private static final String SUITE_NAME = "geo-json";
     private static final BsonDeserializationTestSuite<Geometry> TEST_SUITE =
@@ -69,7 +69,7 @@ public class GeoJsonParserTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Geometry> testSpec;
 
-    public TestParseGeometry(BsonDeserializationTestSuite.TestSpecWrapper<Geometry> testSpec) {
+    public ParseGeometryTest(BsonDeserializationTestSuite.TestSpecWrapper<Geometry> testSpec) {
       this.testSpec = testSpec;
     }
 

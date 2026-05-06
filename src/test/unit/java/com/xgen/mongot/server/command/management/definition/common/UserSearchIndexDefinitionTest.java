@@ -19,22 +19,22 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses({
-  UserSearchIndexDefinitionTest.TestDeserialization.class,
-  UserSearchIndexDefinitionTest.TestSerialization.class
+  UserSearchIndexDefinitionTest.DeserializationTest.class,
+  UserSearchIndexDefinitionTest.SerializationTest.class
 })
 public class UserSearchIndexDefinitionTest {
   static final String RESOURCES_PATH =
       "src/test/unit/resources/server/command/management/definition/common";
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "user-search-index-deserialization";
     private static final BsonDeserializationTestSuite<UserSearchIndexDefinition> TEST_SUITE =
         fromDocument(RESOURCES_PATH, SUITE_NAME, UserSearchIndexDefinition::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<UserSearchIndexDefinition> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<UserSearchIndexDefinition> testSpec) {
       this.testSpec = testSpec;
     }
@@ -71,14 +71,14 @@ public class UserSearchIndexDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "user-search-index-serialization";
     private static final BsonSerializationTestSuite<UserSearchIndexDefinition> TEST_SUITE =
         fromEncodable(RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<UserSearchIndexDefinition> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<UserSearchIndexDefinition> testSpec) {
       this.testSpec = testSpec;
     }

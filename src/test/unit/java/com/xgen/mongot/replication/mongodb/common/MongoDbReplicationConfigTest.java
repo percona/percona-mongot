@@ -23,13 +23,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      MongoDbReplicationConfigTest.TestSerialization.class,
-      MongoDbReplicationConfigTest.TestConfig.class
+      MongoDbReplicationConfigTest.SerializationTest.class,
+      MongoDbReplicationConfigTest.ConfigTest.class
     })
 public class MongoDbReplicationConfigTest {
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "replication-config-serialization";
     private static final BsonSerializationTestSuite<MongoDbReplicationConfig> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(
@@ -37,7 +37,7 @@ public class MongoDbReplicationConfigTest {
 
     private final BsonSerializationTestSuite.TestSpec<MongoDbReplicationConfig> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<MongoDbReplicationConfig> testSpec) {
       this.testSpec = testSpec;
     }
@@ -80,7 +80,7 @@ public class MongoDbReplicationConfigTest {
     }
   }
 
-  public static class TestConfig {
+  public static class ConfigTest {
     private static <T> void assertExpectedDefault(
         Function<MongoDbReplicationConfig, T> resultSupplier, Runtime runtime, T expected) {
 

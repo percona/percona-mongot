@@ -14,13 +14,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      InitialSyncConfigTest.TestDeserialization.class,
-      InitialSyncConfigTest.TestSerialization.class
+      InitialSyncConfigTest.DeserializationTest.class,
+      InitialSyncConfigTest.SerializationTest.class
     })
 public class InitialSyncConfigTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "initial-sync-config-deserialization";
     private static final BsonDeserializationTestSuite<InitialSyncConfig> TEST_SUITE =
         BsonDeserializationTestSuite.fromDocument(
@@ -30,7 +30,7 @@ public class InitialSyncConfigTest {
 
     private final TestSpecWrapper<InitialSyncConfig> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<InitialSyncConfig> testSpec) {
+    public DeserializationTest(TestSpecWrapper<InitialSyncConfig> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -85,7 +85,7 @@ public class InitialSyncConfigTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "initial-sync-config-serialization";
     private static final BsonSerializationTestSuite<InitialSyncConfig> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(
@@ -93,7 +93,7 @@ public class InitialSyncConfigTest {
 
     private final BsonSerializationTestSuite.TestSpec<InitialSyncConfig> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<InitialSyncConfig> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<InitialSyncConfig> testSpec) {
       this.testSpec = testSpec;
     }
 
