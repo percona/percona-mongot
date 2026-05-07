@@ -79,7 +79,8 @@ public enum Feature {
   CUSTOM_VECTOR_ENGINE("customVectorEngine", State.DISABLED),
   OVERLOAD_RETRY_SIGNAL("overloadRetrySignal", State.DISABLED),
   NESTED_VECTOR("nestedVector", State.ENABLED),
-  QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.DISABLED);
+  QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.DISABLED),
+  METRICS_CACHE("metricsCache", State.DISABLED);
 
   private final String name;
   private final State defaultState;

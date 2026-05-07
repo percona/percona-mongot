@@ -1,6 +1,9 @@
 package com.xgen.mongot.metrics.prometheus;
 
 import com.sun.net.httpserver.HttpServer;
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.metrics.cache.ScrapeCache;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
@@ -13,6 +16,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,9 +40,15 @@ public class PrometheusServer {
   private final HttpServer server;
   private final PrometheusMeterRegistry prometheusMeterRegistry;
 
-  public PrometheusServer(HttpServer server, PrometheusMeterRegistry prometheusMeterRegistry) {
+  private final Optional<ScrapeCache> scrapeCache;
+
+  public PrometheusServer(
+      HttpServer server,
+      PrometheusMeterRegistry prometheusMeterRegistry,
+      Optional<ScrapeCache> scrapeCache) {
     this.server = server;
     this.prometheusMeterRegistry = prometheusMeterRegistry;
+    this.scrapeCache = scrapeCache;
   }
 
   public PrometheusMeterRegistry getPrometheusMeterRegistry() {
@@ -50,7 +61,10 @@ public class PrometheusServer {
 
   /** Starts the Prometheus server. */
   public static PrometheusServer start(
-      InetSocketAddress address, Iterable<Tag> commonTags, List<MeterFilter> filters) {
+      InetSocketAddress address,
+      Iterable<Tag> commonTags,
+      List<MeterFilter> filters,
+      FeatureFlags featureFlags) {
     var prometheusRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
 
     PrometheusNamingConvention mongotPrometheusNamingConvention =
@@ -65,10 +79,23 @@ public class PrometheusServer {
             .publishPercentiles(0.5, 0.75, 0.9, 0.99)
             .register(prometheusRegistry);
 
+    // Configure metrics supplier
+    Optional<ScrapeCache> scrapeCache;
+    Supplier<String> scrapeSupplier;
+    if (featureFlags.isEnabled(Feature.METRICS_CACHE)) {
+      ScrapeCache cache = new ScrapeCache(prometheusRegistry::scrape);
+      scrapeCache = Optional.of(cache);
+      scrapeSupplier = cache::get;
+    } else {
+      scrapeCache = Optional.empty();
+      scrapeSupplier = prometheusRegistry::scrape;
+    }
+
     LOG.atInfo()
         .addKeyValue("address", address)
         .addKeyValue("commonTags", commonTags)
         .addKeyValue("numMeterFilters", filters.size())
+        .addKeyValue("cacheEnabled", scrapeCache.isPresent())
         .log("Starting and configuring prometheus");
 
     try {
@@ -77,7 +104,7 @@ public class PrometheusServer {
       server.createContext(
           ENDPOINT_PATH,
           httpExchange -> {
-            @Nullable String response = scrapingTimer.record(() -> prometheusRegistry.scrape());
+            @Nullable String response = scrapingTimer.record(scrapeSupplier);
             byte[] bytes = response != null ? response.getBytes() : "".getBytes();
             httpExchange.getResponseHeaders().add("Content-Type", PROMETHEUS_SCRAPE_CONTENT_TYPE);
             httpExchange.sendResponseHeaders(200, bytes.length);
@@ -89,7 +116,7 @@ public class PrometheusServer {
       server.setExecutor(null);
       server.start();
 
-      return new PrometheusServer(server, prometheusRegistry);
+      return new PrometheusServer(server, prometheusRegistry, scrapeCache);
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
@@ -98,6 +125,7 @@ public class PrometheusServer {
   public void shutdown() {
     LOG.info("Shutting down Prometheus endpoint...");
     this.server.stop(0);
+    this.scrapeCache.ifPresent(ScrapeCache::close);
   }
 
   private static class MongotPrometheusNamingConvention extends PrometheusNamingConvention {

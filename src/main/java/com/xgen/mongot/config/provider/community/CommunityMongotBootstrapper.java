@@ -167,7 +167,9 @@ public class CommunityMongotBootstrapper {
     var meterRegistry = meterAndFtdcRegistry.getCompositeMeterRegistry();
 
     var prometheusServerOptional =
-        config.metricsConfig().flatMap(CommunityMongotBootstrapper::maybeStartPrometheusServer);
+        config
+            .metricsConfig()
+            .flatMap(mc -> maybeStartPrometheusServer(mc, mongotConfigs.featureFlags));
     prometheusServerOptional.ifPresent(
         (promServer) -> meterRegistry.add(promServer.getPrometheusMeterRegistry()));
 
@@ -365,14 +367,14 @@ public class CommunityMongotBootstrapper {
   }
 
   private static Optional<PrometheusServer> maybeStartPrometheusServer(
-      MetricsConfig metricsConfig) {
+      MetricsConfig metricsConfig, FeatureFlags featureFlags) {
     if (!metricsConfig.enabled()) {
       LOG.info("Not starting Prometheus endpoint since it was explicitly disabled");
       return Optional.empty();
     }
 
     var address = CommunityMongotBootstrapper.parseInetSocketAddress(metricsConfig.address());
-    return Optional.of(PrometheusServer.start(address, List.of(), List.of()));
+    return Optional.of(PrometheusServer.start(address, List.of(), List.of(), featureFlags));
   }
 
   private static Optional<SystemMetricsInstrumentation> maybeStartSystemMetrics(
