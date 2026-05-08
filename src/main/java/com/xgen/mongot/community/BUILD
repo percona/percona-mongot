@@ -9,6 +9,7 @@ java_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/java/com/xgen/mongot/config/provider/community",
+        "//src/main/java/com/xgen/mongot/index/lucene/vector",
         "//src/main/java/com/xgen/mongot/logging",
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/mongot/util/security",

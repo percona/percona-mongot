@@ -570,7 +570,7 @@ public class CommunityMongotBootstrapper {
           new EmbeddingServiceManagerConfig.VoyageCredentials(
               new VoyageEmbeddingCredentials(queryKey),
               new VoyageEmbeddingCredentials(indexingKey)));
-    } catch (IOException e) {
+    } catch (IOException | IllegalArgumentException e) {
       LOG.warn("Failed to read Voyage API credential files. Auto-embedding disabled.", e);
       return Optional.empty();
     }

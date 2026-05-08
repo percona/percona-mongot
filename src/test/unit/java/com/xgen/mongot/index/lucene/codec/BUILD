@@ -19,6 +19,7 @@ java_test_suite(
         "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/lucene/quantization",
         "//src/main/java/com/xgen/mongot/index/lucene/util",
+        "//src/main/java/com/xgen/mongot/index/lucene/vector",
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/testing/mongot/mock/index",
         "@lucene_fork//:org_apache_lucene_lucene_codecs",

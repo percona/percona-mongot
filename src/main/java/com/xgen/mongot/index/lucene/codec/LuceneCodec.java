@@ -14,6 +14,7 @@ import com.xgen.mongot.index.lucene.codec.flat.ScalarQuantizedFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBinaryQuantizedVectorsFormat;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBitVectorsFormat;
+import com.xgen.mongot.index.lucene.vector.Lucene99NativeHnswVectorsFormat;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FieldPath;
 import java.util.HashMap;
@@ -166,8 +167,10 @@ public class LuceneCodec extends FilterCodec {
   private KnnVectorsFormat resolveHnswVectorFormat(
       String field, FieldName.TypeField typeField, VectorFieldSpecification.HnswOptions options) {
     return switch (typeField) {
-      case FieldName.TypeField.KNN_VECTOR, FieldName.TypeField.KNN_BYTE ->
+      case FieldName.TypeField.KNN_VECTOR ->
           new Lucene99HnswVectorsFormat(options.maxEdges(), options.numEdgeCandidates());
+      case FieldName.TypeField.KNN_BYTE ->
+          new Lucene99NativeHnswVectorsFormat(options.maxEdges(), options.numEdgeCandidates());
       case FieldName.TypeField.KNN_BIT ->
           new Mongot01042HnswBitVectorsFormat(options.maxEdges(), options.numEdgeCandidates());
       case FieldName.TypeField.KNN_F32_Q7 ->
@@ -192,6 +195,7 @@ public class LuceneCodec extends FilterCodec {
 
   private KnnVectorsFormat resolveFlatVectorFormat(String field, FieldName.TypeField typeField) {
     return switch (typeField) {
+      // TODO(CLOUDP-403218): extend native scoring support to flat indexes.
       case FieldName.TypeField.KNN_VECTOR, FieldName.TypeField.KNN_BYTE ->
           new Float32AndByteFlatVectorsFormat();
       case FieldName.TypeField.KNN_BIT -> new FlatBitVectorsFormat();

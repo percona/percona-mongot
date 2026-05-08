@@ -15,6 +15,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/lucene/codec/flat",
         "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/lucene/quantization",
+        "//src/main/java/com/xgen/mongot/index/lucene/vector",
         "//src/main/java/com/xgen/mongot/util",
         "@maven//:com_google_flogger_flogger",
         "@maven//:com_google_guava_guava",

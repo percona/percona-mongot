@@ -223,13 +223,14 @@ def mongot_java_fuzz_test_suite(name, deps = [], resources = False, exclude_file
         timeouts = timeouts,
     )
 
-def mongot_java_bench_suite(name, deps = [], exclude_files = [], resources = False):
+def mongot_java_bench_suite(name, deps = [], exclude_files = [], resources = False, profile_gc = True):
     # Create a package with the dependencies that can be used by the individual benchmarks.
     mongot_java_package(
         name,
         deps = deps + [artifact("org.openjdk.jmh:jmh-core")],
         plugins = ["//bazel/java:jmh_annotation_processor"],
         testonly = True,
+        javacopts = ["--enable-preview"],
     )
 
     # Create a java_binary for each file in the package not explicitly excluded.
@@ -245,11 +246,12 @@ def mongot_java_bench_suite(name, deps = [], exclude_files = [], resources = Fal
         native.java_test(
             name = bench_name,
             main_class = "org.openjdk.jmh.Main",
-            args = ["-prof gc", bench_name],
+            args = ["-prof gc", bench_name] if profile_gc else [],
             runtime_deps = [":lib"],
             classpath_resources = ["//conf/mongot/test:conf"],
             visibility = ["//visibility:public"],
             data = test_data,
+            jvm_flags = ["--enable-preview"],
         )
 
 def _mongot_java_test_suite(

@@ -51,7 +51,10 @@ package_deploy_tar(
     bin = [
         "//:mongot_community_deploy.jar",
     ],
-    lib = ["//:fips-jars"],
+    lib = [
+        "//:fips-jars",
+        "//src/main/c:mongot_vecsim",
+    ],
     license = [
         ":community-resources/LICENSE/LICENSE",
         ":community-resources/LICENSE/THIRD_PARTY_NOTICES.txt",

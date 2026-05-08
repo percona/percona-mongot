@@ -2,6 +2,7 @@ package com.xgen.mongot.community;
 
 import com.google.common.net.HostAndPort;
 import com.xgen.mongot.config.provider.community.CommunityMongotBootstrapper;
+import com.xgen.mongot.index.lucene.vector.Similarity;
 import com.xgen.mongot.logging.Logging;
 import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.MongotVersionResolver;
@@ -54,6 +55,9 @@ public class MongotCommunity implements Runnable, IVersionProvider {
 
     // install security providers used by mongot's modules
     Security.installFipsSecurityProvider();
+
+    // Load native dependencies of the vector similarity library.
+    Similarity.load();
 
     // Verify Java version
     if (Runtime.version().feature() != 21) {

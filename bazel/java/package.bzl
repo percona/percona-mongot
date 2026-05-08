@@ -19,7 +19,7 @@ def java_library(name, plugins = [], javacopts = [], testonly = False, **kwargs)
         **kwargs
     )
 
-def mongot_java_package(name = "lib", deps = [], data = [], plugins = [], exports = [], testonly = False):
+def mongot_java_package(name = "lib", deps = [], data = [], plugins = [], exports = [], testonly = False, **kwargs):
     deps = deps + [
         "org.slf4j:slf4j-api",
         "com.google.errorprone:error_prone_annotations",
@@ -63,6 +63,7 @@ def mongot_java_package(name = "lib", deps = [], data = [], plugins = [], export
         plugins = plugins,
         visibility = ["//visibility:public"],
         testonly = testonly,
+        **kwargs
     )
 
 def _transform_deps(deps):

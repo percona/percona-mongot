@@ -25,6 +25,9 @@ build --jvmopt="-Djava.security.egd=file:/dev/urandom"
 # Enable Java Vector API for SIMD support
 build --jvmopt="--add-modules=jdk.incubator.vector"
 
+# Enable native access for vector similarity code.
+build --jvmopt="--enable-native-access=ALL-UNNAMED"
+
 # Print LocalDev container version at the beginning of build process
 build --workspace_status_command="LOCAL_DEV_CONTAINER_VERSION=$LOCAL_DEV_CONTAINER_VERSION bazel/common/workspace_status.sh"
 

@@ -21,6 +21,7 @@ import com.xgen.mongot.index.lucene.codec.flat.Float32AndByteFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBinaryQuantizedVectorsFormat;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBitVectorsFormat;
+import com.xgen.mongot.index.lucene.vector.Lucene99NativeHnswVectorsFormat;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.lang.reflect.Field;
@@ -65,7 +66,7 @@ public class LuceneCodecTest {
   public static final List<TestSetup> data =
       List.of(
           new TestSetup(KNN_VECTOR, Lucene99HnswVectorsFormat.class, 32, 200),
-          new TestSetup(KNN_BYTE, Lucene99HnswVectorsFormat.class, 128, 100),
+          new TestSetup(KNN_BYTE, Lucene99NativeHnswVectorsFormat.class, 128, 100),
           new TestSetup(KNN_BIT, Mongot01042HnswBitVectorsFormat.class, 512, 1000),
           new TestSetup(KNN_F32_Q7, Lucene99HnswScalarQuantizedVectorsFormat.class, 2, 30),
           new TestSetup(KNN_F32_Q1, Mongot01042HnswBinaryQuantizedVectorsFormat.class, 49, 66));
