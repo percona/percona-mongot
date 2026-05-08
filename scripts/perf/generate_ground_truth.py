@@ -52,7 +52,7 @@ TEST_CONFIGS = {
         ("sample_vectors", "cohere_wikipedia_multilingual_v3", "max-out-hnsw-construction-params", "vector", 10)
     ],
     "query-nested-30GB-vector-search.yml": [
-        ("sample_vectors", "nested_vector_1024d", "unquantized", "sections.vector", 10),
+        ("sample_vectors", "cohere_wikipedia_multilingual_v3_nested", "unquantized", "sections.vector", 10),
     ],
 }
 
