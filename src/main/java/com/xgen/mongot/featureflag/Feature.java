@@ -80,7 +80,8 @@ public enum Feature {
   OVERLOAD_RETRY_SIGNAL("overloadRetrySignal", State.DISABLED),
   NESTED_VECTOR("nestedVector", State.ENABLED),
   QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.DISABLED),
-  METRICS_CACHE("metricsCache", State.DISABLED);
+  METRICS_CACHE("metricsCache", State.DISABLED),
+  MERGE_ATTRIBUTION_METRICS("mergeAttributionMetrics", State.DISABLED);
 
   private final String name;
   private final State defaultState;

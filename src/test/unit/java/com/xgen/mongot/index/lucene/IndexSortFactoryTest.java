@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_ID;
 import static org.mockito.ArgumentMatchers.any;
@@ -481,8 +482,12 @@ public class IndexSortFactoryTest {
       this.resolver = indexDefinition.createFieldDefinitionResolver(IndexFormatVersion.CURRENT);
 
       var mergeScheduler =
-          new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-              .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false);
+          createMergeScheduler(
+              new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+              MOCK_INDEX_GENERATION_ID,
+              0,
+              1,
+              false);
       mergeScheduler.getIn().setMaxMergesAndThreads(10, 4);
 
       this.indexWriter =

@@ -1,6 +1,5 @@
 package com.xgen.mongot.metrics;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.flogger.FluentLogger;
 import com.sun.management.ThreadMXBean;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
@@ -9,20 +8,24 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Per-pool ThreadMXBean attribution metrics. Sums heap allocation and CPU time across every thread
- * the pool has ever created, exposing the totals as Micrometer counters tagged with the pool name.
+ * Per-pool ThreadMXBean attribution metrics. Sums heap allocation and CPU time across a caller-
+ * provided collection of thread ids, exposing the totals as Micrometer counters tagged with the
+ * pool name.
  *
  * <p>Used to attribute heap allocation rate and CPU consumption to a specific workload
  * ({@code blocking-server-worker} vs {@code guaranteed-blocking-server-worker} vs
- * {@code concurrent-search} for query workloads, and similarly for replication / merges).
+ * {@code concurrent-search} for query workloads, and similarly for replication-initialization,
+ * Lucene merges, and other thread sources that do not live behind a {@link NamedExecutorService}).
  *
  * <p>Per-thread allocation tracking is a JVM-wide concept that does not include direct
  * {@link java.nio.ByteBuffer} or native (JNI) allocations. It only counts objects allocated into
@@ -66,7 +69,7 @@ public final class ThreadPoolResourceMetrics {
         mxBean.get().setThreadAllocatedMemoryEnabled(true);
         mxBean.get().setThreadCpuTimeEnabled(true);
         return new ThreadPoolResourceMetrics(mxBean, subsystem);
-      } catch (UnsupportedOperationException e) {
+      } catch (UnsupportedOperationException | SecurityException e) {
         LOG.warn("Per-thread allocation/CPU tracking unsupported on this JVM, counters will be 0.");
       }
     } else {
@@ -78,57 +81,69 @@ public final class ThreadPoolResourceMetrics {
   }
 
   /**
-   * Registers per-pool allocation and CPU-time counters for {@code executor}.
+   * Registers per-pool allocation and CPU-time counters for {@code executor}. Convenience overload
+   * for thread sources that live behind a {@link NamedExecutorService}.
    */
   public void register(NamedExecutorService executor, MeterRegistry meterRegistry) {
-    String poolName = executor.getName();
-
-    FunctionCounter.builder(ALLOCATED_BYTES_METRIC, executor, this::allocatedBytes)
-        .description(
-            "Cumulative bytes allocated into the Java heap by all threads this pool has ever"
-                + " created. Excludes direct ByteBuffers and native allocations.")
-        .baseUnit("bytes")
-        .tag(SUBSYSTEM_TAG, this.subsystem)
-        .tag(NAME_TAG, poolName)
-        .register(meterRegistry);
-
-    FunctionCounter.builder(CPU_TIME_METRIC, executor, this::cpuTimeNanos)
-        .description(
-            "Cumulative on-CPU nanoseconds across all threads this pool has ever created.")
-        .baseUnit("nanoseconds")
-        .tag(SUBSYSTEM_TAG, this.subsystem)
-        .tag(NAME_TAG, poolName)
-        .register(meterRegistry);
-  }
-
-  @VisibleForTesting
-  double allocatedBytes(NamedExecutorService executor) {
-    if (this.threadMxBean.isEmpty()) {
-      return 0.0;
-    }
-    return sumPerThread(executor, this.threadMxBean.get()::getThreadAllocatedBytes);
-  }
-
-  @VisibleForTesting
-  double cpuTimeNanos(NamedExecutorService executor) {
-    if (this.threadMxBean.isEmpty()) {
-      return 0.0;
-    }
-    return sumPerThread(executor, this.threadMxBean.get()::getThreadCpuTime);
+    register(executor.getName(), supplierFor(executor), meterRegistry);
   }
 
   /**
-   * Sums the MXBean data across the executor's threads and prunes any thread ids the JVM reports
-   * as dead.
+   * Registers per-pool allocation and CPU-time counters for an arbitrary thread source. The
+   * supplier is invoked at scrape time and must return the live thread ids
+   * The returned collection must be mutable: dead ids are pruned from it on each
+   * scrape so the set stays bounded for long-lived sources.
    */
-  private double sumPerThread(
-      NamedExecutorService executor, Function<long[], long[]> beanReader) {
-    Optional<Collection<Long>> maybeLiveIds = executor.getMutableThreadIds();
-    if (maybeLiveIds.isEmpty()) {
-      logUnsupportedExecutor(executor);
+  public void register(
+      String name, Supplier<Collection<Long>> liveThreadIds, MeterRegistry meterRegistry) {
+    FunctionCounter.builder(ALLOCATED_BYTES_METRIC, liveThreadIds, this::sumAllocatedBytes)
+        .description(
+            "Cumulative bytes allocated into the Java heap by all threads this source has ever"
+                + " created. Excludes direct ByteBuffers and native allocations.")
+        .baseUnit("bytes")
+        .tag(SUBSYSTEM_TAG, this.subsystem)
+        .tag(NAME_TAG, name)
+        .register(meterRegistry);
+
+    FunctionCounter.builder(CPU_TIME_METRIC, liveThreadIds, this::sumCpuTimeNanos)
+        .description(
+            "Cumulative on-CPU nanoseconds across all threads this source has ever created.")
+        .baseUnit("nanoseconds")
+        .tag(SUBSYSTEM_TAG, this.subsystem)
+        .tag(NAME_TAG, name)
+        .register(meterRegistry);
+  }
+
+  private double sumAllocatedBytes(Supplier<Collection<Long>> liveThreadIds) {
+    if (this.threadMxBean.isEmpty()) {
       return 0.0;
     }
-    Collection<Long> liveIds = maybeLiveIds.get();
+    return sumPerThread(liveThreadIds.get(), this.threadMxBean.get()::getThreadAllocatedBytes);
+  }
+
+  private double sumCpuTimeNanos(Supplier<Collection<Long>> liveThreadIds) {
+    if (this.threadMxBean.isEmpty()) {
+      return 0.0;
+    }
+    return sumPerThread(liveThreadIds.get(), this.threadMxBean.get()::getThreadCpuTime);
+  }
+
+  private static Supplier<Collection<Long>> supplierFor(NamedExecutorService executor) {
+    return () ->
+        executor
+            .getMutableThreadIds()
+            .orElseGet(
+                () -> {
+                  logUnsupportedExecutor(executor);
+                  return Collections.emptyList();
+                });
+  }
+
+  /**
+   * Sums the MXBean data across the supplied thread ids and prunes any ids the JVM reports as
+   * dead.
+   */
+  private double sumPerThread(Collection<Long> liveIds, Function<long[], long[]> beanReader) {
     long[] ids = liveIds.stream().mapToLong(Long::longValue).toArray();
     if (ids.length == 0) {
       return 0.0;
@@ -136,7 +151,7 @@ public final class ThreadPoolResourceMetrics {
     long[] beanValues;
     try {
       beanValues = beanReader.apply(ids);
-    } catch (UnsupportedOperationException e) {
+    } catch (UnsupportedOperationException | SecurityException e) {
       return 0.0;
     }
     // -1 means the thread has terminated, prune it so the set stays bounded.
@@ -154,5 +169,4 @@ public final class ThreadPoolResourceMetrics {
             "Per-thread attribution unavailable for executor '%s', counter will report 0.",
             executor.getName());
   }
-
 }

@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_ID;
 import static org.junit.Assert.assertEquals;
@@ -80,8 +81,12 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -201,8 +206,12 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -270,8 +279,12 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -339,8 +352,12 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -408,8 +425,12 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),

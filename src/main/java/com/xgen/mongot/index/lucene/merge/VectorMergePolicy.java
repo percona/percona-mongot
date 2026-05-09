@@ -258,6 +258,8 @@ public class VectorMergePolicy extends FilterMergePolicy {
         "budgetBytesUsed", policy, VectorMergePolicy::getBudgetBytesUsed);
     metricsFactory.objectValueGauge(
         "budgetBytesTotal", policy, VectorMergePolicy::getBudgetBytesTotal);
+    metricsFactory.objectValueGauge(
+        "budgetBytesHeapUsed", policy, VectorMergePolicy::getBudgetBytesHeapUsed);
 
     return policy;
   }
@@ -398,6 +400,10 @@ public class VectorMergePolicy extends FilterMergePolicy {
 
   synchronized long getBudgetBytesUsed() {
     return this.budgetBytesUsed;
+  }
+
+  synchronized long getBudgetBytesHeapUsed() {
+    return this.budgetBytesHeapUsed;
   }
 
   long getBudgetBytesTotal() {

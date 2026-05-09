@@ -14,6 +14,7 @@ import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.IndexWriter;
 import com.xgen.mongot.index.InitializedSearchIndex;
@@ -174,7 +175,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                         generationId,
                         indexPartitionId,
                         definition.getNumPartitions(),
-                        featureFlags.isEnabled(Feature.CANCEL_MERGE)),
+                        featureFlags.isEnabled(Feature.CANCEL_MERGE),
+                        IndexTypeData.getIndexTypeTag(definition).tagValue),
                     searchIndexProperties.mergePolicy,
                     searchIndexProperties.ramBufferSizeMb,
                     searchIndexProperties.fieldLimit,

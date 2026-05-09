@@ -2,6 +2,7 @@ package com.xgen.mongot.index.lucene;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.mongot.index.lucene.field.FieldName.TypeField.TOKEN;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
@@ -154,8 +155,12 @@ public class SingleLuceneIndexWriterTest {
 
     return SingleLuceneIndexWriter.createForSearchIndex(
         directory,
-        new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-            .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+        createMergeScheduler(
+            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+            MOCK_INDEX_GENERATION_ID,
+            0,
+            1,
+            false),
         new TieredMergePolicy(),
         16D,
         Optional.of(fieldLimit),
@@ -179,8 +184,12 @@ public class SingleLuceneIndexWriterTest {
       throws IOException {
     return SingleLuceneIndexWriter.createForSearchIndex(
         directory,
-        new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-            .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+        createMergeScheduler(
+            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+            MOCK_INDEX_GENERATION_ID,
+            0,
+            1,
+            false),
         new TieredMergePolicy(),
         16D,
         Optional.of(fieldLimit),
@@ -226,8 +235,12 @@ public class SingleLuceneIndexWriterTest {
       throws Exception {
     return SingleLuceneIndexWriter.createForSearchIndex(
         indexDirectory,
-        new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-            .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+        createMergeScheduler(
+            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+            MOCK_INDEX_GENERATION_ID,
+            0,
+            1,
+            false),
         new TieredMergePolicy(),
         16D,
         Optional.empty(),
@@ -248,8 +261,12 @@ public class SingleLuceneIndexWriterTest {
       throws Exception {
     return SingleLuceneIndexWriter.createForVectorIndex(
         indexDirectory,
-        new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-            .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+        createMergeScheduler(
+            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+            MOCK_INDEX_GENERATION_ID,
+            0,
+            1,
+            false),
         new TieredMergePolicy(),
         16D,
         Optional.empty(),
@@ -1482,7 +1499,8 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer1 =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory1,
-                sharedScheduler.createForIndexPartition(generationId1, 0, 2, false),
+                createMergeScheduler(
+                    sharedScheduler, generationId1, 0, 2, false),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),
@@ -1499,7 +1517,8 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer2 =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory2,
-                sharedScheduler.createForIndexPartition(generationId2, 1, 2, false),
+                createMergeScheduler(
+                    sharedScheduler, generationId2, 1, 2, false),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),
@@ -1625,7 +1644,8 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer1 =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory1,
-                sharedScheduler.createForIndexPartition(generationId1, 0, 3, false),
+                createMergeScheduler(
+                    sharedScheduler, generationId1, 0, 3, false),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),
@@ -1642,7 +1662,8 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer2 =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory2,
-                sharedScheduler.createForIndexPartition(generationId2, 1, 3, false),
+                createMergeScheduler(
+                    sharedScheduler, generationId2, 1, 3, false),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),
@@ -1659,7 +1680,7 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer3 =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory3,
-                sharedScheduler.createForIndexPartition(generationId3, 2, 3, false),
+                createMergeScheduler(sharedScheduler, generationId3, 2, 3, false),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),
@@ -1782,8 +1803,12 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory,
-                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                    .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+                createMergeScheduler(
+                    new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                    MOCK_INDEX_GENERATION_ID,
+                    0,
+                    1,
+                    false),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),
@@ -1840,8 +1865,12 @@ public class SingleLuceneIndexWriterTest {
         SingleLuceneIndexWriter writer =
             SingleLuceneIndexWriter.createForSearchIndex(
                 directory,
-                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                    .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, true),
+                createMergeScheduler(
+                    new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                    MOCK_INDEX_GENERATION_ID,
+                    0,
+                    1,
+                    true),
                 new TieredMergePolicy(),
                 16D,
                 Optional.empty(),

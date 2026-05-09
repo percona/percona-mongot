@@ -574,6 +574,10 @@ public class VectorMergePolicyTest {
       Assert.assertEquals(
           0.0, meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(), NO_EPSILON);
       Assert.assertEquals(
+          0.0,
+          meterRegistry.find("vectorMergePolicy.budgetBytesHeapUsed").gauge().value(),
+          NO_EPSILON);
+      Assert.assertEquals(
           1536L << 20,
           meterRegistry.find("vectorMergePolicy.budgetBytesTotal").gauge().value(),
           NO_EPSILON);
@@ -597,16 +601,35 @@ public class VectorMergePolicyTest {
           1019 << 20,
           meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(),
           NO_EPSILON);
+      double heapAfterSchedule =
+          meterRegistry.find("vectorMergePolicy.budgetBytesHeapUsed").gauge().value();
+      Assert.assertTrue(
+          "Expected heap-used > 0 after scheduling vector merges, got " + heapAfterSchedule,
+          heapAfterSchedule > 0);
 
       spec.merges.get(1).mergeFinished(true, false);
       Assert.assertEquals(
           999 << 20,
           meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(),
           NO_EPSILON);
+      double heapAfterOneFinished =
+          meterRegistry.find("vectorMergePolicy.budgetBytesHeapUsed").gauge().value();
+      Assert.assertTrue(
+          "Expected heap-used to decrease after a merge finishes ("
+              + heapAfterOneFinished
+              + " vs "
+              + heapAfterSchedule
+              + ")",
+          heapAfterOneFinished < heapAfterSchedule);
+      Assert.assertTrue(heapAfterOneFinished > 0);
 
       spec.merges.get(0).mergeFinished(true, false);
       Assert.assertEquals(
           0.0, meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(), NO_EPSILON);
+      Assert.assertEquals(
+          0.0,
+          meterRegistry.find("vectorMergePolicy.budgetBytesHeapUsed").gauge().value(),
+          NO_EPSILON);
     }
 
     @Test

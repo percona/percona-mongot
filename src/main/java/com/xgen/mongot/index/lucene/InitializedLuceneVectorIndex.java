@@ -12,6 +12,7 @@ import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.IndexWriter;
 import com.xgen.mongot.index.InitializedVectorIndex;
@@ -166,8 +167,11 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
                 SingleLuceneIndexWriter.createForVectorIndex(
                     directory,
                     vectorIndexProperties.mergeScheduler.createForIndexPartition(
-                        generationId, indexPartitionId, definition.getNumPartitions(),
-                        featureFlags.isEnabled(Feature.CANCEL_MERGE)),
+                        generationId,
+                        indexPartitionId,
+                        definition.getNumPartitions(),
+                        featureFlags.isEnabled(Feature.CANCEL_MERGE),
+                        IndexTypeData.getIndexTypeTag(definition).tagValue),
                     vectorIndexProperties.mergePolicy,
                     vectorIndexProperties.ramBufferSizeMb,
                     vectorIndexProperties.fieldLimit,

@@ -82,7 +82,8 @@ public class LuceneIndexFactory implements IndexFactory {
         throws IOException {
       var meterRegistry = meterAndFtdcRegistry.meterRegistry();
 
-      var mergeScheduler = getInstrumentedConcurrentMergeScheduler(config, meterRegistry);
+      var mergeScheduler =
+          getInstrumentedConcurrentMergeScheduler(config, featureFlags, meterRegistry);
 
       Gate mergeGate = DiskUtilizationAwareMergePolicy.createMergeGate(config, diskMonitor);
       // Pass the merge gate to the scheduler for disk-based pause/resume support
@@ -145,7 +146,7 @@ public class LuceneIndexFactory implements IndexFactory {
     }
 
     private static InstrumentedConcurrentMergeScheduler getInstrumentedConcurrentMergeScheduler(
-        LuceneConfig config, MeterRegistry meterRegistry) {
+        LuceneConfig config, FeatureFlags featureFlags, MeterRegistry meterRegistry) {
       long cancelMergeTimeout =
           config
               .cancelMergePerThreadTimeoutMs()
@@ -159,7 +160,10 @@ public class LuceneIndexFactory implements IndexFactory {
                       .DEFAULT_CANCEL_ALL_MERGES_PER_THREAD_TIMEOUT_MS);
       var mergeScheduler =
           new InstrumentedConcurrentMergeScheduler(
-              meterRegistry, cancelMergeTimeout, cancelAllMergesTimeout);
+              meterRegistry,
+              cancelMergeTimeout,
+              cancelAllMergesTimeout,
+              featureFlags.isEnabled(Feature.MERGE_ATTRIBUTION_METRICS));
       mergeScheduler.setMaxMergesAndThreads(config.numMaxMerges(), config.numMaxMergeThreads());
       return mergeScheduler;
     }

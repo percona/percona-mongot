@@ -6,6 +6,8 @@ import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.Collection;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.LongStream;
@@ -57,8 +59,14 @@ public class ThreadPoolResourceMetricsTest {
       liveIds.add(fakeDeadId);
       assertThat(liveIds).contains(fakeDeadId);
 
-      var metrics = ThreadPoolResourceMetrics.create(SUBSYSTEM);
-      metrics.allocatedBytes(executor); // triggers the prune
+      ThreadPoolResourceMetrics.create(SUBSYSTEM).register(executor, registry);
+      // Trigger a counter scrape (the path Prometheus follows) which sums + prunes.
+      registry
+          .find(ALLOCATED_BYTES)
+          .tag("subsystem", SUBSYSTEM)
+          .tag("name", POOL_NAME)
+          .functionCounter()
+          .count();
 
       assertThat(liveIds).doesNotContain(fakeDeadId);
     }
@@ -77,8 +85,13 @@ public class ThreadPoolResourceMetricsTest {
       liveIds.add(fakeDeadId);
       assertThat(liveIds).contains(fakeDeadId);
 
-      var metrics = ThreadPoolResourceMetrics.create(SUBSYSTEM);
-      metrics.cpuTimeNanos(executor);
+      ThreadPoolResourceMetrics.create(SUBSYSTEM).register(executor, registry);
+      registry
+          .find(CPU_TIME)
+          .tag("subsystem", SUBSYSTEM)
+          .tag("name", POOL_NAME)
+          .functionCounter()
+          .count();
 
       assertThat(liveIds).doesNotContain(fakeDeadId);
     }
@@ -103,8 +116,13 @@ public class ThreadPoolResourceMetricsTest {
   public void allocatedBytes_increasesAfterPoolAllocates() throws Exception {
     var registry = new SimpleMeterRegistry();
     try (NamedExecutorService executor = Executors.fixedSizeThreadPool(POOL_NAME, 2, registry)) {
-      var metrics = ThreadPoolResourceMetrics.create(SUBSYSTEM);
-      metrics.register(executor, registry);
+      ThreadPoolResourceMetrics.create(SUBSYSTEM).register(executor, registry);
+      FunctionCounter allocated =
+          registry
+              .find(ALLOCATED_BYTES)
+              .tag("subsystem", SUBSYSTEM)
+              .tag("name", POOL_NAME)
+              .functionCounter();
 
       // Touch threads first so the pool actually creates them and the counter has IDs to read.
       var ready = new CountDownLatch(2);
@@ -112,7 +130,7 @@ public class ThreadPoolResourceMetricsTest {
       executor.submit(ready::countDown);
       ready.await(1, TimeUnit.MINUTES);
 
-      double before = metrics.allocatedBytes(executor);
+      double before = allocated.count();
 
       // Allocate ~1 MB on a pool thread, the precise byte count is JVM-internal but must increase.
       executor
@@ -123,7 +141,7 @@ public class ThreadPoolResourceMetricsTest {
               })
           .get(1, TimeUnit.MINUTES);
 
-      double after = metrics.allocatedBytes(executor);
+      double after = allocated.count();
 
       // On JVMs without thread allocation tracking the counter is constant 0, skip the
       // monotonicity assertion in that case rather than flaking.
@@ -134,21 +152,86 @@ public class ThreadPoolResourceMetricsTest {
   }
 
   @Test
+  public void register_withSupplier_emitsCountersTaggedWithSubsystemAndName() {
+    var registry = new SimpleMeterRegistry();
+    Collection<Long> liveIds = ConcurrentHashMap.newKeySet();
+    ThreadPoolResourceMetrics.create("merge").register("lucene-merge", () -> liveIds, registry);
+
+    assertThat(
+            registry
+                .find(ALLOCATED_BYTES)
+                .tag("subsystem", "merge")
+                .tag("name", "lucene-merge")
+                .functionCounter())
+        .isNotNull();
+    assertThat(
+            registry
+                .find(CPU_TIME)
+                .tag("subsystem", "merge")
+                .tag("name", "lucene-merge")
+                .functionCounter())
+        .isNotNull();
+  }
+
+  @Test
+  public void register_withSupplier_summingZeroIdsReportsZero() {
+    var registry = new SimpleMeterRegistry();
+    Collection<Long> liveIds = ConcurrentHashMap.newKeySet();
+    ThreadPoolResourceMetrics.create("merge").register("lucene-merge", () -> liveIds, registry);
+
+    FunctionCounter alloc =
+        registry
+            .find(ALLOCATED_BYTES)
+            .tag("subsystem", "merge")
+            .tag("name", "lucene-merge")
+            .functionCounter();
+    assertThat(alloc).isNotNull();
+    // Empty live id collection -> counter reports 0 without throwing.
+    assertThat(alloc.count()).isEqualTo(0.0);
+  }
+
+  @Test
+  public void register_withSupplier_prunesDeadIds() {
+    var registry = new SimpleMeterRegistry();
+    Collection<Long> liveIds = ConcurrentHashMap.newKeySet();
+    long fakeDeadId = Long.MAX_VALUE - 1;
+    liveIds.add(fakeDeadId);
+
+    ThreadPoolResourceMetrics.create("merge").register("lucene-merge", () -> liveIds, registry);
+
+    FunctionCounter alloc =
+        registry
+            .find(ALLOCATED_BYTES)
+            .tag("subsystem", "merge")
+            .tag("name", "lucene-merge")
+            .functionCounter();
+    assertThat(alloc).isNotNull();
+    // Triggering the counter scrape prunes the synthetic dead id.
+    alloc.count();
+    assertThat(liveIds).doesNotContain(fakeDeadId);
+  }
+
+  @Test
   public void cpuTime_increasesAfterPoolBurnsCpu() throws Exception {
     var registry = new SimpleMeterRegistry();
     try (NamedExecutorService executor = Executors.fixedSizeThreadPool(POOL_NAME, 1, registry)) {
-      var metrics = ThreadPoolResourceMetrics.create(SUBSYSTEM);
-      metrics.register(executor, registry);
+      ThreadPoolResourceMetrics.create(SUBSYSTEM).register(executor, registry);
+      FunctionCounter cpuTime =
+          registry
+              .find(CPU_TIME)
+              .tag("subsystem", SUBSYSTEM)
+              .tag("name", POOL_NAME)
+              .functionCounter();
 
       var ready = new CountDownLatch(1);
       executor.submit(ready::countDown);
       ready.await(1, TimeUnit.MINUTES);
 
-      double before = metrics.cpuTimeNanos(executor);
+      double before = cpuTime.count();
 
       executor.submit(() -> LongStream.range(0, 5_000_000L).sum()).get(1, TimeUnit.MINUTES);
 
-      double after = metrics.cpuTimeNanos(executor);
+      double after = cpuTime.count();
 
       if (before != 0.0 || after != 0.0) {
         assertThat(after).isGreaterThan(before);

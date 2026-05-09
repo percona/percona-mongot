@@ -37,7 +37,8 @@
         "overloadRetrySignal": false,
         "nestedVector": true,
         "queryMemoryAttributionMetrics": false,
-        "metricsCache": false
+        "metricsCache": false,
+        "mergeAttributionMetrics": false
       }
     },
     {
@@ -77,7 +78,8 @@
         "overloadRetrySignal": false,
         "nestedVector": true,
         "queryMemoryAttributionMetrics": false,
-        "metricsCache": false
+        "metricsCache": false,
+        "mergeAttributionMetrics": false
       }
     },
     {
@@ -117,7 +119,8 @@
         "overloadRetrySignal": true,
         "nestedVector": true,
         "queryMemoryAttributionMetrics": true,
-        "metricsCache": true
+        "metricsCache": true,
+        "mergeAttributionMetrics": true
       }
     },
     {
@@ -157,7 +160,8 @@
         "overloadRetrySignal": false,
         "nestedVector": false,
         "queryMemoryAttributionMetrics": false,
-        "metricsCache": false
+        "metricsCache": false,
+        "mergeAttributionMetrics": false
       }
     }
   ]

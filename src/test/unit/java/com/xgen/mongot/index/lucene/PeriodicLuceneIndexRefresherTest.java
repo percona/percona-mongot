@@ -1,5 +1,6 @@
 package com.xgen.mongot.index.lucene;
 
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
@@ -147,8 +148,12 @@ public class PeriodicLuceneIndexRefresherTest {
     var luceneIndexWriter =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false),
             new TieredMergePolicy(),
             16D,
             Optional.empty(),

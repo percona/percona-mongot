@@ -3,20 +3,25 @@ package com.xgen.mongot.index.lucene.merge;
 import com.google.common.base.Stopwatch;
 import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.sun.management.ThreadMXBean;
 import com.xgen.mongot.index.lucene.abortable.AbortableDirectory;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor.LuceneMeterData;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.metrics.Timed;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.monitor.ToggleGate;
+import com.xgen.mongot.util.Bytes;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -26,6 +31,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -56,12 +62,13 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
   static class IndexPartitionIdentifier {
     private final GenerationId generationId;
     private final Optional<Integer> indexPartitionId;
+    private final String indexType;
 
-    // TODO(CLOUDP-280897): We don't have the index type anymore. Bring it back needs extra plumbing
-    // of the IndexDefinitionGeneration.
-    IndexPartitionIdentifier(GenerationId generationId, Optional<Integer> indexPartitionId) {
+    IndexPartitionIdentifier(
+        GenerationId generationId, Optional<Integer> indexPartitionId, String indexType) {
       this.generationId = generationId;
       this.indexPartitionId = indexPartitionId;
+      this.indexType = indexType;
     }
 
     GenerationId getGenerationId() {
@@ -70,6 +77,10 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
 
     Optional<Integer> getIndexPartitionId() {
       return this.indexPartitionId;
+    }
+
+    String getIndexType() {
+      return this.indexType;
     }
 
     @Override
@@ -82,12 +93,13 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
       }
       IndexPartitionIdentifier that = (IndexPartitionIdentifier) o;
       return Objects.equals(this.generationId, that.generationId)
-          && Objects.equals(this.indexPartitionId, that.indexPartitionId);
+          && Objects.equals(this.indexPartitionId, that.indexPartitionId)
+          && Objects.equals(this.indexType, that.indexType);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(this.generationId, this.indexPartitionId);
+      return Objects.hash(this.generationId, this.indexPartitionId, this.indexType);
     }
 
     @Override
@@ -96,6 +108,8 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
           + this.generationId.uniqueString()
           + ", indexPartition="
           + this.indexPartitionId
+          + ", indexType="
+          + this.indexType
           + ")";
     }
   }
@@ -298,17 +312,27 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
   // Gate for pausing merges when disk usage is high. Default is always open (no blocking).
   private Gate mergeGate = ToggleGate.opened();
 
-  // Creates a per index-partition merge scheduler where input 'idx' tags the merge threads that
-  // belong to a particular index-partition. The output PerIndexMergeScheduler wraps the running
-  // instance of InstrumentedConcurrentMergeScheduler, and only one of its type exists per
-  // index-partition.
+  // Per-merge attribution. Empty when MERGE_ATTRIBUTION_METRICS is disabled or per-thread
+  // tracking is unavailable on this JVM.
+  private final Optional<MergeAttribution> mergeAttribution;
+
+  /**
+   * Creates a per index-partition merge scheduler where input 'idx' tags the merge threads that
+   * belong to a particular index-partition. The output PerIndexMergeScheduler wraps the running
+   * instance of InstrumentedConcurrentMergeScheduler, and only one of its type exists per
+   * index-partition.
+   */
   public PerIndexPartitionMergeScheduler createForIndexPartition(
-      GenerationId generationId, int indexPartitionId, int numIndexes, boolean cancelMergeEnabled) {
+      GenerationId generationId,
+      int indexPartitionId,
+      int numIndexes,
+      boolean cancelMergeEnabled,
+      String indexType) {
     Optional<Integer> optionalIndexPartitionId =
         numIndexes > 1 ? Optional.of(indexPartitionId) : Optional.empty();
     return new PerIndexPartitionMergeScheduler(
         this,
-        new IndexPartitionIdentifier(generationId, optionalIndexPartitionId),
+        new IndexPartitionIdentifier(generationId, optionalIndexPartitionId, indexType),
         cancelMergeEnabled);
   }
 
@@ -339,7 +363,8 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
   }
 
   /**
-   * Creates a new InstrumentedConcurrentMergeScheduler with default timeout values.
+   * Creates a new InstrumentedConcurrentMergeScheduler with default timeout values and
+   * attribution metrics disabled.
    *
    * @param meterRegistry the meter registry for metrics
    */
@@ -347,7 +372,19 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
     this(
         meterRegistry,
         DEFAULT_CANCEL_MERGE_PER_THREAD_TIMEOUT_MS,
-        DEFAULT_CANCEL_ALL_MERGES_PER_THREAD_TIMEOUT_MS);
+        DEFAULT_CANCEL_ALL_MERGES_PER_THREAD_TIMEOUT_MS,
+        false);
+  }
+
+  /**
+   * Creates a new InstrumentedConcurrentMergeScheduler with the specified timeout values and
+   * attribution metrics disabled.
+   */
+  public InstrumentedConcurrentMergeScheduler(
+      MeterRegistry meterRegistry,
+      long cancelMergePerThreadTimeoutMs,
+      long cancelAllMergesPerThreadTimeoutMs) {
+    this(meterRegistry, cancelMergePerThreadTimeoutMs, cancelAllMergesPerThreadTimeoutMs, false);
   }
 
   /**
@@ -360,12 +397,15 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
    * @param cancelAllMergesPerThreadTimeoutMs timeout in milliseconds for waiting on each merge
    *     thread during global cancellation of all merges (used by cancelAllMerges()). Must be
    *     positive.
+   * @param enableAttributionMetrics if true, register per-merge ThreadMXBean memory and cpu time
+   *     attribution metrics.
    * @throws IllegalArgumentException if either timeout is not positive
    */
   public InstrumentedConcurrentMergeScheduler(
       MeterRegistry meterRegistry,
       long cancelMergePerThreadTimeoutMs,
-      long cancelAllMergesPerThreadTimeoutMs) {
+      long cancelAllMergesPerThreadTimeoutMs,
+      boolean enableAttributionMetrics) {
     super();
 
     if (cancelMergePerThreadTimeoutMs <= 0) {
@@ -404,6 +444,11 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
         this.metricsFactory.counter(
             LuceneMeterData.NUM_MERGES_ABORTED_KEY, Tags.of(luceneTag));
     this.mergeElapsedStopwatches = new WeakHashMap<>();
+
+    this.mergeAttribution =
+        enableAttributionMetrics
+            ? MergeAttribution.create(this.metricsFactory, meterRegistry)
+            : Optional.empty();
   }
 
   // Same functionality as calling initialize() in MergeScheduler, used by PerIndexMergeScheduler to
@@ -902,6 +947,16 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
               this.indexPartitionIdentifier);
       stopwatch.startOneMerge(this.merge);
 
+      // Per-merge ThreadMXBean attribution. The snapshot must happen before any merge work so
+      // the metric captures the entire merge.
+      Optional<MergeAttribution> attribution =
+          InstrumentedConcurrentMergeScheduler.this.mergeAttribution;
+      long threadId = Thread.currentThread().threadId();
+      long allocBefore = attribution.map(a -> a.snapshotAllocated(threadId)).orElse(0L);
+      long cpuBefore = attribution.map(a -> a.snapshotCpu(threadId)).orElse(0L);
+      attribution.ifPresent(a -> a.markStarted(threadId));
+      String indexType = this.indexPartitionIdentifier.getIndexType();
+
       try {
         Timed.runnable(InstrumentedConcurrentMergeScheduler.this.mergeTime, super::run);
       } catch (Exception e) {
@@ -914,6 +969,8 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
         // Decrease the counters no matter run() throws error or not to guarantee the correctness.
         InstrumentedConcurrentMergeScheduler.this.runningMerges.decrementAndGet();
         InstrumentedConcurrentMergeScheduler.this.mergingDocs.addAndGet(-this.merge.totalNumDocs());
+        attribution.ifPresent(
+            a -> a.recordEnd(threadId, allocBefore, cpuBefore, indexType));
       }
 
       try {
@@ -932,6 +989,140 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
       } catch (Exception e) {
         // ok to ignore as this is expected only in case of IO errors or merge abort
       }
+    }
+  }
+
+  /**
+   * Per-merge ThreadMXBean attribution. Tracks live merge thread ids and lazily registers
+   * per-merge {@code merge.allocatedBytes} / {@code merge.cpuTimeNanos} histograms tagged by
+   * {@code indexType} on first sample. Created only when {@code MERGE_ATTRIBUTION_METRICS} is
+   * enabled.
+   */
+  static final class MergeAttribution {
+
+    private static final String MERGE_SUBSYSTEM = "merge";
+    private static final String MERGE_POOL_NAME = "lucene-merge";
+    // Matches IndexTypeData.INDEX_TYPE_TAG_NAME
+    private static final String INDEX_TYPE_TAG = "indexType";
+
+    /**
+     * Bucket upper bounds for per-merge heap allocation, in bytes.
+     */
+    private static final double[] ALLOCATED_BYTES_BUCKETS = {
+      Bytes.ofMebi(16).toBytes(),
+      Bytes.ofMebi(64).toBytes(),
+      Bytes.ofMebi(256).toBytes(),
+      Bytes.ofGibi(1).toBytes(),
+      Bytes.ofGibi(4).toBytes(),
+      Bytes.ofGibi(16).toBytes(),
+      Bytes.ofGibi(64).toBytes()
+    };
+
+    /** Bucket upper bounds for per-merge CPU time, in nanoseconds.*/
+    private static final double[] CPU_TIME_NANOS_BUCKETS = {
+      Duration.ofMillis(100).toNanos(),
+      Duration.ofSeconds(1).toNanos(),
+      Duration.ofSeconds(10).toNanos(),
+      Duration.ofMinutes(1).toNanos(),
+      Duration.ofMinutes(5).toNanos(),
+      Duration.ofMinutes(15).toNanos(),
+      Duration.ofMinutes(30).toNanos()
+    };
+
+    private final ThreadMXBean threadMxBean;
+    private final Set<Long> liveMergeThreadIds;
+    private final MetricsFactory metricsFactory;
+    private final ConcurrentHashMap<String, DistributionSummary> allocatedBytesByIndexType =
+        new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DistributionSummary> cpuTimeNanosByIndexType =
+        new ConcurrentHashMap<>();
+
+    private MergeAttribution(
+        ThreadMXBean threadMxBean,
+        Set<Long> liveMergeThreadIds,
+        MetricsFactory metricsFactory) {
+      this.threadMxBean = threadMxBean;
+      this.liveMergeThreadIds = liveMergeThreadIds;
+      this.metricsFactory = metricsFactory;
+    }
+
+    static Optional<MergeAttribution> create(
+        MetricsFactory metricsFactory, MeterRegistry meterRegistry) {
+      if (!(ManagementFactory.getThreadMXBean() instanceof ThreadMXBean bean)) {
+        LOG.warn("Per-thread tracking unavailable on this JVM, merge attribution disabled.");
+        return Optional.empty();
+      }
+      if (!bean.isThreadAllocatedMemorySupported() || !bean.isThreadCpuTimeSupported()) {
+        LOG.warn(
+            "Per-thread allocation or CPU tracking unsupported, merge attribution disabled.");
+        return Optional.empty();
+      }
+      try {
+        bean.setThreadAllocatedMemoryEnabled(true);
+        bean.setThreadCpuTimeEnabled(true);
+      } catch (UnsupportedOperationException | SecurityException e) {
+        LOG.warn("Per-thread tracking refused enabling, merge attribution disabled.");
+        return Optional.empty();
+      }
+
+      Set<Long> liveIds = ConcurrentHashMap.newKeySet();
+
+      // Aggregate live-merge FunctionCounters.
+      ThreadPoolResourceMetrics.create(MERGE_SUBSYSTEM)
+          .register(MERGE_POOL_NAME, () -> liveIds, meterRegistry);
+
+      return Optional.of(new MergeAttribution(bean, liveIds, metricsFactory));
+    }
+
+    long snapshotAllocated(long threadId) {
+      return this.threadMxBean.getThreadAllocatedBytes(threadId);
+    }
+
+    long snapshotCpu(long threadId) {
+      return this.threadMxBean.getThreadCpuTime(threadId);
+    }
+
+    void markStarted(long threadId) {
+      this.liveMergeThreadIds.add(threadId);
+    }
+
+    void recordEnd(long threadId, long allocBefore, long cpuBefore, String indexType) {
+      try {
+        long allocDelta = this.threadMxBean.getThreadAllocatedBytes(threadId) - allocBefore;
+        long cpuDelta = this.threadMxBean.getThreadCpuTime(threadId) - cpuBefore;
+        // Negative delta only happens if the thread died between start and end (after = -1).
+        // Skip recording in that case to avoid corrupting DistributionSummary statistics.
+        if (allocDelta >= 0) {
+          allocatedBytesHistogramFor(indexType).record(allocDelta);
+        }
+        if (cpuDelta >= 0) {
+          cpuTimeNanosHistogramFor(indexType).record(cpuDelta);
+        }
+      } finally {
+        this.liveMergeThreadIds.remove(threadId);
+      }
+    }
+
+    private DistributionSummary allocatedBytesHistogramFor(String indexType) {
+      return this.allocatedBytesByIndexType.computeIfAbsent(
+          indexType,
+          t ->
+              this.metricsFactory.histogram(
+                  "merge.allocatedBytes",
+                  Tags.of(ServerStatusDataExtractor.Scope.LUCENE.getTag())
+                      .and(INDEX_TYPE_TAG, t),
+                  ALLOCATED_BYTES_BUCKETS));
+    }
+
+    private DistributionSummary cpuTimeNanosHistogramFor(String indexType) {
+      return this.cpuTimeNanosByIndexType.computeIfAbsent(
+          indexType,
+          t ->
+              this.metricsFactory.histogram(
+                  "merge.cpuTimeNanos",
+                  Tags.of(ServerStatusDataExtractor.Scope.LUCENE.getTag())
+                      .and(INDEX_TYPE_TAG, t),
+                  CPU_TIME_NANOS_BUCKETS));
     }
   }
 }
