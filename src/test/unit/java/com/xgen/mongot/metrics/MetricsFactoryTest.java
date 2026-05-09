@@ -169,33 +169,6 @@ public class MetricsFactoryTest {
   }
 
   @Test
-  public void histogram_auto_buckets() {
-    MeterRegistry meterRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
-    MetricsFactory metricsFactory = new MetricsFactory("testMetricsFactory", meterRegistry);
-
-    DistributionSummary metricsFactoryHistogram = metricsFactory.histogram("histogram");
-    metricsFactoryHistogram.record(1);
-    Assert.assertEquals(1, (int) metricsFactoryHistogram.max());
-    Assert.assertEquals(1, (int) metricsFactoryHistogram.count());
-    Assert.assertEquals(1, (int) metricsFactoryHistogram.mean());
-
-    metricsFactoryHistogram.record(3);
-    Assert.assertEquals(3, (int) metricsFactoryHistogram.max());
-    Assert.assertEquals(2, (int) metricsFactoryHistogram.count());
-    Assert.assertEquals(2, (int) metricsFactoryHistogram.mean());
-
-    for (int i = 0; i < 100; i++) {
-      metricsFactoryHistogram.record(2);
-    }
-
-    var histogramCounts = metricsFactoryHistogram.takeSnapshot().histogramCounts();
-    Assert.assertEquals(276, histogramCounts.length);
-    Assert.assertEquals(1, (int) histogramCounts[0].count()); // 1 or less
-    Assert.assertEquals(101, (int) histogramCounts[1].count()); // 2 or less
-    Assert.assertEquals(102, (int) histogramCounts[2].count()); // 3 or less
-  }
-
-  @Test
   public void histogram_slo_buckets() {
     MeterRegistry meterRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
     MetricsFactory metricsFactory = new MetricsFactory("testMetricsFactory", meterRegistry);
@@ -218,6 +191,18 @@ public class MetricsFactoryTest {
 
     Assert.assertEquals(100.0, histogramCounts[2].bucket(), 0.01);
     Assert.assertEquals(100, (int) histogramCounts[2].count());
+  }
+
+  @Test
+  public void histogram_emptyBuckets_throws() {
+    MeterRegistry meterRegistry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("testMetricsFactory", meterRegistry);
+
+    Assert.assertThrows(
+        IllegalArgumentException.class, () -> metricsFactory.histogram("histogram"));
+    Assert.assertThrows(
+        IllegalArgumentException.class,
+        () -> metricsFactory.histogram("histogram", Tags.empty()));
   }
 
   @Test

@@ -227,7 +227,7 @@ public class MetricsFactory {
    *
    * <p>These percentiles computed cannot be aggregated to produce fleet-wide percentiles in
    * Prometheus. If you need fleet-wide aggregation of percentiles across all instances, use
-   * {@link #histogram(String)} instead.
+   * {@link #histogram(String, double...)} with explicit buckets instead.
    *
    * @param name name of the variable to export
    * @return a {@link DistributionSummary} that can be used to record samples.
@@ -241,7 +241,7 @@ public class MetricsFactory {
    *
    * <p>These percentiles computed cannot be aggregated to produce fleet-wide percentiles in
    * Prometheus. If you need fleet-wide aggregation of percentiles across all instances, use
-   * {@link #histogram(String)} instead.
+   * {@link #histogram(String, double...)} with explicit buckets instead.
    *
    * @param name name of the variable to export
    * @param percentiles a list of percentile values to export.
@@ -256,7 +256,7 @@ public class MetricsFactory {
    *
    * <p>These percentiles computed cannot be aggregated to produce fleet-wide percentiles in
    * Prometheus. If you need fleet-wide aggregation of percentiles across all instances, use
-   * {@link #histogram(String)} instead.
+   * {@link #histogram(String, double...)} with explicit buckets instead.
    *
    * @param name name of the variable to export
    * @param meterTags additional tags to add to the exported histogram variables.
@@ -274,78 +274,34 @@ public class MetricsFactory {
   }
 
   /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * automatic buckets.
-   *
-   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
-   * compute accurate percentiles aggregated across all instances.
-   *
-   * <p>Warning: This method uses automatic buckets, which may produce many wide or unused buckets
-   * and significant increase the number of exported time series. Please consider using
-   * {@link #histogram(String, double...)} or {@link #histogram(String, Tags, double...)} with
-   * explicit bucket buckets to avoid cardinality explosion.
-   *
-   * @param name name of the variable to export
-   * @return a {@link DistributionSummary} that can be used to record samples.
-   */
-  public DistributionSummary histogram(String name) {
-    return histogram(name, Tags.empty());
-  }
-
-  /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * automatic buckets.
-   *
-   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
-   * compute accurate percentiles aggregated across all instances.
-   *
-   * <p>Warning: This method uses automatic buckets, which may produce many wide or unused buckets
-   * and significant increase the number of exported time series. Please consider using
-   * {@link #histogram(String, double...)} or {@link #histogram(String, Tags, double...)} with
-   * explicit bucket buckets to avoid cardinality explosion.
-   *
-   * @param name name of the variable to export
-   * @param meterTags additional tags to add to the exported histogram variables.
-   * @return a {@link DistributionSummary} that can be used to record samples.
-   */
-  public DistributionSummary histogram(String name, Tags meterTags) {
-    var histogram =
-        DistributionSummary.builder(metricName(name))
-            .tags(this.factoryTags.and(meterTags))
-            .publishPercentileHistogram()
-            .register(this.registry);
-    this.registeredMeters.add(histogram);
-    return histogram;
-  }
-
-  /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * buckets defined by the {@code buckets} passed to this method.
+   * Export distribution summary with histogram buckets defined by {@code buckets}.
    *
    * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
    * compute accurate percentiles aggregated across all instances.
    *
    * @param name name of the variable to export
-   * @param buckets the upper-bound cutoffs for histogram buckets (must be strictly increasing).
+   * @param buckets upper-bound cutoffs for histogram buckets (strictly increasing, non-empty).
    * @return a {@link DistributionSummary} that can be used to record samples.
+   * @throws IllegalArgumentException if {@code buckets} is empty.
    */
   public DistributionSummary histogram(String name, double... buckets) {
     return histogram(name, Tags.empty(), buckets);
   }
 
   /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * buckets defined by the {@code buckets} passed to this method.
+   * Export distribution summary with histogram buckets defined by {@code buckets}.
    *
    * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
    * compute accurate percentiles aggregated across all instances.
    *
    * @param name name of the variable to export
    * @param meterTags additional tags to add to the exported histogram variables.
-   * @param buckets the upper-bound cutoffs for histogram buckets (must be strictly increasing).
+   * @param buckets upper-bound cutoffs for histogram buckets (strictly increasing, non-empty).
    * @return a {@link DistributionSummary} that can be used to record samples.
+   * @throws IllegalArgumentException if {@code buckets} is empty.
    */
   public DistributionSummary histogram(String name, Tags meterTags, double... buckets) {
+    checkArg(buckets.length > 0, "histogram requires at least one explicit bucket boundary");
     var histogram =
         DistributionSummary.builder(metricName(name))
             .tags(this.factoryTags.and(meterTags))

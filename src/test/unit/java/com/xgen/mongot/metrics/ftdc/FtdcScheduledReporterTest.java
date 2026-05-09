@@ -1128,7 +1128,6 @@ public class FtdcScheduledReporterTest {
     // how many meters SimpleMeterRegistry actually allocates for it.
     Timer.builder(FtdcScheduledReporter.FTDC_MONGOT_REPORTING_TIMER_NAME)
         .tags(FtdcScheduledReporter.FTDC_MONGOT_REPORTING_TIMER_TAGS)
-        .publishPercentileHistogram()
         .publishPercentiles(0.5, 0.75, 0.9, 0.99)
         .register(reportingRegistry);
     int baseMeterCount = reportingRegistry.getMeters().size();

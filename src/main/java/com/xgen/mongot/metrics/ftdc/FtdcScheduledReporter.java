@@ -172,7 +172,6 @@ public class FtdcScheduledReporter {
       this.reportingTimer =
           Timer.builder(FTDC_MONGOT_REPORTING_TIMER_NAME)
               .tags(FTDC_MONGOT_REPORTING_TIMER_TAGS)
-              .publishPercentileHistogram()
               .publishPercentiles(0.5, 0.75, 0.9, 0.99)
               .register(reportingRegistry);
     }
