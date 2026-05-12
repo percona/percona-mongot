@@ -6,7 +6,7 @@ cc_binary(
         "-DNDEBUG",
     ] + select({
         "//bazel/platforms:is_linux_aarch64": ["-march=armv8.2-a+dotprod+sve"],
-        "//bazel/platforms:is_macos_aarch64": ["-march=armv8.2-a+dotprod+sve"],
+        "//bazel/platforms:is_macos_aarch64": ["-march=armv8.2-a+dotprod"],
         "//conditions:default": [],
     }),
     linkshared = True,
