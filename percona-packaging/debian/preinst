@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if ! getent passwd mongod >/dev/null 2>&1; then
+    adduser --system --no-create-home --group --home /var/lib/mongo --shell /bin/false mongod
+fi
+
+#DEBHELPER#
+
+exit 0

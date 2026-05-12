@@ -1,0 +1,16 @@
+Source: percona-server-mongodb-mongot
+Section: database
+Priority: optional
+Maintainer: Percona LLC <info@percona.com>
+Build-Depends: debhelper (>= 9), lsb-release
+Standards-Version: 4.5.0
+Homepage: https://github.com/percona/percona-mongot
+
+Package: percona-server-mongodb-mongot
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, adduser
+Description: Percona Search for MongoDB (mongot).
+ Percona Search for MongoDB is the Percona-supported distribution of
+ MongoDB Search (mongot). It provides Full Text and Vector Search
+ capabilities for MongoDB and is intended to run alongside Percona Server
+ for MongoDB to serve search queries and manage search indexes.

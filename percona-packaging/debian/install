@@ -1,0 +1,6 @@
+usr/lib/percona-server-mongodb-mongot/* /usr/lib/percona-server-mongodb-mongot/
+usr/bin/mongot /usr/bin/
+etc/mongot/mongot.yml /etc/mongot/
+etc/default/mongot /etc/default/
+etc/logrotate.d/mongot /etc/logrotate.d/
+lib/systemd/system/mongot.service /lib/systemd/system/

@@ -1,0 +1,7 @@
+.DS_Store
+*.swp
+*.bak
+*~
+
+# Tracked once the docs land in the right shape; ignored for now.
+PACKAGING.md
