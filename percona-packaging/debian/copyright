@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mongot
+Upstream-Contact: MongoDB Inc.
+Source: https://github.com/mongodb/mongot
+
+Files: *
+Copyright: MongoDB Inc.
+License: SSPL-1.0
+ MongoDB Search is distributed under the Server Side Public License, v1.
+ The full text is available at https://www.mongodb.com/licensing/server-side-public-license.

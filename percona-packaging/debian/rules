@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+# debian/rules for percona-server-mongodb-mongot.
+# The mongot bundle is built externally with Bazel and shipped to debian/rules
+# as `prebuilt/mongot-community-bundle.tar.gz`. Here we just lay it out.
+
+export DH_VERBOSE=1
+TMP=$(CURDIR)/debian/tmp
+BUNDLE=$(CURDIR)/prebuilt/mongot-community-bundle.tar.gz
+
+%:
+	dh $@ --with=systemd
+
+override_dh_auto_build:
+	@echo "RULES.$@ — bundle is prebuilt, nothing to compile"
+
+override_dh_auto_test override_dh_strip override_dh_shlibdeps:
+	@echo "RULES.$@ — skipped for prebuilt JVM bundle"
+
+# Skip strip-nondeterminism: it rewrites zip metadata inside every JAR/JMOD
+# and would break the cryptographic signatures on the BouncyCastle FIPS
+# jars (lib/processed_bc-fips-*.jar, lib/processed_bctls-fips-*.jar).
+# Once the FIPS signature is invalidated, BouncyCastle refuses to register
+# as a JCE provider in approved mode and mongot fails to initialise. The
+# bundle is already built deterministically by Bazel upstream
+# stage, so re-normalising ia not needed.
+override_dh_strip_nondeterminism:
+	@echo "RULES.$@ — skipped for prebuilt JVM bundle (preserves FIPS signatures)"
+
+override_dh_auto_install:
+	@echo "RULES.$@"
+	mkdir -p $(TMP)/usr/lib/percona-server-mongodb-mongot
+	mkdir -p $(TMP)/usr/bin
+	mkdir -p $(TMP)/etc/mongot
+	mkdir -p $(TMP)/etc/default
+	mkdir -p $(TMP)/etc/logrotate.d
+	mkdir -p $(TMP)/lib/systemd/system
+	mkdir -p $(TMP)/var/lib/mongot
+	mkdir -p $(TMP)/var/log/mongot
+	tar -xzf $(BUNDLE) -C $(TMP)/usr/lib/percona-server-mongodb-mongot --strip-components=1
+	install -m 0755 percona-packaging/conf/mongot-wrapper.sh $(TMP)/usr/bin/mongot
+	install -m 0640 percona-packaging/conf/mongot.yml       $(TMP)/etc/mongot/mongot.yml
+	install -m 0640 percona-packaging/conf/mongot.env       $(TMP)/etc/default/mongot
+	install -m 0644 percona-packaging/conf/mongot.logrotate $(TMP)/etc/logrotate.d/mongot
+	install -m 0644 percona-packaging/conf/mongot.service   $(TMP)/lib/systemd/system/mongot.service
+
+override_dh_systemd_start:
+	dh_systemd_enable --name=mongot mongot.service
+	dh_systemd_start --restart-after-upgrade
+
+override_dh_builddeb:
+	dh_builddeb -- -Zgzip

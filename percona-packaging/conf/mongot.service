@@ -1,0 +1,16 @@
+[Unit]
+Description=Percona MongoDB Search (mongot)
+After=network.target time-sync.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sysconfig/mongot
+User=mongod
+Group=mongod
+ExecStart=/usr/bin/mongot --config /etc/mongot/mongot.yml $MONGOT_OPTS
+Restart=on-failure
+LimitNOFILE=64000
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

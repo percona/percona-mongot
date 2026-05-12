@@ -1,0 +1,5 @@
+percona-server-mongodb-mongot (0.50.0-1) unstable; urgency=medium
+
+  * Initial Percona packaging of MongoDB Search (mongot).
+
+ -- Oleksandr Miroshnychenko <alex.miroshnychenko@percona.com>  Sun, 10 May 2026 00:00:00 +0000

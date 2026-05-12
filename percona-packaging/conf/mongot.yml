@@ -1,0 +1,22 @@
+# Default configuration for Percona MongoDB Search (mongot).
+# Adjust to match your mongod deployment.
+syncSource:
+  replicaSet:
+    hostAndPort: "localhost:27017"
+    username: mongotUser
+    passwordFile: "/etc/mongot/secrets/passwordFile"
+    tls: false
+storage:
+  dataPath: "/var/lib/mongot"
+server:
+  grpc:
+    address: "localhost:27028"
+    tls:
+      mode: "disabled"
+metrics:
+  enabled: true
+  address: "localhost:9946"
+healthCheck:
+  address: "localhost:8080"
+logging:
+  verbosity: INFO

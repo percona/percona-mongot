@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+chown -R mongod:mongod /var/lib/mongot
+chown -R mongod:mongod /var/log/mongot
+chown -R root:mongod   /etc/mongot
+chmod 0750             /etc/mongot
+chmod 0640             /etc/mongot/mongot.yml || true
+
+#DEBHELPER#
+
+exit 0
