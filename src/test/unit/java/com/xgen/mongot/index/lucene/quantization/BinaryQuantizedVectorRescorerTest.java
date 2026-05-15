@@ -19,6 +19,7 @@ import com.xgen.mongot.index.lucene.codec.LuceneCodec;
 import com.xgen.mongot.index.lucene.extension.KnnFloatVectorField;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.query.custom.MongotKnnFloatQuery;
+import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherFactory;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
@@ -45,6 +46,7 @@ import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -55,9 +57,14 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnFloatVectorQuery;
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TotalHits;
+import org.apache.lucene.search.join.QueryBitSetProducer;
+import org.apache.lucene.search.join.ScoreMode;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.junit.Assert;
 import org.junit.Assume;
@@ -490,6 +497,206 @@ public class BinaryQuantizedVectorRescorerTest {
     Assert.assertEquals(
         Stream.of(firstRescore.scoreDocs).map(doc -> doc.doc).toList(),
         Stream.of(secondRescore.scoreDocs).map(doc -> doc.doc).toList());
+  }
+
+  // ---- nested rescoring tests ----
+
+  @Test
+  public void nestedApproximateRescoring_euclidean_reordersParentsByMaxChildScore()
+      throws IOException {
+    Assume.assumeTrue(this.similarity == EUCLIDEAN);
+    Assume.assumeFalse(this.sparse);
+
+    // Parent A: children [1,-1] (sign pattern +,- same as query) and [1,1] (sign pattern +,+)
+    // Parent B: child [-1,-1] (sign pattern -,- opposite to query)
+    // Binary quantization encodes sign only, so [1,-1] and [3,-3] share the same code (+,-).
+    // Using different sign patterns ensures the dequantized rescorer produces distinct scores:
+    //   [+,-] vs query [+,-]: distance 0, score = 1.0
+    //   [-,-] vs query [+,-]: both dimensions differ, much lower score
+    this.indexWriter.addDocuments(nestedBlock(new float[] {1, -1}, new float[] {1, 1}));
+    this.indexWriter.addDocuments(nestedBlock(new float[] {-1, -1}));
+    this.indexWriter.commit();
+
+    float[] queryVector = new float[] {1, -1};
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term(NESTED_PARENT_MARKER_FIELD, "T")));
+    MongotKnnFloatQuery knnQuery =
+        new MongotKnnFloatQuery(metrics, this.vectorFieldName, queryVector, 10);
+    WrappedToParentBlockJoinQuery blockJoinQuery =
+        new WrappedToParentBlockJoinQuery(knnQuery, parentFilter, ScoreMode.Max);
+
+    IndexSearcher searcher = buildSearcher();
+    TopDocs parentTopDocs = searcher.search(blockJoinQuery, 10);
+    assertThat(parentTopDocs.scoreDocs).hasLength(2);
+
+    BinaryQuantizedVectorRescorer.ApproximateRescorer rescorer =
+        new BinaryQuantizedVectorRescorer.ApproximateRescorer(knnQuery, Optional.of(parentFilter));
+    TopDocs rescored = rescorer.rescore(searcher, parentTopDocs, 10);
+
+    assertThat(rescored.scoreDocs).hasLength(2);
+    // Parent A ranks first: its [1,-1] child has euclidean score = 1.0 (zero distance)
+    // Parent B's [-1,-1] child scores significantly lower
+    assertThat(rescored.scoreDocs[0].score).isGreaterThan(rescored.scoreDocs[1].score);
+    assertThat(rescored.scoreDocs[0].score).isGreaterThan(0.5f);
+    assertScoresValid(rescored);
+  }
+
+  @Test
+  public void nestedFullFidelityRescoring_euclidean_reordersParentsByMaxChildScore()
+      throws IOException {
+    Assume.assumeTrue(this.similarity == EUCLIDEAN);
+    Assume.assumeFalse(this.sparse);
+
+    // Same layout as the approximate test; full-fidelity scores should give the same ordering.
+    this.indexWriter.addDocuments(nestedBlock(new float[] {1, -1}, new float[] {50, 50}));
+    this.indexWriter.addDocuments(nestedBlock(new float[] {3, -3}));
+    this.indexWriter.commit();
+
+    float[] queryVector = new float[] {1, -1};
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term(NESTED_PARENT_MARKER_FIELD, "T")));
+    MongotKnnFloatQuery knnQuery =
+        new MongotKnnFloatQuery(metrics, this.vectorFieldName, queryVector, 10);
+    WrappedToParentBlockJoinQuery blockJoinQuery =
+        new WrappedToParentBlockJoinQuery(knnQuery, parentFilter, ScoreMode.Max);
+
+    IndexSearcher searcher = buildSearcher();
+    TopDocs parentTopDocs = searcher.search(blockJoinQuery, 10);
+    assertThat(parentTopDocs.scoreDocs).hasLength(2);
+
+    BinaryQuantizedVectorRescorer.FullFidelityRescorer rescorer =
+        new BinaryQuantizedVectorRescorer.FullFidelityRescorer(
+            knnQuery, this.executor, Optional.of(parentFilter));
+    TopDocs rescored = rescorer.rescore(searcher, parentTopDocs, 10);
+
+    assertThat(rescored.scoreDocs).hasLength(2);
+    assertThat(rescored.scoreDocs[0].score).isGreaterThan(rescored.scoreDocs[1].score);
+    // Full-fidelity [1,-1] vs [1,-1]: euclidean score = 1.0 exactly
+    assertThat(rescored.scoreDocs[0].score).isWithin(1e-4f).of(1.0f);
+    assertScoresValid(rescored);
+  }
+
+  @Test
+  public void nestedTwoStageRescoring_euclidean_returnsResultsInOrder() throws IOException {
+    Assume.assumeTrue(this.similarity == EUCLIDEAN);
+    Assume.assumeFalse(this.sparse);
+
+    this.indexWriter.addDocuments(nestedBlock(new float[] {1, -1}, new float[] {50, 50}));
+    this.indexWriter.addDocuments(nestedBlock(new float[] {3, -3}));
+    this.indexWriter.commit();
+
+    float[] queryVector = new float[] {1, -1};
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term(NESTED_PARENT_MARKER_FIELD, "T")));
+    MongotKnnFloatQuery knnQuery =
+        new MongotKnnFloatQuery(metrics, this.vectorFieldName, queryVector, 10);
+    WrappedToParentBlockJoinQuery blockJoinQuery =
+        new WrappedToParentBlockJoinQuery(knnQuery, parentFilter, ScoreMode.Max);
+
+    IndexSearcher searcher = buildSearcher();
+    TopDocs parentTopDocs = searcher.search(blockJoinQuery, 10);
+    assertThat(parentTopDocs.scoreDocs).hasLength(2);
+
+    BinaryQuantizedVectorRescorer rescorer = new BinaryQuantizedVectorRescorer(this.executor);
+    ApproximateVectorSearchCriteria criteria = createVectorSearchQuery(2, 10);
+    TopDocs rescored =
+        rescorer.rescore(searcher, parentTopDocs, criteria, knnQuery, Optional.of(parentFilter));
+
+    assertThat(rescored.scoreDocs).hasLength(2);
+    assertThat(rescored.scoreDocs[0].score).isGreaterThan(rescored.scoreDocs[1].score);
+    assertThat(rescored.scoreDocs[0].score).isWithin(1e-4f).of(1.0f);
+    assertScoresValid(rescored);
+  }
+
+  @Test
+  public void nestedRescoring_parentWithNoChildren_getsZeroScore() throws IOException {
+    Assume.assumeTrue(this.similarity == EUCLIDEAN);
+    Assume.assumeFalse(this.sparse);
+
+    // Doc 0: child with vector; Doc 1: parent1 (well-formed block).
+    this.indexWriter.addDocuments(nestedBlock(new float[] {1, -1}));
+    // Doc 2: bare parent with no preceding child — simulates a malformed or split block.
+    // The parentBitSet will mark both doc 1 and doc 2 as parents, so for doc 2:
+    //   prevParent = 1, firstChild = 2, localParentDoc = 2 → firstChild >= localParentDoc.
+    Document bareParent = new Document();
+    bareParent.add(new StringField(NESTED_PARENT_MARKER_FIELD, "T", Field.Store.NO));
+    this.indexWriter.addDocument(bareParent);
+    this.indexWriter.commit();
+
+    float[] queryVector = new float[] {1, -1};
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term(NESTED_PARENT_MARKER_FIELD, "T")));
+    MongotKnnFloatQuery knnQuery =
+        new MongotKnnFloatQuery(metrics, this.vectorFieldName, queryVector, 10);
+
+    IndexSearcher searcher = buildSearcher();
+
+    // Manually inject both parents with a stale ANN score of 0.8 — this is what the rescorer
+    // receives before it replaces scores. The bare parent (doc 2) must end up with 0, not 0.8.
+    float annScore = 0.8f;
+    TopDocs injectedTopDocs =
+        new TopDocs(
+            new TotalHits(2, TotalHits.Relation.EQUAL_TO),
+            new ScoreDoc[] {new ScoreDoc(1, annScore), new ScoreDoc(2, annScore)});
+
+    BinaryQuantizedVectorRescorer.FullFidelityRescorer rescorer =
+        new BinaryQuantizedVectorRescorer.FullFidelityRescorer(
+            knnQuery, this.executor, Optional.of(parentFilter));
+    TopDocs rescored = rescorer.rescore(searcher, injectedTopDocs, 10);
+
+    assertThat(rescored.scoreDocs).hasLength(2);
+
+    // Results are sorted descending by score, so parent1 (positive rescored score) comes first.
+    float parent1Score =
+        Arrays.stream(rescored.scoreDocs).filter(sd -> sd.doc == 1).findFirst().get().score;
+    float bareParentScore =
+        Arrays.stream(rescored.scoreDocs).filter(sd -> sd.doc == 2).findFirst().get().score;
+
+    // parent1 has a real child vector — rescored score must be positive.
+    assertThat(parent1Score).isGreaterThan(0f);
+    // bare parent has no children — must get 0, not the stale ANN score of 0.8.
+    assertThat(bareParentScore).isEqualTo(0f);
+    assertThat(bareParentScore).isLessThan(annScore);
+  }
+
+  private static final String NESTED_PARENT_MARKER_FIELD = "$meta/embeddedRoot";
+
+  /** Creates a Lucene document block: child docs (with vectors) followed by one parent doc. */
+  private List<Document> nestedBlock(float[]... childVectors) {
+    List<Document> block =
+        Arrays.stream(childVectors)
+            .map(
+                vector -> {
+                  Document child = new Document();
+                  child.add(
+                      new KnnFloatVectorField(
+                          this.vectorFieldName, vector, this.similarity));
+                  return child;
+                })
+            .collect(Collectors.toList());
+    Document parent = new Document();
+    parent.add(new StringField(NESTED_PARENT_MARKER_FIELD, "T", Field.Store.NO));
+    block.add(parent);
+    return block;
+  }
+
+  private IndexSearcher buildSearcher() throws IOException {
+    var searcherManager =
+        LuceneSearcherManager.create(
+            this.indexWriter,
+            new LuceneSearcherFactory(
+                VectorIndex.MOCK_VECTOR_DEFINITION,
+                false,
+                new QueryCacheProvider.DefaultQueryCacheProvider(),
+                Optional.empty(),
+                SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
+            VectorIndex.mockMetricsFactory());
+    var searcherReference =
+        LuceneIndexSearcherReference.create(
+            searcherManager,
+            SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH),
+            FeatureFlags.getDefault());
+    return searcherReference.getIndexSearcher();
   }
 
   /** Assert all final scores are [0, 1], which is required for vectorSearch. */

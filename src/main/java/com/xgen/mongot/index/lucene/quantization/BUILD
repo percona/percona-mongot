@@ -33,5 +33,6 @@ java_library(
         "@maven//:com_google_flogger_flogger",
         "@maven//:com_google_guava_guava",
         "@maven//:org_apache_lucene_lucene_core",
+        "@maven//:org_apache_lucene_lucene_join",
     ],
 )
