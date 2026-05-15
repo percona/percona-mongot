@@ -275,7 +275,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
           supplier,
           CachedGauge.of(
               LuceneSearchIndexMetricValuesSupplier::getMaxStringFacetCardinality,
-              Duration.ofMinutes(1)));
+              Duration.ofMinutes(5)));
     }
 
     return supplier;
