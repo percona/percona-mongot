@@ -42,3 +42,4 @@ scripts/tests/copybara/test-results/
 .cache/
 
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
