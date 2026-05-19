@@ -125,6 +125,7 @@ tools.precommit.enabled:
 # dependency rules
 .PHONY: deps.update
 deps.update:
+	@CARGO_BAZEL_REPIN=1 $(call BAZEL) build //src/main/rust/...
 	@$(DIR)/scripts/java/update-dependencies.sh
 	@$(call BAZEL) run //bazel/python:requirements.update
 
