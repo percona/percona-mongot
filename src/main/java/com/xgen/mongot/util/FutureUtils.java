@@ -203,7 +203,9 @@ public class FutureUtils {
           if (throwable instanceof CompletionException) {
             Throwable cause = throwable.getCause();
             unwrapped =
-                cause instanceof WrappedException ? ((WrappedException) cause).wrapped : cause;
+                cause instanceof WrappedException wrappedException
+                    ? wrappedException.wrapped
+                    : cause;
           }
 
           return CompletableFuture.failedFuture(unwrapped);

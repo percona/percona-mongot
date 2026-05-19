@@ -147,6 +147,14 @@ public class WrappedQueryTest {
         () -> new WrappedQuery(termQuery("hello")), () -> new WrappedQuery(termQuery("world")));
   }
 
+  @Test
+  public void testAsWrapped() {
+    WrappedQuery wrappedQuery = new WrappedQuery(termQuery("hello"));
+
+    Assert.assertEquals(Optional.of(wrappedQuery), WrappedQuery.asWrapped(wrappedQuery));
+    Assert.assertEquals(Optional.empty(), WrappedQuery.asWrapped(termQuery("hello")));
+  }
+
   private static Query termQuery(String value) {
     return new TermQuery(new Term("path", value));
   }

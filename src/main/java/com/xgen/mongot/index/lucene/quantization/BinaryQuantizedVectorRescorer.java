@@ -297,20 +297,18 @@ public class BinaryQuantizedVectorRescorer {
 
     private Optional<QuantizedVectorsReader> getVectorsReader(LeafReader reader) {
 
-      if (!(reader instanceof CodecReader)) {
+      if (!(reader instanceof CodecReader codecReader)) {
         return Optional.empty();
       }
 
-      @Var KnnVectorsReader vectorsReader = ((CodecReader) reader).getVectorReader();
+      @Var KnnVectorsReader vectorsReader = codecReader.getVectorReader();
 
-      if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
-        vectorsReader =
-            ((PerFieldKnnVectorsFormat.FieldsReader) vectorsReader)
-                .getFieldReader(this.query.getField());
+      if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+        vectorsReader = fieldsReader.getFieldReader(this.query.getField());
       }
 
-      if (vectorsReader instanceof QuantizedVectorsReader) {
-        return Optional.of((QuantizedVectorsReader) vectorsReader);
+      if (vectorsReader instanceof QuantizedVectorsReader quantizedVectorsReader) {
+        return Optional.of(quantizedVectorsReader);
       }
 
       return Optional.empty();

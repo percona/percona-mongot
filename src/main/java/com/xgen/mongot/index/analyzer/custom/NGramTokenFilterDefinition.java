@@ -74,11 +74,9 @@ public class NGramTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof NGramTokenFilterDefinition)) {
+    if (!(other instanceof NGramTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    NGramTokenFilterDefinition otherDefinition = (NGramTokenFilterDefinition) other;
     return (this.minGram == otherDefinition.minGram)
         && (this.maxGram == otherDefinition.maxGram)
         && (this.termNotInBounds == otherDefinition.termNotInBounds);

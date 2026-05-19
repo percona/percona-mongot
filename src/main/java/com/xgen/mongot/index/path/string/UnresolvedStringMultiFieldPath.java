@@ -26,11 +26,9 @@ public final class UnresolvedStringMultiFieldPath extends UnresolvedStringPath {
       return true;
     }
 
-    if (!(other instanceof UnresolvedStringMultiFieldPath)) {
+    if (!(other instanceof UnresolvedStringMultiFieldPath otherMultiFieldPath)) {
       return false;
     }
-
-    UnresolvedStringMultiFieldPath otherMultiFieldPath = (UnresolvedStringMultiFieldPath) other;
     return Objects.equals(this.path, otherMultiFieldPath.getFieldPath())
         && Objects.equals(this.multi, otherMultiFieldPath.multi);
   }

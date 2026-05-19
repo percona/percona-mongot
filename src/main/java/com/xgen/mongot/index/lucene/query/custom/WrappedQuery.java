@@ -43,7 +43,9 @@ public class WrappedQuery extends Query {
    * optional.
    */
   public static Optional<WrappedQuery> asWrapped(Query query) {
-    return (query instanceof WrappedQuery) ? Optional.of((WrappedQuery) query) : Optional.empty();
+    return query instanceof WrappedQuery wrappedQuery
+        ? Optional.of(wrappedQuery)
+        : Optional.empty();
   }
 
   @Override

@@ -196,8 +196,8 @@ public class SynonymSyncException extends LoggableException {
       // mongos may not deserialize change stream results correctly when first starting
       throw createTransient(e, operationTime);
     } catch (Exception e) {
-      if (e instanceof RuntimeException) {
-        throw (RuntimeException) e;
+      if (e instanceof RuntimeException runtimeException) {
+        throw runtimeException;
       }
 
       throw new AssertionError("threw unexpected checked exception: " + e, e);
@@ -217,8 +217,8 @@ public class SynonymSyncException extends LoggableException {
   }
 
   public static boolean isShutDown(Throwable throwable) {
-    return throwable instanceof SynonymSyncException
-        && ((SynonymSyncException) throwable).isShutDown();
+    return throwable instanceof SynonymSyncException synonymSyncException
+        && synonymSyncException.isShutDown();
   }
 
   public boolean isShutDown() {

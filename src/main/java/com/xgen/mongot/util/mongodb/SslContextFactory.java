@@ -158,16 +158,16 @@ public class SslContextFactory {
     try (PEMParser parser = new PEMParser(new FileReader(certKeyFilePath.toFile()))) {
       @Var Object obj;
       while ((obj = parser.readObject()) != null) {
-        if (obj instanceof PEMEncryptedKeyPair) {
+        if (obj instanceof PEMEncryptedKeyPair encryptedKeyPair) {
           if (password.length == 0) {
             throw new IllegalArgumentException(
                 "tlsCertificateKeyFile is password-protected, "
                     + "tlsCertificateKeyFilePasswordFile is required");
           }
           PEMDecryptorProvider decProv = new JcePEMDecryptorProviderBuilder().build(password);
-          PEMKeyPair keyPair = ((PEMEncryptedKeyPair) obj).decryptKeyPair(decProv);
+          PEMKeyPair keyPair = encryptedKeyPair.decryptKeyPair(decProv);
           privateKey = Optional.of(keyConverter.getKeyPair(keyPair).getPrivate());
-        } else if (obj instanceof PKCS8EncryptedPrivateKeyInfo) {
+        } else if (obj instanceof PKCS8EncryptedPrivateKeyInfo encryptedPrivateKeyInfo) {
           if (password.length == 0) {
             throw new IllegalArgumentException(
                 "tlsCertificateKeyFile is password-protected,"
@@ -175,15 +175,14 @@ public class SslContextFactory {
           }
           InputDecryptorProvider decProv =
               new JceOpenSSLPKCS8DecryptorProviderBuilder().build(password);
-          PrivateKeyInfo keyInfo =
-              ((PKCS8EncryptedPrivateKeyInfo) obj).decryptPrivateKeyInfo(decProv);
+          PrivateKeyInfo keyInfo = encryptedPrivateKeyInfo.decryptPrivateKeyInfo(decProv);
           privateKey = Optional.of(keyConverter.getPrivateKey(keyInfo));
-        } else if (obj instanceof PrivateKeyInfo) {
-          privateKey = Optional.of(keyConverter.getPrivateKey((PrivateKeyInfo) obj));
-        } else if (obj instanceof PEMKeyPair) {
-          privateKey = Optional.of(keyConverter.getKeyPair((PEMKeyPair) obj).getPrivate());
-        } else if (obj instanceof X509CertificateHolder) {
-          certList.add(certConverter.getCertificate((X509CertificateHolder) obj));
+        } else if (obj instanceof PrivateKeyInfo privateKeyInfo) {
+          privateKey = Optional.of(keyConverter.getPrivateKey(privateKeyInfo));
+        } else if (obj instanceof PEMKeyPair keyPair) {
+          privateKey = Optional.of(keyConverter.getKeyPair(keyPair).getPrivate());
+        } else if (obj instanceof X509CertificateHolder certificateHolder) {
+          certList.add(certConverter.getCertificate(certificateHolder));
         }
       }
     }

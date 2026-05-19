@@ -203,8 +203,8 @@ public class InitialSyncException extends Exception {
     } catch (InitialSyncException e) {
       throw e;
     } catch (Exception e) {
-      if (e instanceof RuntimeException) {
-        throw (RuntimeException) e;
+      if (e instanceof RuntimeException runtimeException) {
+        throw runtimeException;
       }
 
       throw new AssertionError("threw unexpected checked exception: " + e, e);

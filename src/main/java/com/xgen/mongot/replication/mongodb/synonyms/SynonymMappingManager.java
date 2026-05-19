@@ -390,12 +390,10 @@ public class SynonymMappingManager {
       }
     }
 
-    if (!(throwable instanceof SynonymSyncException)) {
+    if (!(throwable instanceof SynonymSyncException exception)) {
       failMapping(throwable);
       return;
     }
-
-    SynonymSyncException exception = (SynonymSyncException) throwable;
     this.logger.trace(
         "exceptional completion of request with operation time {}", exception.getOperationTime());
     this.synonymMappingHighWaterMark =

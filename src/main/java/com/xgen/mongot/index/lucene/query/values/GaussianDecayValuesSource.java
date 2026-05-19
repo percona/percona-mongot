@@ -104,11 +104,9 @@ public class GaussianDecayValuesSource extends DoubleValuesSource {
       return true;
     }
 
-    if (!(o instanceof GaussianDecayValuesSource)) {
+    if (!(o instanceof GaussianDecayValuesSource that)) {
       return false;
     }
-
-    GaussianDecayValuesSource that = (GaussianDecayValuesSource) o;
     return this.pathValue.equals(that.pathValue)
         && this.originValue == that.originValue
         && this.scaleValue == that.scaleValue

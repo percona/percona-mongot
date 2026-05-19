@@ -45,11 +45,9 @@ public class ChangeStreamResumeInfo implements DocumentEncodable {
       return false;
     }
 
-    if (!(obj instanceof ChangeStreamResumeInfo)) {
+    if (!(obj instanceof ChangeStreamResumeInfo other)) {
       return false;
     }
-
-    ChangeStreamResumeInfo other = (ChangeStreamResumeInfo) obj;
     return other.namespace.equals(this.namespace) && other.resumeToken.equals(this.resumeToken);
   }
 

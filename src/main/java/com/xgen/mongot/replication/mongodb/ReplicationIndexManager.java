@@ -878,10 +878,10 @@ public class ReplicationIndexManager {
     }
 
     String type;
-    if (throwable instanceof SteadyStateException) {
-      type = ((SteadyStateException) throwable).getType().name();
-    } else if (throwable instanceof InitialSyncException) {
-      type = ((InitialSyncException) throwable).getType().name();
+    if (throwable instanceof SteadyStateException steadyStateException) {
+      type = steadyStateException.getType().name();
+    } else if (throwable instanceof InitialSyncException initialSyncException) {
+      type = initialSyncException.getType().name();
     } else {
       type = EMPTY_EXCEPTION_METRIC_FIELD;
     }

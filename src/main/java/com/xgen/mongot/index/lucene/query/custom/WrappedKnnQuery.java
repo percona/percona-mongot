@@ -51,8 +51,8 @@ public class WrappedKnnQuery extends Query {
    * empty optional.
    */
   public static Optional<WrappedKnnQuery> asWrapped(Query query) {
-    return (query instanceof WrappedKnnQuery)
-        ? Optional.of((WrappedKnnQuery) query)
+    return query instanceof WrappedKnnQuery wrappedKnnQuery
+        ? Optional.of(wrappedKnnQuery)
         : Optional.empty();
   }
 

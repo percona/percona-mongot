@@ -585,12 +585,11 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
   @Nullable
   private static QuantizedVectorsReader getQuantizedKnnVectorsReader(
       @Var KnnVectorsReader vectorsReader, String fieldName) {
-    if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
-      vectorsReader =
-          ((PerFieldKnnVectorsFormat.FieldsReader) vectorsReader).getFieldReader(fieldName);
+    if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+      vectorsReader = fieldsReader.getFieldReader(fieldName);
     }
-    if (vectorsReader instanceof QuantizedVectorsReader) {
-      return (QuantizedVectorsReader) vectorsReader;
+    if (vectorsReader instanceof QuantizedVectorsReader quantizedVectorsReader) {
+      return quantizedVectorsReader;
     }
     return null;
   }

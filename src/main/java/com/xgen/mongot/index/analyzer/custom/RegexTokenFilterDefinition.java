@@ -76,11 +76,9 @@ public class RegexTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof RegexTokenFilterDefinition)) {
+    if (!(other instanceof RegexTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    RegexTokenFilterDefinition otherDefinition = (RegexTokenFilterDefinition) other;
 
     // Pattern::equals() currently only tests identity - compare underlying string instead
     return Objects.equals(this.pattern.pattern(), otherDefinition.pattern.pattern())

@@ -61,8 +61,8 @@ public class FragmentBuffer {
     } catch (Exception e) {
       // Clear buffer to ensure clean state for non-resumable errors
       clear();
-      if (e instanceof FragmentProcessingException) {
-        throw e;
+      if (e instanceof FragmentProcessingException fragmentProcessingException) {
+        throw fragmentProcessingException;
       }
       // Wrap unexpected exceptions for consistent error handling
       throw new FragmentProcessingException(

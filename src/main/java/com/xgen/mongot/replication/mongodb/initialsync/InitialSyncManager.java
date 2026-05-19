@@ -110,16 +110,16 @@ interface InitialSyncManager {
       logger.error("Caught exception {}. Shutting down.", description, cause);
       shutDownProcedure.run();
 
-      if (cause instanceof InitialSyncException) {
-        throw (InitialSyncException) cause;
+      if (cause instanceof InitialSyncException initialSyncException) {
+        throw initialSyncException;
       }
 
-      if (cause instanceof RuntimeException) {
-        throw (RuntimeException) cause;
+      if (cause instanceof RuntimeException runtimeException) {
+        throw runtimeException;
       }
 
-      if (cause instanceof Error) {
-        throw (Error) cause;
+      if (cause instanceof Error error) {
+        throw error;
       }
 
       throw new AssertionError(
