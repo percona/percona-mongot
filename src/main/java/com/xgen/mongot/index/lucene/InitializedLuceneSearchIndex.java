@@ -252,7 +252,7 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
             indexMetricsUpdater.getQueryingMetricsUpdater(),
             () ->
                 dynamicFeatureFlagRegistry.evaluateClusterInvariant(
-                    DynamicFeatureFlags.ENABLE_TOTAL_STRING_FACET_BUCKETS));
+                    DynamicFeatureFlags.ENABLE_TOTAL_FACET_BUCKETS));
 
     IndexWriter writer =
         new MeteredIndexWriter(

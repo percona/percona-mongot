@@ -16,15 +16,15 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
   private final SearchIndexReader indexReader;
   private final IndexMetricsUpdater.QueryingMetricsUpdater queryingMetricsUpdater;
   private final QueryMetricsRecorder queryMetricsRecorder;
-  private final BooleanSupplier recordTotalStringFacetBucketsMetric;
+  private final BooleanSupplier recordTotalFacetBucketsMetric;
 
   public MeteredSearchIndexReader(
       SearchIndexReader indexReader,
       IndexMetricsUpdater.QueryingMetricsUpdater queryingMetricsUpdater,
-      BooleanSupplier recordTotalStringFacetBucketsMetric) {
+      BooleanSupplier recordTotalFacetBucketsMetric) {
     this.indexReader = indexReader;
     this.queryingMetricsUpdater = queryingMetricsUpdater;
-    this.recordTotalStringFacetBucketsMetric = recordTotalStringFacetBucketsMetric;
+    this.recordTotalFacetBucketsMetric = recordTotalFacetBucketsMetric;
     this.queryMetricsRecorder =
         new QueryMetricsRecorder(queryingMetricsUpdater.getQueryFeaturesMetricsUpdater());
   }
@@ -41,8 +41,8 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
       SearchProducerAndMetaResults result =
           this.indexReader.query(
               query, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
-      this.queryingMetricsUpdater.recordTotalStringFacetBucketsIfApplicable(
-          query, this.recordTotalStringFacetBucketsMetric);
+      this.queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(
+          query, this.recordTotalFacetBucketsMetric);
       this.queryMetricsRecorder.record(query, queryCursorOptions);
       return result;
     } catch (Exception e) {
@@ -63,8 +63,8 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
       SearchProducerAndMetaProducer result =
           this.indexReader.intermediateQuery(
               query, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
-      this.queryingMetricsUpdater.recordTotalStringFacetBucketsIfApplicable(
-          query, this.recordTotalStringFacetBucketsMetric);
+      this.queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(
+          query, this.recordTotalFacetBucketsMetric);
       this.queryMetricsRecorder.record(query, queryCursorOptions);
       return result;
     } catch (Exception e) {

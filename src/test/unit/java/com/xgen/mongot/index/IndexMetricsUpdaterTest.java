@@ -427,7 +427,7 @@ public class IndexMetricsUpdaterTest {
       }
 
       @Test
-      public void recordTotalStringFacetBucketsIfApplicable_skippedWhenDisabled() {
+      public void recordTotalFacetBucketsIfApplicable_skippedWhenDisabled() {
         var metricsFactory =
             SearchIndex.mockMetricsFactory()
                 .childMetricsFactory(IndexMetricsUpdater.QueryingMetricsUpdater.NAMESPACE);
@@ -449,13 +449,13 @@ public class IndexMetricsUpdaterTest {
                 .build();
         long countBefore =
             metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
-        queryingMetricsUpdater.recordTotalStringFacetBucketsIfApplicable(query, () -> false);
+        queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(query, () -> false);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().count())
             .isEqualTo(countBefore);
       }
 
       @Test
-      public void recordTotalStringFacetBucketsIfApplicable_skipsEnabledWhenOperatorQuery() {
+      public void recordTotalFacetBucketsIfApplicable_skipsEnabledWhenOperatorQuery() {
         var metricsFactory =
             SearchIndex.mockMetricsFactory()
                 .childMetricsFactory(IndexMetricsUpdater.QueryingMetricsUpdater.NAMESPACE);
@@ -471,7 +471,7 @@ public class IndexMetricsUpdaterTest {
                 .returnStoredSource(false)
                 .build();
         AtomicBoolean enabledInvoked = new AtomicBoolean(false);
-        queryingMetricsUpdater.recordTotalStringFacetBucketsIfApplicable(
+        queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(
             operatorQuery,
             () -> {
               enabledInvoked.set(true);
@@ -485,8 +485,8 @@ public class IndexMetricsUpdaterTest {
        * histogram bounds — not the number of Prometheus bucket series.
        */
       @Test
-      public void recordTotalStringFacetBucketsIfApplicable_recordsWhenEnabled() {
-        int requestedStringFacetBuckets = 5000;
+      public void recordTotalFacetBucketsIfApplicable_recordsWhenEnabled() {
+        int requestedFacetBuckets = 5000;
         var metricsFactory =
             SearchIndex.mockMetricsFactory()
                 .childMetricsFactory(IndexMetricsUpdater.QueryingMetricsUpdater.NAMESPACE);
@@ -499,7 +499,7 @@ public class IndexMetricsUpdaterTest {
                             Map.of(
                                 "stringFacet",
                                 FacetDefinitionBuilder.string()
-                                    .numBuckets(requestedStringFacetBuckets)
+                                    .numBuckets(requestedFacetBuckets)
                                     .path("path")
                                     .build()))
                         .operator(OperatorBuilder.text().path("path").query("q").build())
@@ -508,15 +508,15 @@ public class IndexMetricsUpdaterTest {
                 .build();
         long countBefore =
             metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
-        queryingMetricsUpdater.recordTotalStringFacetBucketsIfApplicable(query, () -> true);
+        queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(query, () -> true);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().count())
             .isEqualTo(countBefore + 1L);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().totalAmount())
-            .isEqualTo((double) requestedStringFacetBuckets);
+            .isEqualTo((double) requestedFacetBuckets);
       }
 
       @Test
-      public void recordTotalStringFacetBucketsIfApplicable_skippedWhenNumericOnlyFacets() {
+      public void recordTotalFacetBucketsIfApplicable_recordsWhenNumericOnlyFacets() {
         var metricsFactory =
             SearchIndex.mockMetricsFactory()
                 .childMetricsFactory(IndexMetricsUpdater.QueryingMetricsUpdater.NAMESPACE);
@@ -538,9 +538,11 @@ public class IndexMetricsUpdaterTest {
                 .build();
         long countBefore =
             metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
-        queryingMetricsUpdater.recordTotalStringFacetBucketsIfApplicable(query, () -> true);
+        queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(query, () -> true);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().count())
-            .isEqualTo(countBefore);
+            .isEqualTo(countBefore + 1L);
+        assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().totalAmount())
+            .isEqualTo(1.0);
       }
 
       @Test

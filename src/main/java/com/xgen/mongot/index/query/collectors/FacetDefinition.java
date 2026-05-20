@@ -42,15 +42,16 @@ public sealed interface FacetDefinition extends DocumentEncodable
   /**
    * Deserializes definition from a BSON.
    *
-   * @param allow10k when true, string facet numBuckets may be 1–10_000; when false,
-   *     1–1000 (parser throws BsonParseException if exceeded).
+   * @param allow10k when true, string facet {@code numBuckets} may be 1–10_000 and number/date
+   *     facet {@code boundaries} may contain 2–10_000 values; when false, each limit is 1_000
+   *     (parser throws BsonParseException if exceeded).
    */
   static FacetDefinition fromBson(DocumentParser parser, boolean allow10k)
       throws BsonParseException {
     return switch (parser.getField(Fields.TYPE).unwrap()) {
       case STRING -> new StringFacetDefinition(parser, allow10k);
-      case NUMBER -> new NumericFacetDefinition(parser);
-      case DATE -> new DateFacetDefinition(parser);
+      case NUMBER -> new NumericFacetDefinition(parser, allow10k);
+      case DATE -> new DateFacetDefinition(parser, allow10k);
     };
   }
 
@@ -133,20 +134,30 @@ public sealed interface FacetDefinition extends DocumentEncodable
     }
 
     private static class Fields {
-      private static final Field.Required<List<BsonNumber>> BOUNDARIES =
+      private static final Field.Required<List<BsonNumber>> BOUNDARIES_1K =
           Field.builder("boundaries")
               .bsonNumberField()
               .asList()
               .sizeMustBeWithinBounds(Range.of(2, 1000))
               .validate(Validators.BOUNDARIES_ORDER_VALIDATOR)
               .required();
+      private static final Field.Required<List<BsonNumber>> BOUNDARIES_10K =
+          Field.builder("boundaries")
+              .bsonNumberField()
+              .asList()
+              .sizeMustBeWithinBounds(Range.of(2, 10_000))
+              .validate(Validators.BOUNDARIES_ORDER_VALIDATOR)
+              .required();
     }
 
-    private NumericFacetDefinition(DocumentParser parser) throws BsonParseException {
+    private NumericFacetDefinition(DocumentParser parser, boolean allow10k)
+        throws BsonParseException {
       this(
           parser.getField(FacetDefinition.Fields.PATH).unwrap(),
           parser.getField(BoundaryFacetDefinition.Fields.DEFAULT).unwrap(),
-          parser.getField(Fields.BOUNDARIES).unwrap());
+          parser
+              .getField(allow10k ? Fields.BOUNDARIES_10K : Fields.BOUNDARIES_1K)
+              .unwrap());
     }
 
     @Override
@@ -160,7 +171,7 @@ public sealed interface FacetDefinition extends DocumentEncodable
           .field(FacetDefinition.Fields.TYPE, this.getType())
           .field(FacetDefinition.Fields.PATH, this.path())
           .field(BoundaryFacetDefinition.Fields.DEFAULT, this.defaultBucketName())
-          .field(Fields.BOUNDARIES, this.boundaries())
+          .field(Fields.BOUNDARIES_10K, this.boundaries())
           .build();
     }
   }
@@ -182,19 +193,28 @@ public sealed interface FacetDefinition extends DocumentEncodable
     }
 
     private static class Fields {
-      public static final Field.Required<List<BsonDateTime>> BOUNDARIES =
+      private static final Field.Required<List<BsonDateTime>> BOUNDARIES_1K =
           Field.builder("boundaries")
               .listOf(Value.builder().bsonDateTimeField().required())
               .sizeMustBeWithinBounds(Range.of(2, 1000))
               .validate(Validators.BOUNDARIES_ORDER_VALIDATOR)
               .required();
+      private static final Field.Required<List<BsonDateTime>> BOUNDARIES_10K =
+          Field.builder("boundaries")
+              .listOf(Value.builder().bsonDateTimeField().required())
+              .sizeMustBeWithinBounds(Range.of(2, 10_000))
+              .validate(Validators.BOUNDARIES_ORDER_VALIDATOR)
+              .required();
     }
 
-    private DateFacetDefinition(DocumentParser parser) throws BsonParseException {
+    private DateFacetDefinition(DocumentParser parser, boolean allow10k)
+        throws BsonParseException {
       this(
           parser.getField(FacetDefinition.Fields.PATH).unwrap(),
           parser.getField(BoundaryFacetDefinition.Fields.DEFAULT).unwrap(),
-          parser.getField(Fields.BOUNDARIES).unwrap());
+          parser
+              .getField(allow10k ? Fields.BOUNDARIES_10K : Fields.BOUNDARIES_1K)
+              .unwrap());
     }
 
     @Override
@@ -208,7 +228,7 @@ public sealed interface FacetDefinition extends DocumentEncodable
           .field(FacetDefinition.Fields.TYPE, this.getType())
           .field(FacetDefinition.Fields.PATH, this.path())
           .field(BoundaryFacetDefinition.Fields.DEFAULT, this.defaultBucketName())
-          .field(Fields.BOUNDARIES, this.boundaries())
+          .field(Fields.BOUNDARIES_10K, this.boundaries())
           .build();
     }
   }

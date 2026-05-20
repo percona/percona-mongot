@@ -51,7 +51,7 @@ public class IndexMetricsUpdater implements Closeable {
   };
 
   /**
-   * Upper bounds for {@code totalFacetBucketsPerQuery} (string facet bucket demand per query).
+   * Upper bounds for {@code totalFacetBucketsPerQuery} (facet bucket demand per query).
    *
    * <p>Kept coarse (vs finer histograms) to limit Prometheus series: tail-focused bands around the
    * 10k bucket-limit context; use {@code sum}/{@code count} on export for mean demand.
@@ -778,15 +778,16 @@ public class IndexMetricsUpdater implements Closeable {
     }
 
     /**
-     * Records total requested string facet buckets for facet queries when {@code enabled} returns
-     * true and the query has positive string bucket demand (numeric-only facet queries are
-     * skipped). Called from the search execution path after a successful query (e.g. {@link
-     * MeteredSearchIndexReader}), consistent with other query-time distribution metrics.
+     * Records total requested facet buckets for facet queries when {@code enabled} returns true
+     * and the query has positive bucket demand (string {@code numBuckets} plus number/date
+     * boundary-derived buckets). Called from the search execution path after a successful query
+     * (e.g. {@link MeteredSearchIndexReader}), consistent with other query-time distribution
+     * metrics.
      *
      * <p>{@code enabled} is consulted only for {@link CollectorQuery} with a {@link FacetCollector}
      * so dynamic flag evaluation stays off the hot path for non-facet queries.
      */
-    public void recordTotalStringFacetBucketsIfApplicable(Query query, BooleanSupplier enabled) {
+    public void recordTotalFacetBucketsIfApplicable(Query query, BooleanSupplier enabled) {
       if (!(query instanceof CollectorQuery collectorQuery)
           || !(collectorQuery.collector() instanceof FacetCollector facetCollector)) {
         return;
@@ -794,9 +795,9 @@ public class IndexMetricsUpdater implements Closeable {
       if (!enabled.getAsBoolean()) {
         return;
       }
-      int totalStringBuckets = facetCollector.getTotalRequestedStringFacetBuckets();
-      if (totalStringBuckets > 0) {
-        this.totalFacetBucketsPerQuery.record(totalStringBuckets);
+      int totalFacetBuckets = facetCollector.getTotalRequestedFacetBuckets();
+      if (totalFacetBuckets > 0) {
+        this.totalFacetBucketsPerQuery.record(totalFacetBuckets);
       }
     }
 
