@@ -7,6 +7,7 @@ import com.google.common.flogger.FluentLogger;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.BinaryQuantizedFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.FlatBitVectorsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.Float32AndByteFlatVectorsFormat;
@@ -27,7 +28,6 @@ import org.apache.lucene.codecs.FilterCodec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.StoredFieldsFormat;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -46,8 +46,8 @@ import org.apache.lucene.store.Directory;
  * <h3>Postings</h3>
  *
  * <p>Delegates to {@link HybridPostingsFormat}, which dynamically selects between a {@link
- * BloomFilteringPostingsFormat} and the default Lucene99 format for the {@code _id} field based on
- * a runtime toggle. Search and vector Lucene indexes both use {@link
+ * MongotBloomFilteringPostingsFormat} and the default Lucene99 format for the {@code _id} field
+ * based on a runtime toggle. Search and vector Lucene indexes both use {@link
  * Factory#forIndexWithBloomFilter} so the same dynamic feature flag applies, except writers for
  * auto-embedding indexes pass a supplier that is always {@code false}. See {@link
  * HybridPostingsFormat} for details on the per-segment format selection, metrics, and rollback

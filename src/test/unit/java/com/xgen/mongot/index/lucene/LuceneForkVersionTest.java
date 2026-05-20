@@ -11,7 +11,7 @@ import org.apache.lucene.analysis.morfologik.MorfologikFilter;
 import org.apache.lucene.analysis.phonetic.BeiderMorseFilter;
 import org.apache.lucene.analysis.stempel.StempelPolishStemFilterFactory;
 import org.apache.lucene.backward_codecs.lucene95.Lucene95Codec;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
+import org.apache.lucene.codecs.bloom.DefaultBloomFilterFactory;
 import org.apache.lucene.expressions.Expression;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.misc.SweetSpotSimilarity;
@@ -51,7 +51,7 @@ public class LuceneForkVersionTest {
 
   @Test
   public void luceneCodecs_fromFork() {
-    String jarPath = jarLocationOf(BloomFilteringPostingsFormat.class);
+    String jarPath = jarLocationOf(DefaultBloomFilterFactory.class);
     Truth.assertThat(jarPath).contains("lucene-codecs-" + FORK_VERSION + ".jar");
     Truth.assertThat(jarPath).doesNotContain("lucene-codecs-" + UPSTREAM_VERSION + ".jar");
   }

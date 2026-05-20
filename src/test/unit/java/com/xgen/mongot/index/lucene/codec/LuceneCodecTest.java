@@ -17,6 +17,7 @@ import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
 import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.Float32AndByteFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBinaryQuantizedVectorsFormat;
@@ -33,7 +34,6 @@ import org.apache.lucene.backward_codecs.lucene99.Lucene94FieldInfosFormatV1;
 import org.apache.lucene.backward_codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90CompoundFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90DocValuesFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90LiveDocsFormat;
@@ -245,7 +245,9 @@ public class LuceneCodecTest {
   @Test
   public void postingsFormat_idField_bloomFilterEnabled_returnsBloomFilterPostingsFormat() {
     testPostingsFormat(
-        true, FieldName.MetaField.ID.getLuceneFieldName(), BloomFilteringPostingsFormat.class);
+        true,
+        FieldName.MetaField.ID.getLuceneFieldName(),
+        MongotBloomFilteringPostingsFormat.class);
   }
 
   @Test
@@ -272,7 +274,7 @@ public class LuceneCodecTest {
 
     bloomEnabled.set(true);
     assertThat(format.getPostingsFormatForField(idField))
-        .isInstanceOf(BloomFilteringPostingsFormat.class);
+        .isInstanceOf(MongotBloomFilteringPostingsFormat.class);
 
     bloomEnabled.set(false);
     assertThat(format.getPostingsFormatForField(idField))
@@ -289,10 +291,10 @@ public class LuceneCodecTest {
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
     PostingsFormat bloomFormat = format.getPostingsFormatForField(idField);
-    assertThat(bloomFormat).isInstanceOf(BloomFilteringPostingsFormat.class);
+    assertThat(bloomFormat).isInstanceOf(MongotBloomFilteringPostingsFormat.class);
 
     Field delegateField =
-        BloomFilteringPostingsFormat.class.getDeclaredField("delegatePostingsFormat");
+        MongotBloomFilteringPostingsFormat.class.getDeclaredField("delegatePostingsFormat");
     delegateField.setAccessible(true);
     PostingsFormat bloomDelegate = (PostingsFormat) delegateField.get(bloomFormat);
 
@@ -312,9 +314,9 @@ public class LuceneCodecTest {
 
     assertThat(metricsUpdater.getBloomFilterIdPostingCreatedCounter().count()).isEqualTo(0.0);
     PostingsFormat bloomFormat = format.getPostingsFormatForField(idField);
-    assertThat(bloomFormat).isInstanceOf(BloomFilteringPostingsFormat.class);
+    assertThat(bloomFormat).isInstanceOf(MongotBloomFilteringPostingsFormat.class);
     assertThat(metricsUpdater.getBloomFilterIdPostingCreatedCounter().count()).isEqualTo(1.0);
-    assertEquals(BloomFilteringPostingsFormat.BLOOM_CODEC_NAME, bloomFormat.getName());
+    assertEquals(MongotBloomFilteringPostingsFormat.BLOOM_CODEC_NAME, bloomFormat.getName());
   }
 
   @Test
@@ -330,8 +332,9 @@ public class LuceneCodecTest {
     PostingsFormat defaultFormat = format.getPostingsFormatForField(idField);
     assertThat(defaultFormat).isInstanceOf(Lucene99PostingsFormat.class);
     assertThat(metricsUpdater.getLucene99IdPostingCreatedCounter().count()).isEqualTo(1.0);
-    assertThat(defaultFormat).isNotInstanceOf(BloomFilteringPostingsFormat.class);
-    assertThat(defaultFormat.getName()).isNotEqualTo(BloomFilteringPostingsFormat.BLOOM_CODEC_NAME);
+    assertThat(defaultFormat).isNotInstanceOf(MongotBloomFilteringPostingsFormat.class);
+    assertThat(defaultFormat.getName())
+        .isNotEqualTo(MongotBloomFilteringPostingsFormat.BLOOM_CODEC_NAME);
   }
 
   private static void testPostingsFormat(

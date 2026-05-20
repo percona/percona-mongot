@@ -5,6 +5,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.io.IOException;
@@ -17,7 +18,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.CompoundDirectory;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -49,14 +49,14 @@ import org.junit.runners.Parameterized;
 public class LuceneCodecBloomFilterTest {
 
   private static final String ID_FIELD = FieldName.MetaField.ID.getLuceneFieldName();
-  private static final String BLOOM_FORMAT = BloomFilteringPostingsFormat.BLOOM_CODEC_NAME;
+  private static final String BLOOM_FORMAT = MongotBloomFilteringPostingsFormat.BLOOM_CODEC_NAME;
   private static final String LUCENE99_FORMAT = "Lucene99";
   private static final String POSTINGS_FORMAT_ATTR = PerFieldPostingsFormat.PER_FIELD_FORMAT_KEY;
   private static final String DOC_1 = "doc1";
   private static final String DOC_2 = "doc2";
   private static final String DOC_3 = "doc3";
 
-  /** Bloom filter postings data file suffix (see {@link BloomFilteringPostingsFormat}). */
+  /** Bloom filter postings data file suffix (see {@link MongotBloomFilteringPostingsFormat}). */
   private static final String BLM_FILE_SUFFIX = ".blm";
 
   private static final boolean DFF_ENABLED = true;

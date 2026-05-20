@@ -15,6 +15,7 @@ java_test_suite(
         "//src/main/java/com/xgen/mongot/index",
         "//src/main/java/com/xgen/mongot/index/definition",
         "//src/main/java/com/xgen/mongot/index/lucene/codec",
+        "//src/main/java/com/xgen/mongot/index/lucene/codec/bloom",
         "//src/main/java/com/xgen/mongot/index/lucene/codec/flat",
         "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/lucene/quantization",
