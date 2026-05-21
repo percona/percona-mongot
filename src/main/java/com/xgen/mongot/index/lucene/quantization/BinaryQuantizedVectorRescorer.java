@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
 import org.apache.lucene.index.CodecReader;
@@ -30,14 +31,19 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnFloatVectorQuery;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Rescorer;
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.VectorScorer;
+import org.apache.lucene.search.Weight;
 import org.apache.lucene.search.join.BitSetProducer;
 import org.apache.lucene.util.BitSet;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.quantization.QuantizedVectorsReader;
 
 /**
@@ -151,7 +157,8 @@ public class BinaryQuantizedVectorRescorer {
       ScoreDoc[] scoreDocs,
       int start,
       int end,
-      BitSetProducer parentFilter)
+      BitSetProducer parentFilter,
+      @Nullable BitSet childFilterBitSet)
       throws IOException {
 
     BitSet parentBitSet = parentFilter.getBitSet(segment);
@@ -189,11 +196,36 @@ public class BinaryQuantizedVectorRescorer {
         if (found == NO_MORE_DOCS || found >= localParentDoc) {
           break;
         }
-        maxScore = Math.max(maxScore, scorer.score());
+        if (childFilterBitSet == null || childFilterBitSet.get(found)) {
+          maxScore = Math.max(maxScore, scorer.score());
+        }
         docId = found + 1;
       }
       scoreDocs[i].score = maxScore;
     }
+  }
+
+  @Nullable
+  private static Weight createChildFilterWeight(
+      IndexSearcher searcher, KnnFloatVectorQuery query, boolean hasParentFilter)
+      throws IOException {
+    if (!hasParentFilter) {
+      return null;
+    }
+    @Nullable Query childFilter = query.getFilter();
+    if (childFilter == null) {
+      return null;
+    }
+    return searcher.createWeight(searcher.rewrite(childFilter), ScoreMode.COMPLETE_NO_SCORES, 1.0f);
+  }
+
+  private static BitSet computeChildFilterBitSet(
+      Weight childFilterWeight, LeafReaderContext segment)
+      throws IOException {
+    Scorer filterScorer = childFilterWeight.scorer(segment);
+    return filterScorer != null
+        ? BitSet.of(filterScorer.iterator(), segment.reader().maxDoc())
+        : new FixedBitSet(segment.reader().maxDoc());
   }
 
   private static FieldInfo getFieldInfo(LeafReader context, KnnFloatVectorQuery query) {
@@ -238,6 +270,9 @@ public class BinaryQuantizedVectorRescorer {
       Arrays.sort(topDocsCopy.scoreDocs, Comparator.comparingInt(hit -> hit.doc));
       List<LeafReaderContext> segments = searcher.getIndexReader().leaves();
 
+      @Nullable Weight childFilterWeight =
+          createChildFilterWeight(searcher, this.query, this.parentFilter.isPresent());
+
       @Var int i = 0;
       while (i < limit) {
 
@@ -276,8 +311,18 @@ public class BinaryQuantizedVectorRescorer {
         VectorScorer scorer = vectorValues.scorer(queryVector);
 
         if (this.parentFilter.isPresent()) {
+          @Nullable BitSet childFilterBitSet =
+              childFilterWeight != null
+                  ? computeChildFilterBitSet(childFilterWeight, segment)
+                  : null;
           scoreNestedSegment(
-              segment, scorer, topDocsCopy.scoreDocs, start, end, this.parentFilter.get());
+              segment,
+              scorer,
+              topDocsCopy.scoreDocs,
+              start,
+              end,
+              this.parentFilter.get(),
+              childFilterBitSet);
         } else {
           scoreSegment(segment, scorer, topDocsCopy.scoreDocs, start, end);
         }
@@ -348,6 +393,9 @@ public class BinaryQuantizedVectorRescorer {
       List<LeafReaderContext> segments = searcher.getIndexReader().leaves();
       List<Callable<Void>> tasks = new ArrayList<>();
 
+      @Nullable Weight childFilterWeight =
+          createChildFilterWeight(searcher, this.query, this.parentFilter.isPresent());
+
       @Var int i = 0;
 
       while (i < limit) {
@@ -368,9 +416,14 @@ public class BinaryQuantizedVectorRescorer {
 
         if (this.parentFilter.isPresent()) {
           BitSetProducer filter = this.parentFilter.get();
+          @Nullable BitSet childFilterBitSet =
+              childFilterWeight != null
+                  ? computeChildFilterBitSet(childFilterWeight, segment)
+                  : null;
           tasks.add(
               () -> {
-                scoreNestedSegment(segment, scorer, topDocsCopy.scoreDocs, start, end, filter);
+                scoreNestedSegment(
+                    segment, scorer, topDocsCopy.scoreDocs, start, end, filter, childFilterBitSet);
                 return null;
               });
         } else {
