@@ -163,6 +163,7 @@ MISC_ARTIFACTS = [
     "com.squareup.okio:okio:3.10.2",
     "com.google.auto.service:auto-service:1.1.1",
     "org.roaringbitmap:RoaringBitmap:1.6.13",
+    "com.carrotsearch:hppc:0.10.0",
 ]
 
 PINNED_TRANSITIVE_ARTIFACTS = [
