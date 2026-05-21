@@ -1485,6 +1485,146 @@ public class AutoEmbeddingDocumentUtilsTest {
                     new BsonArray(List.of(new BsonString("large"), new BsonString("sale")))));
   }
 
+  @Test
+  public void extractFilterFieldValues_filterPathTraversesArrayOfSubdocs_buildsNestedArray()
+      throws IOException {
+    // Regression for CLOUDP-406702: a filter field path like "annotations.id" that traverses an
+    // array of subdocuments must produce a nested $set ({annotations: [{id: ...}, ...]}), not a
+    // flat dotted key (which MongoDB rejects with "Cannot create field 'id' in element
+    // {annotations: [...]}").
+    List<VectorIndexFieldDefinition> fields =
+        List.of(
+            new VectorAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("text")),
+            new VectorIndexFilterFieldDefinition(FieldPath.parse("annotations.id")));
+    VectorIndexDefinition vectorDef =
+        VectorIndexDefinitionBuilder.builder().setFields(fields).build();
+    BsonDocument bsonDoc =
+        new BsonDocument()
+            .append("_id", new BsonString("anId"))
+            .append("text", new BsonString("some text"))
+            .append(
+                "annotations",
+                new BsonArray(
+                    List.of(
+                        new BsonDocument("id", new BsonString("uuid-1")),
+                        new BsonDocument("id", new BsonString("uuid-2")),
+                        new BsonDocument("id", new BsonString("uuid-3")))));
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    BsonDocument result =
+        AutoEmbeddingDocumentUtils.extractFilterFieldValues(
+            rawBsonDoc, AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorDef));
+
+    assertThat(result)
+        .isEqualTo(
+            new BsonDocument(
+                "annotations",
+                new BsonArray(
+                    List.of(
+                        new BsonDocument("id", new BsonString("uuid-1")),
+                        new BsonDocument("id", new BsonString("uuid-2")),
+                        new BsonDocument("id", new BsonString("uuid-3"))))));
+  }
+
+  @Test
+  public void extractFilterFieldValues_multipleFilterFieldsUnderSameArray_pairsByArrayIndex()
+      throws IOException {
+    // Two filter fields under the same array (annotations.id + annotations.type) must remain
+    // paired by array index in the reconstructed $set document.
+    List<VectorIndexFieldDefinition> fields =
+        List.of(
+            new VectorAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("text")),
+            new VectorIndexFilterFieldDefinition(FieldPath.parse("annotations.id")),
+            new VectorIndexFilterFieldDefinition(FieldPath.parse("annotations.type")));
+    VectorIndexDefinition vectorDef =
+        VectorIndexDefinitionBuilder.builder().setFields(fields).build();
+    BsonDocument bsonDoc =
+        new BsonDocument()
+            .append("_id", new BsonString("anId"))
+            .append("text", new BsonString("some text"))
+            .append(
+                "annotations",
+                new BsonArray(
+                    List.of(
+                        new BsonDocument("id", new BsonString("uuid-1"))
+                            .append("type", new BsonString("topic"))
+                            .append("score", new BsonDouble(0.9)),
+                        new BsonDocument("id", new BsonString("uuid-2"))
+                            .append("type", new BsonString("person"))
+                            .append("score", new BsonDouble(0.7)))));
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    BsonDocument result =
+        AutoEmbeddingDocumentUtils.extractFilterFieldValues(
+            rawBsonDoc, AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorDef));
+
+    // "score" is not in the index definition so it must be dropped, but id/type stay paired.
+    assertThat(result)
+        .isEqualTo(
+            new BsonDocument(
+                "annotations",
+                new BsonArray(
+                    List.of(
+                        new BsonDocument("id", new BsonString("uuid-1"))
+                            .append("type", new BsonString("topic")),
+                        new BsonDocument("id", new BsonString("uuid-2"))
+                            .append("type", new BsonString("person"))))));
+  }
+
+  @Test
+  public void extractFilterFieldValues_nestedSubdocFilter_buildsNestedDocument()
+      throws IOException {
+    // Filter path through a nested subdocument (not an array) must produce a nested $set, not a
+    // flat dotted key.
+    List<VectorIndexFieldDefinition> fields =
+        List.of(
+            new VectorAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("text")),
+            new VectorIndexFilterFieldDefinition(FieldPath.parse("meta.locale")));
+    VectorIndexDefinition vectorDef =
+        VectorIndexDefinitionBuilder.builder().setFields(fields).build();
+    BsonDocument bsonDoc =
+        new BsonDocument()
+            .append("_id", new BsonString("anId"))
+            .append("text", new BsonString("some text"))
+            .append(
+                "meta",
+                new BsonDocument("locale", new BsonString("en-US"))
+                    .append("region", new BsonString("NA")));
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    BsonDocument result =
+        AutoEmbeddingDocumentUtils.extractFilterFieldValues(
+            rawBsonDoc, AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorDef));
+
+    assertThat(result)
+        .isEqualTo(new BsonDocument("meta", new BsonDocument("locale", new BsonString("en-US"))));
+  }
+
+  @Test
+  public void extractFilterFieldValues_resultNeverContainsId() throws IOException {
+    // Guard the contract: the $set document must never include _id (MongoDB rejects updates to
+    // _id). The handler does not normally copy _id since it is not a passthrough field, but the
+    // helper strips it defensively in case a future index definition declares _id as a filter.
+    List<VectorIndexFieldDefinition> fields =
+        List.of(
+            new VectorAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("text")),
+            new VectorIndexFilterFieldDefinition(FieldPath.parse("color")));
+    VectorIndexDefinition vectorDef =
+        VectorIndexDefinitionBuilder.builder().setFields(fields).build();
+    BsonDocument bsonDoc =
+        new BsonDocument()
+            .append("_id", new BsonString("anId"))
+            .append("text", new BsonString("some text"))
+            .append("color", new BsonString("red"));
+    RawBsonDocument rawBsonDoc = new RawBsonDocument(bsonDoc, BsonUtils.BSON_DOCUMENT_CODEC);
+
+    BsonDocument result =
+        AutoEmbeddingDocumentUtils.extractFilterFieldValues(
+            rawBsonDoc, AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorDef));
+
+    assertThat(result.containsKey("_id")).isFalse();
+  }
+
   // Tests for addBsonValueToBsonDocument
 
   @Test

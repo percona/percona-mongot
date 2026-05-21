@@ -362,6 +362,18 @@ public class AutoEmbeddingDocumentUtils {
    * Extracts filter field values from the full document to build a $set document for partial
    * updates. Only includes fields that are defined as FILTER in the index definition.
    *
+   * <p>Reuses {@link MaterializedViewDocumentHandler} — the same traversal used by full MV writes —
+   * so the resulting $set document has the same nested structure (including arrays of subdocuments)
+   * as the MV produced by a full replace. This keeps the MV consistent with the source for Lucene
+   * replication and avoids MongoDB rejecting dotted-path updates that traverse arrays
+   * (CLOUDP-406702).
+   *
+   * <p>The returned document never contains a top-level {@code _id}. The MV document's {@code _id}
+   * is established by the upsert filter in {@link
+   * com.xgen.mongot.index.mongodb.MaterializedViewWriter} ({@code {_id: event.getDocumentId()}}),
+   * so the {@code $set} body is the right place to carry filter-field updates only — {@code _id}
+   * is already correct on the MV document and does not need to be re-set.
+   *
    * @param fullDocument the full document from the change stream event
    * @param fieldMapping the vector index field mapping
    * @return a BsonDocument containing only the filter field values for use with $set
@@ -369,12 +381,14 @@ public class AutoEmbeddingDocumentUtils {
   public static BsonDocument extractFilterFieldValues(
       RawBsonDocument fullDocument, AutoEmbedFieldMapping fieldMapping) {
     try {
-      var filterValuesCollector =
-          CollectFieldValueDocumentHandler.create(
-              fieldMapping, Optional.empty(), fieldMapping::isPassthrough, true);
-
-      BsonDocumentProcessor.process(fullDocument, filterValuesCollector);
-      return filterValuesCollector.toBsonDocument();
+      BsonDocument bsonDoc = new BsonDocument();
+      MaterializedViewDocumentHandler handler =
+          MaterializedViewDocumentHandler.create(fieldMapping, Optional.empty(), bsonDoc);
+      BsonDocumentProcessor.process(fullDocument, handler);
+      // _id is owned by the upsert filter (see Javadoc); strip it here so the contract holds even
+      // if a future index definition declares _id as a filter field.
+      bsonDoc.remove("_id");
+      return bsonDoc;
     } catch (Exception e) {
       LOG.warn(
           "Failed to extract filter field values, falling back to full document processing", e);
