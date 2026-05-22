@@ -371,6 +371,7 @@ public class GrpcStreamingServer implements CommandServer {
   @Override
   public void close() {
     LOG.info("Shutting down gRPC server.");
+    this.status = ServerStatus.NOT_STARTED;
     this.healthManager.enterTerminalState();
     Crash.because("failed to shut down gRPC server")
         .ifThrows(

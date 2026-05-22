@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import org.jetbrains.annotations.TestOnly;
 import org.slf4j.LoggerFactory;
 
@@ -88,6 +89,7 @@ public class DefaultLifecycleManager implements LifecycleManager {
   private Optional<SyncSourceConfig> syncSourceConfig;
 
   private final IndexLifecycleManager.Metrics metrics;
+  private final AtomicLong lifecycleInitialized;
 
   /**
    * A wrapper over the ReplicationManager that can be used across different instantiations of the
@@ -199,6 +201,9 @@ public class DefaultLifecycleManager implements LifecycleManager {
     this.initialized = false;
     this.shutdown = false;
     this.metrics = IndexLifecycleManager.Metrics.create(metricsFactory);
+    this.lifecycleInitialized =
+        new MetricsFactory("readiness", meterRegistry).numGauge("lifecycleInitialized");
+    this.lifecycleInitialized.set(0);
     if (enableInitAttributionMetrics) {
       ThreadPoolResourceMetrics.create("init").register(initExecutor, meterRegistry);
     }
@@ -216,6 +221,9 @@ public class DefaultLifecycleManager implements LifecycleManager {
               // TODO(CLOUDP-361594): Should we include MaterializedViewManager::initialized in
               // this method for HealthManager/ConfCall?
               && this.replicationManagerWrapper.currentReplicationManager.isInitialized();
+      if (this.initialized) {
+        this.lifecycleInitialized.set(1);
+      }
     }
     return this.initialized;
   }
@@ -310,6 +318,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
     // on the indexing executor. As one of the shutdown tasks is shutting down that executor, this
     // will hang forever.
     this.shutdown = true;
+    this.initialized = false;
+    this.lifecycleInitialized.set(0);
     this.replicationManagerWrapper.setReplicationEnabled(false);
     var shutdownExecutor =
         Executors.fixedSizeThreadPool("lifecycle-manager-shutdown", 1, this.meterRegistry);
