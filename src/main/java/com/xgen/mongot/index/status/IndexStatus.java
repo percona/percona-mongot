@@ -149,7 +149,9 @@ public class IndexStatus implements DocumentEncodable {
     /** Fails to resolve derived definition of an auto embedding index. */
     AUTO_EMBEDDING_RESOLUTION_FAILED,
     /** Fails to resolve derived definition of an auto embedding index but recoverable. */
-    AUTO_EMBEDDING_RESOLUTION_RETRY
+    AUTO_EMBEDDING_RESOLUTION_RETRY,
+    /** Failed to replicate during initial sync but recoverable. */
+    INITIAL_SYNC_REPLICATION_FAILED_RETRY
   }
 
   public static IndexStatus unknown() {

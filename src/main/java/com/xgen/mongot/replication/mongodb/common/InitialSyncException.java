@@ -302,6 +302,11 @@ public class InitialSyncException extends Exception {
         && mongoCommandException.getErrorCode() == Errors.INITIAL_SYNC_ID_MISMATCH.code;
   }
 
+  public static boolean isBsonTooLargeError(@Nullable Throwable cause) {
+    return cause instanceof MongoException mongoException
+        && mongoException.getCode() == Errors.BSON_OBJECT_TOO_LARGE.code;
+  }
+
   @SuppressWarnings("checkstyle:MissingJavadocMethod")
   public static boolean isNaturalOrderScanFailed(@Nullable Throwable cause) {
     if (cause == null) {

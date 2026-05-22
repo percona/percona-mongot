@@ -98,7 +98,9 @@ public class ReplicationIndexManager {
   /** The action taken when an index fails. */
   enum FailedIndexAction {
     DROP,
+    CLEAR,
     CLOSE,
+    RETAIN
   }
 
   /**
@@ -683,7 +685,7 @@ public class ReplicationIndexManager {
         if (InitialSyncException.isInitialSyncIdMismatched(throwable.getCause())) {
           Tags tags = Tags.of("reason", "initialSyncIdMismatched", "useNaturalOrderScan", "true");
           this.metricsFactory.counter("naturalOrderScanRetry", tags).increment();
-          scheduleResync(throwable, IndexStatus.initialSync());
+          failRetainOrResync(throwable, IndexStatus.initialSync());
           return;
         }
 
@@ -691,7 +693,12 @@ public class ReplicationIndexManager {
           this.isNaturalOrderScanSupported = false;
           Tags tags = Tags.of("reason", "ServerQueryFailed", "useNaturalOrderScan", "false");
           this.metricsFactory.counter("naturalOrderScanRetry", tags).increment();
-          scheduleResync(throwable, IndexStatus.initialSync());
+          failRetainOrResync(throwable, IndexStatus.initialSync());
+          return;
+        }
+
+        if (InitialSyncException.isBsonTooLargeError(throwable.getCause())) {
+          failClearOrResync(throwable, IndexStatus.initialSync());
           return;
         }
 
@@ -702,25 +709,37 @@ public class ReplicationIndexManager {
           if (MongoViewExceptionUtils.isViewPipelineRelated(cause)) {
             this.metricsFactory.counter("viewPipelineRelatedInitialSyncRetry").increment();
 
-            IndexStatus status =
-                IndexStatus.initialSync(
-                    MongoViewExceptionUtils.getViewPipelineErrorMessage(
-                        Check.isPresent(cause, "cause")));
+            String viewPipelineErrorMessage =
+                MongoViewExceptionUtils.getViewPipelineErrorMessage(
+                    Check.isPresent(cause, "cause"));
 
-            // Set index status so that the error message is exposed to the user
-            this.index.setStatus(status);
-
-            // Schedule resync with the same status. This way the error will only be cleared
-            // when we transition to STEADY and user won't observe flickering of the status
-            scheduleResync(throwable, status);
+            if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+              // Close the index with the view pipeline error message preserved in the
+              // FAILED status so the user can see what went wrong.
+              this.logger.error("Failing due to unexpected error.", throwable);
+              incrementFailedIndexCounter(FailedIndexAction.CLOSE, getState(), throwable);
+              transitionState(State.FAILED);
+              closeIndex(
+                  IndexStatus.failed(
+                      viewPipelineErrorMessage, Reason.INITIAL_SYNC_REPLICATION_FAILED));
+            } else {
+              IndexStatus status = IndexStatus.initialSync(viewPipelineErrorMessage);
+              // Set index status so that the error message is exposed to the user during
+              // backoff. The error will be cleared when we transition to STEADY after a
+              // successful resync.
+              this.index.setStatus(status);
+              scheduleResync(throwable, status);
+            }
             return;
           }
         }
 
         if (InitialSyncException.isNoQueryExecutionPlansError(throwable.getCause())) {
           this.metricsFactory.counter("retriedInitialSyncDueToNoQueryExecutionPlans").increment();
+          failCloseOrResync(throwable, IndexStatus.initialSync());
+          return;
         }
-        scheduleResync(throwable, IndexStatus.initialSync());
+        failRetainOrResync(throwable, IndexStatus.initialSync());
         return;
       }
       case RESUMABLE_TRANSIENT -> {
@@ -1250,6 +1269,86 @@ public class ReplicationIndexManager {
     incrementFailedIndexCounter(FailedIndexAction.CLOSE, getState(), throwable);
     transitionState(State.FAILED);
     closeIndex(IndexStatus.failed(failureMessage(FailedIndexAction.CLOSE, throwable), reason));
+  }
+
+  /**
+   * If RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK is enabled, retain the failed index data. Otherwise,
+   * attempt to resync the index.
+   *
+   * @param throwable the throwable that caused the failure
+   * @param indexStatus the index status to set on failure
+   */
+  void failRetainOrResync(Throwable throwable, IndexStatus indexStatus) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndRetainIndex(throwable);
+    } else {
+      // Old resync behavior.
+      scheduleResync(throwable, indexStatus);
+    }
+  }
+
+  /**
+   * If RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK is enabled, clear the failed index data. Otherwise,
+   * attempt to resync the index.
+   *
+   * @param throwable the throwable that caused the failure
+   * @param indexStatus the index status to set on failure
+   */
+  void failClearOrResync(Throwable throwable, IndexStatus indexStatus) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndClearIndex(throwable);
+    } else {
+      // Old resync behavior.
+      scheduleResync(throwable, indexStatus);
+    }
+  }
+
+  /**
+   * If RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK is enabled, close the failed index. Otherwise,
+   * attempt to resync the index.
+   *
+   * @param throwable the throwable that caused the failure
+   * @param indexStatus the index status to set on failure
+   */
+  void failCloseOrResync(Throwable throwable, IndexStatus indexStatus) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndCloseIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+    } else {
+      scheduleResync(throwable, indexStatus);
+    }
+  }
+
+  /**
+   * Clear the index data and mark the index as failed. The index data is removed but the index
+   * entry is preserved so recovery can create a new initial sync attempt.
+   *
+   * @param throwable the throwable that caused the failure
+   */
+  void failAndClearIndex(Throwable throwable) {
+    this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.CLEAR, getState(), throwable);
+    transitionState(State.FAILED);
+    clearIndex(
+        IndexStatus.failed(
+            failureMessage(FailedIndexAction.CLEAR, throwable),
+            Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY),
+        IndexCommitUserData.EMPTY);
+  }
+
+  /**
+   * Retain the data for the failed index and mark the failed index as recoverable.
+   *
+   * @param throwable the throwable that caused the failure
+   */
+  void failAndRetainIndex(Throwable throwable) {
+    this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.RETAIN, getState(), throwable);
+    transitionState(State.FAILED);
+    // Close keeps the current generation's index data on disk so a rebuild can reuse it.
+    closeIndex(
+        IndexStatus.failed(
+            failureMessage(FailedIndexAction.RETAIN, throwable),
+            Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY));
   }
 
   private String failureMessage(FailedIndexAction action, Throwable throwable) {

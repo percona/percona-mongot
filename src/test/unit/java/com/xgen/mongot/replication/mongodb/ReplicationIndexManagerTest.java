@@ -1417,6 +1417,233 @@ public class ReplicationIndexManagerTest {
   }
 
   @Test
+  public void testFailAndRetainIndex() throws Exception {
+    try (Mocks mocks = Mocks.validUserData()) {
+      // Wait for the manager to reach STEADY_STATE before invoking failAndRetainIndex,
+      // otherwise the background init thread may overwrite our state change.
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("initial sync failed");
+      mocks.manager.failAndRetainIndex(throwable);
+
+      // Index data should be kept on disk.
+      verify(mocks.index, timeout(1000)).close();
+      verify(mocks.index, never()).drop();
+
+      // Status should be FAILED with retryable reason.
+      Assert.assertSame(IndexStatus.StatusCode.FAILED, mocks.index.getStatus().getStatusCode());
+      Assert.assertSame(
+          IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY,
+          mocks.index.getStatus().getReason().orElseThrow());
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith("replication failed (action=retain): ");
+
+      // Metric should record a RETAIN action.
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.RETAIN, State.STEADY_STATE, Exception.class);
+    }
+  }
+
+  @Test
+  public void testFailRetainOrResync_flagEnabled_retainsIndex() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .enable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    try (Mocks mocks = Mocks.validUserData(featureFlags)) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("initial sync failed");
+      mocks.manager.failRetainOrResync(throwable, IndexStatus.initialSync());
+
+      // Index should be closed (data retained) but NOT dropped.
+      verify(mocks.index, timeout(1000)).close();
+      verify(mocks.index, never()).drop();
+
+      Assert.assertSame(IndexStatus.StatusCode.FAILED, mocks.index.getStatus().getStatusCode());
+      Assert.assertSame(
+          Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY,
+          mocks.index.getStatus().getReason().orElseThrow());
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith("replication failed (action=retain): ");
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.RETAIN, State.STEADY_STATE, Exception.class);
+    }
+  }
+
+  @Test
+  public void testFailRetainOrResync_flagDisabled_schedulesResync() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .disable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    try (Mocks mocks = Mocks.validUserData(featureFlags)) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("initial sync failed");
+      mocks.manager.failRetainOrResync(throwable, IndexStatus.initialSync());
+
+      // Resync should be scheduled: index is re-enqueued for initial sync.
+      verify(mocks.initialSyncQueue, timeout(5000))
+          .enqueue(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+
+      // Index should NOT be closed or dropped.
+      verify(mocks.index, never()).close();
+      verify(mocks.index, never()).drop();
+
+      mocks.assertStateTransitions(
+          State.STEADY_STATE, State.INITIAL_SYNC_BACKOFF);
+    }
+  }
+
+  @Test
+  public void testFailAndClearIndex() throws Exception {
+    try (Mocks mocks = Mocks.validUserData()) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("bson too large");
+      mocks.manager.failAndClearIndex(throwable);
+
+      // Index should be cleared but NOT dropped or closed.
+      verify(mocks.documentIndexer, timeout(1000)).clearIndex(IndexCommitUserData.EMPTY);
+      verify(mocks.index, never()).drop();
+
+      // Status should be FAILED with retryable reason.
+      Assert.assertSame(IndexStatus.StatusCode.FAILED, mocks.index.getStatus().getStatusCode());
+      Assert.assertSame(
+          IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY,
+          mocks.index.getStatus().getReason().orElseThrow());
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith("replication failed (action=clear): ");
+
+      // Metric should record a CLEAR action.
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLEAR, State.STEADY_STATE, Exception.class);
+    }
+  }
+
+  @Test
+  public void testFailClearOrResync_flagEnabled_clearsIndex() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .enable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    try (Mocks mocks = Mocks.validUserData(featureFlags)) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("bson too large");
+      mocks.manager.failClearOrResync(throwable, IndexStatus.initialSync());
+
+      // Index should be cleared but NOT dropped.
+      verify(mocks.documentIndexer, timeout(1000)).clearIndex(IndexCommitUserData.EMPTY);
+      verify(mocks.index, never()).drop();
+
+      Assert.assertSame(IndexStatus.StatusCode.FAILED, mocks.index.getStatus().getStatusCode());
+      Assert.assertSame(
+          Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY,
+          mocks.index.getStatus().getReason().orElseThrow());
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith("replication failed (action=clear): ");
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLEAR, State.STEADY_STATE, Exception.class);
+    }
+  }
+
+  @Test
+  public void testFailClearOrResync_flagDisabled_schedulesResync() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .disable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    try (Mocks mocks = Mocks.validUserData(featureFlags)) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("bson too large");
+      mocks.manager.failClearOrResync(throwable, IndexStatus.initialSync());
+
+      // Resync should be scheduled: index is re-enqueued for initial sync.
+      verify(mocks.initialSyncQueue, timeout(5000))
+          .enqueue(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+
+      // Index should NOT be closed or dropped.
+      verify(mocks.index, never()).close();
+      verify(mocks.index, never()).drop();
+
+      mocks.assertStateTransitions(
+          State.STEADY_STATE, State.INITIAL_SYNC_BACKOFF);
+    }
+  }
+
+  @Test
+  public void testFailCloseOrResync_flagEnabled_closesIndex() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .enable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    try (Mocks mocks = Mocks.validUserData(featureFlags)) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("no query execution plans");
+      mocks.manager.failCloseOrResync(throwable, IndexStatus.initialSync());
+
+      // Index should be closed but NOT dropped.
+      verify(mocks.index, timeout(1000)).close();
+      verify(mocks.index, never()).drop();
+
+      Assert.assertSame(IndexStatus.StatusCode.FAILED, mocks.index.getStatus().getStatusCode());
+      Assert.assertSame(
+          Reason.INITIAL_SYNC_REPLICATION_FAILED,
+          mocks.index.getStatus().getReason().orElseThrow());
+      assertThat(mocks.index.getStatus().getMessage().orElseThrow())
+          .startsWith("replication failed (action=close): ");
+      mocks.assertFailedIndexMetric(
+          FailedIndexAction.CLOSE, State.STEADY_STATE, Exception.class);
+    }
+  }
+
+  @Test
+  public void testFailCloseOrResync_flagDisabled_schedulesResync() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .disable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    try (Mocks mocks = Mocks.validUserData(featureFlags)) {
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> mocks.manager.getState() == State.STEADY_STATE);
+
+      Throwable throwable = new Exception("no query execution plans");
+      mocks.manager.failCloseOrResync(throwable, IndexStatus.initialSync());
+
+      // Resync should be scheduled: index is re-enqueued for initial sync.
+      verify(mocks.initialSyncQueue, timeout(5000))
+          .enqueue(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+
+      // Index should NOT be closed or dropped.
+      verify(mocks.index, never()).close();
+      verify(mocks.index, never()).drop();
+
+      mocks.assertStateTransitions(
+          State.STEADY_STATE, State.INITIAL_SYNC_BACKOFF);
+    }
+  }
+
+
+  @Test
   public void testValidateReasonForStatus()
       throws InvocationTargetException, IllegalAccessException, NoSuchMethodException {
     IndexStatus indexStatusInstance = new IndexStatus(IndexStatus.StatusCode.STEADY);
@@ -1703,6 +1930,19 @@ public class ReplicationIndexManagerTest {
           HANGING_SYNONYM_MANAGER,
           Optional.empty(),
           Optional.empty());
+    }
+
+    static Mocks validUserData(FeatureFlags featureFlags) throws Exception {
+      return create(
+          Optional.of(
+              IndexCommitUserData.createChangeStreamResume(
+                  RESUME_INFO, IndexFormatVersion.CURRENT)),
+          HANGING_INITIAL_SYNC_QUEUE,
+          HANGING_STEADY_STATE_MANAGER,
+          HANGING_SYNONYM_MANAGER,
+          Optional.empty(),
+          Optional.empty(),
+          Optional.of(featureFlags));
     }
 
     static Mocks initialSyncResumeCurrentIndexVersion(InitialSyncResumeInfo initialSyncResumeInfo)
