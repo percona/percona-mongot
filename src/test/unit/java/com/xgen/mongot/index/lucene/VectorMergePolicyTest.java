@@ -311,9 +311,12 @@ public class VectorMergePolicyTest {
                       makeSegment("_b", 10000, 0, 125),
                       makeSegment("_c", 1000, 0, 12),
                       makeSegment("_d", 10000, 0, 125))),
-              List.of(List.of("_a", "_c")),
+              // Sorted by heap (∝ maxDoc) ascending: _c(1k), _b(10k), _d(10k), _a(100k).
+              // Greedy accumulation by vec budget (1024MB): _c(12)+_b(125)+_d(125)=262, _a would
+              // push to 1162MB > 1024MB so _a is pruned. Result: [_b, _c, _d].
+              List.of(List.of("_b", "_c", "_d")),
               0,
-              2,
+              1,
               0,
               0),
           new PruneTestSpec(
@@ -323,7 +326,9 @@ public class VectorMergePolicyTest {
                       makeSegment("_a", 100000, 0, 900),
                       makeSegment("_c", 10000, 0, 90),
                       makeSegment("_b", 10000, 0, 90))),
-              List.of(List.of("_a", "_c")),
+              // Sorted by heap asc: _b and _c tie on heap (same maxDoc), broken by name → _b, _c,
+              // then _a. Accumulate: _b(90)+_c(90)=180, _a would push to 1080MB > 1024MB → pruned.
+              List.of(List.of("_b", "_c")),
               0,
               1,
               0,
@@ -492,6 +497,68 @@ public class VectorMergePolicyTest {
               0,
               2),
           new PruneTestSpec(
+              "greedySortByHeapPacksMoreSegments",
+              // 3 segments whose combined vec size exceeds the 1024MB budget, but any two fit.
+              // Segments have distinct maxDoc so they have genuinely different heap sizes:
+              //   _z: 10MB vec,  100 maxDoc  → smallest heap → sorted first
+              //   _y: 500MB vec, 5000 maxDoc → medium heap   → sorted second
+              //   _x: 600MB vec, 10000 maxDoc → largest heap → sorted last
+              // Greedy (heap-asc order: _z, _y, _x):
+              //   _z(10)+_y(500)=510 ≤ 1024; adding _x(600) → 1110 > 1024 → _x pruned.
+              //   Result: [_y, _z].
+              // Without sort, if parent presents [_x, _y, _z]:
+              //   _x(600)+_y(500)=1100 > 1024 → _y skipped; _x+_z=610 → [_x, _z].
+              //   Different result — the heap-ascending sort genuinely changes which segments win.
+              List.of(
+                  List.of(
+                      makeSegment("_x", 10000, 0, 600),
+                      makeSegment("_y", 5000, 0, 500),
+                      makeSegment("_z", 100, 0, 10))),
+              // Heap-asc sort: _z(100 maxDoc) < _y(5000) < _x(10000).
+              // _z(10)+_y(500)=510 ≤ 1024; _x(600) would push to 1110 → pruned.
+              List.of(List.of("_y", "_z")),
+              0,
+              1,
+              0,
+              0),
+          new PruneTestSpec(
+              "greedySortIsStableAcrossInputOrder",
+              // Same segments as greedySortByHeapPacksMoreSegments but presented in reverse order
+              // to the policy. Verifies that the result is order-independent.
+              List.of(
+                  List.of(
+                      makeSegment("_z", 100, 0, 10),
+                      makeSegment("_y", 5000, 0, 500),
+                      makeSegment("_x", 10000, 0, 600))),
+              List.of(List.of("_y", "_z")),
+              0,
+              1,
+              0,
+              0),
+          new PruneTestSpec(
+              "greedyDeletePriorityPreventsCrowdOut",
+              // Verifies that a delete-bearing segment is not crowded out by clean segments.
+              // Vec budget: 1024MB. _del(10MB, 1 delete), _big1(600MB, 0 deletes), _big2(500MB,
+              // 0 deletes). All have small maxDoc so heap is negligible.
+              // Without delete priority: if parent presents [_big1, _big2, _del],
+              //   _big1(600)+_big2(500)=1100>1024 → _big2 skipped; _big1(600)+_del(10)=610 ≤ 1024
+              //   → [_big1, _del]. But if presented as [_big2, _big1, _del]:
+              //   _big2(500)+_big1(600)=1100 → _big1 skipped; _big2(500)+_del(10)=510 → [_big2,
+              //   _del]. The result is order-dependent and _del may or may not be included.
+              // With delete priority: sort order is _del(has deletes) first, then _big1 (name <
+              //   _big2), then _big2. Greedy: _del(10)+_big1(600)=610 ≤ 1024; adding _big2 would
+              //   push to 1110 > 1024 → _big2 pruned. Result: always [_big1, _del].
+              List.of(
+                  List.of(
+                      makeSegment("_big1", 1000, 0, 600),
+                      makeSegment("_big2", 1000, 0, 500),
+                      makeSegment("_del", 1000, 1, 10))),
+              List.of(List.of("_big1", "_del")),
+              0,
+              1,
+              0,
+              0),
+          new PruneTestSpec(
               "heapPruneSegmentsGlobalBudget",
               List.of(
                   List.of(
@@ -583,10 +650,13 @@ public class VectorMergePolicyTest {
           NO_EPSILON);
 
       // Create 3 merges:
-      // * a large one that schedules due to deleted docs estimation.
-      // * a moderate size discarded merge.
-      // * a small one that schedules.
-      // Verify budget bytes after scheduling and when a completion occurs.
+      // * a greedy-pruned merge: [_a(100k,100del,1000MB), _b(80k,40000del,800MB)].
+      //   Prorated vec sizes: _a≈999MB, _b=400MB. Sorted deletes-first then heap asc: _b < _a.
+      //   Greedy: _b(400) fits; adding _a would push to 1399MB > 1024MB → _a pruned.
+      //   → merge acquires 400MB.
+      // * a single-segment merge: [_c(100k,40000del,1000MB)] → prorated 600MB → acquires 600MB.
+      // * a small merge: [_d(1k,0,10MB), _e(1k,0,10MB)] → 20MB total → acquires 20MB.
+      // All three fit within the global budget (1536MB): 400+600+20=1020MB.
       var spec =
           policy.maybePruneMergeSpecification(
               makeMergeSpec(
@@ -598,7 +668,7 @@ public class VectorMergePolicyTest {
                       List.of(makeSegment("_d", 1000, 0, 10), makeSegment("_e", 1000, 0, 10)))),
               FAKE_MERGE_CONTEXT);
       Assert.assertEquals(
-          1019 << 20,
+          1020 << 20,
           meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(),
           NO_EPSILON);
       double heapAfterSchedule =
@@ -607,9 +677,10 @@ public class VectorMergePolicyTest {
           "Expected heap-used > 0 after scheduling vector merges, got " + heapAfterSchedule,
           heapAfterSchedule > 0);
 
+      // Release merge at index 1 (_c, 600MB): 1020-600=420MB remaining.
       spec.merges.get(1).mergeFinished(true, false);
       Assert.assertEquals(
-          999 << 20,
+          420 << 20,
           meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(),
           NO_EPSILON);
       double heapAfterOneFinished =
@@ -623,7 +694,15 @@ public class VectorMergePolicyTest {
           heapAfterOneFinished < heapAfterSchedule);
       Assert.assertTrue(heapAfterOneFinished > 0);
 
+      // Release merge at index 0 (_b greedy result, 400MB): 420-400=20MB remaining.
       spec.merges.get(0).mergeFinished(true, false);
+      Assert.assertEquals(
+          20 << 20,
+          meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(),
+          NO_EPSILON);
+
+      // Release merge at index 2 (_d+_e, 20MB): 20-20=0.
+      spec.merges.get(2).mergeFinished(true, false);
       Assert.assertEquals(
           0.0, meterRegistry.find("vectorMergePolicy.budgetBytesUsed").gauge().value(), NO_EPSILON);
       Assert.assertEquals(

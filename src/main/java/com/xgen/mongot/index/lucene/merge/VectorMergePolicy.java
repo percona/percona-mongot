@@ -704,7 +704,19 @@ public class VectorMergePolicy extends FilterMergePolicy {
     @Var long totalVectorBytes = 0;
     @Var long totalSegmentHeapBytes = 0;
 
-    for (SegmentVectorSize segment : sizedSegments) {
+    // Sort so that segments with deletes are packed first (ensuring they are not crowded out by
+    // clean segments), then by heap size ascending within each group so smaller segments are
+    // accumulated first, maximizing the total number of segments that fit within the budget
+    // regardless of the order the parent policy presents them.
+    List<SegmentVectorSize> sorted =
+        sizedSegments.stream()
+            .sorted(
+                Comparator.comparingInt((SegmentVectorSize s) -> s.info.getDelCount() > 0 ? 0 : 1)
+                    .thenComparingLong(s -> s.segmentHeapByteSize)
+                    .thenComparing(s -> s.info.info.name))
+            .toList();
+
+    for (SegmentVectorSize segment : sorted) {
       if (segment.vectorByteSize < this.maxVectorInputBytes
           && segment.segmentHeapByteSize < this.segmentHeapBytesBudget) {
         long newVectorBytes = totalVectorBytes + segment.vectorByteSize;
