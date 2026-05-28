@@ -1,13 +1,4 @@
-load("//bazel/java:test.bzl", "java_test_suite", "mongot_java_unit_test_suite")
-
-mongot_java_unit_test_suite(
-    name = "lib",
-    exclude_files = ["ScrapeCacheTest.java"],
-    deps = [
-        "//src/main/java/com/xgen/mongot/metrics/cache",
-        "@maven//:junit_junit",
-    ],
-)
+load("//bazel/java:test.bzl", "java_test_suite")
 
 java_test_suite(
     name = "cache",
@@ -15,6 +6,7 @@ java_test_suite(
     tags = ["unit"],
     deps = [
         "//src/main/java/com/xgen/mongot/metrics/cache",
+        "@maven//:io_micrometer_micrometer_registry_prometheus",
         "@maven//:junit_junit",
     ],
 )

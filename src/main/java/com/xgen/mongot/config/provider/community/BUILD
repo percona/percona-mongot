@@ -67,6 +67,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/lifecycle",
         "//src/main/java/com/xgen/mongot/logging",
         "//src/main/java/com/xgen/mongot/metrics",
+        "//src/main/java/com/xgen/mongot/metrics/cache",
         "//src/main/java/com/xgen/mongot/metrics/ftdc",
         "//src/main/java/com/xgen/mongot/metrics/prometheus",
         "//src/main/java/com/xgen/mongot/metrics/system",

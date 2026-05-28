@@ -1,9 +1,11 @@
 package com.xgen.mongot.metrics.prometheus;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.sun.net.httpserver.HttpServer;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.metrics.cache.ScrapeCache;
+import com.xgen.mongot.metrics.cache.ScrapeCacheConfig;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
@@ -15,8 +17,10 @@ import io.micrometer.prometheusmetrics.PrometheusNamingConvention;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import org.slf4j.Logger;
@@ -40,9 +44,10 @@ public class PrometheusServer {
   private final HttpServer server;
   private final PrometheusMeterRegistry prometheusMeterRegistry;
 
+  // Serves cached registry scrape output per request.
   private final Optional<ScrapeCache> scrapeCache;
 
-  public PrometheusServer(
+  private PrometheusServer(
       HttpServer server,
       PrometheusMeterRegistry prometheusMeterRegistry,
       Optional<ScrapeCache> scrapeCache) {
@@ -64,12 +69,31 @@ public class PrometheusServer {
       InetSocketAddress address,
       Iterable<Tag> commonTags,
       List<MeterFilter> filters,
-      FeatureFlags featureFlags) {
-    var prometheusRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+      FeatureFlags featureFlags,
+      ScrapeCacheConfig scrapeCacheConfig) {
+    return startInternal(
+        address,
+        new PrometheusMeterRegistry(PrometheusConfig.DEFAULT),
+        commonTags,
+        filters,
+        featureFlags,
+        scrapeCacheConfig,
+        /* preWarmCache= */ true,
+        Optional.empty());
+  }
 
-    PrometheusNamingConvention mongotPrometheusNamingConvention =
-        new MongotPrometheusNamingConvention();
-    prometheusRegistry.config().namingConvention(mongotPrometheusNamingConvention);
+  /** Test-visible entry point. */
+  @VisibleForTesting
+  static PrometheusServer startInternal(
+      InetSocketAddress address,
+      PrometheusMeterRegistry prometheusRegistry,
+      Iterable<Tag> commonTags,
+      List<MeterFilter> filters,
+      FeatureFlags featureFlags,
+      ScrapeCacheConfig scrapeCacheConfig,
+      boolean preWarmCache,
+      Optional<Executor> httpExecutor) {
+    prometheusRegistry.config().namingConvention(new MongotPrometheusNamingConvention());
     prometheusRegistry.config().commonTags(commonTags);
     filters.forEach(filter -> prometheusRegistry.config().meterFilter(filter));
 
@@ -79,15 +103,21 @@ public class PrometheusServer {
             .publishPercentiles(0.5, 0.75, 0.9, 0.99)
             .register(prometheusRegistry);
 
-    // Configure metrics supplier
-    Optional<ScrapeCache> scrapeCache;
+    Optional<ScrapeCache> scrapeCache =
+        featureFlags.isEnabled(Feature.METRICS_CACHE)
+            ? Optional.of(new ScrapeCache(prometheusRegistry, scrapeCacheConfig))
+            : Optional.empty();
+    // Eager pre-warm with no timeout so the first /metrics request doesn't pay cold-start cost.
+    if (preWarmCache) {
+      scrapeCache.ifPresent(c -> c.get(ScrapeCache.NO_TIMEOUT));
+    }
+
     Supplier<String> scrapeSupplier;
-    if (featureFlags.isEnabled(Feature.METRICS_CACHE)) {
-      ScrapeCache cache = new ScrapeCache(prometheusRegistry::scrape);
-      scrapeCache = Optional.of(cache);
-      scrapeSupplier = cache::get;
+    if (scrapeCache.isPresent()) {
+      ScrapeCache c = scrapeCache.get();
+      Duration httpScrapeTimeout = Duration.ofSeconds(scrapeCacheConfig.scrapeTimeoutSec());
+      scrapeSupplier = () -> c.get(httpScrapeTimeout);
     } else {
-      scrapeCache = Optional.empty();
       scrapeSupplier = prometheusRegistry::scrape;
     }
 
@@ -100,7 +130,6 @@ public class PrometheusServer {
 
     try {
       HttpServer server = HttpServer.create(address, 0);
-
       server.createContext(
           ENDPOINT_PATH,
           httpExchange -> {
@@ -112,10 +141,8 @@ public class PrometheusServer {
               os.write(bytes);
             }
           });
-
-      server.setExecutor(null);
+      server.setExecutor(httpExecutor.orElse(null));
       server.start();
-
       return new PrometheusServer(server, prometheusRegistry, scrapeCache);
     } catch (IOException e) {
       throw new RuntimeException(e);

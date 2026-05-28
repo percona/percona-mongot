@@ -46,6 +46,7 @@ import com.xgen.mongot.lifecycle.LifecycleConfig;
 import com.xgen.mongot.logging.Logging;
 import com.xgen.mongot.metrics.Instrumentation;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
+import com.xgen.mongot.metrics.cache.ScrapeCacheConfig;
 import com.xgen.mongot.metrics.ftdc.Ftdc;
 import com.xgen.mongot.metrics.ftdc.FtdcConfig;
 import com.xgen.mongot.metrics.ftdc.FtdcMetadata;
@@ -365,7 +366,9 @@ public class CommunityMongotBootstrapper {
     }
 
     var address = CommunityMongotBootstrapper.parseInetSocketAddress(metricsConfig.address());
-    return Optional.of(PrometheusServer.start(address, List.of(), List.of(), featureFlags));
+    return Optional.of(
+        PrometheusServer.start(
+            address, List.of(), List.of(), featureFlags, ScrapeCacheConfig.DEFAULT));
   }
 
   private static Optional<SystemMetricsInstrumentation> maybeStartSystemMetrics(
