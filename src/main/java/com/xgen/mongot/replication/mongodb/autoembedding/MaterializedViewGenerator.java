@@ -129,6 +129,17 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   }
 
   /**
+   * Clears the cached leader flag and the leader-status gauge in lockstep. Idempotent. Lock
+   * order: manager → generator (caller in {@link MaterializedViewManager} holds the manager
+   * monitor; this method takes the generator monitor briefly), matching the existing
+   * {@link MaterializedViewManager#transitionToFollower} → {@link #shutdown()} path.
+   */
+  synchronized void clearLeaderState() {
+    this.isLeader = false;
+    this.matViewIndex.setLeaderMode(false);
+  }
+
+  /**
    * Transitions this generator to leader mode and starts the replication loop. In leader mode, the
    * generator runs the full replication lifecycle (initial sync, steady state) and writes to the
    * materialized view collection.
@@ -172,12 +183,10 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   /** Initializes the replication loop. Called by becomeLeader() to start replication. */
   private synchronized void initReplication() {
     super.init();
-    // If init() transitioned to a terminal state (e.g. stale index detected → SHUT_DOWN),
-    // clear the leader flag since a terminal generator cannot act as leader.
-    State state = this.getState();
-    if (state == State.SHUT_DOWN || state == State.FAILED) {
-      this.isLeader = false;
-      this.matViewIndex.setLeaderMode(false);
+    // init() may transition to a terminal state (stale index → SHUT_DOWN, exceededIndex →
+    // FAILED_EXCEEDED); a terminal generator cannot act as leader.
+    if (MaterializedViewManager.TERMINAL_STATES.contains(this.getState())) {
+      clearLeaderState();
     }
   }
 

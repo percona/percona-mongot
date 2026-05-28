@@ -5,6 +5,7 @@ import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getC
 import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getSyncBatchMongoClient;
 import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getSyncSourceHost;
 import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State.FAILED;
+import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State.FAILED_EXCEEDED;
 import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State.SHUT_DOWN;
 import static com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig.Type.AUTO_EMBEDDING;
 import static com.xgen.mongot.util.Check.checkState;
@@ -109,10 +110,14 @@ public class MaterializedViewManager implements ReplicationManager {
 
   public static final String STATE_LABEL = "state";
 
-  // Set of terminal states for a MaterializedViewGenerator that disqualifies it from being used,
-  // for materializedViewGenerator, FAILED_EXCEEDED and STEADY_STATE_SHUT_DOWN wont reached.
-  private static final Set<ReplicationIndexManager.State> TERMINAL_STATES =
-      Set.of(SHUT_DOWN, FAILED);
+  // Sticky terminal states that disqualify a generator from holding a matview lease. Shared
+  // by emitHeartbeat (release these leases), refreshStatus (skip acquisition for these), and
+  // MaterializedViewGenerator.initReplication (clear leader state on terminal init).
+  // STEADY_STATE_SHUT_DOWN is intentionally excluded — it is a transient pre-classification
+  // state in handleSteadyStateException and the classifier can transition back to non-terminal
+  // for recoverable cases (transient errors, renames, invalidates, resyncs).
+  static final Set<ReplicationIndexManager.State> TERMINAL_STATES =
+      Set.of(SHUT_DOWN, FAILED, FAILED_EXCEEDED);
 
   // ==================== Common Fields ====================
 
@@ -742,6 +747,9 @@ public class MaterializedViewManager implements ReplicationManager {
     }
   }
 
+  // TODO(CLOUDP-408738): holds the manager monitor across existingGenerator.shutdown(), which
+  // can be slow for STEADY_STATE generators and blocks refreshStatus. Defer the shutdown
+  // future outside the monitor and track it via pendingShutdowns.
   /**
    * Transitions a generator from leader to follower mode by shutting down the old generator and
    * replacing it with a new follower generator. This is called when leadership is lost (e.g., due
@@ -1231,40 +1239,91 @@ public class MaterializedViewManager implements ReplicationManager {
       return;
     }
 
-    // Delegate to lease manager for lease renewal (no-op for static, renews for dynamic)
-    this.leaseManager.heartbeat();
+    boolean isDynamicLeader = this.leaseManager instanceof DynamicLeaderLeaseManager;
 
-    // Dynamic leader election only: detect generators that lost leadership and replace them
-    // with new follower generators. This handles the case where leadership was lost in
-    // DynamicLeaderLeaseManager (e.g., due to failed lease renewal).
-    if (this.leaseManager instanceof DynamicLeaderLeaseManager) {
+    // Pass 1 (pre-renewal): release leases for terminal-state generators so this tick does
+    // not waste a renewal on them. State-based — independent of the cached isLeader flag,
+    // which can stay stale (e.g., async failAndDropIndex does not clear the subclass field).
+    // Terminal states are sticky, so the outer state read is observation-safe.
+    if (isDynamicLeader) {
       getMatViewGenerators()
           .forEach(
               (uuid, generator) -> {
                 var generationId = generator.getIndexGeneration().getGenerationId();
-                if (generator.isLeader()) {
-                  if (!this.leaseManager.isLeader(generationId)) {
-                    LOG.atInfo()
-                        .addKeyValue("indexId", generationId.indexId)
-                        .addKeyValue("generationId", generationId)
-                        .log("Detected leadership loss, replacing with follower generator");
-                    transitionToFollower(uuid, generator);
-                  }
-                } else if (TERMINAL_STATES.contains(generator.getState())
+
+                if (TERMINAL_STATES.contains(generator.getState())
                     && this.leaseManager.isLeader(generationId)) {
-                  // Zombie lease: generator is in a terminal state but the lease manager
-                  // still has it in leaderGenerationIds. This can happen if becomeLeader()
-                  // -> initReplication() fails -> failAndDropIndex() puts the generator in
-                  // FAILED with isLeader=false, but nobody called becomeFollower() on the
-                  // lease manager. Without this, the heartbeat renews the lease indefinitely,
-                  // blocking all other nodes from acquiring it.
-                  LOG.atWarn()
-                      .addKeyValue("generationId", generationId)
-                      .addKeyValue("state", generator.getState())
-                      .log(
-                          "Generator in terminal state but lease still held — "
-                              + "releasing lease so another node can acquire");
-                  this.leaseManager.releaseLeadership(generationId);
+                  // Re-read under the manager monitor and verify object identity. Guards
+                  // against the same-genId replaceGenerator race (Lucene-only change /
+                  // oplog falloff resync swaps the generator instance at this genId):
+                  // without this, we could release the new generator's lease.
+                  synchronized (this) {
+                    var current = getMatViewGenerator(generationId);
+                    if (current.isPresent() && current.get() == generator) {
+                      LOG.atWarn()
+                          .addKeyValue("generationId", generationId)
+                          .addKeyValue("state", generator.getState())
+                          .log(
+                              "Generator in terminal state but lease still held — "
+                                  + "stopping local lease renewal so another node can "
+                                  + "acquire after lease TTL expiry");
+                      this.leaseManager.releaseLeadership(generationId);
+                      // Clear cached flag + leader-status gauge in lockstep with the lease.
+                      // failAndRetainIndex / shutDownReplicationOnStale* paths never reach
+                      // index.close(), so without this the gauge stays at 1 indefinitely.
+                      generator.clearLeaderState();
+                    } else {
+                      LOG.atWarn()
+                          .addKeyValue("generationId", generationId)
+                          .log(
+                              "Skipped lease release: snapshot generator no longer matches "
+                                  + "live map (same-genId replaceGenerator race)");
+                    }
+                  }
+                }
+              });
+    }
+
+    this.leaseManager.heartbeat();
+
+    // Pass 2 (post-renewal): detect lost leadership and transition to follower. Runs AFTER
+    // the renewal call so this tick's renewal failures (OCC contention, partition) are
+    // visible immediately instead of next tick. Terminal generators were already handled
+    // by pass 1 and are excluded here.
+    if (isDynamicLeader) {
+      getMatViewGenerators()
+          .forEach(
+              (uuid, generator) -> {
+                var generationId = generator.getIndexGeneration().getGenerationId();
+                if (!TERMINAL_STATES.contains(generator.getState())
+                    && generator.isLeader()
+                    && !this.leaseManager.isLeader(generationId)) {
+                  // Inside the manager monitor: re-verify object identity AND non-terminal
+                  // state. Identity check guards against a same-genId replaceGenerator
+                  // landing between snapshot and here (transitionToFollower's unconditional
+                  // map put would otherwise overwrite the new generator). State re-check
+                  // guards against an async terminal transition between the outer guard and
+                  // this point — without it we'd shut down a now-terminal generator that
+                  // pass 1 of the next tick will handle correctly anyway.
+                  synchronized (this) {
+                    var current = getMatViewGenerator(generationId);
+                    if (current.isPresent()
+                        && current.get() == generator
+                        && !TERMINAL_STATES.contains(generator.getState())) {
+                      LOG.atInfo()
+                          .addKeyValue("indexId", generationId.indexId)
+                          .addKeyValue("generationId", generationId)
+                          .log("Detected leadership loss, replacing with follower generator");
+                      transitionToFollower(uuid, generator);
+                    } else {
+                      LOG.atWarn()
+                          .addKeyValue("generationId", generationId)
+                          .addKeyValue("state", generator.getState())
+                          .log(
+                              "Skipped transitionToFollower: same-genId replaceGenerator "
+                                  + "race, or state flipped terminal under us");
+                    }
+                  }
                 }
               });
     }

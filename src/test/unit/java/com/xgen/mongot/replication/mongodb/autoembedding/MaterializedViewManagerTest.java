@@ -9,6 +9,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -84,6 +85,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
@@ -1666,6 +1668,36 @@ public class MaterializedViewManagerTest {
   }
 
   @Test
+  public void dynamicLeader_acquireLease_skipsGeneratorInFailedExceededState() {
+    // refreshStatus must skip lease acquisition for FAILED_EXCEEDED, just like FAILED and
+    // SHUT_DOWN. Both acquirable-lease guards gate on TERMINAL_STATES.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    // Simulate the generator entering FAILED_EXCEEDED state (e.g., exceededIndex via
+    // FIELD_EXCEEDED in initial sync or steady state, or DOCS_EXCEEDED in initial sync).
+    doReturn(ReplicationIndexManager.State.FAILED_EXCEEDED).when(generator).getState();
+
+    // Configure pollFollowerStatuses to return this generation as acquirable.
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+
+    // Run the status refresh.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // tryAcquireLeadership should NOT be called because FAILED_EXCEEDED is terminal.
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(any());
+    verify(generator, never()).becomeLeader();
+  }
+
+  @Test
   public void dynamicLeader_acquireLease_succeedsForHealthyGenerator() {
     // When a generator is in INITIAL_SYNC state (healthy) and the lease becomes acquirable,
     // refreshStatus should attempt and succeed in acquiring leadership.
@@ -1878,6 +1910,43 @@ public class MaterializedViewManagerTest {
   }
 
   @Test
+  public void dynamicLeader_heartbeatTransitionsToFollower_whenRenewalLosesLeadership() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator).becomeLeader();
+    assertTrue(generator.isLeader());
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    AtomicBoolean leaseManagerIsLeader = new AtomicBoolean(true);
+    when(mocks.leaseManager.isLeader(matViewGenId))
+        .thenAnswer(invocation -> leaseManagerIsLeader.get());
+    doAnswer(
+            invocation -> {
+              leaseManagerIsLeader.set(false);
+              return null;
+            })
+        .when(mocks.leaseManager)
+        .heartbeat();
+
+    Mockito.clearInvocations(mocks.leaseManager, mocks.materializedViewGeneratorFactory);
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    InOrder inOrder = Mockito.inOrder(mocks.leaseManager, mocks.materializedViewGeneratorFactory);
+    inOrder.verify(mocks.leaseManager).heartbeat();
+    inOrder.verify(mocks.materializedViewGeneratorFactory).create(matViewIndexGen);
+    verify(generator).shutdown();
+  }
+
+  @Test
   public void dynamicLeader_transitionToFollower_rollsPendingShutdownOnFactoryFailure() {
     // If factory.create() throws, we still install the ex-leader shutdown future in
     // pendingShutdowns (same as the success path) so refreshStatus can wait for shutdown + queue
@@ -2028,6 +2097,261 @@ public class MaterializedViewManagerTest {
     heartbeatCaptor.getValue().run();
 
     verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+  }
+
+  // ==================== Zombie lease detection — state-based =====================================
+  //
+  // On the async failAndDropIndex path, MaterializedViewGenerator.isLeader stays true even
+  // though state has transitioned to FAILED. Heartbeat must release the lease based on state
+  // alone, independent of the cached isLeader flag.
+
+  @Test
+  public void dynamicLeader_heartbeat_releasesLease_whenStateFailedAndIsLeaderStuckTrue() {
+    // Production-realistic: state=FAILED, cached isLeader=true. Heartbeat releases anyway.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator).becomeLeader();
+    assertTrue(generator.isLeader());
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    doReturn(ReplicationIndexManager.State.FAILED).when(generator).getState();
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+    // Gauge must drop with the lease, even on terminal paths that never close the index.
+    verify(generator).clearLeaderState();
+  }
+
+  @Test
+  public void dynamicLeader_heartbeat_releasesLease_whenStateShutDown() {
+    // Direct-to-SHUT_DOWN paths (dropIndex no-arg, shutdownReplicationOnStaleIndex,
+    // handleInitialSyncException case SHUT_DOWN) bypass failAndDropIndex / failAndCloseIndex,
+    // so any per-method override approach would miss them.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    doReturn(ReplicationIndexManager.State.SHUT_DOWN).when(generator).getState();
+    doReturn(true).when(generator).isLeader();
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+  }
+
+  @Test
+  public void dynamicLeader_heartbeat_releasesLease_whenStateFailedExceeded() {
+    // exceededIndex transitions to FAILED_EXCEEDED. Reachable for matview generators via
+    // initial-sync and steady-state FIELD_EXCEEDED. Heartbeat must treat it as terminal.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    doReturn(ReplicationIndexManager.State.FAILED_EXCEEDED).when(generator).getState();
+    doReturn(true).when(generator).isLeader();
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+  }
+
+  @Test
+  public void dynamicLeader_heartbeat_doesNotReleaseLease_whenStateSteadyStateShutDown() {
+    // STEADY_STATE_SHUT_DOWN is transient: the post-stop classifier can transition back to
+    // STEADY_STATE or INITIAL_SYNC. Treating it as terminal would churn the leader on every
+    // transient hiccup. Must NOT be in TERMINAL_STATES.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    doReturn(ReplicationIndexManager.State.STEADY_STATE_SHUT_DOWN).when(generator).getState();
+    doReturn(true).when(generator).isLeader();
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    verify(mocks.leaseManager, never()).releaseLeadership(matViewGenId);
+  }
+
+  @Test
+  public void dynamicLeader_heartbeat_skipsTransitionToFollower_whenSnapshotGeneratorReplacedInMap()
+      throws Exception {
+    // Same-genId race on the leadership-loss branch: the heartbeat snapshot captured the
+    // OLD generator, but a concurrent replaceGenerator swapped a NEW one at the same uuid.
+    // Without the identity check, transitionToFollower would overwrite the new generator.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator oldGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(oldGenerator).becomeLeader();
+    assertTrue(oldGenerator.isLeader());
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    UUID matViewUuid = mocks.manager.getCollectionUuid(matViewGenId);
+
+    // Old generator is healthy (non-terminal) but with stale cached isLeader=true.
+    doReturn(ReplicationIndexManager.State.STEADY_STATE).when(oldGenerator).getState();
+    doReturn(true).when(oldGenerator).isLeader();
+
+    // Lease manager says we no longer hold the lease — leadership-loss condition.
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
+
+    // Construct a fresh "new" healthy generator with the same generationId. This simulates
+    // the post-state of a same-genId replaceGenerator (Lucene-only change / oplog falloff).
+    MaterializedViewGenerator newGenerator = mock(MaterializedViewGenerator.class);
+    when(newGenerator.getIndexGeneration()).thenReturn(matViewIndexGen);
+    doReturn(false).when(newGenerator).isLeader();
+    doReturn(ReplicationIndexManager.State.INITIALIZING).when(newGenerator).getState();
+
+    // Use reflection to swap the live map entry during the leadership-loss pass,
+    // simulating a concurrent same-genId replaceGenerator. emitHeartbeat() runs two passes
+    // (state-based release, then leadership-loss after lease renewal); both call
+    // generator.getIndexGeneration() at the top of each iteration. Gate the swap to the
+    // 2nd call so:
+    //   • Pass 1's snapshot still contains oldGenerator (its release-branch conditions
+    //     don't match anyway since STEADY_STATE isn't terminal).
+    //   • Pass 2's snapshot still contains oldGenerator (taken before the 2nd Answer fires).
+    //   • Just after pass 2 enters the iteration body, the swap installs newGenerator in
+    //     the live map.
+    //   • When transitionToFollower (or the proposed identity check) calls
+    //     getMatViewGenerator(genId), the live map returns newGenerator. Identity check
+    //     against oldGenerator must reject the transition.
+    java.lang.reflect.Field mapField =
+        MaterializedViewManager.class.getDeclaredField("managedMaterializedViewGenerators");
+    mapField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Map<UUID, MaterializedViewGenerator> liveMap =
+        (Map<UUID, MaterializedViewGenerator>) mapField.get(mocks.manager);
+
+    java.util.concurrent.atomic.AtomicInteger getIndexGenCallCount =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+    doAnswer(
+            inv -> {
+              if (getIndexGenCallCount.incrementAndGet() == 2) {
+                // 2nd call = top of pass 2's iteration. Snapshot was already taken;
+                // mutate the live map now so the synchronized identity check sees the
+                // new generator.
+                liveMap.put(matViewUuid, newGenerator);
+              }
+              return matViewIndexGen;
+            })
+        .when(oldGenerator)
+        .getIndexGeneration();
+
+    Mockito.clearInvocations(mocks.materializedViewGeneratorFactory);
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    // transitionToFollower must NOT have fired: identity check rejected because
+    // getMatViewGenerator(genId) returned newGenerator, not oldGenerator.
+    //
+    // If it HAD fired, the factory would have been called to create a new follower
+    // generator. Verify that didn't happen.
+    verify(mocks.materializedViewGeneratorFactory, never()).create(matViewIndexGen);
+
+    // The healthy newGenerator must still be the value in the live map; not displaced by
+    // a fresh follower instance.
+    assertSame(
+        "Same-genId race: leadership-loss heartbeat must not overwrite the new generator "
+            + "installed by a concurrent replaceGenerator (would happen via "
+            + "transitionToFollower's unconditional managedMaterializedViewGenerators.put).",
+        newGenerator,
+        liveMap.get(matViewUuid));
+  }
+
+  @Test
+  public void dynamicLeader_heartbeat_skipsTransitionToFollower_whenStateFlipsTerminalMidCheck() {
+    // Race: state flips non-terminal → terminal between pass 2's outer guard (outside the
+    // manager monitor) and the synchronized identity check. The inner state re-check inside
+    // the synchronized block (atomic with the identity check) catches this and skips
+    // transitionToFollower; pass 1 of the next tick will release the lease.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator).becomeLeader();
+    assertTrue(generator.isLeader());
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    doReturn(true).when(generator).isLeader();
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
+
+    // Stateful getState() simulates the race:
+    //   calls 1-2: STEADY_STATE (pass 1 release check, pass 2 outer guard)
+    //   calls 3+:  FAILED       (pass 2 inner re-check sees the flip)
+    java.util.concurrent.atomic.AtomicInteger getStateCallCount =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+    doAnswer(
+            inv ->
+                getStateCallCount.incrementAndGet() <= 2
+                    ? ReplicationIndexManager.State.STEADY_STATE
+                    : ReplicationIndexManager.State.FAILED)
+        .when(generator)
+        .getState();
+
+    Mockito.clearInvocations(mocks.materializedViewGeneratorFactory);
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    // Inner state re-check skips transitionToFollower — no new follower this tick.
+    verify(mocks.materializedViewGeneratorFactory, never()).create(matViewIndexGen);
+  }
+
+  @Test
+  public void dynamicLeader_heartbeat_doesNotReleaseLease_whenStateInitialSyncBackoff() {
+    // INITIAL_SYNC_BACKOFF is the deliberate retry-wait state set by scheduleResync
+    // (RIM:1098). The lease MUST be retained — the same generator will retry the sync
+    // shortly. Releasing it would orphan every transient initial-sync failure.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    doReturn(ReplicationIndexManager.State.INITIAL_SYNC_BACKOFF).when(generator).getState();
+    doReturn(true).when(generator).isLeader();
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    verify(mocks.leaseManager, never()).releaseLeadership(matViewGenId);
   }
 
   // ==================== replaceGenerator pendingShutdowns Tests ====================
