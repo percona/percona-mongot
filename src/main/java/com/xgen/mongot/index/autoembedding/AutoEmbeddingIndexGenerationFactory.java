@@ -1,5 +1,6 @@
 package com.xgen.mongot.index.autoembedding;
 
+import static com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils.getDerivedSearchIndexDefinition;
 import static com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils.getDerivedVectorIndexDefinition;
 import static com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration.MIN_VERSION_FOR_MATERIALIZED_VIEW_EMBEDDING;
 
@@ -8,10 +9,15 @@ import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexFactory;
 import com.xgen.mongot.index.IndexGeneration;
-import com.xgen.mongot.index.InitializedVectorIndex;
-import com.xgen.mongot.index.VectorIndex;
+import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.analyzer.InvalidAnalyzerDefinitionException;
+import com.xgen.mongot.index.definition.AnalyzerBoundSearchIndexDefinition;
+import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
+import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinitionGeneration;
 import com.xgen.mongot.index.version.MaterializedViewGeneration;
 import com.xgen.mongot.util.Check;
@@ -26,7 +32,8 @@ import org.slf4j.LoggerFactory;
  * new IndexGeneration for any index lifecycle events (staged/live/recovered). Composite
  * IndexGeneration is used for easier index state management and status consolidation between
  * Materialized View and Lucene. For example, steady state Lucene on generationID:123_f1_u1_a1 could
- * be un-queryable if corresponding Materialized View status is in initial sync.
+ * be un-queryable if corresponding Materialized View status is in initial sync. Supports both
+ * vector and search index types.
  */
 public class AutoEmbeddingIndexGenerationFactory {
   private static final Logger LOG =
@@ -39,14 +46,15 @@ public class AutoEmbeddingIndexGenerationFactory {
   public static IndexGeneration getAutoEmbeddingIndexGeneration(
       IndexFactory indexFactory,
       MaterializedViewIndexFactory matViewIndexFactory,
-      VectorIndexDefinitionGeneration rawDefinitionGeneration,
+      IndexDefinitionGeneration rawDefinitionGeneration,
       InitializedIndexCatalog initializedIndexCatalog)
       throws IOException, InvalidAnalyzerDefinitionException {
+    IndexDefinition indexDef = rawDefinitionGeneration.getIndexDefinition();
     Check.checkArg(
-        rawDefinitionGeneration.getIndexDefinition().isAutoEmbeddingIndex()
-            && rawDefinitionGeneration.getIndexDefinition().getParsedAutoEmbeddingFeatureVersion()
-                >= MIN_VERSION_FOR_MATERIALIZED_VIEW_EMBEDDING,
-        "Input definition is not materialized view based vector index");
+        indexDef.isAutoEmbeddingIndex()
+            && indexDef.getParsedAutoEmbeddingFeatureVersion()
+            >= MIN_VERSION_FOR_MATERIALIZED_VIEW_EMBEDDING,
+        "Input definition is not materialized view based auto-embedding index");
     InitializedMaterializedViewIndex matViewIndex;
     try {
       matViewIndex =
@@ -62,26 +70,19 @@ public class AutoEmbeddingIndexGenerationFactory {
       return UnresolvedAutoEmbeddingIndexGeneration.create(rawDefinitionGeneration, e.getReason());
     }
 
-    VectorIndexDefinitionGeneration derivedIndexDefinitionGeneration =
+    IndexDefinitionGeneration derivedDefGen =
         derivedIndexDefinitionGeneration(rawDefinitionGeneration, matViewIndex);
-    Index vectorIndex = indexFactory.getIndex(derivedIndexDefinitionGeneration);
+    Index derivedIndex = indexFactory.getIndex(derivedDefGen);
     // Supplier that looks up initialized index from catalog
-    Supplier<Optional<InitializedVectorIndex>> initializedIndexSupplier =
-        () ->
-            initializedIndexCatalog
-                .getIndex(derivedIndexDefinitionGeneration.getGenerationId())
-                .filter(idx -> idx instanceof InitializedVectorIndex)
-                .map(idx -> (InitializedVectorIndex) idx);
+    Supplier<Optional<InitializedIndex>> initializedIndexSupplier =
+        () -> initializedIndexCatalog.getIndex(derivedDefGen.getGenerationId());
     LOG.atInfo()
         .addKeyValue("generationId", rawDefinitionGeneration.getGenerationId())
         .log("Created auto-embedding composite index generation");
     return new AutoEmbeddingIndexGeneration(
-        new AutoEmbeddingCompositeIndex(
-            matViewIndex,
-            Check.instanceOf(vectorIndex, VectorIndex.class),
-            initializedIndexSupplier),
+        new AutoEmbeddingCompositeIndex(matViewIndex, derivedIndex, initializedIndexSupplier),
         rawDefinitionGeneration,
-        derivedIndexDefinitionGeneration);
+        derivedDefGen);
   }
 
   /**
@@ -94,21 +95,42 @@ public class AutoEmbeddingIndexGenerationFactory {
   }
 
   static MaterializedViewIndexDefinitionGeneration createMaterializedViewIndexDefinitionGeneration(
-      VectorIndexDefinitionGeneration rawDefinitionGeneration) {
+      IndexDefinitionGeneration rawDefinitionGeneration) {
     return new MaterializedViewIndexDefinitionGeneration(
         rawDefinitionGeneration.getIndexDefinition(),
         new MaterializedViewGeneration(rawDefinitionGeneration.generation()));
   }
 
-  private static VectorIndexDefinitionGeneration derivedIndexDefinitionGeneration(
-      VectorIndexDefinitionGeneration rawDefinitionGeneration,
+  static IndexDefinitionGeneration derivedIndexDefinitionGeneration(
+      IndexDefinitionGeneration rawDefinitionGeneration,
       InitializedMaterializedViewIndex matViewIndex) {
-    return new VectorIndexDefinitionGeneration(
-        getDerivedVectorIndexDefinition(
-            rawDefinitionGeneration.getIndexDefinition(),
-            matViewIndex.getMaterializedViewDatabaseName(),
-            matViewIndex.getMaterializedViewCollectionUuid(),
-            matViewIndex.getSchemaMetadata()),
-        rawDefinitionGeneration.generation());
+    IndexDefinition def = rawDefinitionGeneration.getIndexDefinition();
+    return switch (def) {
+      case VectorIndexDefinition vectorDef -> new VectorIndexDefinitionGeneration(
+          getDerivedVectorIndexDefinition(
+              vectorDef,
+              matViewIndex.getMaterializedViewDatabaseName(),
+              matViewIndex.getMaterializedViewCollectionUuid(),
+              matViewIndex.getSchemaMetadata()),
+          rawDefinitionGeneration.generation());
+      case SearchIndexDefinition searchDef -> {
+        SearchIndexDefinition derivedSearchDef =
+            getDerivedSearchIndexDefinition(
+                searchDef,
+                matViewIndex.getMaterializedViewDatabaseName(),
+                matViewIndex.getMaterializedViewCollectionUuid(),
+                matViewIndex.getSchemaMetadata());
+        // A search-typed IndexDefinition reaches the factory only via
+        // SearchIndexDefinitionGeneration.
+        // MaterializedViewIndexDefinitionGeneration is constructed by this factory, not passed in.
+        SearchIndexDefinitionGeneration rawSearchGen =
+            Check.instanceOf(rawDefinitionGeneration, SearchIndexDefinitionGeneration.class);
+        AnalyzerBoundSearchIndexDefinition analyzerBound =
+            AnalyzerBoundSearchIndexDefinition.withRelevantOverriddenAnalyzers(
+                derivedSearchDef, rawSearchGen.definition().analyzerDefinitions());
+        yield new SearchIndexDefinitionGeneration(
+            analyzerBound, rawDefinitionGeneration.generation());
+      }
+    };
   }
 }

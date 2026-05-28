@@ -7,6 +7,7 @@ java_library(
         "AutoEmbeddingMemoryBudget.java",
         "EmbeddingRequestContext.java",
         "MongotMetadata.java",
+        "SearchIndexAutoEmbedFieldMapping.java",
         "VectorAutoEmbedFieldMapping.java",
         "VectorOrError.java",
     ],

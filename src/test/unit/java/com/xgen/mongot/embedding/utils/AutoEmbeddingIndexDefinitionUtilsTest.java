@@ -878,7 +878,11 @@ public class AutoEmbeddingIndexDefinitionUtilsTest {
 
     SearchIndexVectorFieldDefinition vectorField =
         remappedField.searchIndexVectorFieldDefinition().get();
-    Assert.assertEquals(autoEmbedField.specification(), vectorField.specification());
+    Assert.assertEquals(
+        autoEmbedField.specification().numDimensions(),
+        vectorField.specification().numDimensions());
+    Assert.assertEquals(
+        autoEmbedField.specification().similarity(), vectorField.specification().similarity());
 
     FieldDefinition activeField = derivedDefinition.getMappings().fields().get("active");
     Assert.assertTrue(

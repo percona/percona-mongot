@@ -34,6 +34,7 @@ import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.Variables;
+import com.xgen.mongot.index.VectorIndexReader;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
 import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
@@ -264,10 +265,10 @@ public class VectorSearchCommand implements Command {
           () -> {
             var index = getIndexFromCatalog(query);
             try (var unusedExplain =
-                    Explain.setup(
-                        this.definition.explain().map(ExplainDefinition::verbosity),
-                        index.map(idx -> idx.getDefinition().getNumPartitions()));
-                var unusedFeatureFlags = DynamicFeatureFlagsMetricsRecorder.setup()) {
+                     Explain.setup(
+                         this.definition.explain().map(ExplainDefinition::verbosity),
+                         index.map(idx -> idx.getDefinition().getNumPartitions()));
+                 var unusedFeatureFlags = DynamicFeatureFlagsMetricsRecorder.setup()) {
               addMetadataIfExplain(query);
               checkSupportForVectorStoredSource(this.metadata, query, index);
               return getSearchResults(query, index, queryCursorOptions);
@@ -549,13 +550,18 @@ public class VectorSearchCommand implements Command {
       Timer.Sample commandTimer,
       boolean isNested)
       throws IOException, InvalidQueryException, ReaderClosedException {
-    if (!(index instanceof InitializedVectorIndex vectorIndex)) {
+    VectorIndexReader reader;
+    if (index instanceof InitializedVectorIndex vectorIndex) {
+      reader = vectorIndex.getReader();
+    } else if (index instanceof InitializedMaterializedViewIndex matViewIndex) {
+      // TODO(CLOUDP-353553): split when MV can hold a SearchIndexDefinition.
+      reader = matViewIndex.getReader();
+    } else {
       throw new InvalidQueryException(
           "Cannot execute $vectorSearch over search index '%s'"
               .formatted(materializedQuery.vectorSearchQuery().index()),
           InvalidQueryException.Type.STRICT);
     }
-    var reader = vectorIndex.getReader();
     var results = reader.query(materializedQuery);
     var serializedBatch = createExhaustedCursorBatch(results).toBson();
 

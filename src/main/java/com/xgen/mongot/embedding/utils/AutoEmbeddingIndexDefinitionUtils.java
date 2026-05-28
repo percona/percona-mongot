@@ -140,7 +140,8 @@ public class AutoEmbeddingIndexDefinitionUtils {
         SearchAutoEmbedFieldDefinition autoEmbed =
             fieldDef.searchAutoEmbedFieldDefinition().get();
         SearchIndexVectorFieldDefinition vectorField =
-            new SearchIndexVectorFieldDefinition(autoEmbed.specification());
+            new SearchIndexVectorFieldDefinition(
+                toVectorFieldSpecification(autoEmbed.specification()));
         // Remap the field key to the mat-view path based on sourceField
         FieldPath matViewPath =
             getMatViewFieldPath(

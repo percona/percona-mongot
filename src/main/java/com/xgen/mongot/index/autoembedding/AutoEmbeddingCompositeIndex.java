@@ -5,11 +5,10 @@ import static com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGe
 import com.mongodb.lang.Nullable;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.index.EncodedUserData;
+import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexUnavailableException;
-import com.xgen.mongot.index.InitializedVectorIndex;
-import com.xgen.mongot.index.VectorIndex;
+import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.IndexStatus.StatusCode;
 import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
@@ -25,13 +24,13 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Composite Index type for AutoEmbeddingIndexGeneration used for consolidating index status from
- * both Materialized View and Lucene.
+ * both Materialized View and Lucene. Supports both vector and search derived indexes.
  */
-public class AutoEmbeddingCompositeIndex implements VectorIndex {
+public class AutoEmbeddingCompositeIndex implements Index {
   public final InitializedMaterializedViewIndex matViewIndex;
-  public final VectorIndex vectorIndex;
-  // Supplier to lazily fetch the initialized vector index from catalog
-  private final Supplier<Optional<InitializedVectorIndex>> initializedVectorIndexSupplier;
+  public final Index derivedIndex;
+  // Supplier to lazily fetch the initialized derived index from catalog
+  private final Supplier<Optional<InitializedIndex>> initializedIndexSupplier;
   private static final Logger LOG = LoggerFactory.getLogger(AutoEmbeddingCompositeIndex.class);
 
   // Track previous status to log only on transitions
@@ -42,27 +41,23 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
 
   public AutoEmbeddingCompositeIndex(
       InitializedMaterializedViewIndex matViewIndex,
-      VectorIndex vectorIndex,
-      Supplier<Optional<InitializedVectorIndex>> initializedVectorIndexSupplier) {
+      Index derivedIndex,
+      Supplier<Optional<InitializedIndex>> initializedIndexSupplier) {
     this.matViewIndex = matViewIndex;
-    this.vectorIndex = vectorIndex;
-    this.initializedVectorIndexSupplier = initializedVectorIndexSupplier;
+    this.derivedIndex = derivedIndex;
+    this.initializedIndexSupplier = initializedIndexSupplier;
     this.compositeWasQueryable =
         new AtomicBoolean(matViewIndex.isCurrentVersionQueryablePerLease());
   }
 
   public AutoEmbeddingCompositeIndex(
-      InitializedMaterializedViewIndex matViewIndex, VectorIndex vectorIndex) {
-    this(matViewIndex, vectorIndex, Optional::empty);
+      InitializedMaterializedViewIndex matViewIndex, Index derivedIndex) {
+    this(matViewIndex, derivedIndex, Optional::empty);
   }
 
   @Override
-  public VectorIndexDefinition getDefinition() {
+  public IndexDefinition getDefinition() {
     return this.matViewIndex.getDefinition();
-  }
-
-  public VectorIndexDefinition getDerivedDefinition() {
-    return this.vectorIndex.getDefinition();
   }
 
   @Override
@@ -75,7 +70,7 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
   public IndexStatus getStatus() {
     // Effective MV status persisted by StatusResolutionUtils
     IndexStatus effectiveMvStatus = this.matViewIndex.getStatus();
-    IndexStatus luceneStatus = this.vectorIndex.getStatus();
+    IndexStatus luceneStatus = this.derivedIndex.getStatus();
 
     // There are scenarios where lucene will be behind the MV. Particularly during the initial
     // sync stage. We need to properly reflect this lag as the user facing status
@@ -92,30 +87,30 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
             >= MIN_VERSION_FOR_MATERIALIZED_VIEW_EMBEDDING) {
       return this.matViewIndex.isCompatibleWith(indexDefinition);
     }
-    return this.vectorIndex.isCompatibleWith(indexDefinition);
+    return this.derivedIndex.isCompatibleWith(indexDefinition);
   }
 
   @Override
   public void drop() throws IOException {
     this.matViewIndex.drop();
-    this.vectorIndex.drop();
+    this.derivedIndex.drop();
   }
 
   @Override
   public boolean isClosed() {
-    return this.matViewIndex.isClosed() && this.vectorIndex.isClosed();
+    return this.matViewIndex.isClosed() && this.derivedIndex.isClosed();
   }
 
   @Override
   public void throwIfUnavailableForQuerying() throws IndexUnavailableException {
     // TODO(CLOUDP-356241): Implement matview::throwIfUnavailableForQuerying
-    this.vectorIndex.throwIfUnavailableForQuerying();
+    this.derivedIndex.throwIfUnavailableForQuerying();
   }
 
   @Override
   public void close() throws IOException {
     this.matViewIndex.close();
-    this.vectorIndex.close();
+    this.derivedIndex.close();
   }
 
   public MaterializedViewSchemaMetadata getSchemaMetadata() {
@@ -151,11 +146,11 @@ public class AutoEmbeddingCompositeIndex implements VectorIndex {
 
   /** Extract oplog position of the lucene index */
   private Optional<BsonTimestamp> extractLucenePosition() {
-    Optional<InitializedVectorIndex> luceneOpt = this.initializedVectorIndexSupplier.get();
+    Optional<InitializedIndex> luceneOpt = this.initializedIndexSupplier.get();
     if (luceneOpt.isEmpty()) {
       return Optional.empty();
     }
-    InitializedVectorIndex lucene = luceneOpt.get();
+    InitializedIndex lucene = luceneOpt.get();
 
     EncodedUserData commitData = lucene.getWriter().getCommitUserData();
     IndexCommitUserData userData =

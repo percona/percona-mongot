@@ -14,14 +14,13 @@ import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexUnavailableException;
-import com.xgen.mongot.index.InitializedVectorIndex;
+import com.xgen.mongot.index.InitializedAutoEmbedIndex;
 import com.xgen.mongot.index.MetaResults;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.VectorIndexReader;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.lucene.EmptySearchBatchProducer;
 import com.xgen.mongot.index.mongodb.MaterializedViewWriter;
 import com.xgen.mongot.index.query.InvalidQueryException;
@@ -38,9 +37,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.bson.BsonArray;
 import org.bson.BsonTimestamp;
 
-public class InitializedMaterializedViewIndex implements InitializedVectorIndex {
+public class InitializedMaterializedViewIndex implements InitializedAutoEmbedIndex {
   private static final NoOpIndexReader NO_OP_INDEX_READER = new NoOpIndexReader();
-  private final VectorIndexDefinition vectorIndexDefinition;
+  private final IndexDefinition indexDefinition;
   private final MaterializedViewGenerationId generationId;
   private final IndexMetricsUpdater indexMetricsUpdater;
   private final MaterializedViewWriter materializedViewWriter;
@@ -59,10 +58,7 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
       LeaseManager leaseManager,
       MaterializedViewSchemaMetadata schemaMetadata,
       String matViewDatabaseName) {
-    // TODO(CLOUDP-353553): Handle search index version - getIndexDefinition() now returns
-    //  IndexDefinition which may be a SearchIndexDefinition.
-    this.vectorIndexDefinition =
-        matViewDefinitionGeneration.getIndexDefinition().asVectorDefinition();
+    this.indexDefinition = matViewDefinitionGeneration.getIndexDefinition();
     this.generationId = matViewDefinitionGeneration.getGenerationId();
     this.indexMetricsUpdater = indexMetricsUpdater;
     this.materializedViewWriter = materializedViewWriter;
@@ -125,8 +121,8 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
   }
 
   @Override
-  public VectorIndexDefinition getDefinition() {
-    return this.vectorIndexDefinition;
+  public IndexDefinition getDefinition() {
+    return this.indexDefinition;
   }
 
   @Override
@@ -134,7 +130,7 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
     try {
       this.leaseManager.updateReplicationStatus(
           this.generationId,
-          this.vectorIndexDefinition
+          this.indexDefinition
               .getDefinitionVersion()
               .orElse(DEFAULT_INDEX_DEFINITION_VERSION),
           status);
@@ -203,7 +199,7 @@ public class InitializedMaterializedViewIndex implements InitializedVectorIndex 
   public boolean isCurrentVersionQueryablePerLease() {
     return this.leaseManager.isCurrentVersionQueryable(
         this.generationId,
-        this.vectorIndexDefinition
+        this.indexDefinition
             .getDefinitionVersion()
             .orElse(DEFAULT_INDEX_DEFINITION_VERSION));
   }

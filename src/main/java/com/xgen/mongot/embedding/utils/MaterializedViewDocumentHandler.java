@@ -5,7 +5,6 @@ import com.xgen.mongot.index.ingestion.handlers.DocumentHandler;
 import com.xgen.mongot.index.ingestion.handlers.FieldValueHandler;
 import com.xgen.mongot.util.FieldPath;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.Predicate;
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
@@ -38,9 +37,8 @@ public class MaterializedViewDocumentHandler implements DocumentHandler {
    */
   public static MaterializedViewDocumentHandler create(
       AutoEmbedFieldMapping mapping, Optional<FieldPath> parentPath, BsonDocument bsonDoc) {
-    Set<FieldPath> passthroughAncestors = mapping.passthroughAncestorPaths();
     return new MaterializedViewDocumentHandler(
-        mapping::isPassthrough, passthroughAncestors::contains, parentPath, bsonDoc);
+        mapping::isPassthrough, mapping.passthroughDescendPredicate(), parentPath, bsonDoc);
   }
 
   @Override

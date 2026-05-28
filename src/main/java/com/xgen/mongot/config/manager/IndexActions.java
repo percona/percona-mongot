@@ -319,7 +319,7 @@ public class IndexActions {
           this.configState.indexFactory,
           Check.isPresent(
               this.configState.materializedViewIndexFactory, "materializedViewIndexFactory"),
-          definitionGeneration.asVector(),
+          definitionGeneration,
           this.configState.initializedIndexCatalog);
     } else {
       return IndexGenerationFactory.getIndexGeneration(

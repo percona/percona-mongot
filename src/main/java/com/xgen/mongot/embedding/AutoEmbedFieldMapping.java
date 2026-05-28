@@ -5,6 +5,7 @@ import com.xgen.mongot.util.FieldPath;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Index-neutral field mapping for auto-embedding document processing.
@@ -25,9 +26,11 @@ import java.util.Set;
  *
  * <ul>
  *   <li>{@link VectorAutoEmbedFieldMapping} — vector indexes with a fixed set of fields
+ *   <li>{@link SearchIndexAutoEmbedFieldMapping} — search indexes, with dynamic-mapping support
  * </ul>
  */
-public sealed interface AutoEmbedFieldMapping permits VectorAutoEmbedFieldMapping {
+public sealed interface AutoEmbedFieldMapping
+    permits VectorAutoEmbedFieldMapping, SearchIndexAutoEmbedFieldMapping {
 
   /** A field in the auto-embed mapping, classified by its role. */
   sealed interface AutoEmbedField {
@@ -61,4 +64,10 @@ public sealed interface AutoEmbedFieldMapping permits VectorAutoEmbedFieldMappin
 
   /** Returns the precomputed ancestor paths for passthrough fields only. */
   Set<FieldPath> passthroughAncestorPaths();
+
+  /**
+   * Returns the predicate to test whether a path should be descended into when collecting
+   * passthrough field values.
+   */
+  Predicate<FieldPath> passthroughDescendPredicate();
 }

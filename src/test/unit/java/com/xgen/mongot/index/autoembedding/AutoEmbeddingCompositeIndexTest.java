@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.IndexWriter;
+import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.IndexStatus.StatusCode;
@@ -280,7 +281,7 @@ public class AutoEmbeddingCompositeIndexTest {
     EncodedUserData commitData = createCommitInfoWithPosition(lucenePosition);
     when(mockWriter.getCommitUserData()).thenReturn(commitData);
 
-    Supplier<Optional<InitializedVectorIndex>> supplier =
+    Supplier<Optional<InitializedIndex>> supplier =
         includeSupplier ? () -> Optional.of(mockLuceneIndex) : Optional::empty;
     return new AutoEmbeddingCompositeIndex(mockMvIndex, mockLuceneIndex, supplier);
   }

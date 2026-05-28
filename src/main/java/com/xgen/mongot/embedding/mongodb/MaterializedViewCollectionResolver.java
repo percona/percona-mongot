@@ -20,11 +20,10 @@ import com.xgen.mongot.embedding.mongodb.common.InternalDatabaseResolver;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
 import com.xgen.mongot.embedding.utils.MongoClientOperationExecutor;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
-import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
 import com.xgen.mongot.index.definition.VectorTextFieldSpecification;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
@@ -182,7 +181,7 @@ public class MaterializedViewCollectionResolver {
                   Check.instanceOf(collectionInfo, MongoDbCollectionInfo.Collection.class)
                       .info()
                       .uuid(),
-                  indexDefinitionGeneration.getIndexDefinition().asVectorDefinition(),
+                  indexDefinitionGeneration.getIndexDefinition(),
                   this.materializedViewConfig.materializedViewSchemaVersion.orElse(
                       CURRENT_MAT_VIEW_SCHEMA_VERSION)));
       try {
@@ -274,10 +273,7 @@ public class MaterializedViewCollectionResolver {
     } else {
       var hash =
           computeHash(
-              indexDefinitionGeneration
-                  .asMaterializedView()
-                  .getIndexDefinition()
-                  .asVectorDefinition());
+              indexDefinitionGeneration.asMaterializedView().getIndexDefinition());
       collectionName =
           uniqueIndexId
               + DELIM
@@ -315,15 +311,15 @@ public class MaterializedViewCollectionResolver {
   private MaterializedViewCollectionMetadata createProposedMetadata(
       String collectionName,
       UUID uuid,
-      VectorIndexDefinition indexDefinition,
+      IndexDefinition indexDefinition,
       int mvSchemaVersion) {
     if (mvSchemaVersion == 0) {
       return new MaterializedViewCollectionMetadata(VERSION_ZERO, uuid, collectionName);
     } else if (mvSchemaVersion == 1) {
+      AutoEmbedFieldMapping mapping =
+          AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDefinition);
       ImmutableMap<FieldPath, FieldPath> schemaFieldsMapping =
-          indexDefinition.getMappings().fieldMap().entrySet().stream()
-              .filter(
-                  entry -> entry.getValue().getType() == VectorIndexFieldDefinition.Type.AUTO_EMBED)
+          mapping.embedFields().entrySet().stream()
               .collect(
                   toImmutableMap(
                       Map.Entry::getKey,
@@ -369,11 +365,10 @@ public class MaterializedViewCollectionResolver {
   }
 
   /**
-   * Computes a hash of the auto-embed fields in a vector index definition. Convenience overload
-   * that extracts auto-embed fields before delegating to {@link
-   * #computeHash(AutoEmbedFieldMapping)}.
+   * Computes a hash of the auto-embed fields in an index definition. Convenience overload that
+   * extracts auto-embed fields before delegating to {@link #computeHash(AutoEmbedFieldMapping)}.
    */
-  public static String computeHash(VectorIndexDefinition indexDefinition) {
+  public static String computeHash(IndexDefinition indexDefinition) {
     return computeHash(AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDefinition));
   }
 

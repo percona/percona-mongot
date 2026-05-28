@@ -4,10 +4,16 @@ import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadat
 import static com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils.HASH_FIELD_SUFFIX;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping.AutoEmbedField;
+import com.xgen.mongot.embedding.SearchIndexAutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.VectorAutoEmbedFieldMapping;
+import com.xgen.mongot.index.definition.FieldDefinition;
+import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldMapping;
@@ -23,6 +29,17 @@ public class AutoEmbedFieldMappingCreator {
   private static final Logger LOG = LoggerFactory.getLogger(AutoEmbedFieldMappingCreator.class);
 
   private static final String HASH_FIELD_PREFIX = "_autoEmbed._hash";
+
+  /**
+   * Creates an {@code AutoEmbedFieldMapping} from a source {@link IndexDefinition}, dispatching to
+   * the index-type-specific factory.
+   */
+  public static AutoEmbedFieldMapping createAutoEmbedMapping(IndexDefinition indexDefinition) {
+    return switch (indexDefinition) {
+      case VectorIndexDefinition v -> createAutoEmbedMapping(v);
+      case SearchIndexDefinition s -> createAutoEmbedMapping(s);
+    };
+  }
 
   /** Creates an {@code AutoEmbedFieldMapping} from a source {@link VectorIndexDefinition}. */
   public static AutoEmbedFieldMapping createAutoEmbedMapping(
@@ -51,6 +68,33 @@ public class AutoEmbedFieldMappingCreator {
       }
     }
     return new VectorAutoEmbedFieldMapping(builder.build());
+  }
+
+  /**
+   * Creates an {@code AutoEmbedFieldMapping} from a source {@link SearchIndexDefinition}.
+   *
+   * <p>Auto-embed fields (keyed on {@code sourceField()}) become {@link AutoEmbedField.EmbedField}.
+   * Explicitly declared non-auto-embed top-level fields become passthroughs. When the source index
+   * has dynamic mapping enabled, passthrough is additionally inferred at read time for every
+   * non-embed path so the materialized view carries every source field.
+   */
+  public static AutoEmbedFieldMapping createAutoEmbedMapping(SearchIndexDefinition searchDef) {
+    ImmutableMap.Builder<FieldPath, AutoEmbedField.EmbedField> embedBuilder
+        = ImmutableMap.builder();
+    ImmutableSet.Builder<FieldPath> passthroughBuilder = ImmutableSet.builder();
+    for (Map.Entry<String, FieldDefinition> entry : searchDef.getMappings().fields().entrySet()) {
+      Optional<SearchAutoEmbedFieldDefinition> autoEmbed =
+          entry.getValue().searchAutoEmbedFieldDefinition();
+      if (autoEmbed.isPresent()) {
+        SearchAutoEmbedFieldDefinition definition = autoEmbed.get();
+        FieldPath path = definition.sourceField();
+        embedBuilder.put(path, new AutoEmbedField.EmbedField(path, definition.specification()));
+      } else {
+        passthroughBuilder.add(FieldPath.parse(entry.getKey()));
+      }
+    }
+    return new SearchIndexAutoEmbedFieldMapping(
+        searchDef.getMappings().dynamic(), embedBuilder.build(), passthroughBuilder.build());
   }
 
   /**

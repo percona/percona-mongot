@@ -88,6 +88,9 @@ class CursorFactory {
                 .formatted(cursorQuery.getQuery().index()),
             InvalidQueryException.Type.STRICT);
       }
+      // TODO(CLOUDP-353553): widen this check to also accept InitializedMaterializedViewIndex
+      // when MV-backed cursors are exercised;
+      // mirrors the VectorSearchCommand.getExhaustedBatch fix.
       if (cursorQuery instanceof CursorQuery.Vector && !(index instanceof InitializedVectorIndex)) {
         throw new InvalidQueryException(
             "Cannot execute $vectorSearch over search index '%s'"

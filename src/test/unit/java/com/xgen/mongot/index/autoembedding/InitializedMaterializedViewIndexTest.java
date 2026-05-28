@@ -10,7 +10,10 @@ import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.Mater
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.mongodb.MaterializedViewWriter;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
@@ -98,15 +101,58 @@ public class InitializedMaterializedViewIndexTest {
     assertEquals(IndexStatus.StatusCode.RECOVERING_TRANSIENT, index.getStatus().getStatusCode());
   }
 
+  @Test
+  public void getDefinition_vectorIndex_returnsVectorIndexDefinition() throws Exception {
+    MaterializedViewIndexDefinitionGeneration defGen =
+        MaterializedViewIndex.mockMatViewDefinitionGeneration(INDEX_ID);
+    InitializedMaterializedViewIndex index = createIndexFor(defGen, IndexStatus.unknown());
+
+    IndexDefinition definition = index.getDefinition();
+
+    assertTrue(
+        "Vector input must round-trip as VectorIndexDefinition",
+        definition instanceof VectorIndexDefinition);
+    assertEquals(defGen.getIndexDefinition(), definition);
+  }
+
+  @Test
+  public void getDefinition_searchIndex_returnsSearchIndexDefinition() throws Exception {
+    MaterializedViewIndexDefinitionGeneration defGen =
+        MaterializedViewIndex.mockMatViewSearchDefinitionGeneration(INDEX_ID);
+    InitializedMaterializedViewIndex index = createIndexFor(defGen, IndexStatus.unknown());
+
+    IndexDefinition definition = index.getDefinition();
+
+    assertTrue(
+        "Search input must round-trip as SearchIndexDefinition",
+        definition instanceof SearchIndexDefinition);
+    assertEquals(defGen.getIndexDefinition(), definition);
+  }
+
   private InitializedMaterializedViewIndex createIndex(IndexStatus initialStatus) throws Exception {
     return createIndex(initialStatus, /* leaseQueryable= */ false);
   }
 
   private InitializedMaterializedViewIndex createIndex(
       IndexStatus initialStatus, boolean leaseQueryable) throws Exception {
+    return createIndexFor(
+        MaterializedViewIndex.mockMatViewDefinitionGeneration(INDEX_ID),
+        initialStatus,
+        leaseQueryable);
+  }
+
+  private InitializedMaterializedViewIndex createIndexFor(
+      MaterializedViewIndexDefinitionGeneration defGen, IndexStatus initialStatus)
+      throws Exception {
+    return createIndexFor(defGen, initialStatus, /* leaseQueryable= */ false);
+  }
+
+  private InitializedMaterializedViewIndex createIndexFor(
+      MaterializedViewIndexDefinitionGeneration defGen,
+      IndexStatus initialStatus,
+      boolean leaseQueryable)
+      throws Exception {
     MeterAndFtdcRegistry meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithSimpleRegistries();
-    MaterializedViewIndexDefinitionGeneration defGen =
-        MaterializedViewIndex.mockMatViewDefinitionGeneration(INDEX_ID);
     MaterializedViewGenerationId generationId = defGen.getGenerationId();
     String uniqueString = generationId.uniqueString();
     String collectionName = "matview-" + INDEX_ID.toHexString();

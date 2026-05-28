@@ -5,6 +5,7 @@ java_test_suite(
     srcs = [
         "AutoEmbeddingMemoryBudgetTest.java",
         "EmbeddingRequestContextTest.java",
+        "SearchIndexAutoEmbedFieldMappingTest.java",
         "VectorAutoEmbedFieldMappingTest.java",
     ],
     tags = ["unit"],

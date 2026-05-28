@@ -3,10 +3,16 @@ package com.xgen.mongot.embedding.utils;
 import static com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils.HASH_FIELD_SUFFIX;
 
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
+import com.xgen.mongot.embedding.SearchIndexAutoEmbedFieldMapping;
+import com.xgen.mongot.embedding.VectorAutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
+import com.xgen.mongot.index.definition.BooleanFieldDefinition;
+import com.xgen.mongot.index.definition.DocumentFieldDefinition;
+import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldDefinition;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
 import com.xgen.mongot.index.definition.VectorDataFieldDefinition;
@@ -18,6 +24,9 @@ import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
 import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.util.FieldPath;
+import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import java.util.List;
 import java.util.Map;
@@ -267,6 +276,96 @@ public class AutoEmbedFieldMappingCreatorTest {
         "Should contain hash path for nested auto-embed field",
         matViewMapping.fieldMap().containsKey(expectedHashPath));
   }
+
+  // ---- SearchIndexDefinition-based factory ----
+
+  @Test
+  public void createAutoEmbedMapping_search_dynamicWithOnlyAutoEmbed() {
+    var autoEmbedField =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field(
+                "embedding",
+                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(
+        "Search factory should return SearchIndexAutoEmbedFieldMapping",
+        mapping instanceof SearchIndexAutoEmbedFieldMapping);
+    Assert.assertFalse(
+        "Search factory must not return VectorAutoEmbedFieldMapping",
+        mapping instanceof VectorAutoEmbedFieldMapping);
+
+    // Embed field keyed on sourceField()
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("content")));
+    Assert.assertFalse(mapping.isPassthrough(FieldPath.parse("content")));
+    // Dynamic mode → any non-embed path is passthrough
+    Assert.assertTrue(mapping.isPassthrough(FieldPath.parse("anything")));
+    Assert.assertTrue(mapping.passthroughDescendPredicate().test(FieldPath.parse("anything")));
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_staticWithFilterField() {
+    var autoEmbedField =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "embedding",
+                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping instanceof SearchIndexAutoEmbedFieldMapping);
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("content")));
+    Assert.assertTrue(
+        "Statically declared non-auto-embed field must be passthrough",
+        mapping.isPassthrough(FieldPath.parse("active")));
+    Assert.assertFalse(
+        "Undeclared paths must not be passthrough in static mode",
+        mapping.isPassthrough(FieldPath.parse("random")));
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_embedKeyedBySourceFieldNotMappingKey() {
+    // Declaration key differs from sourceField: sourceField must win.
+    var autoEmbedField =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("source_text"));
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "declared_key",
+                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("source_text")));
+    Assert.assertFalse(mapping.isEmbed(FieldPath.parse("declared_key")));
+    // The declaration key should not leak in as a passthrough either — it describes the embed
+    // output, not a source field.
+    Assert.assertFalse(
+        "Declaration key of an auto-embed field is not a passthrough source field",
+        mapping.isPassthrough(FieldPath.parse("declared_key")));
+  }
+
+  // ---- getMatViewNestedRoot ----
 
   @Test
   public void getMatViewNestedRoot_emptySource_returnsEmpty() {

@@ -246,12 +246,30 @@ class AllPresentIndexes {
                 this.indexStatuses.get(indexGeneration),
                 indexGeneration.getGenerationId(),
                 indexMetrics);
-        case VECTOR, AUTO_EMBEDDING ->
+        case VECTOR ->
             new IndexDetailedStatus.Vector(
                 indexGeneration.getIndex().getDefinition().asVectorDefinition(),
                 this.indexStatuses.get(indexGeneration),
                 indexGeneration.getGenerationId(),
                 indexMetrics);
+        case AUTO_EMBEDDING -> {
+          IndexDefinition def = indexGeneration.getDefinition();
+          yield switch (def) {
+            // TODO(CLOUDP-353553): source synonym statuses from the composite's derived
+            // search index instead of an empty map.
+            case SearchIndexDefinition searchDef -> new IndexDetailedStatus.Search(
+                Map.of(),
+                searchDef,
+                this.indexStatuses.get(indexGeneration),
+                indexGeneration.getGenerationId(),
+                indexMetrics);
+            case VectorIndexDefinition vectorDef -> new IndexDetailedStatus.Vector(
+                vectorDef,
+                this.indexStatuses.get(indexGeneration),
+                indexGeneration.getGenerationId(),
+                indexMetrics);
+          };
+        }
       };
     }
 

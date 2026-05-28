@@ -2,7 +2,6 @@ package com.xgen.mongot.index.autoembedding;
 
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import com.xgen.mongot.util.Check;
 
@@ -34,12 +33,4 @@ public class MaterializedViewIndexGeneration extends IndexGeneration {
   public InitializedMaterializedViewIndex getIndex() {
     return Check.instanceOf(super.getIndex(), InitializedMaterializedViewIndex.class);
   }
-
-  @Override
-  public VectorIndexDefinition getDefinition() {
-    // TODO(CLOUDP-353553): Handle search index version - getIndexDefinition() now returns
-    //  IndexDefinition which may be a SearchIndexDefinition.
-    return getDefinitionGeneration().getIndexDefinition().asVectorDefinition();
-  }
-
 }

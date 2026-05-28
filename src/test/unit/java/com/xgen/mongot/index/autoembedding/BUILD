@@ -4,6 +4,7 @@ java_test_suite(
     name = "autoembedding",
     srcs = [
         "AutoEmbeddingCompositeIndexTest.java",
+        "AutoEmbeddingIndexGenerationFactoryTest.java",
         "InitializedMaterializedViewIndexTest.java",
         "MaterializedViewGenerationIdTest.java",
         "MaterializedViewIndexGenerationUtilTest.java",

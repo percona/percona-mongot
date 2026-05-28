@@ -7,6 +7,7 @@ import com.xgen.mongot.util.FieldPath;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Auto-embed field mapping for vector indexes.
@@ -55,6 +56,11 @@ public record VectorAutoEmbedFieldMapping(
   @Override
   public boolean isPassthrough(FieldPath path) {
     return getField(path).filter(AutoEmbedField.PassthroughField.class::isInstance).isPresent();
+  }
+
+  @Override
+  public Predicate<FieldPath> passthroughDescendPredicate() {
+    return passthroughAncestorPaths()::contains;
   }
 
   private static ImmutableMap<FieldPath, AutoEmbedField.EmbedField> computeEmbedFields(
