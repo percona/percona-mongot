@@ -118,8 +118,9 @@ def perf_java_integration_test_suite(
     )
 
 def mongot_java_integration_test(size = "small", timeout = "short", tags = [], **kwargs):
+    final_tags = tags if "integration_community_sharded" in tags else tags + ["integration"]
     native.java_test(
-        tags = tags + ["integration"],
+        tags = final_tags,
         size = size,
         timeout = timeout,
         **kwargs
