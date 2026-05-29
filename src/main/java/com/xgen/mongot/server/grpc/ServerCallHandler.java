@@ -199,7 +199,7 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
           cause.getMessage() == null ? "Server is at capacity" : cause.getMessage();
       BsonDocument error =
           MessageUtils.createErrorBodyWithLabels(
-              message, LOAD_SHEDDING_ERROR_LABELS, Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED);
+              message, LOAD_SHEDDING_ERROR_LABELS, Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD);
       return serializeError(request, error);
     }
 

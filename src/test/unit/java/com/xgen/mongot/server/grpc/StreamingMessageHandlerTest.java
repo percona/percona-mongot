@@ -26,6 +26,7 @@ import com.xgen.mongot.server.message.MessageMessage;
 import com.xgen.mongot.server.message.MessageSection;
 import com.xgen.mongot.server.message.MessageSectionBody;
 import com.xgen.mongot.server.message.OpCode;
+import com.xgen.mongot.util.mongodb.Errors;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
@@ -679,15 +680,16 @@ public class StreamingMessageHandlerTest {
       Assert.assertTrue(
           "Expected code field in rejection response", rejectionErrorDoc.containsKey("code"));
       Assert.assertEquals(
-          "Expected error code 462 (IngressRequestRateLimitExceeded)",
-          462,
+          "Expected error code " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
+              + " (" + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.name + ")",
+          Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code,
           rejectionErrorDoc.getInt32("code").getValue());
       Assert.assertTrue(
           "Expected codeName field in rejection response",
           rejectionErrorDoc.containsKey("codeName"));
       Assert.assertEquals(
-          "Expected codeName IngressRequestRateLimitExceeded",
-          "IngressRequestRateLimitExceeded",
+          "Expected codeName " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.name,
+          Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.name,
           rejectionErrorDoc.getString("codeName").getValue());
 
       // Verify error labels are present for load shedding rejections
@@ -798,9 +800,14 @@ public class StreamingMessageHandlerTest {
 
       boolean foundBsonError = captor.getAllValues().stream().anyMatch(msg -> {
         BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
-        return doc.containsKey("code") && doc.getInt32("code").getValue() == 462;
+        return doc.containsKey("code")
+            && doc.getInt32("code").getValue()
+                == Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code;
       });
-      Assert.assertTrue("Expected BSON error with code 462 when flag is off", foundBsonError);
+      Assert.assertTrue(
+          "Expected BSON error with code " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
+              + " when flag is off",
+          foundBsonError);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();
@@ -973,10 +980,14 @@ public class StreamingMessageHandlerTest {
 
       boolean foundBsonError = captor.getAllValues().stream().anyMatch(msg -> {
         BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
-        return doc.containsKey("code") && doc.getInt32("code").getValue() == 462;
+        return doc.containsKey("code")
+            && doc.getInt32("code").getValue()
+                == Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code;
       });
       Assert.assertTrue(
-          "Expected BSON error with code 462 when attempt >= 3", foundBsonError);
+          "Expected BSON error with code " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
+              + " when attempt >= 3",
+          foundBsonError);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();
