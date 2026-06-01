@@ -324,6 +324,12 @@ class LuceneMetaResultsBuilder {
         result.put(entry.getKey(), new FacetInfo(List.of()));
         continue;
       }
+      // Match getTokenFieldResult: no indexed SSDV state means DrillSideways MultiFacets omits this
+      // dim; calling getTopChildren would throw IllegalArgumentException (invalid dim).
+      if (fieldState.isEmpty()) {
+        result.put(entry.getKey(), new FacetInfo(List.of()));
+        continue;
+      }
       Facets facetCounts = drillSidewaysResult.get().facets;
 
       Optional<FacetResult> children =

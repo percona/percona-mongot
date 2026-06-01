@@ -227,6 +227,13 @@ public class LuceneFacetDrillSidewaysMetaBatchProducerFactory {
       if (maybeDrillSidewaysResult.isEmpty()) {
         continue;
       }
+      // Optimized drill-sideways only registers a token facet dim in MultiFacets when
+      // TokenSsdvFacetState is present (see MongotDrillSideways#addFacetOrTagEmptyNameToken). If
+      // state is empty the dim is omitted, so calling getAllChildren(lucenePath) on the sideways
+      // Facets would throw IllegalArgumentException ("invalid dim"). Skip bucket producers.
+      if (fieldState.isEmpty()) {
+        continue;
+      }
       Facets facetCounts = maybeDrillSidewaysResult.get().facets;
 
       Optional<FacetResult> facetResult =
