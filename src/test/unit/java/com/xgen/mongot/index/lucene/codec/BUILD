@@ -9,6 +9,7 @@ java_test_suite(
         "LuceneCodecBloomFilterTest.java",
         "LuceneCodecTest.java",
         "LuceneStoredFieldsFormatTest.java",
+        "OnDiskFormatVersionsTest.java",
     ],
     tags = ["unit"],
     deps = [
