@@ -197,7 +197,6 @@ public class FtdcScheduledReporter {
               "Skipping FTDC reporting: meter count (%d) exceeds limit (%d). "
                   + "This typically happens when there are too many indexes.",
               meterCount, this.maxMeterCount);
-          ftdcFailureCounter("meterLimitExceeded", this.executorRegistry).increment();
           return;
         }
 
