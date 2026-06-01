@@ -214,7 +214,7 @@ public class CommunityReadinessChecker implements ReadinessChecker {
   private boolean isInvalidDefinitionFailure(IndexStatus status) {
     return status.getStatusCode() == IndexStatus.StatusCode.FAILED
         && status.getMessage().isPresent()
-        && status.getMessage().get().startsWith("Invalid definition: ");
+        && status.getMessage().get().startsWith(IndexStatus.INVALID_DEFINITION_MESSAGE_PREFIX);
   }
 
   private IndexesInAicSupplierOutput getIndexesInAic() {

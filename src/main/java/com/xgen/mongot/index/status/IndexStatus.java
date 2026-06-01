@@ -14,6 +14,8 @@ import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 
 public class IndexStatus implements DocumentEncodable {
+  public static final String INVALID_DEFINITION_MESSAGE_PREFIX = "Invalid definition: ";
+
   private static final Map<Reason, Predicate<StatusCode>> reasonValidationMap =
       new EnumMap<>(Reason.class);
 
