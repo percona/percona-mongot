@@ -474,13 +474,20 @@ public class ServerStatusDataExtractor {
   }
 
   public static class LoadSheddingMeterData {
+    // Admission-control variant 1 (FIXED_POOL_UNBOUNDED_QUEUE): query is still admitted but the
+    // virtual queue capacity was exceeded.
     public static final String WOULD_HAVE_REJECTED = "loadShedding.wouldHaveRejected";
+    // Admission-control variant 2 (FIXED_POOL_BOUNDED_QUEUE): query is rejected outright.
+    // A given executor only ever registers one of the two counters, so at most one is non-zero.
+    public static final String REJECTED = "loadShedding.rejected";
 
     public final double wouldHaveRejectedTotal;
+    public final double rejectedTotal;
 
     @VisibleForTesting
-    public LoadSheddingMeterData(double wouldHaveRejectedTotal) {
+    public LoadSheddingMeterData(double wouldHaveRejectedTotal, double rejectedTotal) {
       this.wouldHaveRejectedTotal = wouldHaveRejectedTotal;
+      this.rejectedTotal = rejectedTotal;
     }
 
     private static double getMeterValue(MeterRegistry meterRegistry, String meterName) {
@@ -489,7 +496,9 @@ public class ServerStatusDataExtractor {
     }
 
     public static LoadSheddingMeterData create(MeterRegistry meterRegistry) {
-      return new LoadSheddingMeterData(getMeterValue(meterRegistry, WOULD_HAVE_REJECTED));
+      return new LoadSheddingMeterData(
+          getMeterValue(meterRegistry, WOULD_HAVE_REJECTED),
+          getMeterValue(meterRegistry, REJECTED));
     }
   }
 

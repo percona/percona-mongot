@@ -483,6 +483,7 @@ public class ServerStatusDataExtractorTest {
 
   @Test
   public void testLoadSheddingMeterData() {
+    // Variant 1 host: only the wouldHaveRejected counter is registered.
     this.meterRegistry
         .counter(LoadSheddingMeterData.WOULD_HAVE_REJECTED, "executor", "blocking-server-worker")
         .increment(7);
@@ -491,6 +492,21 @@ public class ServerStatusDataExtractorTest {
         new ServerStatusDataExtractor(this.meterRegistry).createLoadSheddingMeterData();
 
     Assert.assertEquals(7.0, loadSheddingMeterData.wouldHaveRejectedTotal, 0.0);
+    Assert.assertEquals(0.0, loadSheddingMeterData.rejectedTotal, 0.0);
+  }
+
+  @Test
+  public void testLoadSheddingMeterDataRejected() {
+    // Variant 2 host: only the rejected counter is registered.
+    this.meterRegistry
+        .counter(LoadSheddingMeterData.REJECTED, "executor", "blocking-server-worker")
+        .increment(9);
+
+    var loadSheddingMeterData =
+        new ServerStatusDataExtractor(this.meterRegistry).createLoadSheddingMeterData();
+
+    Assert.assertEquals(0.0, loadSheddingMeterData.wouldHaveRejectedTotal, 0.0);
+    Assert.assertEquals(9.0, loadSheddingMeterData.rejectedTotal, 0.0);
   }
 
   @Test
@@ -499,5 +515,6 @@ public class ServerStatusDataExtractorTest {
         new ServerStatusDataExtractor(this.meterRegistry).createLoadSheddingMeterData();
 
     Assert.assertEquals(0.0, loadSheddingMeterData.wouldHaveRejectedTotal, 0.0);
+    Assert.assertEquals(0.0, loadSheddingMeterData.rejectedTotal, 0.0);
   }
 }
