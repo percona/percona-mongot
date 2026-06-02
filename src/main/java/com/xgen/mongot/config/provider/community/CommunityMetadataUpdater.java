@@ -5,16 +5,19 @@ import static com.xgen.mongot.util.Check.checkState;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexStatsEntry;
 import com.xgen.mongot.catalogservice.IndexStatsEntryMapper;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerStateEntry;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
@@ -42,6 +45,7 @@ public class CommunityMetadataUpdater {
   private final CommunityServerInfo serverInfo;
   private final MetadataService metadataService;
   private final CachedIndexInfoProvider indexInfoProvider;
+  private final CatalogAccessGuard catalogAccessGuard;
   private final NamedScheduledExecutorService executorService;
   private final Duration runFrequency;
 
@@ -62,11 +66,13 @@ public class CommunityMetadataUpdater {
       CommunityServerInfo serverInfo,
       MetadataService metadataService,
       CachedIndexInfoProvider indexInfoProvider,
+      CatalogAccessGuard catalogAccessGuard,
       MeterRegistry meterRegistry,
       Duration runFrequency) {
     this.serverInfo = serverInfo;
     this.metadataService = metadataService;
     this.indexInfoProvider = indexInfoProvider;
+    this.catalogAccessGuard = catalogAccessGuard;
     this.runFrequency = runFrequency;
     this.executorService =
         Executors.singleThreadScheduledExecutor(
@@ -95,6 +101,19 @@ public class CommunityMetadataUpdater {
 
   protected synchronized void run() {
     checkState(!this.closed, "cannot call update() after close()");
+
+    // Verify the configured syncSource.router still matches the actual cluster topology before
+    // touching __mdb_internal_search. Skipping the tick on mismatch avoids writing to the wrong
+    // catalog database.
+    try {
+      this.catalogAccessGuard.requireTopologyMatch();
+    } catch (TopologyMismatchException e) {
+      LOG.error("Skipping metadata updater tick due to cluster topology mismatch.", e);
+      return;
+    } catch (CheckedMongoException e) {
+      LOG.warn("Skipping metadata updater tick; unable to determine cluster topology.", e);
+      return;
+    }
 
     if (!this.startupCompleted) {
       if (!initializeMetadataIndexes() || !initializeServerStateEntry() || !initializeCache()) {

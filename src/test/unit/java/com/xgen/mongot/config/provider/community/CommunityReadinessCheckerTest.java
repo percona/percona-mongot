@@ -2,18 +2,22 @@ package com.xgen.mongot.config.provider.community;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexStats;
 import com.xgen.mongot.catalogservice.IndexStatsEntry;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerState;
 import com.xgen.mongot.catalogservice.ServerStateEntry;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
@@ -24,6 +28,7 @@ import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.server.CommandServer;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import java.time.Duration;
@@ -46,6 +51,7 @@ public class CommunityReadinessCheckerTest {
   private AuthoritativeIndexCatalog authoritativeIndexCatalog;
   private IndexStats indexStats;
   private CommandServer commandServer;
+  private CatalogAccessGuard catalogAccessGuard;
   private CommunityReadinessChecker checker;
 
   @Before
@@ -58,6 +64,7 @@ public class CommunityReadinessCheckerTest {
     this.authoritativeIndexCatalog = mock(AuthoritativeIndexCatalog.class);
     this.indexStats = mock(IndexStats.class);
     this.commandServer = mock(CommandServer.class);
+    this.catalogAccessGuard = mock(CatalogAccessGuard.class);
 
     // Default: server state entry exists, not shutdown, not yet ready.
     ServerStateEntry defaultEntry =
@@ -79,6 +86,7 @@ public class CommunityReadinessCheckerTest {
             this.configManager,
             this.indexInfoProvider,
             this.metadataService,
+            this.catalogAccessGuard,
             List.of(this.commandServer));
   }
 
@@ -382,6 +390,7 @@ public class CommunityReadinessCheckerTest {
             this.configManager,
             this.indexInfoProvider,
             this.metadataService,
+            this.catalogAccessGuard,
             List.of(server1, server2));
 
     assertFalse(multiServerChecker.isReady(false));
@@ -404,6 +413,7 @@ public class CommunityReadinessCheckerTest {
             this.configManager,
             this.indexInfoProvider,
             this.metadataService,
+            this.catalogAccessGuard,
             List.of(server1, server2));
 
     assertTrue(multiServerChecker.isReady(false));
@@ -543,6 +553,47 @@ public class CommunityReadinessCheckerTest {
 
     // Should throw MetadataServiceException
     this.checker.isReady(false);
+  }
+
+  @Test
+  public void testIsReady_topologyMismatch_returnsNotReady() throws Exception {
+    when(this.commandServer.getServerStatus()).thenReturn(CommandServer.ServerStatus.STARTED);
+    when(this.configManager.isReplicationInitialized()).thenReturn(true);
+    doThrow(new TopologyMismatchException("sharded but no router"))
+        .when(this.catalogAccessGuard)
+        .requireTopologyMatch();
+
+    assertFalse(this.checker.isReady(false));
+
+    // Guard short-circuits before any catalog state is read.
+    verify(this.catalogAccessGuard).requireTopologyMatch();
+    verify(this.metadataService, never()).getServerState();
+  }
+
+  @Test
+  public void testIsReady_topologyQueryFailure_returnsNotReady() throws Exception {
+    when(this.commandServer.getServerStatus()).thenReturn(CommandServer.ServerStatus.STARTED);
+    when(this.configManager.isReplicationInitialized()).thenReturn(true);
+    doThrow(new CheckedMongoException(new MongoException("mongod unavailable")))
+        .when(this.catalogAccessGuard)
+        .requireTopologyMatch();
+
+    assertFalse(this.checker.isReady(false));
+
+    verify(this.catalogAccessGuard).requireTopologyMatch();
+    verify(this.metadataService, never()).getServerState();
+  }
+
+  @Test
+  public void testIsReady_topologyMatches_consultsGuardAndReturnsReady() throws Exception {
+    when(this.commandServer.getServerStatus()).thenReturn(CommandServer.ServerStatus.STARTED);
+    when(this.configManager.isReplicationInitialized()).thenReturn(true);
+    when(this.indexInfoProvider.getIndexInfos()).thenReturn(Collections.emptyList());
+    when(this.authoritativeIndexCatalog.listIndexes()).thenReturn(Collections.emptyList());
+
+    assertTrue(this.checker.isReady(false));
+
+    verify(this.catalogAccessGuard).requireTopologyMatch();
   }
 
   private SearchIndexDefinition createIndexDefinition(ObjectId indexId, String name) {

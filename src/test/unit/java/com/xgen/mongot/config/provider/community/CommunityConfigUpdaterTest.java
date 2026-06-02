@@ -3,6 +3,8 @@ package com.xgen.mongot.config.provider.community;
 import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.mockIndex;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -11,10 +13,13 @@ import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableMap;
 import com.mongodb.ConnectionString;
+import com.mongodb.MongoException;
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -72,6 +77,7 @@ public class CommunityConfigUpdaterTest {
   private FeatureFlags featureFlags;
   private SyncSourceConfig syncSourceConfig;
   private InitialSyncHostProvider initialSyncHostProvider;
+  private CatalogAccessGuard catalogAccessGuard;
 
   private CommunityConfigUpdater communityConfigUpdater;
 
@@ -116,6 +122,8 @@ public class CommunityConfigUpdaterTest {
     this.initialSyncHostProvider = mock(InitialSyncHostProvider.class);
     when(this.initialSyncHostProvider.getMongodInitialSyncConnection())
         .thenReturn(Optional.empty());
+    this.catalogAccessGuard = mock(CatalogAccessGuard.class);
+    doNothing().when(this.catalogAccessGuard).requireTopologyMatch();
 
     this.communityConfigUpdater =
         new CommunityConfigUpdater(
@@ -124,7 +132,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             this.syncSourceConfig,
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
   }
 
   @After
@@ -352,7 +361,8 @@ public class CommunityConfigUpdaterTest {
             mockConfigManager,
             this.featureFlags,
             testSyncSourceConfig(),
-            mockInitialSyncHostProvider);
+            mockInitialSyncHostProvider,
+            this.catalogAccessGuard);
 
     communityConfigUpdater.update();
     verify(mockConfigManager).update(List.of(), List.of(), List.of(), Set.of(collectionUuid));
@@ -374,7 +384,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             configWithMongodHost(MONGOD_HOST_1),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       updater.update();
     } finally {
@@ -404,7 +415,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             configWithMongodHost(MONGOD_HOST_1),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       for (int i = 0; i < 5; i++) {
         updater.update();
@@ -436,7 +448,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             configWithMongodHost(MONGOD_HOST_1),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       // Single miss with fresh host available: below threshold, stale host must be retained.
       updater.update();
@@ -479,7 +492,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             configWithMongodHost(MONGOD_HOST_1),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       // Single miss: below the threshold — stale URI must be retained.
       updater.update();
@@ -506,7 +520,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             configWithMongodHost(MONGOD_HOST_1),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       for (int i = 0; i < 5; i++) {
         updater.update();
@@ -538,7 +553,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             shardedConfigWithHosts(Optional.of(MONGOD_HOST_1), Optional.of(MONGOS_HOST)),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       for (int i = 0; i < 5; i++) {
         updater.update();
@@ -573,7 +589,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             shardedConfigWithHosts(Optional.of(MONGOD_HOST_1), Optional.of(MONGOS_HOST)),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       // Single miss with fresh host available: below threshold, stale host must be retained.
       updater.update();
@@ -600,7 +617,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             shardedConfigWithHosts(Optional.of(MONGOD_HOST_1), Optional.of(MONGOS_HOST)),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       // Single miss: below the threshold — stale URI must be retained.
       updater.update();
@@ -628,7 +646,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             shardedConfigWithHosts(Optional.of(MONGOD_HOST_1), Optional.of(MONGOS_HOST)),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       // MISS_THRESHOLD consecutive misses — URI must be cleared on the last one.
       for (int i = 0; i < 5; i++) {
@@ -666,7 +685,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             shardedConfigWithHosts(Optional.of(MONGOD_HOST_1), Optional.of(MONGOS_HOST)),
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       for (int i = 0; i < 6; i++) {
         updater.update();
@@ -700,7 +720,8 @@ public class CommunityConfigUpdaterTest {
             this.configManager,
             this.featureFlags,
             configWithMongodHost(MONGOD_HOST_1), // isSharded=false
-            this.initialSyncHostProvider);
+            this.initialSyncHostProvider,
+            this.catalogAccessGuard);
     try {
       updater.update();
     } finally {
@@ -710,5 +731,33 @@ public class CommunityConfigUpdaterTest {
     // Non-sharded: mongos validity and selection must never be consulted.
     verify(this.initialSyncHostProvider, never()).isMongosHostStillValid(any());
     verify(this.initialSyncHostProvider, never()).getMongosInitialSyncConnection();
+  }
+
+  @Test
+  public void update_skipsCatalogReadOnTopologyMismatch() throws Exception {
+    doThrow(new TopologyMismatchException("sharded but no router"))
+        .when(this.catalogAccessGuard)
+        .requireTopologyMatch();
+
+    this.communityConfigUpdater.update();
+
+    verify(this.mongoDbMetadataClient).maybeUpdateSyncSource(any());
+    verify(this.configManager).handleReplicationAndSyncSourceUpdate(any());
+    verify(this.authoritativeIndexCatalog, never()).listIndexDefinitions();
+    verify(this.configManager, never()).update(any(), any(), any(), any());
+  }
+
+  @Test
+  public void update_skipsCatalogReadOnTopologyQueryFailure() throws Exception {
+    doThrow(new CheckedMongoException(new MongoException("mongod unavailable")))
+        .when(this.catalogAccessGuard)
+        .requireTopologyMatch();
+
+    this.communityConfigUpdater.update();
+
+    verify(this.mongoDbMetadataClient).maybeUpdateSyncSource(any());
+    verify(this.configManager).handleReplicationAndSyncSourceUpdate(any());
+    verify(this.authoritativeIndexCatalog, never()).listIndexDefinitions();
+    verify(this.configManager, never()).update(any(), any(), any(), any());
   }
 }

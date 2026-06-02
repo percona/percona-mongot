@@ -11,8 +11,10 @@ import com.xgen.mongot.catalog.DefaultIndexCatalog;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.DefaultMetadataService;
 import com.xgen.mongot.catalogservice.MetadataService;
+import com.xgen.mongot.catalogservice.MongodTopologyMonitor;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.manager.DefaultConfigManager;
 import com.xgen.mongot.config.provider.CommonUtils;
@@ -208,6 +210,12 @@ public class CommunityMongotBootstrapper {
         new MongoDbMetadataClient(Optional.of(syncSourceConfig), meterRegistry);
     mongoDbMetadataClient.refreshServerInfo();
 
+    var mongodTopologyMonitor = new MongodTopologyMonitor(syncSourceConfig, meterRegistry);
+    mongodTopologyMonitor.start();
+    var clusterTopologyGuard =
+        new CatalogAccessGuard(mongodTopologyMonitor,
+            config.syncSourceConfig().router().isPresent());
+
     var commandRegisterMetadata =
         new SearchCommandsRegister.BootstrapperMetadata(
             mongotVersion,
@@ -251,6 +259,7 @@ public class CommunityMongotBootstrapper {
             serverInfo,
             metadataService,
             configManager,
+            clusterTopologyGuard,
             meterRegistry,
             internalListAllIndexesForTesting);
 
@@ -273,7 +282,12 @@ public class CommunityMongotBootstrapper {
 
     var readinessChecker =
         new CommunityReadinessChecker(
-            serverInfo, configManager, configManager, metadataService, serverLifecycles.servers);
+            serverInfo,
+            configManager,
+            configManager,
+            metadataService,
+            clusterTopologyGuard,
+            serverLifecycles.servers);
     var healthCheckServer =
         createHealthCheckServer(config, meterRegistry, healthManager, readinessChecker);
 
@@ -287,7 +301,8 @@ public class CommunityMongotBootstrapper {
             mongotConfigs.featureFlags,
             meterRegistry,
             syncSourceConfig,
-            initialSyncHostProvider);
+            initialSyncHostProvider,
+            clusterTopologyGuard);
 
     // Register shutdown hook prior to starting the server.
     // Close the server to cleanly finish any in-flight requests.
@@ -304,6 +319,7 @@ public class CommunityMongotBootstrapper {
         diskMonitor::stop,
         metadataService::close,
         initialSyncHostProvider::close,
+        mongodTopologyMonitor::close,
         Logging::shutdown);
 
     // Start our background processes.
@@ -611,6 +627,7 @@ public class CommunityMongotBootstrapper {
       CommunityServerInfo serverInfo,
       MetadataService metadataService,
       ConfigManager configManager,
+      CatalogAccessGuard catalogAccessGuard,
       MeterRegistry meterRegistry,
       boolean internalListAllIndexesForTesting) {
     Duration runFrequency =
@@ -625,7 +642,12 @@ public class CommunityMongotBootstrapper {
     }
 
     return new CommunityMetadataUpdater(
-        serverInfo, metadataService, configManager, meterRegistry, runFrequency);
+        serverInfo,
+        metadataService,
+        configManager,
+        catalogAccessGuard,
+        meterRegistry,
+        runFrequency);
   }
 
   private static DefaultConfigManager configManager(
@@ -809,7 +831,8 @@ public class CommunityMongotBootstrapper {
       FeatureFlags featureFlags,
       MeterRegistry meterRegistry,
       SyncSourceConfig initialSyncSourceConfig,
-      InitialSyncHostProvider initialSyncHostProvider) {
+      InitialSyncHostProvider initialSyncHostProvider,
+      CatalogAccessGuard catalogAccessGuard) {
     var configUpdater =
         new CommunityConfigUpdater(
             authoritativeIndexCatalog,
@@ -817,7 +840,8 @@ public class CommunityMongotBootstrapper {
             configManager,
             featureFlags,
             initialSyncSourceConfig,
-            initialSyncHostProvider);
+            initialSyncHostProvider,
+            catalogAccessGuard);
     return PeriodicConfigMonitor.create(configUpdater, DEFAULT_CONFIG_UPDATE_PERIOD, meterRegistry);
   }
 

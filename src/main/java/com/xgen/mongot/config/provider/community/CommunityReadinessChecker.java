@@ -3,10 +3,12 @@ package com.xgen.mongot.config.provider.community;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexStatsEntry;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerStateEntry;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.index.IndexDetailedStatus;
@@ -15,6 +17,7 @@ import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.mongot.server.http.ReadinessChecker;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +38,7 @@ public class CommunityReadinessChecker implements ReadinessChecker {
   private final ConfigManager configManager;
   private final CachedIndexInfoProvider indexInfoProvider;
   private final MetadataService metadataService;
+  private final CatalogAccessGuard catalogAccessGuard;
   private final List<CommandServer> servers;
 
   // This can be called by unauthenticated connections to get the readiness state of the server.
@@ -52,11 +56,13 @@ public class CommunityReadinessChecker implements ReadinessChecker {
       ConfigManager configManager,
       CachedIndexInfoProvider indexInfoProvider,
       MetadataService metadataService,
+      CatalogAccessGuard catalogAccessGuard,
       List<CommandServer> servers) {
     this.serverInfo = serverInfo;
     this.configManager = configManager;
     this.indexInfoProvider = indexInfoProvider;
     this.metadataService = metadataService;
+    this.catalogAccessGuard = catalogAccessGuard;
     this.servers = servers;
   }
 
@@ -78,6 +84,19 @@ public class CommunityReadinessChecker implements ReadinessChecker {
 
     if (!this.configManager.isReplicationInitialized()) {
       LOG.info("Not ready, waiting on replication to be initialized...");
+      return false;
+    }
+
+    // Verify the configured syncSource.router matches the actual cluster topology before reading
+    // catalog state. The readiness probe is internal and we'd rather fail-closed (return not
+    // ready) than declare ready.
+    try {
+      this.catalogAccessGuard.requireTopologyMatch();
+    } catch (TopologyMismatchException e) {
+      LOG.error("Not ready, cluster topology mismatch", e);
+      return false;
+    } catch (CheckedMongoException e) {
+      LOG.warn("Not ready, unable to determine cluster topology", e);
       return false;
     }
 

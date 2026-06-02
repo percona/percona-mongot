@@ -9,7 +9,9 @@ import com.mongodb.MongoNamespace;
 import com.mongodb.ServerAddress;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.provider.mongod.ConfigUpdaterUtils;
 import com.xgen.mongot.config.updater.ConfigUpdater;
@@ -52,6 +54,7 @@ public class CommunityConfigUpdater implements ConfigUpdater {
   private final ConfigManager configManager;
   private final FeatureFlags featureFlags;
   private final InitialSyncHostProvider initialSyncHostProvider;
+  private final CatalogAccessGuard catalogAccessGuard;
 
   @GuardedBy("this")
   private SyncSourceConfig syncSourceConfig;
@@ -71,13 +74,15 @@ public class CommunityConfigUpdater implements ConfigUpdater {
       ConfigManager configManager,
       FeatureFlags featureFlags,
       SyncSourceConfig initialSyncSourceConfig,
-      InitialSyncHostProvider initialSyncHostProvider) {
+      InitialSyncHostProvider initialSyncHostProvider,
+      CatalogAccessGuard catalogAccessGuard) {
     this.authoritativeIndexCatalog = authoritativeIndexCatalog;
     this.mongoDbMetadataClient = mongoDbMetadataClient;
     this.configManager = configManager;
     this.featureFlags = featureFlags;
     this.syncSourceConfig = initialSyncSourceConfig;
     this.initialSyncHostProvider = initialSyncHostProvider;
+    this.catalogAccessGuard = catalogAccessGuard;
 
     this.mongodHostMissCount = 0;
     this.mongosHostMissCount = 0;
@@ -93,6 +98,20 @@ public class CommunityConfigUpdater implements ConfigUpdater {
     this.syncSourceConfig = getRefreshedSyncSourceConfig();
     this.mongoDbMetadataClient.maybeUpdateSyncSource(this.syncSourceConfig);
     this.configManager.handleReplicationAndSyncSourceUpdate(this.syncSourceConfig);
+
+    // Refresh the cached topology state and bail out if the configured syncSource.router does not
+    // match the actual cluster topology. Doing this fresh check before reading the AIC avoids
+    // deleting indexes when, e.g., the catalog database was moved to a different shard and we are
+    // connected to mongod without router config.
+    try {
+      this.catalogAccessGuard.requireTopologyMatch();
+    } catch (TopologyMismatchException e) {
+      LOG.error("Skipping config updater due to cluster topology mismatch.", e);
+      return;
+    } catch (CheckedMongoException e) {
+      LOG.warn("Skipping; unable to determine cluster topology.", e);
+      return;
+    }
 
     // Then try updating all our live indexes with views. This may fail, if the catalog is
     // concurrently modified by another mongot, or for some other transient reason.

@@ -16,12 +16,15 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoException;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexStats;
 import com.xgen.mongot.catalogservice.IndexStatsEntry;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerState;
 import com.xgen.mongot.catalogservice.ServerStateEntry;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.IndexDetailedStatus;
@@ -32,6 +35,7 @@ import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.Generation;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SynonymMappingDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
@@ -59,6 +63,7 @@ public class CommunityMetadataUpdaterTest {
   private ServerState serverState;
   private IndexStats indexStats;
   private CachedIndexInfoProvider indexInfoProvider;
+  private CatalogAccessGuard catalogAccessGuard;
   private SimpleMeterRegistry meterRegistry;
   private CommunityMetadataUpdater heartbeater;
 
@@ -69,6 +74,7 @@ public class CommunityMetadataUpdaterTest {
     this.serverState = mock(ServerState.class);
     this.indexStats = mock(IndexStats.class);
     this.indexInfoProvider = mock(CachedIndexInfoProvider.class);
+    this.catalogAccessGuard = mock(CatalogAccessGuard.class);
     this.meterRegistry = new SimpleMeterRegistry();
     when(this.metadataService.getServerState()).thenReturn(this.serverState);
     when(this.metadataService.getIndexStats()).thenReturn(this.indexStats);
@@ -81,6 +87,7 @@ public class CommunityMetadataUpdaterTest {
             this.serverInfo,
             this.metadataService,
             this.indexInfoProvider,
+            this.catalogAccessGuard,
             this.meterRegistry,
             Duration.ofMillis(10));
   }
@@ -133,6 +140,48 @@ public class CommunityMetadataUpdaterTest {
         assertThrows(IllegalStateException.class, () -> this.heartbeater.run());
 
     assertEquals("cannot call update() after close()", exception.getMessage());
+  }
+
+  @Test
+  public void run_topologyMismatch_skipsTickAndDoesNotTouchCatalog() throws Exception {
+    doThrow(new TopologyMismatchException("sharded but no router"))
+        .when(this.catalogAccessGuard)
+        .requireTopologyMatch();
+
+    this.heartbeater.run();
+
+    verify(this.catalogAccessGuard).requireTopologyMatch();
+    verify(this.indexStats, never()).createCollectionIndexes();
+    verify(this.serverState, never()).upsert(any(ServerStateEntry.class));
+    verify(this.serverState, never()).list(any(BsonDocument.class));
+    verify(this.indexInfoProvider, never()).refreshIndexInfos();
+  }
+
+  @Test
+  public void run_topologyQueryFailure_skipsTickAndDoesNotTouchCatalog() throws Exception {
+    doThrow(new CheckedMongoException(new MongoException("mongod unavailable")))
+        .when(this.catalogAccessGuard)
+        .requireTopologyMatch();
+
+    this.heartbeater.run();
+
+    verify(this.catalogAccessGuard).requireTopologyMatch();
+    verify(this.indexStats, never()).createCollectionIndexes();
+    verify(this.serverState, never()).upsert(any(ServerStateEntry.class));
+    verify(this.serverState, never()).list(any(BsonDocument.class));
+    verify(this.indexInfoProvider, never()).refreshIndexInfos();
+  }
+
+  @Test
+  public void run_topologyMatches_proceedsWithTick() throws Exception {
+    when(this.indexStats.list(any())).thenReturn(Collections.emptyList());
+    when(this.indexInfoProvider.getIndexInfos()).thenReturn(Collections.emptyList());
+
+    this.heartbeater.run();
+
+    // Guard is consulted, then the tick proceeds to initialize and upsert server state.
+    verify(this.catalogAccessGuard).requireTopologyMatch();
+    verify(this.serverState).upsert(any(ServerStateEntry.class));
   }
 
   @Test
@@ -292,6 +341,7 @@ public class CommunityMetadataUpdaterTest {
             serverInfoNewName,
             this.metadataService,
             this.indexInfoProvider,
+            this.catalogAccessGuard,
             this.meterRegistry,
             Duration.ofMillis(10));
     updater.run();
@@ -772,6 +822,7 @@ public class CommunityMetadataUpdaterTest {
             this.serverInfo,
             this.metadataService,
             this.indexInfoProvider,
+            this.catalogAccessGuard,
             this.meterRegistry,
             Duration.ofMillis(500)); // 500ms period
 
