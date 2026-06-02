@@ -8,18 +8,21 @@ import java.util.List;
 import java.util.Optional;
 
 public final class RouterConfig extends MongoConnectionConfig {
+
   public RouterConfig(
       List<HostAndPort> hostandPorts,
       Optional<String> username,
       Optional<Path> passwordFile,
-      String authSource,
-      boolean tls,
+      Optional<String> authSource,
+      Optional<Boolean> tls,
       Optional<MongoReadPreferenceName> readPreference,
-      Optional<X509Config> x509) {
-    super(hostandPorts, username, passwordFile, authSource, tls, readPreference, x509);
+      Optional<X509Config> x509,
+      Optional<ScramConfig> scram) {
+    super(hostandPorts, username, passwordFile, authSource, tls, readPreference, x509, scram);
   }
 
   public static RouterConfig fromBson(DocumentParser parser) throws BsonParseException {
+    // Todo(CLOUDP-395903): Modify this ctor to use the new three arg one.
     return new RouterConfig(
         parser.getField(Fields.HOST_AND_PORT).unwrap().stream()
             .map(HostAndPort::fromString)
@@ -29,6 +32,8 @@ public final class RouterConfig extends MongoConnectionConfig {
         parser.getField(Fields.AUTH_SOURCE).unwrap(),
         parser.getField(Fields.TLS).unwrap(),
         parser.getField(Fields.READ_PREFERENCE).unwrap(),
-        parser.getField(Fields.X509).unwrap());
+        parser.getField(Fields.X509).unwrap(),
+        parser.getField(Fields.SCRAM).unwrap()
+    );
   }
 }

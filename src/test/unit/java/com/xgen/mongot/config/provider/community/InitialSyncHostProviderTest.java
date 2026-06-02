@@ -64,9 +64,10 @@ public class InitialSyncHostProviderTest {
                 HostAndPort.fromParts("rs2.local", 27018)),
             Optional.of("mongot"),
             Optional.of(this.passwordFile),
-            "admin",
-            false,
+            Optional.of("admin"),
+            Optional.of(false),
             Optional.of(MongoReadPreferenceName.SECONDARY_PREFERRED),
+            Optional.empty(),
             Optional.empty());
 
     this.routerConfig =
@@ -74,9 +75,10 @@ public class InitialSyncHostProviderTest {
             List.of(HostAndPort.fromParts("mongos.local", 27019)),
             Optional.of("mongot"),
             Optional.of(this.passwordFile),
-            "admin",
-            false,
+            Optional.of("admin"),
+            Optional.of(false),
             Optional.of(MongoReadPreferenceName.SECONDARY_PREFERRED),
+            Optional.empty(),
             Optional.empty());
   }
 
@@ -147,9 +149,10 @@ public class InitialSyncHostProviderTest {
                 HostAndPort.fromParts("rs2.local", 27018)),
             Optional.of("mongot"),
             Optional.of(this.passwordFile),
-            "admin",
-            false,
+            Optional.of("admin"),
+            Optional.of(false),
             Optional.of(MongoReadPreferenceName.NEAREST),
+            Optional.empty(),
             Optional.empty());
     return new SyncSourceConfig(
         nearestRsConfig, Optional.empty(), Optional.empty(), Optional.empty());

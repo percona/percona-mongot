@@ -6,8 +6,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -46,10 +48,16 @@
               "mongod1:27017",
               "mongod2:27017"
             ],
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd",
-            "authSource": "local",
-            "tls": true,
+            "scramAuth": {
+              "authSource": "local",
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd",
+              "tls": {
+                "enabled": true,
+                "tlsCertificateKeyFile": "/etc/mongot/tls/client-combined.pem",
+                "caFile": "/etc/mongot/ca.pem"
+              }
+            },
             "readPreference": "primaryPreferred"
           },
           "router": {
@@ -57,13 +65,13 @@
               "mongos1:27017",
               "mongos2:27017"
             ],
-            "username": "user",
-            "passwordFile": "/etc/mongot/router.passwd",
-            "authSource": "local",
-            "tls": false,
+            "scramAuth": {
+              "authSource": "local",
+              "username": "user",
+              "passwordFile": "/etc/mongot/router.passwd"
+            },
             "readPreference": "primaryPreferred"
-          },
-          "caFile": "/etc/mongot/ca.pem"
+          }
         },
         "storage": {
           "dataPath": "data/mongot"
@@ -107,6 +115,46 @@
             "x509": {
               "tlsCertificateKeyFile": "/etc/mongot/tls/client-combined.pem"
             },
+            "authSource": "admin",
+            "tls": true
+          },
+          "caFile": "/etc/mongot/ca.pem"
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG",
+          "logPath": "/var/log/mongot"
+        },
+        "ftdc": {
+          "enabled": true,
+          "directorySizeMb": 100,
+          "fileSizeMb": 10,
+          "collectionPeriodMillis": 1000
+        }
+      }
+    },
+    {
+      "description": "replicaSet legacy",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "username": "user",
+            "passwordFile": "/etc/mongot/router.passwd",
             "authSource": "admin",
             "tls": true
           },
@@ -773,7 +821,7 @@
           "verbosity": "DEBUG"
         }
       },
-      "errorMessageContains": "x509 and username/passwordFile"
+      "errorMessageContains": "One authentication mechanism must be used (username/passwordFile, x509 or scram)"
     },
     {
       "description": "replicaSet neither auth",
@@ -902,7 +950,155 @@
           "verbosity": "DEBUG"
         }
       },
+      "errorMessageContains": "One authentication mechanism must be used (username/passwordFile, x509 or scram)"
+    },
+    {
+      "description": "router both x509 and username password",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "username": "user",
+            "passwordFile": "/etc/mongot/replicaSet.passwd"
+          },
+          "router": {
+            "hostAndPort": "mongos:27017",
+            "username": "routerUser",
+            "passwordFile": "/etc/mongot/router.passwd",
+            "x509": {
+              "tlsCertificateKeyFile": "/etc/mongot/tls/router-client.pem"
+            }
+          },
+          "caFile": "/etc/mongot/ca.pem"
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
       "errorMessageContains": "x509 and username/passwordFile"
+    },
+    {
+      "description": "replicaSet x509 without caFile",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "x509": {
+              "tlsCertificateKeyFile": "/etc/mongot/tls/client.pem"
+            },
+            "tls": true
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
+      "errorMessageContains": "caFile must be set either within x509 config or parent sync source."
+    },
+    {
+      "description": "replicaSet scram tls certKeyFile with tls disabled",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "__system",
+              "passwordFile": "/etc/mongot/keyfile",
+              "tls": {
+                "enabled": false,
+                "tlsCertificateKeyFile": "/etc/tls/client.pem"
+              }
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
+      "errorMessageContains": "tls must be enabled when tlsCertificateKeyFile is configured"
+    },
+    {
+      "description": "replicaSet scram tls passwordFile without certKeyFile",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "__system",
+              "passwordFile": "/etc/mongot/keyfile",
+              "tls": {
+                "enabled": true,
+                "tlsCertificateKeyFilePasswordFile": "/etc/tls/cert-pass",
+                "caFile": "/etc/mongot/ca.pem"
+              }
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
+      "errorMessageContains": "tlsCertificateKeyFilePasswordFile is not supported for scram tls connections"
     },
     {
       "description": "replicationReader PRIMARY with tagSets",

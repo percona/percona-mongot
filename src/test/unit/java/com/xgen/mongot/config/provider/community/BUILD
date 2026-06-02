@@ -13,8 +13,10 @@ java_test_suite(
         "ConnectionInfoFactoryTest.java",
         "InitialSyncHostProviderTest.java",
         "MongoConnectionConfigTest.java",
+        "ScramConfigTest.java",
         "ServerConfigTest.java",
         "SyncSourceConfigTest.java",
+        "TlsConfigTest.java",
         "X509AuthConfigTest.java",
     ],
     data = [

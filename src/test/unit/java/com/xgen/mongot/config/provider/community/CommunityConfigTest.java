@@ -59,6 +59,7 @@ public class CommunityConfigTest {
           simple(),
           full(),
           replicaSetX509(),
+          replicaSetLegacy(),
           withDefaultLogVerbosity(),
           grpcDisabledTls(),
           grpcTls(),
@@ -82,12 +83,19 @@ public class CommunityConfigTest {
               new SyncSourceConfig(
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
-                      Optional.of("user"),
-                      Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
                       Optional.empty(),
-                      Optional.empty()),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(
+                          new ScramConfig(
+                              Databases.ADMIN,
+                              "user",
+                              Path.of("/etc/mongot/replicaSet.passwd"),
+                              new TlsConfig(
+                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
                   Optional.empty(),
                   Optional.empty(),
                   Optional.empty()),
@@ -110,11 +118,32 @@ public class CommunityConfigTest {
             assertTrue("replicaSet should use x509 auth", replicaSet.x509().isPresent());
             assertEquals(
                 Path.of("/etc/mongot/tls/client-combined.pem"),
-                replicaSet.x509().get().tlsCertificateKeyFile());
+                replicaSet.x509().get().tlsConfig().tlsCertificateKeyFile().get());
             assertEquals(
-                Optional.empty(), replicaSet.x509().get().tlsCertificateKeyFilePasswordFile());
+                Optional.empty(),
+                replicaSet.x509().get().tlsConfig().tlsCertificateKeyFilePasswordFile());
             assertEquals("admin", replicaSet.authSource());
             assertTrue(replicaSet.tls());
+          });
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> replicaSetLegacy() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "replicaSet legacy",
+          (CommunityConfig config) -> {
+            var replicaSet = config.syncSourceConfig().replicaSet();
+            assertTrue("replicaSet should use legacy auth", replicaSet.username().isPresent());
+            assertEquals("user", replicaSet.username().get());
+            assertTrue("passwordFile should be present", replicaSet.passwordFile().isPresent());
+            assertEquals(
+                Path.of("/etc/mongot/router.passwd"), replicaSet.passwordFile().get());
+            assertEquals("admin", replicaSet.authSource());
+            assertTrue("tls should be enabled", replicaSet.tls());
+            assertTrue(
+                "caFile should be present at sync source level",
+                config.syncSourceConfig().caFile().isPresent());
+            assertEquals(
+                Path.of("/etc/mongot/ca.pem"), config.syncSourceConfig().caFile().get());
           });
     }
 
@@ -127,24 +156,44 @@ public class CommunityConfigTest {
                       List.of(
                           HostAndPort.fromParts("mongod1", 27017),
                           HostAndPort.fromParts("mongod2", 27017)),
-                      Optional.of("user"),
-                      Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.LOCAL,
-                      true,
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
                       Optional.of(MongoReadPreferenceName.PRIMARY_PREFERRED),
-                      Optional.empty()),
+                      Optional.empty(),
+                      Optional.of(
+                          new ScramConfig(
+                              Databases.LOCAL,
+                              "user",
+                              Path.of("/etc/mongot/replicaSet.passwd"),
+                              new TlsConfig(
+                                  true,
+                                  Optional.of(Path.of("/etc/mongot/tls/client-combined.pem")),
+                                  Optional.empty(),
+                                  Optional.of(Path.of("/etc/mongot/ca.pem")))))),
                   Optional.of(
                       new RouterConfig(
                           List.of(
                               HostAndPort.fromParts("mongos1", 27017),
                               HostAndPort.fromParts("mongos2", 27017)),
-                          Optional.of("user"),
-                          Optional.of(Path.of("/etc/mongot/router.passwd")),
-                          Databases.LOCAL,
-                          false,
+                          Optional.empty(),
+                          Optional.empty(),
+                          Optional.empty(),
+                          Optional.empty(),
                           Optional.of(MongoReadPreferenceName.PRIMARY_PREFERRED),
-                          Optional.empty())),
-                  Optional.of(Path.of("/etc/mongot/ca.pem")),
+                          Optional.empty(),
+                          Optional.of(
+                              new ScramConfig(
+                                  Databases.LOCAL,
+                                  "user",
+                                  Path.of("/etc/mongot/router.passwd"),
+                                  new TlsConfig(
+                                      false,
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty()))))),
+                  Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
@@ -173,8 +222,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -199,8 +249,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -229,8 +280,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -262,8 +314,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -296,8 +349,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -330,8 +384,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -363,8 +418,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -389,8 +445,9 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
+                      Optional.empty(),
                       Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
@@ -460,9 +517,10 @@ public class CommunityConfigTest {
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("/etc/mongot/replicaSet.passwd")),
-                      Databases.ADMIN,
-                      false,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(false),
                       Optional.of(MongoReadPreferenceName.SECONDARY_PREFERRED),
+                      Optional.empty(),
                       Optional.empty()),
                   Optional.empty(),
                   Optional.empty(),
@@ -502,17 +560,19 @@ public class CommunityConfigTest {
                           HostAndPort.fromParts("mongod2", 27017)),
                       Optional.of("user"),
                       Optional.of(Path.of("replicaSet.passwd")),
-                      Databases.ADMIN,
-                      true,
+                      Optional.of(Databases.ADMIN),
+                      Optional.of(true),
                       Optional.of(MongoReadPreferenceName.PRIMARY_PREFERRED),
+                      Optional.empty(),
                       Optional.empty()),
                   Optional.of(
                       new RouterConfig(
                           List.of(HostAndPort.fromParts("mongos", 27017)),
                           Optional.of("user"),
                           Optional.of(Path.of("router.passwd")),
-                          Databases.ADMIN,
-                          false,
+                          Optional.of(Databases.ADMIN),
+                          Optional.of(false),
+                          Optional.empty(),
                           Optional.empty(),
                           Optional.empty())),
                   Optional.of(Path.of("/etc/mongot/ca.pem")),
@@ -547,19 +607,43 @@ public class CommunityConfigTest {
       assertTrue("replicaSet should use x509", replicaSet.x509().isPresent());
       assertEquals(
           Path.of("/etc/mongot/tls/client-combined.pem"),
-          replicaSet.x509().get().tlsCertificateKeyFile());
+          replicaSet.x509().get().tlsConfig().tlsCertificateKeyFile().get());
       assertTrue(
           "tlsCertificateKeyFilePasswordFile should be present",
-          replicaSet.x509().get().tlsCertificateKeyFilePasswordFile().isPresent());
+          replicaSet.x509().get().tlsConfig().tlsCertificateKeyFilePasswordFile().isPresent());
       assertEquals(
           Path.of("/etc/mongot/secrets/cert-key-pass"),
-          replicaSet.x509().get().tlsCertificateKeyFilePasswordFile().get());
+          replicaSet.x509().get().tlsConfig().tlsCertificateKeyFilePasswordFile().get());
       assertEquals("admin", replicaSet.authSource());
       assertTrue(replicaSet.tls());
       assertEquals(
           Optional.of(MongoReadPreferenceName.PRIMARY_PREFERRED), replicaSet.readPreference());
       assertTrue("caFile should be present", result.syncSourceConfig().caFile().isPresent());
       assertEquals(Path.of("/etc/mongot/tls/ca.pem"), result.syncSourceConfig().caFile().get());
+    }
+
+    @Test
+    public void readFromFile_withScram_replicaSetHasScramConfig()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigScram.yaml");
+      CommunityConfig result = CommunityConfig.readFromFile(configPath);
+
+      var replicaSet = result.syncSourceConfig().replicaSet();
+      assertTrue("replicaSet should use scram auth", replicaSet.scram().isPresent());
+      ScramConfig scram = replicaSet.scram().get();
+      assertEquals("user", scram.username());
+      assertEquals(Path.of("/etc/mongot/router.passwd"), scram.passwordFile());
+      assertEquals("admin", scram.authSource());
+      assertTrue("tls should be enabled", scram.tls().enabled());
+      assertTrue(
+          "tlsCertificateKeyFile should be present",
+          scram.tls().tlsCertificateKeyFile().isPresent());
+      assertEquals(
+          Path.of("/etc/mongot/tls/client-combined.pem"),
+          scram.tls().tlsCertificateKeyFile().get());
+      assertTrue("tls.caFile should be present", scram.tls().caFile().isPresent());
+      assertEquals(Path.of("/etc/mongot/ca.pem"), scram.tls().caFile().get());
     }
   }
 }

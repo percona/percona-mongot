@@ -18,9 +18,10 @@ public class SyncSourceConfigTest {
         HOSTS,
         Optional.empty(),
         Optional.empty(),
-        Databases.ADMIN,
-        false,
+        Optional.of(Databases.ADMIN),
+        Optional.of(false),
         readPreference,
+        Optional.empty(),
         Optional.empty());
   }
 
