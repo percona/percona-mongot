@@ -34,6 +34,7 @@ import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
+import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient;
 import com.xgen.mongot.embedding.mongodb.leasing.DynamicLeaderLeaseManager;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
@@ -864,7 +865,12 @@ public class MaterializedViewManagerTest {
         1.0,
         mocks
             .meterRegistry
-            .counter(MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME)
+            .counter(
+                MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME,
+                "errorType",
+                "CREATE_NEW_GENERATOR",
+                "reason",
+                "NON_TRANSIENT")
             .count(),
         0.0);
   }
@@ -890,9 +896,84 @@ public class MaterializedViewManagerTest {
         1.0,
         mocks
             .meterRegistry
-            .counter(MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME)
+            .counter(
+                MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME,
+                "errorType",
+                "CREATE_NEW_GENERATOR",
+                "reason",
+                "NON_TRANSIENT")
             .count(),
         0.0);
+  }
+
+  // Transient failures during restartReplication must not crash mongot. The failing index is
+  // skipped and marked STALE; other indexes still get their generators created.
+  @Test
+  public void restartReplication_skipsIndex_andContinues_whenTransientExceptionThrown() {
+    Mocks mocks = Mocks.create();
+    mocks.manager.setIsReplicationEnabled(false);
+
+    MaterializedViewIndexDefinitionGeneration failingIndexDefinition =
+        mockMatViewDefinitionGeneration(new ObjectId());
+    MaterializedViewIndexDefinitionGeneration succeedingIndexDefinition =
+        mockMatViewDefinitionGeneration(new ObjectId());
+    MaterializedViewIndexGeneration failingGen = mockMatViewIndexGeneration(failingIndexDefinition);
+    MaterializedViewIndexGeneration succeedingGen =
+        mockMatViewIndexGeneration(succeedingIndexDefinition);
+
+    // Pre-register both — mockMaterializedViewGenerator stubs factory.create() to return mocks.
+    mocks.mockMaterializedViewGenerator(failingGen);
+    MaterializedViewGenerator succeedingGenerator =
+        mocks.mockMaterializedViewGenerator(succeedingGen);
+    mocks.addIndexForReplication(failingGen);
+    mocks.addIndexForReplication(succeedingGen);
+
+    // Now reconfigure: factory throws transient for the failing index, still returns the mock for
+    // the succeeding one. Use thenAnswer so per-arg routing is explicit.
+    when(mocks.materializedViewGeneratorFactory.create(any(MaterializedViewIndexGeneration.class)))
+        .thenAnswer(
+            invocation -> {
+              MaterializedViewIndexGeneration arg = invocation.getArgument(0);
+              if (arg.getGenerationId().equals(failingGen.getGenerationId())) {
+                throw new MaterializedViewTransientException(
+                    "simulated 10107 NotPrimary",
+                    MaterializedViewTransientException.Reason.READ_LEASE_FAILED);
+              }
+              return succeedingGenerator;
+            });
+
+    // Must NOT throw — restartReplication should swallow MaterializedViewTransientException.
+    mocks.manager.restartReplication();
+
+    // Failure recorded with the transient reason so alerts can target this specific case.
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(
+                MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME,
+                "errorType",
+                "CREATE_NEW_GENERATOR",
+                "reason",
+                MaterializedViewTransientException.Reason.READ_LEASE_FAILED.name())
+            .count(),
+        0.0);
+
+    // The other index still got its generator created.
+    verify(mocks.materializedViewGeneratorFactory).create(succeedingGen);
+    assertTrue(
+        mocks
+            .manager
+            .getMatViewGenerator(succeedingGen.getGenerationId())
+            .isPresent());
+    // The failing one is absent — caller (next conf push) is expected to retry.
+    assertFalse(
+        mocks.manager.getMatViewGenerator(failingGen.getGenerationId()).isPresent());
+
+    // createNewGenerator's leaseManager.add() ran before the throw; the catch must roll it back
+    // so refreshStatus() doesn't see a follower with no generator and log a warn every heartbeat.
+    verify(mocks.leaseManager).drop(failingGen.getGenerationId());
+    verify(mocks.leaseManager, never()).drop(succeedingGen.getGenerationId());
   }
 
   @Test
@@ -2028,7 +2109,12 @@ public class MaterializedViewManagerTest {
         1.0,
         mocks
             .meterRegistry
-            .counter(MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME)
+            .counter(
+                MaterializedViewManager.GENERATOR_CREATION_FAILURE_COUNTER_NAME,
+                "errorType",
+                "FACTORY_CREATE_AFTER_LEADERSHIP_LOSS",
+                "reason",
+                "NON_TRANSIENT")
             .count(),
         0.0);
   }
