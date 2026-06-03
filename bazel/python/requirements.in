@@ -1,4 +1,4 @@
-requests==2.32.4
+requests==2.33.0
 urllib3==2.6.3
 certifi==2024.7.4
 # Constraints for transitive deps (security upgrades)
