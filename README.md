@@ -1,37 +1,47 @@
-# ![Logo](docs/leaf.svg) MongoDB Search README
+# Percona Search for MongoDB
 
-Welcome to MongoDB Search!
+Percona Search for MongoDB is Percona's distribution of `mongot`, the search
+service that provides Full Text Search and Vector Search capabilities for
+Percona Server for MongoDB.
 
 ## Components
 
-- `mongot` - Service for MongoDB providing Full Text and Vector Search capabilities.
+- `mongot` — service for MongoDB providing Full Text and Vector Search capabilities.
 
-## Download MongoDB Search Community Edition
+## Installation
 
-- https://www.mongodb.com/try/download/search-in-community
-- Using docker image `docker pull mongodb/mongodb-community-search:latest`
+Packages for Percona Search for MongoDB are created by the Percona team and are
+available at the Percona website. You can also build from source — see
+[docs/building.md](docs/building.md).
 
-## Bug Reports
+## Community
 
-- https://mongodb.com/community/forums/
+Find answers to Percona Search for MongoDB-related questions on the
+[Percona Community Forum](https://forums.percona.com/).
 
-  Please report issues with MongoDB Search.
+## Submitting bug reports or feature requests
 
-## Learn MongoDB
+If you find a bug in Percona Search for MongoDB, you can submit a report to the
+Jira issue tracker for Percona Server for MongoDB:
+<https://jira.percona.com/projects/PSMDB>
 
-- Getting Started - https://www.mongodb.com/docs/atlas/atlas-search/tutorial/?deployment-type=self
-- Documentation - https://docs.mongodb.com/manual/
-- Developer Center - https://www.mongodb.com/developer/
-- MongoDB University - https://learn.mongodb.com
-- Building - [docs/building.md](docs/building.md)
+Start by searching the open tickets for a similar report. If you find that
+someone else has already reported the problem, you can upvote that report to
+increase its visibility.
 
-## Forums
+If there is no existing report, submit one following these steps:
 
-- https://mongodb.com/community/forums/
-
-  Technical questions about using Mongo Search.
+1. Sign in to the Jira issue tracker. You will need to create an account if you
+   do not have one.
+2. In the Summary, Description, Steps To Reproduce, and Affects Version fields,
+   describe the problem you have detected.
+3. As a general rule of thumb, try to create bug reports that are:
+   - Reproducible: include steps to reproduce the problem.
+   - Specific: include as much detail as possible (version, environment, etc.).
+   - Unique: check whether a Jira ticket already describes the problem.
+   - Scoped to a single bug: report only one bug per ticket.
 
 ## LICENSE
 
-MongoDB is free and the source is available. All versions are published
-under the [Server Side Public License (SSPL) v1](LICENSE).
+Percona Search for MongoDB is source-available software, published under the
+[Server Side Public License (SSPL) v1](LICENSE).
