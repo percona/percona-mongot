@@ -2,7 +2,7 @@ requests==2.32.4
 urllib3==2.6.3
 certifi==2024.7.4
 # Constraints for transitive deps (security upgrades)
-cryptography==46.0.5 #from pyjwt
+cryptography==46.0.7 #from pyjwt
 PyNaCl==1.6.2 #from PyGithub
 fire
 PyGithub
