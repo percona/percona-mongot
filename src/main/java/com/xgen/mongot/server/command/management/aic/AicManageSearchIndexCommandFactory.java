@@ -1,5 +1,6 @@
 package com.xgen.mongot.server.command.management.aic;
 
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.server.command.Command;
@@ -14,15 +15,18 @@ public class AicManageSearchIndexCommandFactory extends AbstractManageSearchInde
 
   private final MetadataService metadataService;
   private final CachedIndexInfoProvider cachedIndexInfoProvider;
+  private final CatalogAccessGuard catalogAccessGuard;
   private final boolean listAllIndexes;
 
   public AicManageSearchIndexCommandFactory(
       MetadataService metadataService,
       CachedIndexInfoProvider cachedIndexInfoProvider,
+      CatalogAccessGuard catalogAccessGuard,
       boolean internalListAllIndexesForTesting) {
 
     this.metadataService = metadataService;
     this.cachedIndexInfoProvider = cachedIndexInfoProvider;
+    this.catalogAccessGuard = catalogAccessGuard;
     this.listAllIndexes = internalListAllIndexesForTesting;
   }
 
@@ -31,6 +35,7 @@ public class AicManageSearchIndexCommandFactory extends AbstractManageSearchInde
       IndexManagementCommandContext<CreateSearchIndexesCommandDefinition> commandContext) {
     return new AicCreateSearchIndexesCommand(
         this.metadataService.getAuthoritativeIndexCatalog(),
+        this.catalogAccessGuard,
         commandContext.dbName(),
         commandContext.collectionUuid(),
         commandContext.collectionName(),
@@ -44,6 +49,7 @@ public class AicManageSearchIndexCommandFactory extends AbstractManageSearchInde
     return new AicListSearchIndexesCommand(
         this.metadataService,
         this.cachedIndexInfoProvider,
+        this.catalogAccessGuard,
         commandContext.dbName(),
         commandContext.collectionUuid(),
         commandContext.collectionName(),
@@ -57,6 +63,7 @@ public class AicManageSearchIndexCommandFactory extends AbstractManageSearchInde
       IndexManagementCommandContext<UpdateSearchIndexCommandDefinition> commandContext) {
     return new AicUpdateSearchIndexCommand(
         this.metadataService.getAuthoritativeIndexCatalog(),
+        this.catalogAccessGuard,
         commandContext.dbName(),
         commandContext.collectionUuid(),
         commandContext.collectionName(),
@@ -69,6 +76,7 @@ public class AicManageSearchIndexCommandFactory extends AbstractManageSearchInde
       IndexManagementCommandContext<DropSearchIndexCommandDefinition> commandContext) {
     return new AicDropSearchIndexCommand(
         this.metadataService.getAuthoritativeIndexCatalog(),
+        this.catalogAccessGuard,
         commandContext.dbName(),
         commandContext.collectionUuid(),
         commandContext.collectionName(),

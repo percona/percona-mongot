@@ -4,7 +4,9 @@ import static com.xgen.mongot.server.command.management.definition.common.Common
 
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.provider.community.embedding.AutoEmbeddingIndexValidator;
 import com.xgen.mongot.config.util.Invariants;
 import com.xgen.mongot.config.util.Invariants.AnalyzerInvariants;
@@ -17,6 +19,7 @@ import com.xgen.mongot.server.command.management.definition.common.UserViewDefin
 import com.xgen.mongot.server.command.management.util.IndexMapper;
 import com.xgen.mongot.server.message.MessageUtils;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -35,6 +38,7 @@ public class AicUpdateSearchIndexCommand implements Command {
   private static final Logger LOG = LoggerFactory.getLogger(AicUpdateSearchIndexCommand.class);
 
   private final AuthoritativeIndexCatalog authoritativeIndexCatalog;
+  private final CatalogAccessGuard catalogAccessGuard;
 
   private final String db;
 
@@ -48,12 +52,14 @@ public class AicUpdateSearchIndexCommand implements Command {
 
   AicUpdateSearchIndexCommand(
       AuthoritativeIndexCatalog authoritativeIndexCatalog,
+      CatalogAccessGuard catalogAccessGuard,
       String db,
       UUID collectionUuid,
       String collectionName,
       Optional<UserViewDefinition> view,
       UpdateSearchIndexCommandDefinition definition) {
     this.authoritativeIndexCatalog = authoritativeIndexCatalog;
+    this.catalogAccessGuard = catalogAccessGuard;
     this.db = db;
     this.collectionUuid = collectionUuid;
     this.collectionName = collectionName;
@@ -84,6 +90,14 @@ public class AicUpdateSearchIndexCommand implements Command {
         .addKeyValue("indexName", this.definition.name())
         .addKeyValue("indexId", this.definition.id())
         .log("Received command");
+
+    try {
+      this.catalogAccessGuard.requireTopologyMatch();
+    } catch (TopologyMismatchException | CheckedMongoException e) {
+      LOG.atError().setCause(e).log("Rejecting updateSearchIndex; topology check failed");
+      return MessageUtils.createError(
+          Errors.COMMAND_FAILED, Objects.requireNonNullElse(e.getMessage(), "unknown error"));
+    }
 
     try {
       Optional<String> viewName = this.view.map(UserViewDefinition::name);

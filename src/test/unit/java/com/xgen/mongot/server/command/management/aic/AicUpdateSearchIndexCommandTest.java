@@ -16,13 +16,18 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorDataFieldDefinition;
@@ -35,6 +40,7 @@ import com.xgen.mongot.server.command.management.definition.common.NamedSearchIn
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
@@ -97,6 +103,7 @@ public class AicUpdateSearchIndexCommandTest {
     var command =
         new AicUpdateSearchIndexCommand(
             mockAic,
+            mock(CatalogAccessGuard.class),
             DATABASE_NAME,
             COLLECTION_UUID,
             COLLECTION_NAME,
@@ -173,6 +180,7 @@ public class AicUpdateSearchIndexCommandTest {
     var command =
         new AicUpdateSearchIndexCommand(
             mockAic,
+            mock(CatalogAccessGuard.class),
             DATABASE_NAME,
             COLLECTION_UUID,
             COLLECTION_NAME,
@@ -247,6 +255,7 @@ public class AicUpdateSearchIndexCommandTest {
     var command =
         new AicUpdateSearchIndexCommand(
             mockAic,
+            mock(CatalogAccessGuard.class),
             DATABASE_NAME,
             COLLECTION_UUID,
             COLLECTION_NAME,
@@ -295,6 +304,7 @@ public class AicUpdateSearchIndexCommandTest {
     var command =
         new AicUpdateSearchIndexCommand(
             mockAic,
+            mock(CatalogAccessGuard.class),
             DATABASE_NAME,
             COLLECTION_UUID,
             COLLECTION_NAME,
@@ -362,11 +372,70 @@ public class AicUpdateSearchIndexCommandTest {
       AuthoritativeIndexCatalog mockAic, UpdateSearchIndexCommandDefinition updateDefinition) {
     return new AicUpdateSearchIndexCommand(
         mockAic,
+        mock(CatalogAccessGuard.class),
         DATABASE_NAME,
         COLLECTION_UUID,
         COLLECTION_NAME,
         Optional.empty(),
         updateDefinition);
+  }
+
+  @Test
+  public void testTopologyMismatchExceptionReturnsCommandFailed() throws Exception {
+    var mockAic = mock(AuthoritativeIndexCatalog.class);
+    var mockGuard = mock(CatalogAccessGuard.class);
+    doThrow(new TopologyMismatchException("router topology mismatch"))
+        .when(mockGuard)
+        .requireTopologyMatch();
+
+    var definition =
+        (UpdateSearchIndexCommandDefinition)
+            ManageSearchIndexCommandDefinitionBuilder.updateIndex()
+                .withIndexName(INDEX_NAME)
+                .withDefinition(
+                    UserSearchIndexDefinitionBuilder.builder()
+                        .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true))
+                        .build())
+                .buildSearchIndexCommand();
+    var command =
+        new AicUpdateSearchIndexCommand(
+            mockAic, mockGuard, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME,
+            Optional.empty(), definition);
+    var response = command.run();
+
+    assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
+    assertEquals(Errors.COMMAND_FAILED.name, response.getString("codeName").getValue());
+    assertTrue(response.getString("errmsg").getValue().contains("router topology mismatch"));
+    verify(mockAic, never()).updateIndex(any(), any(), any());
+  }
+
+  @Test
+  public void testCheckedMongoExceptionReturnsCommandFailed() throws Exception {
+    var mockAic = mock(AuthoritativeIndexCatalog.class);
+    var mockGuard = mock(CatalogAccessGuard.class);
+    doThrow(new CheckedMongoException(new MongoException("mongo connection failed")))
+        .when(mockGuard)
+        .requireTopologyMatch();
+
+    var definition =
+        (UpdateSearchIndexCommandDefinition)
+            ManageSearchIndexCommandDefinitionBuilder.updateIndex()
+                .withIndexName(INDEX_NAME)
+                .withDefinition(
+                    UserSearchIndexDefinitionBuilder.builder()
+                        .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true))
+                        .build())
+                .buildSearchIndexCommand();
+    var command =
+        new AicUpdateSearchIndexCommand(
+            mockAic, mockGuard, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME,
+            Optional.empty(), definition);
+    var response = command.run();
+
+    assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
+    assertEquals(Errors.COMMAND_FAILED.name, response.getString("codeName").getValue());
+    assertTrue(response.getString("errmsg").getValue().contains("mongo connection failed"));
+    verify(mockAic, never()).updateIndex(any(), any(), any());
   }
 
   @Test
@@ -383,7 +452,13 @@ public class AicUpdateSearchIndexCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicUpdateSearchIndexCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     assertFalse(command.maybeLoadShed());
   }
 }

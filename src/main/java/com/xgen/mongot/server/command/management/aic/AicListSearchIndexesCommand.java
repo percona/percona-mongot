@@ -1,12 +1,14 @@
 package com.xgen.mongot.server.command.management.aic;
 
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexEntry;
 import com.xgen.mongot.catalogservice.IndexStatsEntry;
 import com.xgen.mongot.catalogservice.MetadataClient;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerStateEntry;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.server.command.Command;
@@ -19,11 +21,13 @@ import com.xgen.mongot.server.command.management.util.IndexEntryMapper;
 import com.xgen.mongot.server.message.MessageUtils;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.CollectionUtils;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
@@ -39,6 +43,7 @@ public class AicListSearchIndexesCommand implements Command {
 
   private final MetadataService metadataService;
   private final CachedIndexInfoProvider indexInfoProvider;
+  private final CatalogAccessGuard catalogAccessGuard;
   private final String db;
   private final String collectionName;
   private final UUID collectionUuid;
@@ -58,6 +63,7 @@ public class AicListSearchIndexesCommand implements Command {
   AicListSearchIndexesCommand(
       MetadataService metadataService,
       CachedIndexInfoProvider indexInfoProvider,
+      CatalogAccessGuard catalogAccessGuard,
       String db,
       UUID collectionUuid,
       String collectionName,
@@ -66,6 +72,7 @@ public class AicListSearchIndexesCommand implements Command {
       boolean internalListIndexesForTesting) {
     this.metadataService = metadataService;
     this.indexInfoProvider = indexInfoProvider;
+    this.catalogAccessGuard = catalogAccessGuard;
     this.db = db;
     this.collectionUuid = collectionUuid;
     this.collectionName = collectionName;
@@ -99,6 +106,14 @@ public class AicListSearchIndexesCommand implements Command {
         .addKeyValue("collectionName", this.collectionName)
         .addKeyValue("viewName", this.view.map(UserViewDefinition::name))
         .log("Received command");
+
+    try {
+      this.catalogAccessGuard.requireTopologyMatch();
+    } catch (TopologyMismatchException | CheckedMongoException e) {
+      LOG.atError().setCause(e).log("Rejecting listSearchIndexes; topology check failed");
+      return MessageUtils.createError(
+          Errors.COMMAND_FAILED, Objects.requireNonNullElse(e.getMessage(), "unknown error"));
+    }
 
     List<IndexAndStats> matchingIndexesAndStats;
     try {

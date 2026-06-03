@@ -3,6 +3,7 @@ package com.xgen.mongot.server.command.search;
 import com.google.common.base.Supplier;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.cursor.MongotCursorManager;
@@ -114,11 +115,15 @@ public class SearchCommandsRegister {
       CommandRegistry commandRegistry,
       MetadataService metadataService,
       CachedIndexInfoProvider cachedIndexInfoProvider,
+      CatalogAccessGuard catalogAccessGuard,
       boolean internalListAllIndexesForTesting) {
     var registrationCommand = registrationMode.getRegistrationCommand(commandRegistry);
     var indexManagement =
         new AicManageSearchIndexCommandFactory(
-            metadataService, cachedIndexInfoProvider, internalListAllIndexesForTesting);
+            metadataService,
+            cachedIndexInfoProvider,
+            catalogAccessGuard,
+            internalListAllIndexesForTesting);
 
     registrationCommand.register(ManageSearchIndexCommandDefinition.NAME, indexManagement, false);
   }

@@ -276,6 +276,7 @@ public class CommunityMongotBootstrapper {
             meterRegistry,
             healthManager,
             metadataService,
+            clusterTopologyGuard,
             internalListAllIndexesForTesting,
             embeddingServiceManagerSupplier,
             mongotConfigs.featureFlags);
@@ -783,6 +784,7 @@ public class CommunityMongotBootstrapper {
       MeterRegistry meterRegistry,
       HealthManager healthManager,
       MetadataService metadataService,
+      CatalogAccessGuard catalogAccessGuard,
       boolean internalListAllIndexesForTesting,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
       FeatureFlags featureFlags) {
@@ -806,6 +808,7 @@ public class CommunityMongotBootstrapper {
             DEFAULT_BSON_SIZE_SOFT_LIMIT,
             DEFAULT_MESSAGE_SIZE_LIMIT,
             metadataService,
+            catalogAccessGuard,
             internalListAllIndexesForTesting,
             embeddingServiceManagerSupplier);
 
