@@ -276,6 +276,11 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
                       .required())
               .optional()
               .noDefault();
+      // TODO(CLOUDP-410946): Deprecate this per-service field in favor of the
+      // cluster-topology value at autoEmbedding.isDedicatedCluster in the mongot
+      // startup YAML (read in MmsMongotBootstrapper). This field still drives
+      // VoyageClient credential-routing, so removal requires either inferring
+      // cluster mode from credential shape or threading the YAML value through here.
       static final Field.WithDefault<Boolean> IS_DEDICATED_CLUSTER =
           Field.builder("isDedicatedCluster").booleanField().optional().withDefault(true);
       static final Field.Optional<String> PROVIDER_ENDPOINT =
