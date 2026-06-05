@@ -183,7 +183,7 @@ public class ScrapeCache {
   private synchronized void enterCachedModeIfNeeded() {
     long expires =
         System.currentTimeMillis()
-            + TimeUnit.SECONDS.toMillis(this.config.cachedModeStickyDurationSec());
+            + TimeUnit.SECONDS.toMillis(this.config.slowModeStickyDurationSec());
     if (!this.cachedModeExpiresAtMs.compareAndSet(LIVE_MODE, expires)) {
       return;
     }

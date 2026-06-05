@@ -16,7 +16,7 @@ public class ScrapeCacheTest {
             return "data";
           }
         };
-    ScrapeCache cache = new ScrapeCache(registry, ScrapeCacheConfig.DEFAULT);
+    ScrapeCache cache = new ScrapeCache(registry, ScrapeCacheConfig.getDefault());
     try {
       Assert.assertEquals("data", cache.get(ScrapeCache.NO_TIMEOUT));
     } finally {
@@ -34,7 +34,7 @@ public class ScrapeCacheTest {
             throw ex;
           }
         };
-    ScrapeCache cache = new ScrapeCache(registry, ScrapeCacheConfig.DEFAULT);
+    ScrapeCache cache = new ScrapeCache(registry, ScrapeCacheConfig.getDefault());
     try {
       RuntimeException thrown =
           Assert.assertThrows(RuntimeException.class, () -> cache.get(ScrapeCache.NO_TIMEOUT));

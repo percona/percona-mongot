@@ -385,7 +385,7 @@ public class CommunityMongotBootstrapper {
     var address = CommunityMongotBootstrapper.parseInetSocketAddress(metricsConfig.address());
     return Optional.of(
         PrometheusServer.start(
-            address, List.of(), List.of(), featureFlags, ScrapeCacheConfig.DEFAULT));
+            address, List.of(), List.of(), featureFlags, ScrapeCacheConfig.getDefault()));
   }
 
   private static Optional<SystemMetricsInstrumentation> maybeStartSystemMetrics(
