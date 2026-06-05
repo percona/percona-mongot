@@ -39,10 +39,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import javax.annotation.Nullable;
 import javax.net.ssl.SSLException;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

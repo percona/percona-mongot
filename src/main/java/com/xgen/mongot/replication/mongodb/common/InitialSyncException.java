@@ -16,8 +16,8 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Stream;
-import javax.annotation.Nullable;
 import org.bson.codecs.configuration.CodecConfigurationException;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * InitialSyncException is a checked exception used throughout the initialsync package. Its purpose

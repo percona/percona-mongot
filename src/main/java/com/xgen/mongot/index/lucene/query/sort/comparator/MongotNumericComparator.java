@@ -1,7 +1,6 @@
 package com.xgen.mongot.index.lucene.query.sort.comparator;
 
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.LeafReaderContext;
@@ -14,6 +13,7 @@ import org.apache.lucene.search.Pruning;
 import org.apache.lucene.search.Scorable;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.util.DocIdSetBuilder;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * NOTE - This is purely a clone of {@link org.apache.lucene.search.comparators.NumericComparator}.

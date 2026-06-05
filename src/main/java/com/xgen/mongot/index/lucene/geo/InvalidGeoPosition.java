@@ -1,6 +1,6 @@
 package com.xgen.mongot.index.lucene.geo;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 public class InvalidGeoPosition extends Exception {
 

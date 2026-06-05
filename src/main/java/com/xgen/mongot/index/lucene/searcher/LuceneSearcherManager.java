@@ -9,12 +9,12 @@ import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.search.SearcherManager;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

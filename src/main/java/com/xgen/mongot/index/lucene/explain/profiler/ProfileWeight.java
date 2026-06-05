@@ -4,7 +4,6 @@ import com.xgen.mongot.index.lucene.explain.timing.ExplainTimings;
 import com.xgen.mongot.util.Check;
 import java.io.IOException;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.BulkScorer;
 import org.apache.lucene.search.Explanation;
@@ -12,6 +11,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 public class ProfileWeight extends Weight {
 

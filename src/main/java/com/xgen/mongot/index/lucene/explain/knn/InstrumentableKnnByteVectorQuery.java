@@ -3,7 +3,6 @@ package com.xgen.mongot.index.lucene.explain.knn;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.lucene.query.custom.MongotKnnByteQuery;
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.QueryTimeout;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -12,6 +11,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.knn.KnnCollectorManager;
 import org.apache.lucene.util.Bits;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A decorator over MongotKnnByteQuery to intercept calls to 'approximateSearch' and 'exactSearch'

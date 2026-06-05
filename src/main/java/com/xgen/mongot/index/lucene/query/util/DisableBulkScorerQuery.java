@@ -2,7 +2,6 @@ package com.xgen.mongot.index.lucene.query.util;
 
 import java.io.IOException;
 import java.util.Objects;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BulkScorer;
@@ -14,6 +13,7 @@ import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Wraps a {@link Query} so Lucene does not use specialized {@link BulkScorer} implementations (for

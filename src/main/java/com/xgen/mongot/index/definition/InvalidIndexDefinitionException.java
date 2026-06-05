@@ -2,7 +2,7 @@ package com.xgen.mongot.index.definition;
 
 import com.xgen.mongot.util.LoggableException;
 import java.util.Set;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * InvalidIndexDefinitionException is thrown when an IndexDefinition is attempted to be created with

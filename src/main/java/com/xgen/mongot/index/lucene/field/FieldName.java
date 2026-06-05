@@ -11,9 +11,9 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Predicate;
-import javax.annotation.Nullable;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.util.UnicodeUtil;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A note on performance: this class is used in most performance-critical parts of the code (e.g.

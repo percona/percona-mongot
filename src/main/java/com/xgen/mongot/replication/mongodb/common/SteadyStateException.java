@@ -7,8 +7,8 @@ import com.xgen.mongot.index.FieldExceededLimitsException;
 import com.xgen.mongot.util.mongodb.Errors;
 import java.util.Optional;
 import java.util.concurrent.Callable;
-import javax.annotation.Nullable;
 import org.bson.codecs.configuration.CodecConfigurationException;
+import org.jetbrains.annotations.Nullable;
 
 public class SteadyStateException extends Exception {
 

@@ -17,8 +17,8 @@ import com.xgen.mongot.util.bson.Vector;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.document.Document;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * {@link VectorEmbeddedDocumentBuilder} is a {@link DocumentBlockBuilder} responsible for building

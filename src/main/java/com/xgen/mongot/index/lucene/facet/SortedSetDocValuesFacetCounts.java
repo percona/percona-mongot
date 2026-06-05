@@ -25,7 +25,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.PrimitiveIterator;
 import java.util.stream.IntStream;
-import javax.annotation.Nullable;
 import org.apache.lucene.facet.FacetUtils;
 import org.apache.lucene.facet.FacetsCollector;
 import org.apache.lucene.facet.FacetsCollector.MatchingDocs;
@@ -45,6 +44,7 @@ import org.apache.lucene.search.ConjunctionUtils;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.LongValues;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * This class is forked entirely from Lucene (9.11) {@link

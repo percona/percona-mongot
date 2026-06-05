@@ -21,7 +21,6 @@ import com.google.auto.service.AutoService;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
-import javax.annotation.Nullable;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.KnnVectorsWriter;
@@ -41,6 +40,7 @@ import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.hnsw.HnswGraph;
 import org.apache.lucene.util.hnsw.HnswGraphBuilder;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A drop-in replacement for {@code Lucene99HnswVectorsFormat} that substitutes {@link

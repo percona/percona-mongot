@@ -19,7 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.FilterMergePolicy;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.MergePolicy;
@@ -27,6 +26,7 @@ import org.apache.lucene.index.MergeTrigger;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Wrapper for <code>MergePolicy</code> that applies additional limits for vector indices.

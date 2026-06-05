@@ -31,6 +31,7 @@ java_library(
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_guava_guava",
         "@maven//:io_opentelemetry_opentelemetry_context",
+        "@maven//:org_jetbrains_annotations",
         "@maven//:org_slf4j_slf4j_api",
     ],
 )

@@ -20,7 +20,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * MaterializedViewGenerator manages one materialized view collection for auto-embedding indexes.

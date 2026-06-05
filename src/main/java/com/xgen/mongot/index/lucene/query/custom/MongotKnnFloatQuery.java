@@ -4,7 +4,6 @@ import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.QueryTimeout;
@@ -17,6 +16,7 @@ import org.apache.lucene.search.knn.KnnCollectorManager;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A specialized implementation of Lucene's KnnFloatVectorQuery to integrate with Mongot's metrics

@@ -53,10 +53,10 @@ java_library(
     deps = [
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/proto",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_guava_guava",
         "@maven//:org_apache_commons_commons_lang3",
+        "@maven//:org_jetbrains_annotations",
         "@maven//:org_mongodb_bson",
         "@maven//:org_slf4j_slf4j_api",
     ],

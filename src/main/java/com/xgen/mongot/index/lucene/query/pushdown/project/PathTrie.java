@@ -6,8 +6,8 @@ import com.xgen.mongot.util.FieldPath;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A TrieMap implementation where a prefix follows semantics of dotted paths. For example: "a" is

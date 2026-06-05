@@ -14,11 +14,11 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.ScoreDoc;
 import org.bson.BsonString;
 import org.bson.BsonValue;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A SequenceToken wraps a {@link ScoreDoc} and defines mapping to an opaque bson string.

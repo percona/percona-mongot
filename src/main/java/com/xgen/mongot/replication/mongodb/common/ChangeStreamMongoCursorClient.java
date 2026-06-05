@@ -21,9 +21,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.annotation.Nullable;
 import org.bson.BsonValue;
 import org.bson.RawBsonDocument;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A dedicated client to tail change-stream changes on a collection or database. This client

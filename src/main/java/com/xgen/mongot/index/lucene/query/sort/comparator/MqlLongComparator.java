@@ -3,7 +3,6 @@ package com.xgen.mongot.index.lucene.query.sort.comparator;
 import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
@@ -13,6 +12,7 @@ import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSelector;
 import org.apache.lucene.search.comparators.LongComparator;
 import org.apache.lucene.util.NumericUtils;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * MqlLongComparator is able to sort Long values in a way that's compliant with the MQL sort order.

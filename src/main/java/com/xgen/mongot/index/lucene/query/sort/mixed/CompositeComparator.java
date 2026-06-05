@@ -9,12 +9,12 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.FieldComparator;
 import org.apache.lucene.search.LeafFieldComparator;
 import org.bson.BsonValue;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * This {@link FieldComparator} is used when doing a sort on heterogeneous fields and heterogeneous

@@ -3,7 +3,7 @@ package com.xgen.mongot.util;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.Properties;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 public class MongotVersionResolver {
   private static final String BUILD_DATA_PATH = "/build-data.properties";

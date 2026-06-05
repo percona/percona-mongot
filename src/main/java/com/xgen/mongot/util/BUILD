@@ -56,7 +56,6 @@ java_library(
     deps = [
         "//src/main/java/com/xgen/mongot/logging",
         "//src/main/java/com/xgen/mongot/util/functionalinterfaces",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_flogger_flogger",
         "@maven//:com_google_guava_guava",
