@@ -20,6 +20,7 @@ Usage: $0 [OPTIONS]
         --branch            Branch for build
         --repo              Repo for build
         --version           Version to build
+        --ps4m_release      Package release/revision number (rpm Release / deb revision; same for both)
 
         --help) usage ;;
 Example $0 --builddir=/tmp/percona-server-mongodb-mongot --get_sources=1 --build_mongot=1 --build_variant=linux-x64
@@ -51,6 +52,7 @@ parse_arguments() {
             --branch=*) BRANCH="$val" ;;
             --repo=*) REPO="$val" ;;
             --version=*) VERSION="$val" ;;
+            --ps4m_release=*) RELEASE="$val" ;;
             --install_deps=*) INSTALL="$val" ;;
             --build_mongot=*) MONGOT="$val" ;;
             --build_variant=*) VARIANT="$val" ;;
@@ -461,8 +463,6 @@ OS_NAME=
 ARCH=
 OS=
 INSTALL=0
-RPM_RELEASE=1
-DEB_RELEASE=1
 VERSION="0.50.0"
 RELEASE="1"
 REVISION=0
