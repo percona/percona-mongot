@@ -21,6 +21,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.bson.BsonDocument;
@@ -36,6 +37,7 @@ public class MongodTopologyMonitorTest {
 
   private static final Duration REFRESH_INTERVAL = Duration.ofMillis(200);
   private static final Duration EXPIRY = Duration.ofMillis(500);
+  private static final Duration PROBE_WAIT = Duration.ofMillis(100);
   private static final Instant INITIAL_INSTANT = Instant.parse("2026-05-24T00:00:00Z");
   private static final BsonDocument GET_CMD_LINE_OPTS =
       new BsonDocument("getCmdLineOpts", new BsonInt32(1));
@@ -58,9 +60,10 @@ public class MongodTopologyMonitorTest {
     MockitoAnnotations.openMocks(this);
     when(this.mongoClient.getDatabase("admin")).thenReturn(this.mongoDatabase);
     when(this.scheduler.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(true);
+    when(this.scheduler.submit(any(Runnable.class))).thenReturn(new CompletableFuture<>());
     this.clock = new ManuallyUpdatedClock(Clock.fixed(INITIAL_INSTANT, ZoneId.of("UTC")));
     this.monitor = new MongodTopologyMonitor(
-        this.mongoClient, this.scheduler, REFRESH_INTERVAL, EXPIRY, this.clock);
+        this.mongoClient, this.scheduler, REFRESH_INTERVAL, EXPIRY, PROBE_WAIT, this.clock);
   }
 
   @After
@@ -71,30 +74,34 @@ public class MongodTopologyMonitorTest {
   }
 
   @Test
-  public void isShardedCluster_throwsWhenCacheEmptyAndSubmitsAsyncProbe() {
+  public void isShardedCluster_returnsProbedValueWhenProbeCompletesInTime() throws Exception {
+    runAsyncProbesSynchronously();
+    stubGetCmdLineOpts(/* sharded= */ true);
+
+    // The cache starts empty, so the call triggers an on-demand probe and waits for it. Because the
+    // probe succeeds within the wait window, the very first call serves the freshly probed value
+    // instead of failing until the next periodic refresh.
+    assertThat(this.monitor.isShardedCluster()).isTrue();
+    verify(this.scheduler, times(1)).submit(any(Runnable.class));
+    verify(this.mongoDatabase, times(1))
+        .runCommand(eq(GET_CMD_LINE_OPTS), eq(BsonDocument.class));
+  }
+
+  @Test
+  public void isShardedCluster_throwsWhenCacheEmptyAndProbeDoesNotComplete() {
+    // The scheduler captures but never runs the probe, so the wait times out and the cache stays
+    // empty; the call submits one async probe and then throws.
     assertThrows(CheckedMongoException.class, this.monitor::isShardedCluster);
     verify(this.scheduler, times(1)).submit(any(Runnable.class));
   }
 
   @Test
   public void isShardedCluster_coalescesConcurrentAsyncProbes() {
+    // While a probe is in flight, repeated calls join the same probe rather than submitting more.
     for (int i = 0; i < 5; i++) {
       assertThrows(CheckedMongoException.class, this.monitor::isShardedCluster);
     }
     verify(this.scheduler, times(1)).submit(any(Runnable.class));
-  }
-
-  @Test
-  public void isShardedCluster_asyncProbePopulatesCache() throws Exception {
-    runAsyncProbesSynchronously();
-    stubGetCmdLineOpts(/* sharded= */ true);
-
-    assertThrows(CheckedMongoException.class, this.monitor::isShardedCluster);
-
-    assertThat(this.monitor.isShardedCluster()).isTrue();
-    verify(this.scheduler, times(1)).submit(any(Runnable.class));
-    verify(this.mongoDatabase, times(1))
-        .runCommand(eq(GET_CMD_LINE_OPTS), eq(BsonDocument.class));
   }
 
   @Test
@@ -110,6 +117,35 @@ public class MongodTopologyMonitorTest {
     captor.getValue().run();
 
     verify(this.mongoDatabase, never())
+        .runCommand(eq(GET_CMD_LINE_OPTS), eq(BsonDocument.class));
+  }
+
+  @Test
+  public void isShardedCluster_throwsWhenProbeFails() {
+    runAsyncProbesSynchronously();
+    stubGetCmdLineOptsThrows();
+
+    // The probe runs but mongod is unreachable, so the cache is never populated and the call throws
+    // instead of blocking for the full wait window.
+    assertThrows(CheckedMongoException.class, this.monitor::isShardedCluster);
+    verify(this.scheduler, times(1)).submit(any(Runnable.class));
+    verify(this.mongoDatabase, times(1))
+        .runCommand(eq(GET_CMD_LINE_OPTS), eq(BsonDocument.class));
+  }
+
+  @Test
+  public void isShardedCluster_submitsFreshProbeAfterPreviousProbeCompletes() {
+    runAsyncProbesSynchronously();
+    stubGetCmdLineOptsThrows();
+
+    // Each call runs its probe to completion without populating the cache. Because the previous
+    // probe's future is already done, the next empty-cache call starts a fresh probe rather than
+    // joining the finished one.
+    assertThrows(CheckedMongoException.class, this.monitor::isShardedCluster);
+    assertThrows(CheckedMongoException.class, this.monitor::isShardedCluster);
+
+    verify(this.scheduler, times(2)).submit(any(Runnable.class));
+    verify(this.mongoDatabase, times(2))
         .runCommand(eq(GET_CMD_LINE_OPTS), eq(BsonDocument.class));
   }
 
@@ -226,7 +262,7 @@ public class MongodTopologyMonitorTest {
     when(this.scheduler.submit(any(Runnable.class)))
         .thenAnswer(invocation -> {
           invocation.<Runnable>getArgument(0).run();
-          return null;
+          return CompletableFuture.completedFuture(null);
         });
   }
 

@@ -14,9 +14,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
@@ -40,15 +40,17 @@ public class MongodTopologyMonitor implements Closeable {
   public static final String MONGO_CLIENT_NAME = "MongodTopologyMonitor";
   public static final Duration DEFAULT_REFRESH_INTERVAL = Duration.ofMinutes(1);
   public static final Duration DEFAULT_EXPIRY = Duration.ofMinutes(3);
+  public static final Duration DEFAULT_PROBE_WAIT = Duration.ofSeconds(2);
 
   private final MongoClient topologyClient;
   private final NamedScheduledExecutorService scheduler;
   private final Duration refreshInterval;
   private final Duration expiry;
+  private final Duration probeWait;
   private final Clock clock;
 
   private final AtomicReference<CacheEntry> cache = new AtomicReference<>();
-  private final AtomicBoolean probeInFlight = new AtomicBoolean(false);
+  private Optional<Future<?>> inFlightProbe = Optional.empty();
   private volatile boolean closed = false;
 
   @VisibleForTesting
@@ -60,6 +62,7 @@ public class MongodTopologyMonitor implements Closeable {
         Executors.singleThreadScheduledExecutor("mongod-topology-monitor", meterRegistry),
         DEFAULT_REFRESH_INTERVAL,
         DEFAULT_EXPIRY,
+        DEFAULT_PROBE_WAIT,
         Clock.systemUTC());
   }
 
@@ -69,11 +72,13 @@ public class MongodTopologyMonitor implements Closeable {
       NamedScheduledExecutorService scheduler,
       Duration refreshInterval,
       Duration expiry,
+      Duration probeWait,
       Clock clock) {
     this.topologyClient = topologyClient;
     this.scheduler = scheduler;
     this.refreshInterval = refreshInterval;
     this.expiry = expiry;
+    this.probeWait = probeWait;
     this.clock = clock;
   }
 
@@ -95,8 +100,15 @@ public class MongodTopologyMonitor implements Closeable {
   }
 
   /**
-   * Returns the cached topology if it is present and not expired. Otherwise, kicks off an
-   * asynchronous probe to populate the cache and throws {@link CheckedMongoException}.
+   * Returns the cached topology if it is present and not expired.
+   *
+   * <p>If the cache has not been initialized yet (e.g. mongod started after mongot), this triggers
+   * an on-demand probe and blocks up to {@link #probeWait} for it to complete, so a ready
+   * mongod can be served on the first call instead of failing. If the probe does not populate the
+   * cache in time, {@link CheckedMongoException} is thrown.
+   *
+   * <p>If the cache is present but stale, this throws immediately and relies on the periodic
+   * refresh to repopulate it.
    */
   public boolean isShardedCluster() throws CheckedMongoException {
     CacheEntry entry = this.cache.get();
@@ -104,34 +116,61 @@ public class MongodTopologyMonitor implements Closeable {
       return entry.sharded();
     }
     if (entry == null) {
-      // Trigger async probe to initialize the cache to prevent index management commands failures
-      // up to the REFRESH_INTERVAL period when mongod is started after mongot.
-      triggerAsyncProbe();
+      return awaitProbe();
     }
-    throw new CheckedMongoException(new MongoException("Topology cache is unavailable."));
+    throw cacheUnavailableException();
   }
 
-  private void triggerAsyncProbe() {
-    // Using probeInFlight to prevent submitting duplicated tasks.
-    if (this.closed || !this.probeInFlight.compareAndSet(false, true)) {
-      return;
+  /**
+   * Waits for an in-flight on-demand probe (starting one if none is running) and then serves the
+   * cache. Returns the probed value if the cache was populated in time, otherwise throws.
+   */
+  private boolean awaitProbe() throws CheckedMongoException {
+    triggerAsyncProbe().ifPresent(probe -> {
+      try {
+        probe.get(this.probeWait.toMillis(), TimeUnit.MILLISECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        LOG.atWarn().setCause(e).log("Interrupted while waiting for the topology probe.");
+      } catch (Exception e) {
+        LOG.atWarn().setCause(e).log("Topology probe did not populate the cache in time.");
+      }
+    });
+    CacheEntry entry = this.cache.get();
+    if (entry != null) {
+      return entry.sharded();
+    }
+    throw cacheUnavailableException();
+  }
+
+  /**
+   * Ensures a single on-demand probe is in flight and returns its future, or an empty optional when
+   * no probe could be scheduled. Concurrent callers coalesce onto the running probe's future.
+   */
+  private synchronized Optional<Future<?>> triggerAsyncProbe() {
+    if (this.closed) {
+      return Optional.empty();
+    }
+    if (this.inFlightProbe.filter(probe -> !probe.isDone()).isPresent()) {
+      return this.inFlightProbe;
     }
     try {
-      this.scheduler.submit(() -> {
-        try {
-          if (this.cache.get() != null) {
-            // cache is populated by the periodic task.
-            return;
-          }
+      this.inFlightProbe = Optional.of(this.scheduler.submit(() -> {
+        // Refresh only if the cache is still empty; a periodic refresh may have already
+        // populated it between scheduling this task and it running.
+        if (this.cache.get() == null) {
           refreshCache();
-        } finally {
-          this.probeInFlight.set(false);
         }
-      });
+      }));
+      return this.inFlightProbe;
     } catch (RejectedExecutionException e) {
-      this.probeInFlight.set(false);
       LOG.atWarn().setCause(e).log("Failed to schedule async topology probe.");
+      return Optional.empty();
     }
+  }
+
+  private static CheckedMongoException cacheUnavailableException() {
+    return new CheckedMongoException(new MongoException("Topology cache is unavailable."));
   }
 
   @VisibleForTesting
