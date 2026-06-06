@@ -19,7 +19,7 @@ Group:   Applications/Databases
 License: SSPL-1.0
 URL:     https://github.com/percona/percona-mongot
 Source0: percona-server-mongodb-mongot-%{version}.tar.gz
-Source1: mongot-community-bundle.tar.gz
+Source1: percona-server-mongodb-mongot-bundle.tar.gz
 
 # The bundle ships a prebuilt JDK and native .so libraries; skip auto-discovery.
 AutoReqProv: no
@@ -46,7 +46,7 @@ for MongoDB to serve search queries and manage search indexes.
 %setup -q -n percona-server-mongodb-mongot-%{version}
 
 %build
-# The mongot bundle is built externally with Bazel (see builder.sh).
+# The mongot bundle is built externally with Bazel (see mongot_builder.sh).
 # Nothing to compile here. Install just puts the prebuilt tarball into place.
 
 %install

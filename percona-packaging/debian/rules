@@ -1,11 +1,11 @@
 #!/usr/bin/make -f
 # debian/rules for percona-server-mongodb-mongot.
 # The mongot bundle is built externally with Bazel and shipped to debian/rules
-# as `prebuilt/mongot-community-bundle.tar.gz`. Here we just lay it out.
+# as `prebuilt/percona-server-mongodb-mongot-bundle.tar.gz`. Here we just lay it out.
 
 export DH_VERBOSE=1
 TMP=$(CURDIR)/debian/tmp
-BUNDLE=$(CURDIR)/prebuilt/mongot-community-bundle.tar.gz
+BUNDLE=$(CURDIR)/prebuilt/percona-server-mongodb-mongot-bundle.tar.gz
 
 %:
 	dh $@ --with=systemd

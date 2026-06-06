@@ -320,17 +320,12 @@ build_mongot(){
     # The bundle is architecture-specific (it ships a bundled JDK and native
     # .so libraries selected via bazel `select(platform)`). Tag the output with
     # the bazel platform name so x86_64 and aarch64 bundles do not collide.
-    #   1. Versioned + platform-tagged tarball under `tarball/` for direct release.
-    #   2. `mongot-community-bundle-${PLATFORM}.tar.gz` under `bazel_tarball/`
-    #      for downstream RPM/DEB packaging stages.
+    # This single versioned + platform-tagged tarball under `tarball/` is both
+    # the release artifact and the input consumed by the RPM/DEB packaging stages.
     OUT_NAME="${PRODUCT}-${VERSION}-${PLATFORM}.tar.gz"
-    BUNDLE_NAME="mongot-community-bundle-${PLATFORM}.tar.gz"
     mkdir -p ${WORKDIR}/tarball ${CURDIR}/tarball
-    mkdir -p ${WORKDIR}/bazel_tarball ${CURDIR}/bazel_tarball
     cp "${BUILT_TGZ}" "${WORKDIR}/tarball/${OUT_NAME}"
     cp "${BUILT_TGZ}" "${CURDIR}/tarball/${OUT_NAME}"
-    cp "${BUILT_TGZ}" "${WORKDIR}/bazel_tarball/${BUNDLE_NAME}"
-    cp "${BUILT_TGZ}" "${CURDIR}/bazel_tarball/${BUNDLE_NAME}"
 
     # Release the bazel server so its cache locks are dropped before exit.
     ${BAZELISK} --output_user_root="${BAZEL_OUTPUT_USER_ROOT}" shutdown || true
@@ -351,13 +346,11 @@ get_bundle(){
     # libraries — running an aarch64 RPM stage with an x86_64 bundle would
     # produce a package whose binaries do not load.
     BUNDLE_PLATFORM=$(host_bazel_platform)
-    BUNDLE_NAME="mongot-community-bundle-${BUNDLE_PLATFORM}.tar.gz"
-    if [ -f "${WORKDIR}/bazel_tarball/${BUNDLE_NAME}" ]; then
-        cp "${WORKDIR}/bazel_tarball/${BUNDLE_NAME}" "${WORKDIR}/mongot-community-bundle.tar.gz"
-    elif [ -f "${CURDIR}/bazel_tarball/${BUNDLE_NAME}" ]; then
-        cp "${CURDIR}/bazel_tarball/${BUNDLE_NAME}" "${WORKDIR}/mongot-community-bundle.tar.gz"
+    BUNDLE_SRC=$(find "${WORKDIR}/tarball" "${CURDIR}/tarball" -maxdepth 1 -name "${PRODUCT}-*-${BUNDLE_PLATFORM}.tar.gz" 2>/dev/null | sort | tail -n1)
+    if [ -n "${BUNDLE_SRC}" ] && [ -f "${BUNDLE_SRC}" ]; then
+        cp "${BUNDLE_SRC}" "${WORKDIR}/percona-server-mongodb-mongot-bundle.tar.gz"
     else
-        echo "No mongot bundle for ${BUNDLE_PLATFORM} found in bazel_tarball/."
+        echo "No mongot bundle for ${BUNDLE_PLATFORM} found in tarball/."
         echo "Run --build_mongot=1 --build_variant=$(echo ${BUNDLE_PLATFORM} | sed 's/linux_x86_64/linux-x64/;s/linux_aarch64/linux-aarch64/') on a matching-arch host first."
         exit 1
     fi
@@ -388,7 +381,7 @@ build_rpm(){
         -e "s:@@RELEASE@@:${RELEASE}:g" \
         percona-packaging/rpm/percona-server-mongodb-mongot.spec > rpmbuild/SPECS/percona-server-mongodb-mongot.spec
     cp ${TARFILE} rpmbuild/SOURCES/
-    cp mongot-community-bundle.tar.gz rpmbuild/SOURCES/
+    cp percona-server-mongodb-mongot-bundle.tar.gz rpmbuild/SOURCES/
 
     echo "RHEL=${RHEL}" >> ${WORKDIR}/percona-server-mongodb-mongot.properties
     echo "ARCH=${ARCH}" >> ${WORKDIR}/percona-server-mongodb-mongot.properties
@@ -430,7 +423,7 @@ build_deb(){
     rm -rf debian
     cp -r percona-packaging/debian ./debian
     mkdir -p prebuilt
-    cp ${WORKDIR}/mongot-community-bundle.tar.gz prebuilt/mongot-community-bundle.tar.gz
+    cp ${WORKDIR}/percona-server-mongodb-mongot-bundle.tar.gz prebuilt/percona-server-mongodb-mongot-bundle.tar.gz
 
     export DEBIAN=$(lsb_release -sc)
     export ARCH=$(dpkg-architecture -qDEB_BUILD_ARCH)
