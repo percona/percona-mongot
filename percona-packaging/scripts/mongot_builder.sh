@@ -282,7 +282,7 @@ build_mongot(){
     get_tar "source_tarball"
     cd $WORKDIR
     rm -rf ${PRODUCT}-${VERSION}
-    TARFILE=$(basename $(find . -name 'percona-server-mongodb-mongot*.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
     tar xzf ${TARFILE}
     cd ${PRODUCT}-${VERSION}
     source VERSION
@@ -370,7 +370,7 @@ build_rpm(){
     get_bundle
     rm -fr rpmbuild
     mkdir -vp rpmbuild/{SOURCES,SPECS,BUILD,SRPMS,RPMS}
-    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
     if ! tar -xzf ${TARFILE} --wildcards "*/percona-packaging" --strip=1; then
         echo "ERROR: source tarball does not contain percona-packaging/."
         exit 1
@@ -413,7 +413,7 @@ build_deb(){
     get_tar "source_tarball"
     get_bundle
     rm -rf ${PRODUCT}-${VERSION}
-    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
     tar -xzf ${TARFILE}
     cd ${PRODUCT}-${VERSION}
     source VERSION
