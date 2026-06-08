@@ -1,6 +1,11 @@
+/*
+ * Derived from lucene-mongot 10.1.0 BloomFilteringPostingsFormat.
+ */
+
 package com.xgen.mongot.index.lucene.codec.bloom;
 
 import com.google.auto.service.AutoService;
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -39,6 +44,47 @@ import org.apache.lucene.util.automaton.CompiledAutomaton;
  * A {@link PostingsFormat} useful for low doc-frequency fields such as primary keys. Bloom filters
  * are maintained in a ".blm" file which offers "fast-fail" for reads in segments known to have no
  * record of the key. A choice of delegate PostingsFormat is used to record all other Postings data.
+ *
+ * <p><b>Upstream source.</b> Copied from lucene-mongot 10.1.0 {@code
+ * org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat} in the {@code lucene-codecs} module
+ * (see {@code
+ * lucene/codecs/src/java/org/apache/lucene/codecs/bloom/BloomFilteringPostingsFormat.java} in the
+ * Lucene 10.1.0 release tree). On-disk layout matches upstream except for the codec name written in
+ * the {@code .blm} header (see below).
+ *
+ * <p><b>Write path.</b> Indexing does not pick this class via ServiceLoader. {@link
+ * com.xgen.mongot.index.lucene.codec.HybridPostingsFormat}, installed on {@link
+ * com.xgen.mongot.index.lucene.codec.LuceneCodec}, constructs {@code new
+ * MongotBloomFilteringPostingsFormat(delegate)} for the {@code _id} field when a {@link
+ * java.util.function.BooleanSupplier} returns {@code true}. {@link
+ * com.xgen.mongot.index.lucene.writer.SingleLuceneIndexWriter} builds that supplier from dynamic
+ * feature flags ({@link
+ * com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags#BLOOM_FILTER_FOR_ID_FIELD}), whether
+ * natural-order scan is enabled, and index type (auto-embedding indices disable bloom). The
+ * supplier is consulted again on flush and merge, so adjacent segments may use different encodings.
+ * The parameterless constructor is for Lucene read-time SPI only and must not be used when opening
+ * an {@link org.apache.lucene.index.IndexWriter}.
+ *
+ * <p><b>Read path.</b> Lucene loads this class from the {@code .blm} index header when the segment
+ * was written with {@link #BLOOM_CODEC_NAME}. Whether deserialized bloom bitsets are kept on heap
+ * is controlled separately by {@link MongotBloomReadPolicy} (also driven by the same feature-flag
+ * policy as the write supplier).
+ *
+ * <p><b>Differences from upstream.</b>
+ *
+ * <ul>
+ *   <li><b>SPI / codec name</b> — {@link #BLOOM_CODEC_NAME} is {@code MongotBloomFilter} instead of
+ *       upstream {@code BloomFilter}, so this class is registered separately from Lucene's built-in
+ *       format and segments written here store the mongot name in the index header.
+ *   <li><b>Conditional bloom heap load on read</b> — {@link
+ *       MongotBloomReadPolicy#shouldLoadBloomOnRead()} controls whether {@link FuzzySet} bitsets
+ *       are deserialized into heap. When false, {@link #fieldsProducer} returns the delegate {@link
+ *       FieldsProducer} directly: only the delegate name is read from the {@code .blm} header (no
+ *       bloom bitsets loaded); term lookups use delegate postings only (no in-memory fast-fail).
+ *   <li><b>Heap eviction on close</b> — {@link MongotBloomFilteredFieldsProducer#close()} clears
+ *       {@code bloomsByFieldName} before closing the delegate producer so in-heap bloom state is
+ *       dropped when the segment reader is closed.
+ * </ul>
  *
  * <p>A choice of {@link BloomFilterFactory} can be passed to tailor Bloom Filter settings on a
  * per-field basis. The default configuration is {@link DefaultBloomFilterFactory} which allocates a
@@ -107,7 +153,7 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
     this(delegatePostingsFormat, new DefaultBloomFilterFactory());
   }
 
-  // Used only by core Lucene at read-time via Service Provider instantiation -
+  // Used only at read-time via Service Provider instantiation -
   // do not use at Write-time in application code.
   public MongotBloomFilteringPostingsFormat() {
     this(null, new DefaultBloomFilterFactory());
@@ -127,7 +173,44 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
 
   @Override
   public FieldsProducer fieldsProducer(SegmentReadState state) throws IOException {
+    if (!MongotBloomReadPolicy.shouldLoadBloomOnRead(state.segmentInfo.dir)) {
+      return resolveDelegatePostingsFormat(state).fieldsProducer(state);
+    }
     return new MongotBloomFilteredFieldsProducer(state);
+  }
+
+  private PostingsFormat resolveDelegatePostingsFormat(SegmentReadState state) throws IOException {
+    if (this.delegatePostingsFormat != null) {
+      return this.delegatePostingsFormat;
+    }
+    return PostingsFormat.forName(readDelegatePostingsFormatNameFromBlm(state));
+  }
+
+  /**
+   * Reads only the delegate {@link PostingsFormat} name from the segment {@code .blm} sidecar
+   * (index header + string). Does not load bloom bitsets.
+   */
+  private static String readDelegatePostingsFormatNameFromBlm(SegmentReadState state)
+      throws IOException {
+    try (ChecksumIndexInput bloomIn = openBlmChecksumInput(state)) {
+      return bloomIn.readString();
+    }
+  }
+
+  private static ChecksumIndexInput openBlmChecksumInput(SegmentReadState state)
+      throws IOException {
+    String bloomFileName =
+        IndexFileNames.segmentFileName(
+            state.segmentInfo.name, state.segmentSuffix, BLOOM_EXTENSION);
+    ChecksumIndexInput bloomIn = state.directory.openChecksumInput(bloomFileName);
+    CodecUtil.checkIndexHeader(
+        bloomIn,
+        BLOOM_CODEC_NAME,
+        VERSION_START,
+        VERSION_CURRENT,
+        state.segmentInfo.getId(),
+        state.segmentSuffix);
+    return bloomIn;
   }
 
   static class MongotBloomFilteredFieldsProducer extends FieldsProducer {
@@ -136,26 +219,16 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
 
     public MongotBloomFilteredFieldsProducer(SegmentReadState state) throws IOException {
 
-      String bloomFileName =
-          IndexFileNames.segmentFileName(
-              state.segmentInfo.name, state.segmentSuffix, BLOOM_EXTENSION);
       ChecksumIndexInput bloomIn = null;
       boolean success = false;
       try {
-        bloomIn = state.directory.openChecksumInput(bloomFileName);
-        CodecUtil.checkIndexHeader(
-            bloomIn,
-            BLOOM_CODEC_NAME,
-            VERSION_START,
-            VERSION_CURRENT,
-            state.segmentInfo.getId(),
-            state.segmentSuffix);
+        bloomIn = openBlmChecksumInput(state);
         // // Load the hash function used in the BloomFilter
         // hashFunction = HashFunction.forName(bloomIn.readString());
         // Load the delegate postings format
-        PostingsFormat delegatePostingsFormat = PostingsFormat.forName(bloomIn.readString());
+        PostingsFormat delegateFormat = PostingsFormat.forName(bloomIn.readString());
 
-        this.delegateFieldsProducer = delegatePostingsFormat.fieldsProducer(state);
+        this.delegateFieldsProducer = delegateFormat.fieldsProducer(state);
         int numBlooms = bloomIn.readInt();
         for (int i = 0; i < numBlooms; i++) {
           int fieldNum = bloomIn.readInt();
@@ -180,6 +253,7 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
 
     @Override
     public void close() throws IOException {
+      bloomsByFieldName.clear();
       delegateFieldsProducer.close();
     }
 
@@ -200,6 +274,11 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
     @Override
     public int size() {
       return delegateFieldsProducer.size();
+    }
+
+    @VisibleForTesting
+    FuzzySet getHeapLoadedBloomForField(String fieldName) {
+      return bloomsByFieldName.get(fieldName);
     }
 
     static class MongotBloomFilteredTerms extends Terms {

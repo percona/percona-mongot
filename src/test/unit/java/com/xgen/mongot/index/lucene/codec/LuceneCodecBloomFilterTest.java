@@ -6,6 +6,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomReadPolicy;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.io.IOException;
@@ -76,6 +77,7 @@ public class LuceneCodecBloomFilterTest {
     public void bloomFilteredTermsEnum_prefersSeekExact() throws IOException {
       try (Directory dir = new ByteBuffersDirectory()) {
         writeDocuments(dir, () -> DFF_ENABLED, DOC_1);
+        MongotBloomReadPolicy.setLoadBloomOnHeap(dir, true);
         try (DirectoryReader reader = DirectoryReader.open(dir)) {
           for (LeafReaderContext ctx : reader.leaves()) {
             Terms terms = ctx.reader().terms(ID_FIELD);
@@ -83,6 +85,8 @@ public class LuceneCodecBloomFilterTest {
             TermsEnum termsEnum = terms.iterator();
             assertThat(termsEnum.preferSeekExact()).isTrue();
           }
+        } finally {
+          MongotBloomReadPolicy.setLoadBloomOnHeap(dir, false);
         }
       }
     }

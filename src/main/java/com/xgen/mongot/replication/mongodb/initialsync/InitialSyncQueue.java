@@ -18,6 +18,7 @@ import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.lucene.codec.bloom.BloomCodecPolicy;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryHelper;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -452,7 +453,7 @@ public class InitialSyncQueue {
       }
 
       // TODO(CLOUDP-364699): Auto-embedding indexes do not support natural order scan for now.
-      if (indexDefinition.getIndexDefinition().isAutoEmbeddingIndex()) {
+      if (BloomCodecPolicy.isNaturalScanUnsupportedForIndex(indexDefinition.getIndexDefinition())) {
         useNaturalOrderScan = false;
       }
 

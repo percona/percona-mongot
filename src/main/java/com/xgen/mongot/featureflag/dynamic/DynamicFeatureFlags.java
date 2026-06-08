@@ -36,6 +36,7 @@ public enum DynamicFeatureFlags {
   ENABLE_10K_BUCKET_LIMIT("mongot.featureFlag.enable10kBucketLimit", false),
   ENABLE_TOTAL_FACET_BUCKETS("mongot.featureFlag.enableTotalFacetBuckets", false),
   BLOOM_FILTER_FOR_ID_FIELD("mongot.featureFlag.enableBloomFilterNaturalOrderInitialSync", false),
+  BLOOM_FILTER_IN_STEADY_STATE("mongot.featureFlag.enableBloomFilterInSteadyState", false),
   NUMERIC_V2_SEMANTICS("mongot.featureFlag.numericV2Semantics", false),
   /**
    * When enabled, wraps the Lucene child query of {@code embeddedDocument} operators so Lucene

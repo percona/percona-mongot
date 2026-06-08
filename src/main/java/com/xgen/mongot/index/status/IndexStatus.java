@@ -9,6 +9,7 @@ import com.xgen.mongot.util.bson.parser.Field;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
@@ -39,6 +40,13 @@ public class IndexStatus implements DocumentEncodable {
     reasonValidationMap.put(
         Reason.INDEX_DROPPED, statusCode -> statusCode == StatusCode.DOES_NOT_EXIST);
   }
+
+  private static final Set<StatusCode> QUERIES_SERVICEABLE_STATUS_CODES =
+      Set.of(
+          StatusCode.STEADY,
+          StatusCode.RECOVERING_TRANSIENT,
+          StatusCode.RECOVERING_NON_TRANSIENT,
+          StatusCode.STALE);
 
   public static IndexStatus doesNotExist(Reason reason) {
     return new IndexStatus(
@@ -238,10 +246,7 @@ public class IndexStatus implements DocumentEncodable {
   }
 
   public boolean canServiceQueries() {
-    return this.statusCode == StatusCode.STEADY
-        || this.statusCode == StatusCode.RECOVERING_TRANSIENT
-        || this.statusCode == StatusCode.RECOVERING_NON_TRANSIENT
-        || this.statusCode == StatusCode.STALE;
+    return QUERIES_SERVICEABLE_STATUS_CODES.contains(this.statusCode);
   }
 
   public boolean canBeRecovered() {

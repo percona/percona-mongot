@@ -171,12 +171,18 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
             (directory, indexPartitionId) ->
                 SingleLuceneIndexWriter.createForSearchIndex(
                     directory,
+                    generationId,
                     searchIndexProperties.mergeScheduler.createForIndexPartition(
                         generationId,
                         indexPartitionId,
                         definition.getNumPartitions(),
                         featureFlags.isEnabled(Feature.CANCEL_MERGE),
-                        IndexTypeData.getIndexTypeTag(definition).tagValue),
+                        dynamicFeatureFlagRegistry,
+                        enableNaturalOrderScan,
+                        definition,
+                        index::getStatus,
+                        IndexTypeData.getIndexTypeTag(definition).tagValue,
+                        directory),
                     searchIndexProperties.mergePolicy,
                     searchIndexProperties.ramBufferSizeMb,
                     searchIndexProperties.fieldLimit,
@@ -189,12 +195,17 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                         snapshotter -> snapshotter.getSnapshotDeletionPolicy(indexPartitionId)),
                     featureFlags,
                     dynamicFeatureFlagRegistry,
-                    enableNaturalOrderScan),
+                    enableNaturalOrderScan,
+                    index::getStatus),
             luceneIndexWriter ->
                 LuceneSearcherManager.create(
                     luceneIndexWriter.getLuceneWriter(),
                     searcherFactory,
-                    searchIndexProperties.metricsFactory));
+                    searchIndexProperties.metricsFactory,
+                    dynamicFeatureFlagRegistry,
+                    enableNaturalOrderScan,
+                    index::getStatus,
+                    generationId));
 
     List<LuceneSearchIndexReader> searchIndexReaders =
         new ArrayList<>(indexResources.luceneSearcherManagers.size());

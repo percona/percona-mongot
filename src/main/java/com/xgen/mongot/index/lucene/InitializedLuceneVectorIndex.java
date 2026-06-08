@@ -166,12 +166,18 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
             (directory, indexPartitionId) ->
                 SingleLuceneIndexWriter.createForVectorIndex(
                     directory,
+                    generationId,
                     vectorIndexProperties.mergeScheduler.createForIndexPartition(
                         generationId,
                         indexPartitionId,
                         definition.getNumPartitions(),
                         featureFlags.isEnabled(Feature.CANCEL_MERGE),
-                        IndexTypeData.getIndexTypeTag(definition).tagValue),
+                        dynamicFeatureFlagRegistry,
+                        enableNaturalOrderScan,
+                        definition,
+                        index::getStatus,
+                        IndexTypeData.getIndexTypeTag(definition).tagValue,
+                        directory),
                     vectorIndexProperties.mergePolicy,
                     vectorIndexProperties.ramBufferSizeMb,
                     vectorIndexProperties.fieldLimit,
@@ -183,12 +189,17 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
                         snapshotter -> snapshotter.getSnapshotDeletionPolicy(indexPartitionId)),
                     featureFlags,
                     dynamicFeatureFlagRegistry,
-                    enableNaturalOrderScan),
+                    enableNaturalOrderScan,
+                    index::getStatus),
             luceneIndexWriter ->
                 LuceneSearcherManager.create(
                     luceneIndexWriter.getLuceneWriter(),
                     searcherFactory,
-                    vectorIndexProperties.metricsFactory));
+                    vectorIndexProperties.metricsFactory,
+                    dynamicFeatureFlagRegistry,
+                    enableNaturalOrderScan,
+                    index::getStatus,
+                    generationId));
 
     IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
         indexMetricsUpdaterBuilder.getQueryingMetricsUpdater();

@@ -4,7 +4,12 @@ import com.google.common.base.Stopwatch;
 import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.sun.management.ThreadMXBean;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.lucene.abortable.AbortableDirectory;
+import com.xgen.mongot.index.lucene.codec.bloom.BloomCodecPolicy;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomReadPolicy;
+import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor;
@@ -36,7 +41,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import org.apache.lucene.index.ConcurrentMergeScheduler;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.MergeScheduler;
@@ -120,14 +127,29 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
     private final MergeScheduler.MergeSource in;
     private final IndexPartitionIdentifier indexPartitionIdentifier;
     private final boolean cancelMergeEnabled;
+    private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
+    private final boolean enableNaturalOrderScan;
+    private final Optional<IndexDefinition> indexDefinition;
+    private final Supplier<IndexStatus> indexStatusSupplier;
+    private final Optional<Directory> indexPartitionDirectory;
 
     TaggedMergeSource(
         MergeScheduler.MergeSource in,
         IndexPartitionIdentifier indexPartitionIdentifier,
-        boolean cancelMergeEnabled) {
+        boolean cancelMergeEnabled,
+        DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+        boolean enableNaturalOrderScan,
+        Optional<IndexDefinition> indexDefinition,
+        Supplier<IndexStatus> indexStatusSupplier,
+        Optional<Directory> indexPartitionDirectory) {
       this.in = in;
       this.indexPartitionIdentifier = indexPartitionIdentifier;
       this.cancelMergeEnabled = cancelMergeEnabled;
+      this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+      this.enableNaturalOrderScan = enableNaturalOrderScan;
+      this.indexDefinition = indexDefinition;
+      this.indexStatusSupplier = indexStatusSupplier;
+      this.indexPartitionDirectory = indexPartitionDirectory;
     }
 
     public IndexPartitionIdentifier getIndexPartitionIdentifier() {
@@ -173,15 +195,30 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
     private final InstrumentedConcurrentMergeScheduler in;
     private final IndexPartitionIdentifier indexPartitionIdentifier;
     private final boolean cancelMergeEnabled;
+    private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
+    private final boolean enableNaturalOrderScan;
+    private final Optional<IndexDefinition> indexDefinition;
+    private final Supplier<IndexStatus> indexStatusSupplier;
+    private final Optional<Directory> indexPartitionDirectory;
 
     /** Creates a merge scheduler for a specific index partition. */
     public PerIndexPartitionMergeScheduler(
         InstrumentedConcurrentMergeScheduler in,
         IndexPartitionIdentifier indexPartitionIdentifier,
-        boolean cancelMergeEnabled) {
+        boolean cancelMergeEnabled,
+        DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+        boolean enableNaturalOrderScan,
+        Optional<IndexDefinition> indexDefinition,
+        Supplier<IndexStatus> indexStatusSupplier,
+        Optional<Directory> indexPartitionDirectory) {
       this.in = in;
       this.indexPartitionIdentifier = indexPartitionIdentifier;
       this.cancelMergeEnabled = cancelMergeEnabled;
+      this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+      this.enableNaturalOrderScan = enableNaturalOrderScan;
+      this.indexDefinition = indexDefinition;
+      this.indexStatusSupplier = indexStatusSupplier;
+      this.indexPartitionDirectory = indexPartitionDirectory;
     }
 
     @Override
@@ -199,7 +236,14 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
       }
       var taggedMergeSource =
           new TaggedMergeSource(
-              mergeSource, this.indexPartitionIdentifier, this.cancelMergeEnabled);
+              mergeSource,
+              this.indexPartitionIdentifier,
+              this.cancelMergeEnabled,
+              this.dynamicFeatureFlagRegistry,
+              this.enableNaturalOrderScan,
+              this.indexDefinition,
+              this.indexStatusSupplier,
+              this.indexPartitionDirectory);
       this.in.merge(taggedMergeSource, trigger);
     }
 
@@ -329,12 +373,65 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
       int numIndexes,
       boolean cancelMergeEnabled,
       String indexType) {
+    return createForIndexPartition(
+        generationId,
+        indexPartitionId,
+        numIndexes,
+        cancelMergeEnabled,
+        DynamicFeatureFlagRegistry.empty(),
+        false,
+        Optional.empty(),
+        IndexStatus::steady,
+        indexType,
+        Optional.empty());
+  }
+
+  public PerIndexPartitionMergeScheduler createForIndexPartition(
+      GenerationId generationId,
+      int indexPartitionId,
+      int numIndexes,
+      boolean cancelMergeEnabled,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan,
+      IndexDefinition indexDefinition,
+      Supplier<IndexStatus> indexStatusSupplier,
+      String indexType,
+      Directory indexPartitionDirectory) {
+    return createForIndexPartition(
+        generationId,
+        indexPartitionId,
+        numIndexes,
+        cancelMergeEnabled,
+        dynamicFeatureFlagRegistry,
+        enableNaturalOrderScan,
+        Optional.of(indexDefinition),
+        indexStatusSupplier,
+        indexType,
+        Optional.of(indexPartitionDirectory));
+  }
+
+  public PerIndexPartitionMergeScheduler createForIndexPartition(
+      GenerationId generationId,
+      int indexPartitionId,
+      int numIndexes,
+      boolean cancelMergeEnabled,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      boolean enableNaturalOrderScan,
+      Optional<IndexDefinition> indexDefinition,
+      Supplier<IndexStatus> indexStatusSupplier,
+      String indexType,
+      Optional<Directory> indexPartitionDirectory) {
     Optional<Integer> optionalIndexPartitionId =
         numIndexes > 1 ? Optional.of(indexPartitionId) : Optional.empty();
     return new PerIndexPartitionMergeScheduler(
         this,
         new IndexPartitionIdentifier(generationId, optionalIndexPartitionId, indexType),
-        cancelMergeEnabled);
+        cancelMergeEnabled,
+        dynamicFeatureFlagRegistry,
+        enableNaturalOrderScan,
+        indexDefinition,
+        indexStatusSupplier,
+        indexPartitionDirectory);
   }
 
   /**
@@ -850,7 +947,7 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
 
     ConcurrentMergeScheduler.MergeThread thread =
         new InstrumentedMergeThread(
-            mergeSource, merge, indexPartitionIdentifier);
+            mergeSource, merge, indexPartitionIdentifier, taggedMergeSource);
     thread.setDaemon(true);
     thread.setName(threadNamePrefix + " " + indexPartitionIdentifier.toString());
     return thread;
@@ -902,6 +999,7 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
 
     private final MergePolicy.OneMerge merge;
     private final IndexPartitionIdentifier indexPartitionIdentifier;
+    private final TaggedMergeSource taggedMergeSource;
     private static final Logger LOG = LoggerFactory.getLogger(InstrumentedMergeThread.class);
 
     public IndexPartitionIdentifier getIndexPartitionIdentifier() {
@@ -911,10 +1009,12 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
     private InstrumentedMergeThread(
         MergeSource mergeSource,
         MergePolicy.OneMerge merge,
-        IndexPartitionIdentifier indexPartitionIdentifier) {
+        IndexPartitionIdentifier indexPartitionIdentifier,
+        TaggedMergeSource taggedMergeSource) {
       super(mergeSource, merge);
       this.merge = merge;
       this.indexPartitionIdentifier = indexPartitionIdentifier;
+      this.taggedMergeSource = taggedMergeSource;
     }
 
     @Override
@@ -958,6 +1058,23 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
       attribution.ifPresent(a -> a.markStarted(threadId));
       String indexType = this.indexPartitionIdentifier.getIndexType();
 
+      this.taggedMergeSource.indexDefinition.ifPresent(
+          indexDefinition -> {
+            BooleanSupplier loadBloomOnHeap =
+                BloomCodecPolicy.getBloomFilterEnabledForIdField(
+                    this.taggedMergeSource.dynamicFeatureFlagRegistry,
+                    this.taggedMergeSource.enableNaturalOrderScan,
+                    indexDefinition,
+                    this.taggedMergeSource.indexStatusSupplier);
+            @Var Optional<Directory> directory = this.taggedMergeSource.indexPartitionDirectory;
+            if (directory.isEmpty() && !this.merge.segments.isEmpty()) {
+              directory = Optional.of(this.merge.segments.getFirst().info.dir);
+            }
+            directory.ifPresent(
+                dir ->
+                    MongotBloomReadPolicy.setLoadBloomOnHeap(
+                        dir, loadBloomOnHeap.getAsBoolean()));
+          });
       try {
         Timed.runnable(InstrumentedConcurrentMergeScheduler.this.mergeTime, super::run);
       } catch (Exception e) {

@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.lucene.backward_codecs.lucene99.Lucene94FieldInfosFormatV1;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.backward_codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
@@ -301,6 +302,8 @@ public class LuceneCodecTest {
     PostingsFormat defaultFormat = format.getPostingsFormatForField("someOtherField");
 
     assertThat(bloomDelegate).isSameInstanceAs(defaultFormat);
+    assertThat(bloomDelegate.getName())
+        .isEqualTo(new Lucene99Codec().getPostingsFormatForField(idField).getName());
   }
 
   @Test
