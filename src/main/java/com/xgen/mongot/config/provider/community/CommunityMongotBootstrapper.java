@@ -3,6 +3,7 @@ package com.xgen.mongot.config.provider.community;
 import static com.xgen.mongot.cursor.CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT;
 import static com.xgen.mongot.cursor.CursorConfig.DEFAULT_MESSAGE_SIZE_LIMIT;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.net.HostAndPort;
@@ -15,6 +16,7 @@ import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.DefaultMetadataService;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MongodTopologyMonitor;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.manager.DefaultConfigManager;
 import com.xgen.mongot.config.provider.CommonUtils;
@@ -83,6 +85,7 @@ import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.SecretsParser;
 import com.xgen.mongot.util.Shutdown;
 import com.xgen.mongot.util.concurrent.Executors;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.MongoDbMetadataClient;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -218,6 +221,10 @@ public class CommunityMongotBootstrapper {
     var clusterTopologyGuard =
         new CatalogAccessGuard(mongodTopologyMonitor,
             config.syncSourceConfig().router().isPresent());
+
+    // Crash early if mongod is reachable and the topology contradicts syncSource.router.
+    // If mongod is unreachable, continue.
+    failFastOnTopologyMismatch(clusterTopologyGuard);
 
     var commandRegisterMetadata =
         new SearchCommandsRegister.BootstrapperMetadata(
@@ -497,6 +504,34 @@ public class CommunityMongotBootstrapper {
   private static MetadataService initializeMetadataService(
       SyncSourceConfig syncSourceConfig, MeterRegistry meterRegistry) {
     return DefaultMetadataService.create(syncSourceConfig, meterRegistry);
+  }
+
+  /**
+   * Bootstrap-time topology mismatch check. Calls {@link CatalogAccessGuard#requireTopologyMatch()}
+   * once and:
+   *
+   * <ul>
+   *   <li>On {@link TopologyMismatchException}: crashes the process. The mongot's
+   *       {@code syncSource.router} setting does not match the actual cluster topology.
+   *   <li>On {@link CheckedMongoException}: logs and continues. The cluster topology could not be
+   *       determined (mongod might not be available yet).
+   * </ul>
+   */
+  @VisibleForTesting
+  static void failFastOnTopologyMismatch(CatalogAccessGuard catalogAccessGuard) {
+    try {
+      catalogAccessGuard.requireTopologyMatch();
+      LOG.info("Bootstrap topology check passed: syncSource.router matches cluster topology.");
+    } catch (TopologyMismatchException e) {
+      Crash.because(
+              "Bootstrap topology check failed: syncSource.router does not match the actual"
+                  + " cluster topology; update the mongot config and restart.")
+          .withThrowable(e)
+          .now();
+    } catch (CheckedMongoException e) {
+      LOG.info("Bootstrap topology check skipped. mongod might not be available yet."
+          + "Continuing bootstrap.");
+    }
   }
 
   /**

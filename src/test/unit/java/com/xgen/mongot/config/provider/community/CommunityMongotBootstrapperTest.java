@@ -3,13 +3,22 @@ package com.xgen.mongot.config.provider.community;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 import com.google.common.base.Supplier;
+import com.mongodb.MongoException;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.provider.MongotConfigs;
 import com.xgen.mongot.config.provider.community.embedding.EmbeddingConfig;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
+import com.xgen.mongot.util.Crash;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Databases;
 import com.xgen.testing.TestUtils;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
@@ -22,6 +31,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.After;
 import org.junit.Before;
@@ -215,6 +225,49 @@ public class CommunityMongotBootstrapperTest {
   }
 
   @Test
+  public void failFastOnTopologyMismatch_passesWhenTopologyMatches() throws Exception {
+    var guard = mock(CatalogAccessGuard.class);
+    doNothing().when(guard).requireTopologyMatch();
+
+    CommunityMongotBootstrapper.failFastOnTopologyMismatch(guard);
+  }
+
+  @Test
+  @Crash.TestOnlyHaltHandler
+  public void failFastOnTopologyMismatch_crashesWhenMismatched() throws Exception {
+    var guard = mock(CatalogAccessGuard.class);
+    doThrow(new TopologyMismatchException("mismatch for test"))
+        .when(guard)
+        .requireTopologyMatch();
+
+    AtomicInteger exitCode = new AtomicInteger(-1);
+    Crash.setHaltHandlerForTesting(
+        code -> {
+          exitCode.set(code);
+          throw new HaltError();
+        });
+
+    try {
+      assertThrows(
+          HaltError.class,
+          () -> CommunityMongotBootstrapper.failFastOnTopologyMismatch(guard));
+      assertEquals("expected fail-exit code 1", 1, exitCode.get());
+    } finally {
+      Crash.clearHaltHandlerForTesting();
+    }
+  }
+
+  @Test
+  public void failFastOnTopologyMismatch_continuesWhenTopologyUndetermined() throws Exception {
+    var guard = mock(CatalogAccessGuard.class);
+    doThrow(new CheckedMongoException(new MongoException("topology cache is unavailable")))
+        .when(guard)
+        .requireTopologyMatch();
+
+    CommunityMongotBootstrapper.failFastOnTopologyMismatch(guard);
+  }
+
+  @Test
   public void maybeCreateFtdcReporter_FtdcDisabled_DoesNotCreateFtdcReporter() throws IOException {
     CompositeMeterRegistry compositeRegistry = new CompositeMeterRegistry();
     SimpleMeterRegistry simpleRegistry = new SimpleMeterRegistry();
@@ -335,5 +388,11 @@ public class CommunityMongotBootstrapperTest {
   private ServerConfig createMinimalServerConfig() {
     return new ServerConfig(
         new ServerConfig.GrpcServerConfig("127.0.0.1:27028", Optional.empty()), Optional.empty());
+  }
+
+  private static final class HaltError extends Error {
+    private HaltError() {
+      super("test halt");
+    }
   }
 }
