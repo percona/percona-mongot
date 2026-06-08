@@ -108,11 +108,13 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       int requestRateLimitBackoffMs) {
     super(
         pauseAllInitialSyncs,
         pauseInitialSyncOnIndexIds,
         enableSplitLargeChangeStreamEvents,
+        splitLargeChangeStreamEventsForInitialSync,
         excludedChangestreamFields,
         matchCollectionUuidForUpdateLookup);
     this.numConcurrentInitialSyncs = numConcurrentInitialSyncs;
@@ -243,6 +245,7 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
         globalReplicationConfig.excludedChangestreamFields(),
         globalReplicationConfig.matchCollectionUuidForUpdateLookup(),
         globalReplicationConfig.enableSplitLargeChangeStreamEvents(),
+        globalReplicationConfig.splitLargeChangeStreamEventsForInitialSync(),
         requestRateLimitBackoffMs);
   }
 
@@ -384,6 +387,9 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
             Fields.MATCH_COLLECTION_UUID_FOR_UPDATE_LOOKUP, this.matchCollectionUuidForUpdateLookup)
         .field(
             Fields.ENABLE_SPLIT_LARGE_CHANGE_STREAM_EVENTS, this.enableSplitLargeChangeStreamEvents)
+        .field(
+            Fields.SPLIT_LARGE_CHANGE_STREAM_EVENTS_FOR_INITIAL_SYNC,
+            this.splitLargeChangeStreamEventsForInitialSync)
         .field(Fields.REQUEST_RATE_LIMIT_BACKOFF_MS, Optional.of(this.requestRateLimitBackoffMs))
         .build();
   }
@@ -496,6 +502,9 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
 
     private static final Field.Required<Boolean> ENABLE_SPLIT_LARGE_CHANGE_STREAM_EVENTS =
         Field.builder("enableSplitLargeChangeStreamEvents").booleanField().required();
+
+    private static final Field.Required<Boolean> SPLIT_LARGE_CHANGE_STREAM_EVENTS_FOR_INITIAL_SYNC =
+        Field.builder("splitLargeChangeStreamEventsForInitialSync").booleanField().required();
 
     private static final Field.Optional<Integer> REQUEST_RATE_LIMIT_BACKOFF_MS =
         Field.builder("requestRateLimitBackoffMs")

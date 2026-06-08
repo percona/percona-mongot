@@ -24,6 +24,7 @@
         ],
         "matchCollectionUUIDForUpdateLookup": true,
         "enableSplitLargeChangeStreamEvents": false,
+        "splitLargeChangeStreamEventsForInitialSync": false,
         "requestRateLimitBackoffMs" : 11
       },
       "bson": {
@@ -52,6 +53,7 @@
         ],
         "matchCollectionUUIDForUpdateLookup": true,
         "enableSplitLargeChangeStreamEvents": false,
+        "splitLargeChangeStreamEventsForInitialSync": false,
         "requestRateLimitBackoffMs" : 11
       }
     }

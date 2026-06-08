@@ -25,6 +25,7 @@ public class MongoDbReplicationConfigBuilder {
   private List<String> excludedChangestreamFields = List.of();
   private Optional<Boolean> optionalMatchCollectionUuidForUpdateLookup = Optional.empty();
   private Optional<Boolean> enableSplitLargeChangeStreamEvents = Optional.empty();
+  private Optional<Boolean> splitLargeChangeStreamEventsForInitialSync = Optional.empty();
   private Optional<Integer> optionalRequestRateLimitBackoffMs = Optional.empty();
 
   public static MongoDbReplicationConfigBuilder builder() {
@@ -145,6 +146,7 @@ public class MongoDbReplicationConfigBuilder {
             this.optionalPauseAllInitialSyncs.orElse(false),
             this.optionalPauseInitialSyncOnIndexIds.orElse(List.of()),
             this.enableSplitLargeChangeStreamEvents.orElse(false),
+            this.splitLargeChangeStreamEventsForInitialSync.orElse(false),
             this.excludedChangestreamFields,
             this.optionalMatchCollectionUuidForUpdateLookup.orElse(false)),
         this.optionalNumConcurrentInitialSyncs,

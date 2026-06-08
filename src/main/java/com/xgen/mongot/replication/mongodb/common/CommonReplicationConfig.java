@@ -15,6 +15,7 @@ public abstract sealed class CommonReplicationConfig
       boolean pauseAllInitialSyncs,
       List<ObjectId> pauseInitialSyncOnIndexIds,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup) {}
 
@@ -39,6 +40,10 @@ public abstract sealed class CommonReplicationConfig
    */
   final boolean enableSplitLargeChangeStreamEvents;
 
+  /** Whether to enable support for large change stream events that exceed the 16MB limit
+   *  during initial sync. */
+  final boolean splitLargeChangeStreamEventsForInitialSync;
+
   /**
    * When pauseAllInitialSyncs is set to false, we will pause initial sync for indexes in this list.
    */
@@ -58,17 +63,19 @@ public abstract sealed class CommonReplicationConfig
       boolean pauseAllInitialSyncs,
       List<ObjectId> pauseInitialSyncOnIndexIds,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup) {
     this.pauseAllInitialSyncs = pauseAllInitialSyncs;
     this.pauseInitialSyncOnIndexIds = pauseInitialSyncOnIndexIds;
     this.enableSplitLargeChangeStreamEvents = enableSplitLargeChangeStreamEvents;
+    this.splitLargeChangeStreamEventsForInitialSync = splitLargeChangeStreamEventsForInitialSync;
     this.excludedChangestreamFields = excludedChangestreamFields;
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
   }
 
   public static GlobalReplicationConfig defaultGlobalReplicationConfig() {
-    return new GlobalReplicationConfig(false, List.of(), false, List.of(), false);
+    return new GlobalReplicationConfig(false, List.of(), false, false, List.of(), false);
   }
 
   // Overridable parameters by subclasses.
@@ -92,6 +99,10 @@ public abstract sealed class CommonReplicationConfig
 
   public final boolean getEnableSplitLargeChangeStreamEvents() {
     return this.enableSplitLargeChangeStreamEvents;
+  }
+
+  public final boolean getSplitLargeChangeStreamEventsForInitialSync() {
+    return this.splitLargeChangeStreamEventsForInitialSync;
   }
 
   public final List<ObjectId> getPauseInitialSyncOnIndexIds() {

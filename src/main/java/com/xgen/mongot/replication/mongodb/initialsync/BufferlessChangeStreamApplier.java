@@ -82,6 +82,7 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
   private volatile boolean shutdown;
 
   private final boolean avoidNaturalOrderScanSyncSourceChangeResync;
+  private final boolean splitLargeChangeStreamEvents;
 
   // If true, this is a fresh initial sync (not resuming from a crash). The change stream will
   // start at highWaterMark + 1 since the collection scan already captured everything at
@@ -103,6 +104,7 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
       Duration maxLagTime,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
+      boolean splitLargeChangeStreamEvents,
       InitialSyncContext context,
       InitialSyncMongoClient mongoClient,
       MongoNamespace namespace,
@@ -121,6 +123,7 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
     this.maxLagTime = maxLagTime;
     this.excludedChangestreamFields = excludedChangestreamFields;
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
+    this.splitLargeChangeStreamEvents = splitLargeChangeStreamEvents;
     this.context = context;
     this.mongoClient = mongoClient;
     this.clusterTimeProvider = mongoClient::getMaxValidMajorityReadOptime;
@@ -236,7 +239,8 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
             this.context.getIndexDefinition(),
             this.namespace,
             this.excludedChangestreamFields,
-            !this.context.isRemoveMatchCollectionUuid() && this.matchCollectionUuidForUpdateLookup);
+            !this.context.isRemoveMatchCollectionUuid() && this.matchCollectionUuidForUpdateLookup,
+            this.splitLargeChangeStreamEvents);
     ChangeStreamMode mode = ChangeStreamMode.getDefault();
 
     if (this.isFreshStart) {

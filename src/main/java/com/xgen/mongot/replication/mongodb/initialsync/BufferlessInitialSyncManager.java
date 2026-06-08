@@ -94,6 +94,7 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
       boolean avoidNaturalOrderScanSyncSourceChangeResync,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
+      boolean splitLargeChangeStreamEvents,
       Optional<MaterializedViewCollectionMetadataCatalog> mvMetadataCatalog,
       MetricsFactory metricsFactory) {
     return (initialSyncContext, mongoClient, namespace, resumeInfo) ->
@@ -106,6 +107,7 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
             changeStreamLagTime,
             excludedChangestreamFields,
             matchCollectionUuidForUpdateLookup,
+            splitLargeChangeStreamEvents,
             resumeInfo,
             mvMetadataCatalog,
             metricsFactory,
@@ -131,6 +133,7 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
       Duration changeStreamLagTime,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
+      boolean splitLargeChangeStreamEvents,
       Optional<InitialSyncResumeInfo> resumeInfo,
       Optional<MaterializedViewCollectionMetadataCatalog> mvMetadataCatalog,
       MetricsFactory metricsFactory,
@@ -164,6 +167,7 @@ public class BufferlessInitialSyncManager implements InitialSyncManager {
                 changeStreamLagTime,
                 excludedChangestreamFields,
                 matchCollectionUuidForUpdateLookup,
+                splitLargeChangeStreamEvents,
                 initialSyncContext,
                 mongoClient,
                 namespace,

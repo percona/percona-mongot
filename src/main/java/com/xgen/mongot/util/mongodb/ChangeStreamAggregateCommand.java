@@ -42,6 +42,9 @@ public class ChangeStreamAggregateCommand {
   /* $project that filters out unused changestream metadata fields. */
   private final Optional<Bson> changeStreamMetadataExclusionProjectionStage;
 
+  /** $changeStreamSplitLargeEvent stage for large event splitting. */
+  private final Optional<Bson> splitLargeEventStage;
+
   /**
    * $addFields that adds metadata fields like _id and deleted flag under a separate namespace under
    * indexId field. Required to avoid collision with user-defined fields.
@@ -66,7 +69,8 @@ public class ChangeStreamAggregateCommand {
       Optional<Bson> indexedFieldsProjectionStage,
       Optional<Bson> metadataAddFieldsStage,
       Optional<List<Bson>> viewDefinedStages,
-      Optional<Bson> changeStreamMetadataExclusionProjectionStage) {
+      Optional<Bson> changeStreamMetadataExclusionProjectionStage,
+      Optional<Bson> splitLargeEventStage) {
     checkArg(
         startAfter.isEmpty() || startAtOperationTime.isEmpty(),
         "only one of startAfter or startAtOperation may be specified");
@@ -84,6 +88,7 @@ public class ChangeStreamAggregateCommand {
     this.viewDefinedStages = viewDefinedStages;
     this.changeStreamMetadataExclusionProjectionStage =
         changeStreamMetadataExclusionProjectionStage;
+    this.splitLargeEventStage = splitLargeEventStage;
   }
 
   public static class Builder {
@@ -98,6 +103,7 @@ public class ChangeStreamAggregateCommand {
     private Optional<Boolean> matchCollectionUuidForUpdateLookup;
     private Optional<Bson> indexedFieldsProjectionStage;
     private Optional<Bson> changeStreamMetadataExclusionProjectionStage;
+    private Optional<Bson> splitLargeEventStage;
     private Optional<Bson> metadataAddFieldsStage;
     private Optional<List<Bson>> viewDefinedStages;
 
@@ -114,6 +120,7 @@ public class ChangeStreamAggregateCommand {
       this.indexedFieldsProjectionStage = Optional.empty();
       this.metadataAddFieldsStage = Optional.empty();
       this.changeStreamMetadataExclusionProjectionStage = Optional.empty();
+      this.splitLargeEventStage = Optional.empty();
       this.viewDefinedStages = Optional.empty();
     }
 
@@ -131,7 +138,8 @@ public class ChangeStreamAggregateCommand {
           this.indexedFieldsProjectionStage,
           this.metadataAddFieldsStage,
           this.viewDefinedStages,
-          this.changeStreamMetadataExclusionProjectionStage);
+          this.changeStreamMetadataExclusionProjectionStage,
+          this.splitLargeEventStage);
     }
 
     /** Sets the collection name. */
@@ -208,6 +216,15 @@ public class ChangeStreamAggregateCommand {
           Optional.of(changeStreamMetadataExclusionProjectionStage);
       return this;
     }
+
+    /** Sets the $changeStreamSplitLargeEvent stage for large event splitting. */
+    public Builder splitLargeEvent(boolean value) {
+      if (value) {
+        this.splitLargeEventStage =
+                Optional.of(new BsonDocument("$changeStreamSplitLargeEvent", new BsonDocument()));
+      }
+      return this;
+    }
   }
 
   /** Constructs the proper AggregateCommandProxy for the ChangeStreamAggregateCommand. */
@@ -244,6 +261,8 @@ public class ChangeStreamAggregateCommand {
             // stages might need access to the full document
             .addStage(this.indexedFieldsProjectionStage)
             .addStage(this.changeStreamMetadataExclusionProjectionStage)
+            // $changeStreamSplitLargeEvent must be the last stage to minimize data being split
+            .addStage(this.splitLargeEventStage)
             .build();
 
     return new AggregateCommandProxy(

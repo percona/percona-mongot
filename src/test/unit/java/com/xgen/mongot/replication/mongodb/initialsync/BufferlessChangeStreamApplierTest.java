@@ -329,6 +329,7 @@ public class BufferlessChangeStreamApplierTest {
                   Duration.ofMinutes(1),
                   List.of(),
                   false,
+                  false,
                   this.context,
                   mongoClient,
                   indexDefinitionGeneration.getIndexDefinition().getLastObservedNamespace(),

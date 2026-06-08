@@ -56,6 +56,7 @@ interface InitialSyncManager {
         bufferlessConfig.avoidNaturalOrderScanSyncSourceChangeResync(),
         replicationConfig.getExcludedChangestreamFields(),
         replicationConfig.getMatchCollectionUuidForUpdateLookup(),
+        replicationConfig.getSplitLargeChangeStreamEventsForInitialSync(),
         mvMetadataCatalog,
         metricsFactory);
   }

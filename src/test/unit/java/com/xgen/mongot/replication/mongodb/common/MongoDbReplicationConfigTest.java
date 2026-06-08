@@ -58,6 +58,7 @@ public class MongoDbReplicationConfigTest {
                       new ObjectId("68784215b86a4a2d55787ae6"),
                       new ObjectId("687d201de90e474dfbc7c1d4")),
                   false,
+                  false,
                   List.of("updateDescription.disambiguatedPaths"),
                   true),
               Optional.of(1),

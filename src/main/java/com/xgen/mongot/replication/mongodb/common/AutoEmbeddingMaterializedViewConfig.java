@@ -198,6 +198,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       int numConcurrentChangeStreams,
       int numIndexingThreads,
       int changeStreamMaxTimeMs,
@@ -227,6 +228,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
         pauseAllInitialSyncs,
         pauseInitialSyncOnIndexIds,
         enableSplitLargeChangeStreamEvents,
+        splitLargeChangeStreamEventsForInitialSync,
         excludedChangestreamFields,
         matchCollectionUuidForUpdateLookup);
     this.maxConcurrentEmbeddingInitialSyncs = maxConcurrentEmbeddingInitialSyncs;
@@ -474,6 +476,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
         globalReplicationConfig.excludedChangestreamFields(),
         globalReplicationConfig.matchCollectionUuidForUpdateLookup(),
         globalReplicationConfig.enableSplitLargeChangeStreamEvents(),
+        globalReplicationConfig.splitLargeChangeStreamEventsForInitialSync(),
         numConcurrentChangeStreams,
         numIndexingThreads,
         changeStreamMaxTimeMs,

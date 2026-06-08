@@ -62,6 +62,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
                       new ObjectId("68784215b86a4a2d55787ae6"),
                       new ObjectId("687d201de90e474dfbc7c1d4")),
                   false,
+                  false,
                   List.of("updateDescription.disambiguatedPaths"),
                   true),
               Optional.of(1),
@@ -287,7 +288,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
           AutoEmbeddingMaterializedViewConfig.create(
               runtime,
               new CommonReplicationConfig.GlobalReplicationConfig(
-                  false, List.of(), false, List.of(), false),
+                  false, List.of(), false, false, List.of(), false),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
@@ -324,7 +325,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
           AutoEmbeddingMaterializedViewConfig.create(
               runtime,
               new CommonReplicationConfig.GlobalReplicationConfig(
-                  false, List.of(), false, List.of(), false),
+                  false, List.of(), false, false, List.of(), false),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
