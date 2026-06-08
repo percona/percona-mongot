@@ -734,7 +734,7 @@
 <dependency>
   <groupId>io.netty</groupId>
   <artifactId>netty-resolver-dns</artifactId>
-  <version>4.1.122.Final</version>
+  <version>4.1.135.Final</version>
 </dependency>
 <dependency>
   <groupId>io.netty</groupId>
