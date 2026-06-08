@@ -12,6 +12,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.jetbrains.annotations.Nullable;
@@ -36,6 +37,7 @@ public class ScrapeCache {
 
   static final String COMPUTE_EXECUTOR_NAME = "scrape-cache-compute";
   static final String REFRESH_EXECUTOR_NAME = "scrape-cache-refresh";
+  static final String PREWARM_EXECUTOR_NAME = "scrape-cache-prewarm";
 
   public static final String COMPUTED_AT_METRIC_NAME = "metrics_computed_at_seconds";
   public static final String COMPUTED_IN_BACKGROUND_METRIC_NAME = "metrics_computed_in_background";
@@ -63,6 +65,8 @@ public class ScrapeCache {
   private @Nullable Future<String> liveComputeFuture;
   private final NamedExecutorService liveComputeExecutor;
   private final NamedScheduledExecutorService backgroundComputeExecutor;
+  private final NamedExecutorService preWarmExecutor;
+  private final AtomicBoolean preWarmStarted = new AtomicBoolean(false);
 
   public ScrapeCache(
       PrometheusMeterRegistry registry, ScrapeCacheConfig config, IntervalThrottle throttle) {
@@ -72,6 +76,7 @@ public class ScrapeCache {
     this.liveComputeExecutor = Executors.fixedSizeThreadPool(COMPUTE_EXECUTOR_NAME, 1, registry);
     this.backgroundComputeExecutor =
         Executors.singleThreadScheduledExecutor(REFRESH_EXECUTOR_NAME, registry);
+    this.preWarmExecutor = Executors.unboundedCachingThreadPool(PREWARM_EXECUTOR_NAME, registry);
 
     Gauge.builder(COMPUTED_AT_METRIC_NAME, () -> System.currentTimeMillis() / 1000.0)
         .description("Unix timestamp in seconds at which the cached metrics were last computed")
@@ -82,6 +87,33 @@ public class ScrapeCache {
             () -> Thread.currentThread().getName().contains(REFRESH_EXECUTOR_NAME) ? 1.0 : 0.0)
         .description("1 if computed in cached mode (background); 0 if computed in live mode")
         .register(registry);
+  }
+
+  /**
+   * Asynchronously populates the cache once. Runs at most once; skips when the cache is already
+   * populated. The computation runs on a dedicated executor with no timeout and stores the result
+   * only if the cache is still empty.
+   */
+  public void preWarm() {
+    if (!this.preWarmStarted.compareAndSet(false, true)) {
+      LOG.atInfo().log("preWarm already started; skipping");
+      return;
+    }
+    if (this.cachedMetrics.get() != null) {
+      LOG.atInfo().log("cache already populated; skipping preWarm");
+      return;
+    }
+    this.preWarmExecutor.execute(
+        () -> {
+          try {
+            String metrics = computeWithTimeout(NO_TIMEOUT);
+            if (!this.cachedMetrics.compareAndSet(null, metrics)) {
+              LOG.atInfo().log("discarding preWarm result; cache already populated");
+            }
+          } catch (TimeoutException | RuntimeException e) {
+            LOG.error("prewarm failed", e);
+          }
+        });
   }
 
   /**
@@ -219,5 +251,6 @@ public class ScrapeCache {
   public void close() {
     Executors.shutdownOrFail(this.backgroundComputeExecutor);
     Executors.shutdownOrFail(this.liveComputeExecutor);
+    Executors.shutdownOrFail(this.preWarmExecutor);
   }
 }

@@ -115,11 +115,6 @@ public class PrometheusServer {
                         Clock.systemUTC(),
                         Duration.ofSeconds(scrapeCacheConfig.throttleIntervalSec()))))
             : Optional.empty();
-    // Eager pre-warm with no timeout so the first /metrics request doesn't pay cold-start cost.
-    if (preWarmCache) {
-      scrapeCache.ifPresent(c -> c.get(ScrapeCache.NO_TIMEOUT));
-    }
-
     Supplier<String> scrapeSupplier;
     if (scrapeCache.isPresent()) {
       ScrapeCache c = scrapeCache.get();
@@ -151,6 +146,16 @@ public class PrometheusServer {
           });
       server.setExecutor(httpExecutor.orElse(null));
       server.start();
+      // Eager pre-warm with no timeout so the first /metrics request doesn't pay cold-start cost.
+      if (preWarmCache && scrapeCache.isPresent()) {
+        LOG.atInfo().log("Triggering scrape cache pre-warm");
+        scrapeCache.get().preWarm();
+      } else {
+        LOG.atInfo()
+            .addKeyValue("preWarmCache", preWarmCache)
+            .addKeyValue("cacheEnabled", scrapeCache.isPresent())
+            .log("Skipping scrape cache pre-warm");
+      }
       return new PrometheusServer(server, prometheusRegistry, scrapeCache);
     } catch (IOException e) {
       throw new RuntimeException(e);
