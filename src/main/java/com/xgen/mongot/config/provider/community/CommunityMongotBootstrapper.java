@@ -117,6 +117,9 @@ public class CommunityMongotBootstrapper {
 
   private static final Duration DEFAULT_CONFIG_UPDATE_PERIOD = Duration.ofSeconds(1);
 
+  // Fixed cadence for refreshing system metrics (disk/memory/netstat/process) gauges.
+  private static final Duration SYSTEM_METRICS_UPDATE_INTERVAL = Duration.ofSeconds(5);
+
   /**
    * Bootstraps the mongot using the config file from the supplied configPath.
    *
@@ -328,6 +331,12 @@ public class CommunityMongotBootstrapper {
     metadataUpdater.start();
     serverLifecycles.start.run();
     ftdcReporterLifecycle.ifPresent(f -> f.start.run());
+    // Begin periodically refreshing system metrics (disk/memory/netstat/process gauges). Without
+    // this the gauges (e.g. system.disk.space.data.path.free) stay frozen at their startup
+    // snapshot.
+    systemMetricsInstrumentation.ifPresent(
+        instrumentation ->
+            instrumentation.start(SYSTEM_METRICS_UPDATE_INTERVAL.getSeconds(), TimeUnit.SECONDS));
 
     // Health check server should be started last, to minimize the chance that we service health
     // check requests on startup that immediately return unhealthy.
