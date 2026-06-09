@@ -18,6 +18,7 @@ import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
+import com.xgen.mongot.util.mongodb.MongoDbMetadataClient;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
@@ -46,6 +47,7 @@ public class CommunityMetadataUpdater {
   private final MetadataService metadataService;
   private final CachedIndexInfoProvider indexInfoProvider;
   private final CatalogAccessGuard catalogAccessGuard;
+  private final DroppedCollectionIndexCleaner droppedCollectionCleaner;
   private final NamedScheduledExecutorService executorService;
   private final Duration runFrequency;
 
@@ -67,12 +69,16 @@ public class CommunityMetadataUpdater {
       MetadataService metadataService,
       CachedIndexInfoProvider indexInfoProvider,
       CatalogAccessGuard catalogAccessGuard,
+      MongoDbMetadataClient mongoDbMetadataClient,
       MeterRegistry meterRegistry,
       Duration runFrequency) {
     this.serverInfo = serverInfo;
     this.metadataService = metadataService;
     this.indexInfoProvider = indexInfoProvider;
     this.catalogAccessGuard = catalogAccessGuard;
+    this.droppedCollectionCleaner =
+        new DroppedCollectionIndexCleaner(
+            metadataService, mongoDbMetadataClient, catalogAccessGuard);
     this.runFrequency = runFrequency;
     this.executorService =
         Executors.singleThreadScheduledExecutor(
@@ -126,6 +132,7 @@ public class CommunityMetadataUpdater {
 
     updateServerState();
     updateIndexStats();
+    removeDroppedCollectionIndexes();
     removeStaleServersAndIndexEntries();
   }
 
@@ -344,6 +351,12 @@ public class CommunityMetadataUpdater {
       // eventually consistent.
       LOG.warn("error updating index stats", e);
     }
+  }
+
+  /** Delegates dropped-collection AIC cleanup to {@link DroppedCollectionIndexCleaner}. */
+  private void removeDroppedCollectionIndexes() {
+    this.droppedCollectionCleaner.deleteIndexesForDroppedCollections(
+        this.indexInfoProvider.getIndexInfos());
   }
 
   /**

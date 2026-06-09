@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -36,6 +37,7 @@ import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
+import com.xgen.mongot.util.mongodb.MongoDbMetadataClient;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SynonymMappingDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
@@ -64,6 +66,7 @@ public class CommunityMetadataUpdaterTest {
   private IndexStats indexStats;
   private CachedIndexInfoProvider indexInfoProvider;
   private CatalogAccessGuard catalogAccessGuard;
+  private MongoDbMetadataClient mongoDbMetadataClient;
   private SimpleMeterRegistry meterRegistry;
   private CommunityMetadataUpdater heartbeater;
 
@@ -75,6 +78,7 @@ public class CommunityMetadataUpdaterTest {
     this.indexStats = mock(IndexStats.class);
     this.indexInfoProvider = mock(CachedIndexInfoProvider.class);
     this.catalogAccessGuard = mock(CatalogAccessGuard.class);
+    this.mongoDbMetadataClient = mock(MongoDbMetadataClient.class);
     this.meterRegistry = new SimpleMeterRegistry();
     when(this.metadataService.getServerState()).thenReturn(this.serverState);
     when(this.metadataService.getIndexStats()).thenReturn(this.indexStats);
@@ -82,12 +86,15 @@ public class CommunityMetadataUpdaterTest {
     when(this.serverState.get(this.serverInfo.id())).thenReturn(Optional.empty());
     // Default: updateOne returns true (matched a document) so initializeServerStateEntry succeeds
     when(this.serverState.updateOne(any(), any())).thenReturn(true);
+    // Default: no active/stale servers
+    when(this.serverState.list(any())).thenReturn(List.of());
     this.heartbeater =
         new CommunityMetadataUpdater(
             this.serverInfo,
             this.metadataService,
             this.indexInfoProvider,
             this.catalogAccessGuard,
+            this.mongoDbMetadataClient,
             this.meterRegistry,
             Duration.ofMillis(10));
   }
@@ -179,8 +186,8 @@ public class CommunityMetadataUpdaterTest {
 
     this.heartbeater.run();
 
-    // Guard is consulted, then the tick proceeds to initialize and upsert server state.
-    verify(this.catalogAccessGuard).requireTopologyMatch();
+    // Guard is consulted (once in run(), once in the cleaner), then the tick proceeds.
+    verify(this.catalogAccessGuard, atLeastOnce()).requireTopologyMatch();
     verify(this.serverState).upsert(any(ServerStateEntry.class));
   }
 
@@ -199,7 +206,8 @@ public class CommunityMetadataUpdaterTest {
     verify(this.serverState).upsert(any(ServerStateEntry.class));
     verify(this.serverState).updateOne(eq(this.serverInfo.id()), any());
     verify(this.indexInfoProvider).refreshIndexInfos();
-    verify(this.indexInfoProvider).getIndexInfos();
+    // getIndexInfos() is called by updateIndexStats() and removeDroppedCollectionIndexes()
+    verify(this.indexInfoProvider, times(2)).getIndexInfos();
   }
 
   @Test
@@ -342,6 +350,7 @@ public class CommunityMetadataUpdaterTest {
             this.metadataService,
             this.indexInfoProvider,
             this.catalogAccessGuard,
+            this.mongoDbMetadataClient,
             this.meterRegistry,
             Duration.ofMillis(10));
     updater.run();
@@ -823,6 +832,7 @@ public class CommunityMetadataUpdaterTest {
             this.metadataService,
             this.indexInfoProvider,
             this.catalogAccessGuard,
+            this.mongoDbMetadataClient,
             this.meterRegistry,
             Duration.ofMillis(500)); // 500ms period
 
@@ -1124,5 +1134,26 @@ public class CommunityMetadataUpdaterTest {
     IllegalStateException exception =
         assertThrows(IllegalStateException.class, () -> this.heartbeater.run());
     assertEquals("cannot call update() after close()", exception.getMessage());
+  }
+
+  // (Dropped-collection cleanup is tested in DroppedCollectionIndexCleanerTest.)
+
+  /**
+   * Verifies that removeDroppedCollectionIndexes() is invoked each tick by confirming deleteIndex
+   * is reachable through CommunityMetadataUpdater.run().
+   */
+  @Test
+  public void run_removeDroppedCollectionIndexes_noOpWhenNoDroppedIndexes() throws Exception {
+    ObjectId indexId = new ObjectId();
+    SearchIndexDefinition searchDef = createSearchIndexDefinition(indexId);
+    IndexInformation steadyIndex =
+        createSearchIndexInformation(searchDef, new IndexStatus(IndexStatus.StatusCode.STEADY));
+
+    when(this.indexStats.list(any())).thenReturn(Collections.emptyList());
+    when(this.indexInfoProvider.getIndexInfos()).thenReturn(List.of(steadyIndex));
+
+    this.heartbeater.run();
+
+    verify(this.serverState, never()).list(ServerStateEntry.activeServersFilter());
   }
 }

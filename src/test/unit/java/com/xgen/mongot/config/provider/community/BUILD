@@ -11,6 +11,7 @@ java_test_suite(
         "CommunityServerIdProviderTest.java",
         "CommunityServerInfoTest.java",
         "ConnectionInfoFactoryTest.java",
+        "DroppedCollectionIndexCleanerTest.java",
         "InitialSyncHostProviderTest.java",
         "MongoConnectionConfigTest.java",
         "ScramConfigTest.java",

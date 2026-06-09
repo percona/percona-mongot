@@ -270,6 +270,7 @@ public class CommunityMongotBootstrapper {
             metadataService,
             configManager,
             clusterTopologyGuard,
+            mongoDbMetadataClient,
             meterRegistry,
             internalListAllIndexesForTesting);
 
@@ -673,6 +674,7 @@ public class CommunityMongotBootstrapper {
       MetadataService metadataService,
       ConfigManager configManager,
       CatalogAccessGuard catalogAccessGuard,
+      MongoDbMetadataClient mongoDbMetadataClient,
       MeterRegistry meterRegistry,
       boolean internalListAllIndexesForTesting) {
     Duration runFrequency =
@@ -691,6 +693,7 @@ public class CommunityMongotBootstrapper {
         metadataService,
         configManager,
         catalogAccessGuard,
+        mongoDbMetadataClient,
         meterRegistry,
         runFrequency);
   }
