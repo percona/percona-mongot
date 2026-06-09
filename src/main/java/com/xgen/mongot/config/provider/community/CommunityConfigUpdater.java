@@ -15,6 +15,7 @@ import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.provider.mongod.ConfigUpdaterUtils;
 import com.xgen.mongot.config.updater.ConfigUpdater;
+import com.xgen.mongot.config.updater.RetriableConfigUpdateException;
 import com.xgen.mongot.config.util.ViewValidator;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -90,7 +91,7 @@ public class CommunityConfigUpdater implements ConfigUpdater {
   }
 
   @Override
-  public synchronized void update() {
+  public synchronized void update() throws RetriableConfigUpdateException {
     checkState(!this.closed, "cannot call update() after close()");
 
     // Refresh the single-host replication URIs via SDAM health checks, then propagate any changes

@@ -18,7 +18,6 @@ import com.mongodb.MongoNamespace;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
-import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.featureflag.Feature;
@@ -142,7 +141,7 @@ public class CommunityConfigUpdaterTest {
   }
 
   @Test
-  public void testUpdatesSearchIndex() throws MetadataServiceException {
+  public void testUpdatesSearchIndex() throws Exception {
     when(this.authoritativeIndexCatalog.listIndexDefinitions())
         .thenReturn(List.of(SearchIndex.MOCK_INDEX_DEFINITION));
 
@@ -157,7 +156,7 @@ public class CommunityConfigUpdaterTest {
   }
 
   @Test
-  public void testUpdatesSearchAndVectorIndex() throws MetadataServiceException {
+  public void testUpdatesSearchAndVectorIndex() throws Exception {
     when(this.authoritativeIndexCatalog.listIndexDefinitions())
         .thenReturn(List.of(SearchIndex.MOCK_INDEX_DEFINITION, VectorIndex.MOCK_VECTOR_DEFINITION));
 
@@ -174,8 +173,7 @@ public class CommunityConfigUpdaterTest {
   }
 
   @Test
-  public void testUpdatesViewWithValidDefinition()
-      throws CheckedMongoException, MetadataServiceException {
+  public void testUpdatesViewWithValidDefinition() throws Exception {
     var viewDefinition =
         ViewDefinition.existing(
             "myView",
@@ -221,8 +219,7 @@ public class CommunityConfigUpdaterTest {
   }
 
   @Test
-  public void testUpdatesVectorViewWithValidDefinition()
-      throws CheckedMongoException, MetadataServiceException {
+  public void testUpdatesVectorViewWithValidDefinition() throws Exception {
     var viewDefinition =
         ViewDefinition.existing(
             "myView",
@@ -268,8 +265,7 @@ public class CommunityConfigUpdaterTest {
   }
 
   @Test
-  public void testUpdatesViewWithInvalidDefinition()
-      throws CheckedMongoException, MetadataServiceException {
+  public void testUpdatesViewWithInvalidDefinition() throws Exception {
     var viewDefinition =
         ViewDefinition.existing(
             "myView",

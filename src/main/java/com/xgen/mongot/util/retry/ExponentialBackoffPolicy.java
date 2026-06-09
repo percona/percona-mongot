@@ -64,6 +64,23 @@ public class ExponentialBackoffPolicy implements BackoffPolicy {
         .withJitter(this.jitter);
   }
 
+  @Override
+  public Duration delayFor(int consecutiveFailures) {
+    if (consecutiveFailures <= 0) {
+      return Duration.ZERO;
+    }
+    long initialNanos = this.initialDelay.toNanos();
+    long maxNanos = this.maxDelay.toNanos();
+    double scaled = initialNanos * Math.pow(this.backoffFactor, consecutiveFailures - 1.0);
+    long delayNanos;
+    if (Double.isInfinite(scaled) || scaled >= maxNanos) {
+      delayNanos = maxNanos;
+    } else {
+      delayNanos = Math.min(maxNanos, (long) scaled);
+    }
+    return applyJitter(Duration.ofNanos(delayNanos), this.jitter);
+  }
+
   public static class BackoffPolicyInitialDelayBuilder {
     public BackoffPolicyBackoffFactorBuilder initialDelay(Duration initialDelay) {
       return new BackoffPolicyBackoffFactorBuilder(initialDelay);
