@@ -25,6 +25,7 @@ import com.xgen.mongot.index.lucene.EmptySearchBatchProducer;
 import com.xgen.mongot.index.mongodb.MaterializedViewWriter;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
@@ -218,7 +219,8 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
 
   static class NoOpIndexReader implements VectorIndexReader {
     @Override
-    public BsonArray query(MaterializedVectorSearchQuery materializedQuery)
+    public BsonArray query(
+        MaterializedVectorSearchQuery materializedQuery, QueryExecutionContext context)
         throws ReaderClosedException, IOException, InvalidQueryException {
       return new BsonArray();
     }
@@ -226,6 +228,7 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
     @Override
     public VectorProducerAndMetaResults query(
         MaterializedVectorSearchQuery materializedVectorSearchQuery,
+        QueryExecutionContext context,
         QueryCursorOptions queryCursorOptions,
         BatchSizeStrategy batchSizeStrategy,
         QueryOptimizationFlags queryOptimizationFlags)

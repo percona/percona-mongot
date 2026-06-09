@@ -110,12 +110,17 @@ class CursorFactory {
           batchProducer = r.searchBatchProducer;
           metaResults = r.metaResults;
         }
-        case CursorQuery.Vector(var query) -> {
+        case CursorQuery.Vector(var query, var context) -> {
           var r =
               index
                   .asVectorIndex()
                   .getReader()
-                  .query(query, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
+                  .query(
+                      query,
+                      context,
+                      queryCursorOptions,
+                      batchSizeStrategy,
+                      queryOptimizationFlags);
           batchProducer = r.vectorBatchProducer;
           metaResults = r.metaResults;
         }

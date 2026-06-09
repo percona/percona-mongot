@@ -49,6 +49,15 @@ public class LuceneIndexSearcher extends IndexSearcher {
         Optional.empty());
   }
 
+  /**
+   * Creates a new IndexSearcher based on the provided one that shares the IndexReader and all
+   * cached state from the given searcher but can have its own mutable fields (e.g. timeout). Use
+   * this to obtain a per-request searcher instance to avoid race across concurrent requests.
+   */
+  public static LuceneIndexSearcher create(LuceneIndexSearcher other) {
+    return new LuceneIndexSearcher(other);
+  }
+
   static LuceneIndexSearcher create(
       IndexReader newReader,
       QueryCacheProvider queryCacheProvider,

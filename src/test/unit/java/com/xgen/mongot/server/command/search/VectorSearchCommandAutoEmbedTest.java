@@ -151,7 +151,7 @@ public class VectorSearchCommandAutoEmbedTest {
     // ensure that reader is being called with QUERY_VECTOR
     ArgumentCaptor<MaterializedVectorSearchQuery> captor =
         ArgumentCaptor.forClass(MaterializedVectorSearchQuery.class);
-    Mockito.verify(mocks.reader, times(1)).query(captor.capture());
+    Mockito.verify(mocks.reader, times(1)).query(captor.capture(), any());
     MaterializedVectorSearchQuery ranQuery = captor.getValue();
     Assert.assertEquals(QUERY_VECTOR, ranQuery.queryVector().get());
 
@@ -225,7 +225,7 @@ public class VectorSearchCommandAutoEmbedTest {
     // ensure that reader is being called with QUERY_VECTOR
     ArgumentCaptor<MaterializedVectorSearchQuery> captor =
         ArgumentCaptor.forClass(MaterializedVectorSearchQuery.class);
-    Mockito.verify(mocks.reader, times(1)).query(captor.capture());
+    Mockito.verify(mocks.reader, times(1)).query(captor.capture(), any());
     MaterializedVectorSearchQuery ranQuery = captor.getValue();
     Assert.assertEquals(QUERY_VECTOR, ranQuery.queryVector().get());
 
@@ -1042,7 +1042,7 @@ public class VectorSearchCommandAutoEmbedTest {
       LuceneVectorIndexReader reader) throws Exception {
     ArgumentCaptor<MaterializedVectorSearchQuery> captor =
         ArgumentCaptor.forClass(MaterializedVectorSearchQuery.class);
-    Mockito.verify(reader).query(captor.capture());
+    Mockito.verify(reader).query(captor.capture(), any());
     return captor.getValue();
   }
 
@@ -1214,7 +1214,7 @@ public class VectorSearchCommandAutoEmbedTest {
       when(initializedIndex.getReader()).thenReturn(this.reader);
 
       this.bsonResults = new VectorSearchResultBatch(4).getBsonResults();
-      when(this.reader.query(any())).thenReturn(this.bsonResults);
+      when(this.reader.query(any(), any())).thenReturn(this.bsonResults);
 
       this.metricsUpdater =
           IndexMetricsUpdaterBuilder.builder()
@@ -1247,7 +1247,7 @@ public class VectorSearchCommandAutoEmbedTest {
     var queryCountDown = new CountDownLatch(1);
     var testCountDown = new CountDownLatch(1);
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenAnswer(
             invocation -> {
               // Signal the test thread proceed.
@@ -1311,7 +1311,7 @@ public class VectorSearchCommandAutoEmbedTest {
     var queryCountDown = new CountDownLatch(1);
     var testCountDown = new CountDownLatch(1);
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenAnswer(
             invocation -> {
               // Signal the test thread proceed.

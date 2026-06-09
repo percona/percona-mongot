@@ -89,6 +89,9 @@ public class LuceneVectorSearchManager implements LuceneSearchManager<QueryInfo>
       throws IOException {
     TopDocs topCandidates = indexSearcher.search(this.luceneQuery, collectorManager);
 
+    // Surface a timeout to the user if the deadline is exceeded
+    DeadlineQueryTimeout.throwIfExceeded(Optional.ofNullable(indexSearcher.getTimeout()));
+
     if (this.rescorer.isEmpty()) {
       return topCandidates;
     }

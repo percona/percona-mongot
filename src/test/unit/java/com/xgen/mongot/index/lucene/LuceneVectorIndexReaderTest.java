@@ -38,6 +38,7 @@ import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.lucene.writer.SingleLuceneIndexWriter;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.util.AtomicDirectoryRemover;
@@ -362,7 +363,7 @@ public class LuceneVectorIndexReaderTest {
       ConcurrencyTestUtils.assertCanBeInvokedConcurrently(
           this.queryFactory,
           factory -> factory.createQuery(any(), any()),
-          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY));
+          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty()));
     }
 
     @Test
@@ -373,7 +374,7 @@ public class LuceneVectorIndexReaderTest {
           f -> f.createQuery(any(), any()),
           () -> {
             try {
-              this.reader.query(q);
+              this.reader.query(q, QueryExecutionContext.empty());
             } catch (Exception e) {
               // ignored - don't cause assertCanBeInvokedConcurrently to fail
             }
@@ -397,7 +398,9 @@ public class LuceneVectorIndexReaderTest {
       var reader = getInternalReader();
       // one reference for management
       Assert.assertEquals(1, reader.getRefCount());
-      Assert.assertThrows(InvalidQueryException.class, () -> this.reader.query(getInvalidQuery()));
+      Assert.assertThrows(
+          InvalidQueryException.class,
+          () -> this.reader.query(getInvalidQuery(), QueryExecutionContext.empty()));
       // the post-query ref count the same
       Assert.assertEquals(1, reader.getRefCount());
     }
@@ -409,7 +412,7 @@ public class LuceneVectorIndexReaderTest {
       ConcurrencyTestUtils.assertCannotBeInvokedConcurrently(
           this.queryFactory,
           factory -> factory.createQuery(any(), any()),
-          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY),
+          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty()),
           this.reader::close);
     }
 
@@ -431,7 +434,7 @@ public class LuceneVectorIndexReaderTest {
       Assert.assertEquals(0, binaryQuantizedMetric.count());
       Assert.assertEquals(0, limitMetric.count());
 
-      this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY);
+      this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty());
 
       Assert.assertEquals(
           IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH.tagValue,
@@ -454,7 +457,7 @@ public class LuceneVectorIndexReaderTest {
       Assert.assertEquals(0, scalarQuantizedMetric.count());
       Assert.assertEquals(0, binaryQuantizedMetric.count());
 
-      this.reader.query(SCALAR_QUANTIZED_MATERIALIZED_QUERY);
+      this.reader.query(SCALAR_QUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty());
       Assert.assertEquals(1, unquantizedMetric.count());
       Assert.assertEquals(10, unquantizedMetric.mean(), 0.01);
 
@@ -468,7 +471,7 @@ public class LuceneVectorIndexReaderTest {
     }
 
     private BsonArray query() throws IOException, InvalidQueryException, ReaderClosedException {
-      return this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY);
+      return this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty());
     }
 
     private IndexReader getInternalReader() throws IOException {

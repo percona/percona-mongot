@@ -4,6 +4,7 @@ import com.xgen.mongot.cursor.batch.BatchSizeStrategy;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import java.io.IOException;
 import org.bson.BsonArray;
@@ -28,7 +29,7 @@ public interface VectorIndexReader extends IndexReader {
   }
 
   /** Returns a bson array of {@link VectorSearchResult} (single-batch results with no cursor). */
-  BsonArray query(MaterializedVectorSearchQuery materializedQuery)
+  BsonArray query(MaterializedVectorSearchQuery materializedQuery, QueryExecutionContext context)
       throws ReaderClosedException, IOException, InvalidQueryException;
 
   /**
@@ -37,6 +38,7 @@ public interface VectorIndexReader extends IndexReader {
    */
   VectorProducerAndMetaResults query(
       MaterializedVectorSearchQuery query,
+      QueryExecutionContext context,
       QueryCursorOptions queryCursorOptions,
       BatchSizeStrategy batchSizeStrategy,
       QueryOptimizationFlags queryOptimizationFlags)

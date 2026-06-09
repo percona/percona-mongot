@@ -13,8 +13,10 @@ import static org.mockito.Mockito.verify;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.MeteredVectorIndexReader;
 import com.xgen.mongot.index.ReaderClosedException;
+import com.xgen.mongot.index.query.DeadlineExceededException;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.Vector;
@@ -409,6 +411,8 @@ public class MultiLuceneVectorIndexReaderTest {
       new MaterializedVectorSearchQuery(
           TEST_QUERY_DEFINITION, TEST_QUERY_DEFINITION.criteria().queryVector().get());
 
+  private static final QueryExecutionContext EMPTY_CONTEXT = QueryExecutionContext.empty();
+
   /**
    * Tests that ReaderClosedException thrown by a partition reader is correctly propagated through
    * the concurrent query path without being wrapped or modified.
@@ -420,9 +424,9 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
     // First reader throws ReaderClosedException
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
     // Second reader would succeed
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     NamedExecutorService executor =
         spy(
@@ -437,7 +441,8 @@ public class MultiLuceneVectorIndexReaderTest {
 
       ReaderClosedException thrown =
           Assert.assertThrows(
-              ReaderClosedException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+              ReaderClosedException.class,
+              () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
       Assert.assertSame(originalException, thrown);
     } finally {
@@ -455,8 +460,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     NamedExecutorService executor =
         spy(
@@ -471,7 +476,7 @@ public class MultiLuceneVectorIndexReaderTest {
 
       IOException thrown =
           Assert.assertThrows(
-              IOException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+              IOException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
       Assert.assertSame(originalException, thrown);
     } finally {
@@ -489,8 +494,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     NamedExecutorService executor =
         spy(
@@ -505,7 +510,8 @@ public class MultiLuceneVectorIndexReaderTest {
 
       InvalidQueryException thrown =
           Assert.assertThrows(
-              InvalidQueryException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+              InvalidQueryException.class,
+              () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
       Assert.assertSame(originalException, thrown);
     } finally {
@@ -522,8 +528,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenReturn(Collections.emptyList());
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     // Create a properly configured metrics updater mock
     IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
@@ -543,11 +549,11 @@ public class MultiLuceneVectorIndexReaderTest {
               List.of(mockReader1, mockReader2), metricsUpdater, Optional.of(executor));
 
       // Should not throw any exception
-      multiReader.query(TEST_MATERIALIZED_QUERY);
+      multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT);
 
       // Verify both readers were queried
-      verify(mockReader1).queryResults(any());
-      verify(mockReader2).queryResults(any());
+      verify(mockReader1).queryResults(any(), any());
+      verify(mockReader2).queryResults(any(), any());
     } finally {
       executor.shutdown();
     }
@@ -565,8 +571,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     // Create a properly configured metrics updater mock
     IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
@@ -587,11 +593,171 @@ public class MultiLuceneVectorIndexReaderTest {
 
       RuntimeException thrown =
           Assert.assertThrows(
-              RuntimeException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+              RuntimeException.class,
+              () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
       Assert.assertSame(originalException, thrown.getCause());
     } finally {
       executor.shutdown();
     }
+  }
+
+  /**
+   * Tests that when the deadline has already passed, the sequential query path throws
+   * {@link DeadlineExceededException} before querying any partition reader, rather than silently
+   * returning a partial result.
+   */
+  @Test
+  public void testExpiredDeadlineThrowsInSequentialQuery() throws Exception {
+    LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
+    LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
+
+    IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
+        mock(IndexMetricsUpdater.QueryingMetricsUpdater.class);
+
+    MultiLuceneVectorIndexReader multiReader =
+        new MultiLuceneVectorIndexReader(
+            List.of(mockReader1, mockReader2), metricsUpdater, Optional.empty());
+
+    QueryExecutionContext expiredContext =
+        QueryExecutionContext.withDeadline(Optional.of(System.currentTimeMillis() - 1000));
+
+    Assert.assertThrows(
+        DeadlineExceededException.class,
+        () -> multiReader.query(TEST_MATERIALIZED_QUERY, expiredContext));
+
+    Mockito.verify(mockReader1, Mockito.never()).queryResults(any(), any());
+    Mockito.verify(mockReader2, Mockito.never()).queryResults(any(), any());
+  }
+
+  /**
+   * Tests that when the deadline has already passed, the concurrent query path throws
+   * {@link DeadlineExceededException} before submitting any partition work.
+   */
+  @Test
+  public void testExpiredDeadlineThrowsBeforeSubmittingConcurrentQuery() throws Exception {
+    LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
+    LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
+
+    NamedExecutorService executor =
+        spy(
+            Executors.fixedSizeThreadScheduledExecutor(
+                "testConcurrentSearchExecutor", 2, new SimpleMeterRegistry()));
+    try {
+      MultiLuceneVectorIndexReader multiReader =
+          new MultiLuceneVectorIndexReader(
+              List.of(mockReader1, mockReader2),
+              mock(IndexMetricsUpdater.QueryingMetricsUpdater.class),
+              Optional.of(executor));
+
+      QueryExecutionContext expiredContext =
+          QueryExecutionContext.withDeadline(Optional.of(System.currentTimeMillis() - 1000));
+
+      Assert.assertThrows(
+          DeadlineExceededException.class,
+          () -> multiReader.query(TEST_MATERIALIZED_QUERY, expiredContext));
+
+      Mockito.verify(mockReader1, Mockito.never()).queryResults(any(), any());
+      Mockito.verify(mockReader2, Mockito.never()).queryResults(any(), any());
+    } finally {
+      executor.shutdown();
+    }
+  }
+
+  /**
+   * Tests that a {@link DeadlineExceededException} thrown by a partition reader is propagated
+   * through the concurrent query path unchanged (not wrapped in a RuntimeException), so its
+   * user-facing message survives.
+   */
+  @Test
+  public void testConcurrentQueryPropagatesDeadlineExceededException() throws Exception {
+    DeadlineExceededException originalException =
+        new DeadlineExceededException();
+    LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
+    LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
+
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
+
+    NamedExecutorService executor =
+        spy(
+            Executors.fixedSizeThreadScheduledExecutor(
+                "testConcurrentSearchExecutor", 2, new SimpleMeterRegistry()));
+    try {
+      MultiLuceneVectorIndexReader multiReader =
+          new MultiLuceneVectorIndexReader(
+              List.of(mockReader1, mockReader2),
+              mock(IndexMetricsUpdater.QueryingMetricsUpdater.class),
+              Optional.of(executor));
+
+      DeadlineExceededException thrown =
+          Assert.assertThrows(
+              DeadlineExceededException.class,
+              () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
+
+      Assert.assertSame(originalException, thrown);
+    } finally {
+      executor.shutdown();
+    }
+  }
+
+  /**
+   * Tests that when the deadline is far in the future, the sequential query path queries all
+   * partition readers normally.
+   */
+  @Test
+  public void testFutureDeadlineQueriesAllPartitionsInSequentialQuery() throws Exception {
+    LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
+    LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
+
+    Mockito.when(mockReader1.queryResults(any(), any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
+
+    IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
+        mock(IndexMetricsUpdater.QueryingMetricsUpdater.class);
+    io.micrometer.core.instrument.DistributionSummary mockSummary =
+        mock(io.micrometer.core.instrument.DistributionSummary.class);
+    Mockito.when(metricsUpdater.getBatchDocumentCount()).thenReturn(mockSummary);
+    Mockito.when(metricsUpdater.getBatchDataSize()).thenReturn(mockSummary);
+
+    MultiLuceneVectorIndexReader multiReader =
+        new MultiLuceneVectorIndexReader(
+            List.of(mockReader1, mockReader2), metricsUpdater, Optional.empty());
+
+    QueryExecutionContext futureContext =
+        QueryExecutionContext.withDeadline(Optional.of(System.currentTimeMillis() + 60_000));
+
+    multiReader.query(TEST_MATERIALIZED_QUERY, futureContext);
+
+    Mockito.verify(mockReader1).queryResults(any(), any());
+    Mockito.verify(mockReader2).queryResults(any(), any());
+  }
+
+  /**
+   * Tests that a query without a deadline queries all partitions (no early exit).
+   */
+  @Test
+  public void testNoDeadlineQueriesAllPartitionsInSequentialQuery() throws Exception {
+    LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
+    LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
+
+    Mockito.when(mockReader1.queryResults(any(), any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
+
+    IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
+        mock(IndexMetricsUpdater.QueryingMetricsUpdater.class);
+    io.micrometer.core.instrument.DistributionSummary mockSummary =
+        mock(io.micrometer.core.instrument.DistributionSummary.class);
+    Mockito.when(metricsUpdater.getBatchDocumentCount()).thenReturn(mockSummary);
+    Mockito.when(metricsUpdater.getBatchDataSize()).thenReturn(mockSummary);
+
+    MultiLuceneVectorIndexReader multiReader =
+        new MultiLuceneVectorIndexReader(
+            List.of(mockReader1, mockReader2), metricsUpdater, Optional.empty());
+
+    multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT);
+
+    Mockito.verify(mockReader1).queryResults(any(), any());
+    Mockito.verify(mockReader2).queryResults(any(), any());
   }
 
   // ============================================================================
@@ -608,8 +774,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     // Pass Optional.empty() for executor to get sequential processing
     MultiLuceneVectorIndexReader multiReader =
@@ -620,7 +786,8 @@ public class MultiLuceneVectorIndexReaderTest {
 
     ReaderClosedException thrown =
         Assert.assertThrows(
-            ReaderClosedException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+            ReaderClosedException.class,
+            () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
     Assert.assertSame(originalException, thrown);
   }
@@ -635,8 +802,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     MultiLuceneVectorIndexReader multiReader =
         new MultiLuceneVectorIndexReader(
@@ -645,7 +812,8 @@ public class MultiLuceneVectorIndexReaderTest {
             Optional.empty());
 
     IOException thrown =
-        Assert.assertThrows(IOException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+        Assert.assertThrows(
+            IOException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
     Assert.assertSame(originalException, thrown);
   }
@@ -660,8 +828,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     MultiLuceneVectorIndexReader multiReader =
         new MultiLuceneVectorIndexReader(
@@ -671,7 +839,8 @@ public class MultiLuceneVectorIndexReaderTest {
 
     InvalidQueryException thrown =
         Assert.assertThrows(
-            InvalidQueryException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+            InvalidQueryException.class,
+            () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
     Assert.assertSame(originalException, thrown);
   }
@@ -687,8 +856,8 @@ public class MultiLuceneVectorIndexReaderTest {
     LuceneVectorIndexReader mockReader1 = mock(LuceneVectorIndexReader.class);
     LuceneVectorIndexReader mockReader2 = mock(LuceneVectorIndexReader.class);
 
-    Mockito.when(mockReader1.queryResults(any())).thenThrow(originalException);
-    Mockito.when(mockReader2.queryResults(any())).thenReturn(Collections.emptyList());
+    Mockito.when(mockReader1.queryResults(any(), any())).thenThrow(originalException);
+    Mockito.when(mockReader2.queryResults(any(), any())).thenReturn(Collections.emptyList());
 
     MultiLuceneVectorIndexReader multiReader =
         new MultiLuceneVectorIndexReader(
@@ -698,7 +867,8 @@ public class MultiLuceneVectorIndexReaderTest {
 
     RuntimeException thrown =
         Assert.assertThrows(
-            RuntimeException.class, () -> multiReader.query(TEST_MATERIALIZED_QUERY));
+            RuntimeException.class,
+            () -> multiReader.query(TEST_MATERIALIZED_QUERY, EMPTY_CONTEXT));
 
     Assert.assertSame(originalException, thrown);
   }

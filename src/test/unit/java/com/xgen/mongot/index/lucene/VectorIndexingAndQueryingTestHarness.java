@@ -32,6 +32,7 @@ import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.status.IndexStatus;
@@ -312,7 +313,8 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
     this.index.setStatus(IndexStatus.steady());
     var vectorQuery = getQuery(queryVector, exact);
     return this.indexReader.query(
-        new MaterializedVectorSearchQuery(vectorQuery, vectorQuery.criteria().queryVector().get()));
+        new MaterializedVectorSearchQuery(vectorQuery, vectorQuery.criteria().queryVector().get()),
+        QueryExecutionContext.empty());
   }
 
   private VectorSearchQuery getQuery(Vector queryVector, boolean exact) {

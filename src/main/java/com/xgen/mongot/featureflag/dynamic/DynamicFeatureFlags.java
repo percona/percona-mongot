@@ -44,7 +44,13 @@ public enum DynamicFeatureFlags {
    * select Lucene 10 perf regressions on dense embedded child queries).
    */
   DISABLE_BULK_SCORER_QUERY_FOR_EMBEDDED_DOCUMENT_CHILD(
-      "mongot.featureFlag.disableBulkScorerQueryForEmbeddedDocumentChild", true);
+      "mongot.featureFlag.disableBulkScorerQueryForEmbeddedDocumentChild", true),
+  /**
+   * When enabled, {@code $vectorSearch} enforces the wall-clock deadline ({@code
+   * deadlineTimestampMs}) supplied by mongod, failing the query with a timeout error once it
+   * elapses. When disabled, the deadline is ignored and queries run to completion.
+   */
+  VECTOR_SEARCH_QUERY_TIMEOUT("mongot.featureFlag.enableVectorSearchQueryTimeout", false);
 
   private final String name;
   private final boolean fallback;

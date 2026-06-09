@@ -835,7 +835,7 @@ public class VectorSearchCommandIndexSizeMetricsTest {
       when(this.initializedIndex.getReader()).thenReturn(this.reader);
 
       this.bsonResults = new VectorSearchResultBatch(4).getBsonResults();
-      when(this.reader.query(any())).thenReturn(this.bsonResults);
+      when(this.reader.query(any(), any())).thenReturn(this.bsonResults);
 
       this.metricsUpdater =
           IndexMetricsUpdaterBuilder.builder()

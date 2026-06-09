@@ -4,11 +4,13 @@ java_library(
     name = "query",
     srcs = [
         "CollectorQuery.java",
+        "DeadlineExceededException.java",
         "InvalidQueryException.java",
         "MaterializedVectorSearchQuery.java",
         "OperatorQuery.java",
         "Pagination.java",
         "Query.java",
+        "QueryExecutionContext.java",
         "QueryOptimizationFlags.java",
         "QueryTimeMappingChecks.java",
         "ReturnScope.java",
