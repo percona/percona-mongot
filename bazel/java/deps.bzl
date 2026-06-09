@@ -167,11 +167,12 @@ MISC_ARTIFACTS = [
 
 PINNED_TRANSITIVE_ARTIFACTS = [
     "com.google.protobuf:protobuf-java:4.29.0",
-    # netty-codec-http/-http2/-handler at 4.1.133.Final for CVE-2026-33870/42584/42587/33871
-    # (netty core version lives in systems_deps.bzl _NETTY_VERSION — keep in sync)
-    "io.netty:netty-codec-http:4.1.133.Final",
-    "io.netty:netty-codec-http2:4.1.133.Final",
-    "io.netty:netty-handler:4.1.133.Final",
+    # netty-codec-http/-http2/-handler at 4.1.135.Final for Trivy HIGH CVEs: codec-http
+    # CVE-2026-33870/42584/42587, codec-http2 CVE-2026-33871/42587, handler CVE-2026-44249/45416.
+    # Core version lives in systems_deps.bzl _NETTY_VERSION — keep in sync.
+    "io.netty:netty-codec-http:4.1.135.Final",
+    "io.netty:netty-codec-http2:4.1.135.Final",
+    "io.netty:netty-handler:4.1.135.Final",
     # GRPC requires this but doesn't bundle it for some reason
     "org.checkerframework:checker-qual:3.48.4",
     # Force gRPC version to 1.75.0 to address CVE-2025-55163

@@ -46,8 +46,9 @@ _GCP = [
     "com.google.cloud:google-cloud-nio:0.128.7",
 ]
 
-# 4.1.133.Final addresses CVE-2026-42583 (netty-codec); codec-http/-http2/-handler pinned in deps.bzl
-_NETTY_VERSION = "4.1.133.Final"
+# 4.1.135.Final addresses CVE-2026-42583 (netty-codec); the netty-codec-http/-http2/-handler
+# CVEs are pinned in deps.bzl — keep both in sync.
+_NETTY_VERSION = "4.1.135.Final"
 
 # Netty core artifacts
 _NETTY_ARTIFACTS = (
