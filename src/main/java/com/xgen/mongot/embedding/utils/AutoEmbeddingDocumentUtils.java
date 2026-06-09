@@ -282,14 +282,9 @@ public class AutoEmbeddingDocumentUtils {
 
       // check if mat view has extra fields which are no longer in the index definition.
       // an example of this is when a filter field is removed.
-
-      // TODO(CLOUDP-353553): dynamic-mode search auto-embed returns embed-only from fieldMap()
-      // (open-ended passthrough set), so every passthrough MV field will look stale here and
-      // spuriously force reindex once search-backed wires through.
-      // Need to use mapping.isPassthrough(path) or a coversAllNonEmbed flag
-      // instead of fieldMap().containsKey when that lands.
       for (FieldPath fieldPath : matViewValues.keySet()) {
         if (!MV_METADATA_FIELDS.contains(fieldPath.toString())
+            && !matViewMappings.isPassthrough(fieldPath)
             && !matViewMappings.fieldMap().containsKey(fieldPath)) {
           needsReIndexing = true;
           break;

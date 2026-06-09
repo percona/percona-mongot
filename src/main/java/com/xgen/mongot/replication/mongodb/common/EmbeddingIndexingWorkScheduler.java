@@ -12,6 +12,7 @@ import com.google.common.collect.SetMultimap;
 import com.google.common.flogger.FluentLogger;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
+import com.xgen.mongot.embedding.AutoEmbedFieldMapping.AutoEmbedField;
 import com.xgen.mongot.embedding.AutoEmbeddingMemoryBudget;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.VectorOrError;
@@ -31,9 +32,6 @@ import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.FieldExceededLimitsException;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.VectorFieldAutoEmbeddingSpecification;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
-import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
-import com.xgen.mongot.index.definition.VectorIndexFieldMapping;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory.IndexingStrategy;
@@ -132,8 +130,8 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
    * Creates and starts a new EmbeddingIndexingWorkScheduler.
    *
    * @return an EmbeddingIndexingWorkScheduler.
-   * @deprecated Please use createForMaterializedViewIndex instead. This will be removed after
-   *     type:text index is deprecated.
+   * @deprecated use createForMaterializedViewIndex instead.
+   *     This will be removed after type:text index is deprecated.
    */
   public static EmbeddingIndexingWorkScheduler create(
       NamedExecutorService indexingExecutor,
@@ -249,11 +247,10 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
 
     ImmutableMap<FieldPath, EmbeddingModelConfig> modelConfigPerPath =
         modelConfigPerPathBuilder.build();
-    VectorIndexDefinition vectorIndexDefinition = indexDefinition.asVectorDefinition();
     AutoEmbedFieldMapping autoEmbedMapping =
-        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorIndexDefinition);
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDefinition);
     ImmutableMap<FieldPath, EmbedConfigurationForBatch> embedBatchKeyPerPath =
-        computeEmbedBatchKeyPerPath(vectorIndexDefinition, modelConfigPerPath);
+        computeEmbedBatchKeyPerPath(autoEmbedMapping, modelConfigPerPath);
 
     // Check global memory budget before proceeding. If exceeded, fast-fail with a transient
     // exception so the batch can be retried when memory becomes available.
@@ -283,7 +280,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
         batchFuture =
             processSubBatchesSequentially(
                 batch,
-                vectorIndexDefinition,
+                indexDefinition,
                 autoEmbedMapping,
                 embedBatchKeyPerPath,
                 matViewCollectionMetadataOpt,
@@ -293,7 +290,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
         List<CompletableFuture<List<DocumentEvent>>> indexingBundles =
             embed(
                 batch.events,
-                vectorIndexDefinition,
+                indexDefinition,
                 autoEmbedMapping,
                 batch.priority,
                 embedBatchKeyPerPath,
@@ -339,7 +336,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
    */
   private CompletableFuture<Void> processSubBatchesSequentially(
       IndexingSchedulerBatch batch,
-      VectorIndexDefinition vectorIndexDefinition,
+      IndexDefinition indexDefinition,
       AutoEmbedFieldMapping autoEmbedMapping,
       ImmutableMap<FieldPath, EmbedConfigurationForBatch> embedBatchKeyPerPath,
       Optional<MaterializedViewSchemaMetadata> matViewSchemaMetadata,
@@ -382,7 +379,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
                         bundles.size(),
                         events.size(),
                         textsPerModel.size());
-                    return getEmbeddings(textsPerModel, batch.priority, vectorIndexDefinition)
+                    return getEmbeddings(textsPerModel, batch.priority, indexDefinition)
                         .thenApplyAsync(
                             embeddingsPerModel ->
                                 applyEmbeddingsToEvents(
@@ -510,7 +507,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
    */
   private List<CompletableFuture<List<DocumentEvent>>> embed(
       List<DocumentEvent> allEventsInBatch,
-      VectorIndexDefinition vectorIndexDefinition,
+      IndexDefinition indexDefinition,
       AutoEmbedFieldMapping autoEmbedMapping,
       SchedulerQueue.Priority priority,
       ImmutableMap<FieldPath, EmbedConfigurationForBatch> embedBatchKeyPerPath,
@@ -528,7 +525,7 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
       // memory leak.
       var events = new ArrayList<>(bundle.events());
       CompletableFuture<Map<EmbedConfigurationForBatch, Map<String, Vector>>> embeddingsFuture =
-          getEmbeddings(bundle.textsPerBatchKey(), priority, vectorIndexDefinition);
+          getEmbeddings(bundle.textsPerBatchKey(), priority, indexDefinition);
       resultFutures.add(
           // Change executor to use indexing executor here for better chaining with indexer.
           embeddingsFuture.thenApplyAsync(
@@ -826,37 +823,34 @@ final class EmbeddingIndexingWorkScheduler extends IndexingWorkScheduler {
   /**
    * Precomputes {@link EmbedConfigurationForBatch} for each auto-embed path so callers (e.g. {@link
    * #getTextValueBundles}, {@link #applyEmbeddingsToEvents}) need not re-derive keys from {@link
-   * EmbeddingModelConfig} and field mapping on every use.
+   * EmbeddingModelConfig} and field mapping on every use. Dims and quantization come from the
+   * per-field {@link VectorFieldAutoEmbeddingSpecification} stored in the index-neutral {@link
+   * AutoEmbedFieldMapping}.
    */
   static ImmutableMap<FieldPath, EmbedConfigurationForBatch> computeEmbedBatchKeyPerPath(
-      VectorIndexDefinition vectorIndexDefinition,
+      AutoEmbedFieldMapping autoEmbedMapping,
       ImmutableMap<FieldPath, EmbeddingModelConfig> modelConfigPerPath) {
-    VectorIndexFieldMapping mappings = vectorIndexDefinition.getMappings();
     ImmutableMap.Builder<FieldPath, EmbedConfigurationForBatch> builder = ImmutableMap.builder();
     for (var entry : modelConfigPerPath.entrySet()) {
+      FieldPath fieldPath = entry.getKey();
+      EmbeddingModelConfig config = entry.getValue();
+      VectorFieldAutoEmbeddingSpecification spec =
+          autoEmbeddingFieldSpecForPath(autoEmbedMapping, fieldPath);
       builder.put(
-          entry.getKey(), batchConfigurationForPath(mappings, entry.getKey(), entry.getValue()));
+          fieldPath,
+          new EmbedConfigurationForBatch(
+              config, spec.numDimensions(), spec.autoEmbedQuantization()));
     }
     return builder.build();
   }
 
-  private static EmbedConfigurationForBatch batchConfigurationForPath(
-      VectorIndexFieldMapping mappings, FieldPath path, EmbeddingModelConfig modelConfig) {
-    VectorFieldAutoEmbeddingSpecification spec = autoEmbeddingFieldSpecForPath(mappings, path);
-    return new EmbedConfigurationForBatch(
-        modelConfig, spec.numDimensions(), spec.autoEmbedQuantization());
-  }
-
   private static VectorFieldAutoEmbeddingSpecification autoEmbeddingFieldSpecForPath(
-      VectorIndexFieldMapping fieldMapping, FieldPath path) {
-    return fieldMapping
-        .getFieldDefinition(path)
-        .filter(VectorIndexFieldDefinition::isAutoEmbedField)
-        .map(def -> (VectorFieldAutoEmbeddingSpecification) def.asVectorField().specification())
-        .orElseThrow(
-            () ->
-                new IllegalStateException(
-                    "missing vector field definition for auto-embed path: " + path));
+      AutoEmbedFieldMapping autoEmbedMapping, FieldPath path) {
+    AutoEmbedField.EmbedField embedField = Optional
+        .ofNullable(autoEmbedMapping.embedFields().get(path))
+        .orElseThrow(() -> new IllegalStateException("missing auto-embed field for path: " + path));
+
+    return embedField.specification();
   }
 
   record EmbedConfigurationForBatch(

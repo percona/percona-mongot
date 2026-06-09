@@ -98,6 +98,18 @@ public class AutoEmbedFieldMappingCreator {
   }
 
   /**
+   * Creates an {@code AutoEmbedFieldMapping} describing the materialized-view side of an auto-embed
+   * index, dispatching to the index-type-specific factory.
+   */
+  public static AutoEmbedFieldMapping createMatViewAutoEmbedMapping(
+      IndexDefinition indexDefinition, MaterializedViewSchemaMetadata schemaMetadata) {
+    return switch (indexDefinition) {
+      case VectorIndexDefinition v -> createMatViewAutoEmbedMapping(v, schemaMetadata);
+      case SearchIndexDefinition s -> createMatViewAutoEmbedMapping(s, schemaMetadata);
+    };
+  }
+
+  /**
    * Creates a new AutoEmbedFieldMapping from a VectorIndexDefinition by converting AUTO_EMBED
    * fields and adding hash fields for a materialized view.
    *
@@ -145,6 +157,41 @@ public class AutoEmbedFieldMappingCreator {
       }
     }
     return new VectorAutoEmbedFieldMapping(builder.build());
+  }
+
+  /**
+   * Creates an {@code AutoEmbedFieldMapping} describing the materialized-view side of a
+   * search-backed auto-embed index. Auto-embed source paths are rewritten to their MV namespace via
+   * {@code schemaMetadata.autoEmbeddingFieldsMapping()}; a passthrough hash path is added per embed
+   * field for staleness detection. Declared non-auto-embed top-level fields stay at their original
+   * path. The source mapping's {@code dynamic} flag is preserved so dynamic-mode MVs treat every
+   * non-embed path as passthrough.
+   */
+  public static AutoEmbedFieldMapping createMatViewAutoEmbedMapping(
+      SearchIndexDefinition searchDef, MaterializedViewSchemaMetadata schemaMetadata) {
+    ImmutableMap.Builder<FieldPath, AutoEmbedField.EmbedField> embedBuilder =
+        ImmutableMap.builder();
+    ImmutableSet.Builder<FieldPath> passthroughBuilder = ImmutableSet.builder();
+    for (Map.Entry<String, FieldDefinition> entry : searchDef.getMappings().fields().entrySet()) {
+      Optional<SearchAutoEmbedFieldDefinition> autoEmbed =
+          entry.getValue().searchAutoEmbedFieldDefinition();
+      if (autoEmbed.isEmpty()) {
+        FieldPath fieldPath = FieldPath.parse(entry.getKey());
+        passthroughBuilder.add(fieldPath);
+      } else {
+        SearchAutoEmbedFieldDefinition definition = autoEmbed.get();
+        FieldPath sourcePath = definition.sourceField();
+        FieldPath matViewPath =
+            getMatViewFieldPath(sourcePath, schemaMetadata.autoEmbeddingFieldsMapping());
+        embedBuilder.put(
+            matViewPath, new AutoEmbedField.EmbedField(matViewPath, definition.specification()));
+        FieldPath hashPath =
+            getHashFieldPath(sourcePath, schemaMetadata.materializedViewSchemaVersion());
+        passthroughBuilder.add(hashPath);
+      }
+    }
+    return new SearchIndexAutoEmbedFieldMapping(
+        searchDef.getMappings().dynamic(), embedBuilder.build(), passthroughBuilder.build());
   }
 
   /**

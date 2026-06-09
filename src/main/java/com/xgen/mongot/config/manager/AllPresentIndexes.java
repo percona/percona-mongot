@@ -7,7 +7,6 @@ import com.xgen.mongot.config.manager.AllIndexInformations.IndexInformationAndGe
 import com.xgen.mongot.config.manager.metrics.IndexConfigState;
 import com.xgen.mongot.config.manager.metrics.IndexGenerationStateMetrics;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
-import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexDetailedStatus;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexGenerationMetrics;
@@ -15,6 +14,7 @@ import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.SearchIndex;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingCompositeIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
@@ -22,6 +22,7 @@ import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.SynonymStatus;
 import com.xgen.mongot.index.synonym.SynonymRegistry;
 import com.xgen.mongot.index.version.GenerationId;
+import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.CollectionUtils;
 import java.util.Collections;
 import java.util.List;
@@ -169,9 +170,19 @@ class AllPresentIndexes {
     private Optional<Map<String, SynonymStatus>> getSynonymStatus() {
       return descendingOrderOfPrecedence()
           .map(IndexGeneration::getIndex)
-          .filter(index -> index instanceof SearchIndex)
-          .map(Index::asSearchIndex)
-          .map(SearchIndex::getSynonymRegistry)
+          .map(
+              index -> {
+                if (index instanceof SearchIndex si) {
+                  return Optional.of(si.getSynonymRegistry());
+                }
+                if (index instanceof AutoEmbeddingCompositeIndex composite
+                    && composite.derivedIndex instanceof SearchIndex si) {
+                  return Optional.of(si.getSynonymRegistry());
+                }
+                return Optional.<SynonymRegistry>empty();
+              })
+          .filter(Optional::isPresent)
+          .map(Optional::get)
           .findFirst()
           .map(SynonymRegistry::getStatuses);
     }
@@ -255,14 +266,20 @@ class AllPresentIndexes {
         case AUTO_EMBEDDING -> {
           IndexDefinition def = indexGeneration.getDefinition();
           yield switch (def) {
-            // TODO(CLOUDP-353553): source synonym statuses from the composite's derived
-            // search index instead of an empty map.
-            case SearchIndexDefinition searchDef -> new IndexDetailedStatus.Search(
-                Map.of(),
-                searchDef,
-                this.indexStatuses.get(indexGeneration),
-                indexGeneration.getGenerationId(),
-                indexMetrics);
+            case SearchIndexDefinition searchDef -> {
+              AutoEmbeddingCompositeIndex composite =
+                  Check.instanceOf(indexGeneration.getIndex(), AutoEmbeddingCompositeIndex.class);
+              yield new IndexDetailedStatus.Search(
+                  composite
+                      .derivedIndex
+                      .asSearchIndex()
+                      .getSynonymRegistry()
+                      .getDetailedStatuses(),
+                  searchDef,
+                  this.indexStatuses.get(indexGeneration),
+                  indexGeneration.getGenerationId(),
+                  indexMetrics);
+            }
             case VectorIndexDefinition vectorDef -> new IndexDetailedStatus.Vector(
                 vectorDef,
                 this.indexStatuses.get(indexGeneration),

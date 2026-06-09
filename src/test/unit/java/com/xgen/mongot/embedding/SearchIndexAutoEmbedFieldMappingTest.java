@@ -173,6 +173,22 @@ public class SearchIndexAutoEmbedFieldMappingTest {
     assertThat(mapping.subDocumentExists(FieldPath.parse("missing"))).isFalse();
   }
 
+  @Test
+  public void static_nestedEmbedSourceField_ancestorIsReachable() {
+    FieldPath nestedEmbed = FieldPath.parse("body.text");
+    AutoEmbedField.EmbedField nestedEmbedField = new AutoEmbedField.EmbedField(nestedEmbed, SPEC);
+    var mapping =
+        new SearchIndexAutoEmbedFieldMapping(
+            DYNAMIC_DISABLED, ImmutableMap.of(nestedEmbed, nestedEmbedField), ImmutableSet.of());
+
+    // Ancestor of the embed source must be recognized so the traversal descends into the subdoc.
+    assertThat(mapping.subDocumentExists(FieldPath.parse("body"))).isTrue();
+    assertThat(mapping.childPathExists(FieldPath.parse("body"))).isTrue();
+    assertThat(mapping.childPathExists(nestedEmbed)).isTrue();
+    // The passthrough-descent predicate must not cover embed ancestors (no passthrough to copy).
+    assertThat(mapping.passthroughDescendPredicate().test(FieldPath.parse("body"))).isFalse();
+  }
+
   // ---- Shared ----
 
   @Test

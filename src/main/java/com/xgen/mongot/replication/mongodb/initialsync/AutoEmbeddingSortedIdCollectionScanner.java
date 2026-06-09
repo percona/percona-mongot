@@ -16,7 +16,7 @@ import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
 import com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.lucene.query.pushdown.ArrayComparator;
 import com.xgen.mongot.index.lucene.query.pushdown.MqlComparator;
 import com.xgen.mongot.logging.DefaultKeyValueLogger;
@@ -89,12 +89,11 @@ public class AutoEmbeddingSortedIdCollectionScanner extends BufferlessCollection
             matViewCollectionMetadataCatalog.getDatabaseName(context.getGenerationId()),
             this.matViewCollectionMetadata.collectionName());
 
-    VectorIndexDefinition vectorDef =
-        Check.instanceOf(context.getIndexDefinition(), VectorIndexDefinition.class);
-    this.autoEmbedMapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorDef);
+    IndexDefinition indexDef = context.getIndexDefinition();
+    this.autoEmbedMapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDef);
     this.matViewAutoEmbedMapping =
         AutoEmbedFieldMappingCreator.createMatViewAutoEmbedMapping(
-            vectorDef, this.matViewCollectionMetadata.schemaMetadata());
+            indexDef, this.matViewCollectionMetadata.schemaMetadata());
   }
 
   @Override

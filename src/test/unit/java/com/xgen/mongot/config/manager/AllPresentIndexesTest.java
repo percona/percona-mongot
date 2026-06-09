@@ -9,20 +9,33 @@ import com.xgen.mongot.config.manager.metrics.IndexConfigState;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.DocCounts;
 import com.xgen.mongot.index.Index;
+import com.xgen.mongot.index.IndexDetailedStatus;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.ReplicationOpTimeInfo;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingCompositeIndex;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
+import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.index.status.SynonymStatus;
+import com.xgen.mongot.index.synonym.SynonymDetailedStatus;
+import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.config.manager.ConfigStateMocks;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.EmbeddedDocumentsFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionGenerationBuilder;
+import com.xgen.testing.mongot.index.definition.SynonymMappingDefinitionBuilder;
+import com.xgen.testing.mongot.mock.index.MaterializedViewIndex;
+import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.util.Collections;
+import java.util.Set;
 import org.bson.BsonTimestamp;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
@@ -352,6 +365,122 @@ public class AllPresentIndexesTest {
 
     Assert.assertEquals(11, stats.numDocs());
     Assert.assertEquals(new BsonTimestamp(5L), stats.opTime());
+  }
+
+  @Test
+  public void testAutoEmbeddingSearchIndex_DetailedStatusCarriesSynonymsFromDerivedIndex() {
+    ObjectId indexId = new ObjectId();
+
+    // Raw user-facing search auto-embed definition: contains the auto-embed field, no synonyms.
+    SearchAutoEmbedFieldDefinition autoEmbed =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("field"));
+    SearchIndexDefinition rawDef =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(indexId)
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .dynamic(false)
+                    .field(
+                        "field_embed",
+                        FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbed).build())
+                    .build())
+            .build();
+    SearchIndexDefinitionGeneration rawGen =
+        com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionGeneration(rawDef);
+
+    // Derived search index definition: what mongot creates underneath, carries the synonyms.
+    SearchIndexDefinition derivedDef =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(indexId)
+            .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
+            .synonyms(
+                SynonymMappingDefinitionBuilder.builder()
+                    .name("mySynonyms")
+                    .analyzer("lucene.standard")
+                    .synonymSourceDefinition("synonymCollection")
+                    .buildAsList())
+            .build();
+    SearchIndexDefinitionGeneration derivedGen =
+        com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionGeneration(derivedDef);
+
+    // Build a composite whose derived SearchIndex exposes the derived synonyms.
+    InitializedMaterializedViewIndex mvIndex = MaterializedViewIndex.mockIndex(rawDef);
+    com.xgen.mongot.index.SearchIndex derivedSearchIndex = SearchIndex.mockIndex(derivedGen);
+    AutoEmbeddingCompositeIndex composite =
+        new AutoEmbeddingCompositeIndex(mvIndex, derivedSearchIndex);
+    AutoEmbeddingIndexGeneration autoEmbedGen =
+        new AutoEmbeddingIndexGeneration(composite, rawGen, derivedGen);
+    this.mocks.indexCatalog.addIndex(autoEmbedGen);
+
+    IndexDetailedStatus mainStatus = getIndexInfo(indexId).getMainIndex().orElseThrow();
+    Assert.assertTrue(
+        "expected Search detailed status, got " + mainStatus.getClass().getSimpleName(),
+        mainStatus instanceof IndexDetailedStatus.Search);
+    IndexDetailedStatus.Search searchStatus = (IndexDetailedStatus.Search) mainStatus;
+    Assert.assertEquals(
+        "synonym statuses should be sourced from the composite's derived search index",
+        Set.of("mySynonyms"),
+        searchStatus.synonymStatusMap().keySet());
+    SynonymDetailedStatus mySynonymStatus = searchStatus.synonymStatusMap().get("mySynonyms");
+    Assert.assertEquals(SynonymStatus.READY, mySynonymStatus.statusCode());
+  }
+
+  @Test
+  public void testAutoEmbeddingSearchIndex_IndexInformationCarriesSynonymsFromDerivedIndex() {
+    ObjectId indexId = new ObjectId();
+
+    SearchAutoEmbedFieldDefinition autoEmbed =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("field"));
+    SearchIndexDefinition rawDef =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(indexId)
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .dynamic(false)
+                    .field(
+                        "field_embed",
+                        FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbed).build())
+                    .build())
+            .build();
+    SearchIndexDefinitionGeneration rawGen =
+        com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionGeneration(rawDef);
+
+    SearchIndexDefinition derivedDef =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(indexId)
+            .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
+            .synonyms(
+                SynonymMappingDefinitionBuilder.builder()
+                    .name("mySynonyms")
+                    .analyzer("lucene.standard")
+                    .synonymSourceDefinition("synonymCollection")
+                    .buildAsList())
+            .build();
+    SearchIndexDefinitionGeneration derivedGen =
+        com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionGeneration(derivedDef);
+
+    InitializedMaterializedViewIndex mvIndex = MaterializedViewIndex.mockIndex(rawDef);
+    com.xgen.mongot.index.SearchIndex derivedSearchIndex = SearchIndex.mockIndex(derivedGen);
+    AutoEmbeddingCompositeIndex composite =
+        new AutoEmbeddingCompositeIndex(mvIndex, derivedSearchIndex);
+    AutoEmbeddingIndexGeneration autoEmbedGen =
+        new AutoEmbeddingIndexGeneration(composite, rawGen, derivedGen);
+    this.mocks.indexCatalog.addIndex(autoEmbedGen);
+
+    IndexInformation info = getIndexInfo(indexId);
+    Assert.assertTrue(
+        "expected Search index information, got " + info.getClass().getSimpleName(),
+        info instanceof IndexInformation.Search);
+    IndexInformation.Search searchInfo = (IndexInformation.Search) info;
+    Assert.assertEquals(
+        "synonym statuses (listSearchIndexes path) should be sourced from the derived search index",
+        Set.of("mySynonyms"),
+        searchInfo.getSynonymStatus().keySet());
+    Assert.assertEquals(SynonymStatus.READY, searchInfo.getSynonymStatus().get("mySynonyms"));
   }
 
   private IndexInformation getIndexInfo(ObjectId indexId) {

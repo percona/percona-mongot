@@ -470,4 +470,76 @@ public class AutoEmbedFieldMappingCreatorTest {
     // "_autoEmbed.sections" < "_otherPrefix.sections" lexicographically, so it is always picked.
     Assert.assertEquals(Optional.of(FieldPath.parse("_autoEmbed.sections")), result);
   }
+
+  @Test
+  public void createMatViewAutoEmbedMapping_search_static_rewritesEmbedAndAddsHashPassthrough() {
+    var schemaMetadata =
+        new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
+            1, Map.of(FieldPath.parse("content"), FieldPath.parse("_autoEmbed.content")));
+    var autoEmbedField =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "embedding",
+                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping =
+        AutoEmbedFieldMappingCreator.createMatViewAutoEmbedMapping(searchDef, schemaMetadata);
+
+    Assert.assertTrue(
+        "Search factory should return SearchIndexAutoEmbedFieldMapping",
+        mapping instanceof SearchIndexAutoEmbedFieldMapping);
+
+    FieldPath matViewEmbedPath = FieldPath.parse("_autoEmbed.content");
+    FieldPath hashPath = FieldPath.parse("_autoEmbed." + HASH_FIELD_SUFFIX + ".content");
+
+    Assert.assertTrue(
+        "Embed field should be keyed at the MV-rewritten path",
+        mapping.embedFields().containsKey(matViewEmbedPath));
+    Assert.assertFalse(
+        "Source path should not appear as an embed key on the MV side",
+        mapping.embedFields().containsKey(FieldPath.parse("content")));
+    Assert.assertTrue("Hash path should be a passthrough", mapping.isPassthrough(hashPath));
+    Assert.assertTrue(
+        "Declared non-auto-embed field should remain passthrough at its original path",
+        mapping.isPassthrough(FieldPath.parse("active")));
+  }
+
+  @Test
+  public void createMatViewAutoEmbedMapping_search_dynamicFlagPreserved() {
+    var schemaMetadata =
+        new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
+            1, Map.of(FieldPath.parse("content"), FieldPath.parse("_autoEmbed.content")));
+    var autoEmbedField =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field(
+                "embedding",
+                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping =
+        AutoEmbedFieldMappingCreator.createMatViewAutoEmbedMapping(searchDef, schemaMetadata);
+
+    SearchIndexAutoEmbedFieldMapping searchMapping = (SearchIndexAutoEmbedFieldMapping) mapping;
+    Assert.assertTrue(
+        "Dynamic flag must propagate to MV mapping", searchMapping.dynamic().isEnabled());
+    Assert.assertTrue(
+        "Hash path must be in the explicit passthrough set regardless of dynamic mode",
+        searchMapping
+            .explicitPassthroughPaths()
+            .contains(FieldPath.parse("_autoEmbed." + HASH_FIELD_SUFFIX + ".content")));
+  }
 }

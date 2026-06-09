@@ -32,11 +32,12 @@ public record SearchIndexAutoEmbedFieldMapping(
     DynamicDefinition dynamic,
     ImmutableMap<FieldPath, AutoEmbedField.EmbedField> embedFields,
     ImmutableSet<FieldPath> explicitPassthroughPaths,
-    ImmutableSet<FieldPath> explicitPassthroughAncestorPaths)
+    ImmutableSet<FieldPath> explicitPassthroughAncestorPaths,
+    ImmutableSet<FieldPath> embedAncestorPaths)
     implements AutoEmbedFieldMapping {
 
   /**
-   * Convenience constructor that precomputes the ancestor-path set used in static mode for descent
+   * Convenience constructor that precomputes ancestor-path sets used in static mode for descent
    * decisions in the materialized-view writer.
    */
   public SearchIndexAutoEmbedFieldMapping(
@@ -47,7 +48,8 @@ public record SearchIndexAutoEmbedFieldMapping(
         dynamic,
         embedFields,
         explicitPassthroughPaths,
-        computeAncestorPaths(explicitPassthroughPaths));
+        computeAncestorPaths(explicitPassthroughPaths),
+        computeAncestorPaths(embedFields.keySet()));
   }
 
   @Override
@@ -65,7 +67,8 @@ public record SearchIndexAutoEmbedFieldMapping(
     if (this.dynamic.isEnabled()) {
       return true;
     }
-    return this.explicitPassthroughAncestorPaths.contains(path);
+    return this.explicitPassthroughAncestorPaths.contains(path)
+        || this.embedAncestorPaths.contains(path);
   }
 
   @Override
@@ -107,10 +110,7 @@ public record SearchIndexAutoEmbedFieldMapping(
    * "content"), the embed entry wins — the path is owned by the embed pipeline.
    *
    * <p>Dynamic-mode passthroughs are open-ended (anything not embed is passthrough) and cannot be
-   * enumerated here, so dynamic mode returns embed-only. See TODO(CLOUDP-384026): at
-   * {@code AutoEmbeddingDocumentUtils.compareDocuments} - the stale-MV detector iterates this map
-   * and will spuriously force reindex on every passthrough field once dynamic search-backed
-   * auto-embed wires through.
+   * enumerated here, so dynamic mode returns embed-only. See TODO(CLOUDP-384026).
    */
   @Override
   public ImmutableMap<FieldPath, AutoEmbedField> fieldMap() {

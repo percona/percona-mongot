@@ -11,11 +11,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
+import com.xgen.mongot.embedding.SearchIndexAutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
+import com.xgen.mongot.index.definition.DynamicDefinition;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
@@ -190,7 +193,7 @@ public class AutoEmbeddingDocumentUtilsTest {
                 ImmutableMap.of(), // no matched vector in embeddings
                 FieldPath.parse("extra"),
                 ImmutableMap.of() // no matched vector in embeddings
-                )),
+            )),
         result);
   }
 
@@ -1690,5 +1693,32 @@ public class AutoEmbeddingDocumentUtilsTest {
     assertThat(array.size()).isEqualTo(2);
     assertThat(array.get(0)).isEqualTo(new BsonString("primitiveValue"));
     assertThat(array.get(1).asDocument().getString("b").getValue()).isEqualTo("nestedValue");
+  }
+
+  @Test
+  public void compareDocuments_dynamicSearchMapping_dynamicPassthroughFieldDoesNotTriggerReindex() {
+    // For a dynamic search auto-embed index, fields that dynamic mode copies implicitly (not listed
+    // in fieldMap()) must not cause compareDocuments to flag the doc as stale.
+    DynamicDefinition dynamic = new DynamicDefinition.Boolean(true);
+    AutoEmbedFieldMapping sourceMapping =
+        new SearchIndexAutoEmbedFieldMapping(dynamic, ImmutableMap.of(), ImmutableSet.of());
+    AutoEmbedFieldMapping matViewMapping =
+        new SearchIndexAutoEmbedFieldMapping(dynamic, ImmutableMap.of(), ImmutableSet.of());
+
+    // MV contains a dynamic-passthrough field not in fieldMap() — must not look stale.
+    RawBsonDocument sourceDoc =
+        new RawBsonDocument(
+            new BsonDocument("body", new BsonString("world")), BsonUtils.BSON_DOCUMENT_CODEC);
+    RawBsonDocument matViewDoc =
+        new RawBsonDocument(
+            new BsonDocument("body", new BsonString("world")), BsonUtils.BSON_DOCUMENT_CODEC);
+
+    var result =
+        compareDocuments(sourceDoc, matViewDoc,
+            sourceMapping, matViewMapping, MAT_VIEW_SCHEMA_METADATA);
+
+    assertFalse(
+        "dynamic passthrough field in MV must not trigger spurious reindex",
+        result.needsReIndexing());
   }
 }
