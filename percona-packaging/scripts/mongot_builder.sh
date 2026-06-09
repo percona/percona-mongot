@@ -302,11 +302,16 @@ build_mongot(){
 
     # Run a basic compile first to surface errors early (mirrors `make build`),
     # then produce the deployable. We invoke bazelisk directly so we can pass
-    # the version flag for stamping.
+    # the stamping flags below.
     ${BAZELISK} --output_user_root="${BAZEL_OUTPUT_USER_ROOT}" build //src/...
+    # --embed_label feeds BUILD_EMBED_LABEL, which stamps both the jar manifest
+    # Implementation-Version and build-data.properties build.label (read by
+    # `mongot --version`); without it both default to "local" (.bazelrc).
+    # --//bazel/config:version stamps VERSION.txt independently.
     ${BAZELISK} --output_user_root="${BAZEL_OUTPUT_USER_ROOT}" build \
         --platforms=//bazel/platforms:${PLATFORM} \
         --//bazel/config:version=${VERSION} \
+        --embed_label=${VERSION} \
         //deploy:mongot-community
 
     # The package_deploy_tar rule emits `mongot-community.tgz` under bazel-bin/deploy.
