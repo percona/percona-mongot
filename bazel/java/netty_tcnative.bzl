@@ -4,9 +4,9 @@ This file replaces netty_tcnative.bzl in the open source repository.
 Community builds use only the standard Maven artifacts.
 """
 
-# Note that matching tcnative version for Netty 4.1.130.Final is 2.0.74.Final.
-# However, the linux-aarch_64-fedora artifact has been removed for that version,
-# hence using 2.0.71.Final.
+# Matching tcnative for Netty 4.1.133.Final is 2.0.77.Final, but its
+# linux-aarch_64-fedora artifact was removed (gone since 2.0.74.Final);
+# 2.0.71.Final is the last version that still ships it.
 NETTY_TCNATIVE_VERSION = "2.0.71.Final"
 
 # Maven artifacts for maven_install()
