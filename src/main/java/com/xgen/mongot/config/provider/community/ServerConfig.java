@@ -86,7 +86,11 @@ public record ServerConfig(GrpcServerConfig grpc, Optional<String> name)
               .noDefault();
     }
 
-    public record GrpcTls(TlsMode mode, Optional<Path> certificateKeyFile, Optional<Path> caFile)
+    public record GrpcTls(
+        TlsMode mode,
+        Optional<Path> certificateKeyFile,
+        Optional<Path> certificateKeyFilePasswordFile,
+        Optional<Path> caFile)
         implements DocumentEncodable {
       private static class Fields {
         public static final Field.Required<TlsMode> MODE =
@@ -101,27 +105,36 @@ public record ServerConfig(GrpcServerConfig grpc, Optional<String> name)
                 .classField(PathField.PARSER, PathField.ENCODER)
                 .optional()
                 .noDefault();
+        public static final Field.Optional<Path> CERTIFICATE_KEY_FILE_PASSWORD_FILE =
+            Field.builder("certificateKeyFilePasswordFile")
+                .classField(PathField.PARSER, PathField.ENCODER)
+                .optional()
+                .noDefault();
       }
 
       public static GrpcServerConfig.GrpcTls fromBson(DocumentParser parser)
           throws BsonParseException {
         TlsMode mode = parser.getField(GrpcServerConfig.GrpcTls.Fields.MODE).unwrap();
         Optional<Path> certificateKeyFile = parser.getField(Fields.CERTIFICATE_KEY_FILE).unwrap();
+        Optional<Path> certificateKeyFilePasswordFile =
+            parser.getField(Fields.CERTIFICATE_KEY_FILE_PASSWORD_FILE).unwrap();
         Optional<Path> caFile = parser.getField(Fields.CERTIFICATE_AUTHORITY_FILE).unwrap();
-        // Validate requirement for certificateKeyFile when TlsMode is enabled
         if (mode != TlsMode.DISABLED && certificateKeyFile.isEmpty()) {
           parser
               .getContext()
               .handleSemanticError("certificateKeyFile is required when tls is enabled");
         }
-        // Validate requirement for caFile when mTlsMode is enabled
         if (mode == TlsMode.MTLS && caFile.isEmpty()) {
           parser.getContext().handleSemanticError("caFile is required when mtls is enabled");
         }
+        if (certificateKeyFilePasswordFile.isPresent() && certificateKeyFile.isEmpty()) {
+          parser
+              .getContext()
+              .handleSemanticError(
+                  "certificateKeyFile required when certificateKeyFilePasswordFile is set");
+        }
         return new GrpcServerConfig.GrpcTls(
-            parser.getField(Fields.MODE).unwrap(),
-            parser.getField(Fields.CERTIFICATE_KEY_FILE).unwrap(),
-            parser.getField(Fields.CERTIFICATE_AUTHORITY_FILE).unwrap());
+            mode, certificateKeyFile, certificateKeyFilePasswordFile, caFile);
       }
 
       @Override
@@ -130,6 +143,7 @@ public record ServerConfig(GrpcServerConfig grpc, Optional<String> name)
             .field(Fields.MODE, this.mode)
             .field(Fields.CERTIFICATE_KEY_FILE, this.certificateKeyFile)
             .field(Fields.CERTIFICATE_AUTHORITY_FILE, this.caFile)
+            .field(Fields.CERTIFICATE_KEY_FILE_PASSWORD_FILE, this.certificateKeyFilePasswordFile)
             .build();
       }
     }
@@ -150,6 +164,10 @@ public record ServerConfig(GrpcServerConfig grpc, Optional<String> name)
 
   public Optional<Path> getGrpcCertificateKeyFile() {
     return this.grpc.tls().flatMap(GrpcServerConfig.GrpcTls::certificateKeyFile);
+  }
+
+  public Optional<Path> getGrpcCertificateKeyFilePasswordFile() {
+    return this.grpc.tls().flatMap(GrpcServerConfig.GrpcTls::certificateKeyFilePasswordFile);
   }
 
   public Optional<Path> getGrpcCaFile() {

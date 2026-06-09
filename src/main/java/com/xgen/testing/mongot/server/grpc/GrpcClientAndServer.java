@@ -172,7 +172,7 @@ public class GrpcClientAndServer implements ClientAndServer {
   private SocketAddress createSocketAddress(Mocks mocks) {
     switch (this.socketType) {
       case TCP -> {
-        return new InetSocketAddress("0.0.0.0", 0);
+        return new InetSocketAddress("127.0.0.1", 0);
       }
       case UNIX_DOMAIN -> {
         try {

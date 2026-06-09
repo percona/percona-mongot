@@ -21,6 +21,7 @@ import com.xgen.mongot.server.message.MessageMessage;
 import com.xgen.mongot.server.util.NettyUtil;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Crash;
+import com.xgen.mongot.util.mongodb.SslContextFactory;
 import io.grpc.Context;
 import io.grpc.Server;
 import io.grpc.ServerServiceDefinition;
@@ -42,6 +43,7 @@ import java.net.SocketAddress;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.KeyManagerFactory;
 import org.bson.RawBsonDocument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -308,16 +310,23 @@ public class GrpcStreamingServer implements CommandServer {
       throw new IllegalArgumentException("TLS mode is disabled, should not create SSL context");
     }
     Optional<Path> certKeyFilePath = securityConfig.certKeyFilePath();
-    var sslContextBuilder =
-        SslContextBuilder.forServer(getCertFile(certKeyFilePath), getCertFile(certKeyFilePath))
-            .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
-            .applicationProtocolConfig(
-                new ApplicationProtocolConfig(
-                    ApplicationProtocolConfig.Protocol.ALPN,
-                    ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
-                    ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
-                    ApplicationProtocolNames.HTTP_2,
-                    ApplicationProtocolNames.HTTP_1_1));
+    Optional<Path> certKeyFilePasswordFilePath = securityConfig.certKeyFilePasswordFilePath();
+    KeyManagerFactory kmf =
+        Crash.because("Failed to initialize SSL key manager")
+            .ifThrowsExceptionOrError(
+                () ->
+                    SslContextFactory.buildKeyManagerFactory(
+                        certKeyFilePath.orElseThrow(), certKeyFilePasswordFilePath));
+    SslContextBuilder sslContextBuilder = SslContextBuilder.forServer(kmf);
+    sslContextBuilder
+        .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+        .applicationProtocolConfig(
+            new ApplicationProtocolConfig(
+                ApplicationProtocolConfig.Protocol.ALPN,
+                ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
+                ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
+                ApplicationProtocolNames.HTTP_2,
+                ApplicationProtocolNames.HTTP_1_1));
     if (securityConfig.tlsMode() == TlsMode.MTLS) {
       Optional<Path> caFilePath = securityConfig.certAuthFilePath();
       sslContextBuilder.trustManager(getCertFile(caFilePath)).clientAuth(ClientAuth.REQUIRE);

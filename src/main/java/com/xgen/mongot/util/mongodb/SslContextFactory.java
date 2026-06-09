@@ -78,7 +78,7 @@ public class SslContextFactory {
       Path caFilePath, Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) {
     try {
       KeyManagerFactory kmf =
-          createKeyManagerFromCertKeyFile(certKeyFilePath, certKeyFilePasswordPath);
+          createKmfFromCombinedPem(certKeyFilePath, certKeyFilePasswordPath);
       TrustManagerFactory tmf = createTrustManagerFromCaFile(caFilePath);
 
       SSLContext sslContext = SSLContext.getInstance("TLSv1.3");
@@ -125,6 +125,22 @@ public class SslContextFactory {
   }
 
   /**
+   * Builds a {@link KeyManagerFactory} from a combined PEM file for use with Netty's {@link
+   * SslContextBuilder#forServer(KeyManagerFactory)}.
+   *
+   * <p>Supports unencrypted and password-protected PEM key pairs (traditional OpenSSL and PKCS8
+   * formats). When the key is encrypted, {@code certKeyFilePasswordPath} must be present.
+   *
+   * @param certKeyFilePath path to the combined PEM file (private key and certificate(s))
+   * @param certKeyFilePasswordPath optional path to a file containing the key passphrase
+   * @return an initialized KeyManagerFactory
+   */
+  public static KeyManagerFactory buildKeyManagerFactory(
+      Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) throws Exception {
+    return createKmfFromCombinedPem(certKeyFilePath, certKeyFilePasswordPath);
+  }
+
+  /**
    * Builds a {@link KeyManagerFactory} from a combined PEM file containing a private key and X.509
    * certificate(s).
    *
@@ -135,7 +151,7 @@ public class SslContextFactory {
    * @param certKeyFilePasswordPath optional path to a file containing the key passphrase
    * @return an initialized KeyManagerFactory for use with TLS client authentication
    */
-  private static KeyManagerFactory createKeyManagerFromCertKeyFile(
+  private static KeyManagerFactory createKmfFromCombinedPem(
       Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) throws Exception {
     char[] password =
         certKeyFilePasswordPath
@@ -161,8 +177,9 @@ public class SslContextFactory {
         if (obj instanceof PEMEncryptedKeyPair encryptedKeyPair) {
           if (password.length == 0) {
             throw new IllegalArgumentException(
-                "tlsCertificateKeyFile is password-protected, "
-                    + "tlsCertificateKeyFilePasswordFile is required");
+                "The certificate key-file at "
+                    + certKeyFilePath
+                    + " is password-protected, a key-file-password is required");
           }
           PEMDecryptorProvider decProv = new JcePEMDecryptorProviderBuilder().build(password);
           PEMKeyPair keyPair = encryptedKeyPair.decryptKeyPair(decProv);
@@ -170,8 +187,9 @@ public class SslContextFactory {
         } else if (obj instanceof PKCS8EncryptedPrivateKeyInfo encryptedPrivateKeyInfo) {
           if (password.length == 0) {
             throw new IllegalArgumentException(
-                "tlsCertificateKeyFile is password-protected,"
-                    + " tlsCertificateKeyFilePasswordFile is required");
+                "The certificate key-file at "
+                    + certKeyFilePath
+                    + " is password-protected, a key-file-password is required");
           }
           InputDecryptorProvider decProv =
               new JceOpenSSLPKCS8DecryptorProviderBuilder().build(password);

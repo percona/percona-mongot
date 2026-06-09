@@ -219,8 +219,8 @@ public class CommunityMongotBootstrapper {
     var mongodTopologyMonitor = new MongodTopologyMonitor(syncSourceConfig, meterRegistry);
     mongodTopologyMonitor.start();
     var clusterTopologyGuard =
-        new CatalogAccessGuard(mongodTopologyMonitor,
-            config.syncSourceConfig().router().isPresent());
+        new CatalogAccessGuard(
+            mongodTopologyMonitor, config.syncSourceConfig().router().isPresent());
 
     // Crash early if mongod is reachable and the topology contradicts syncSource.router.
     // If mongod is unreachable, continue.
@@ -488,7 +488,10 @@ public class CommunityMongotBootstrapper {
 
   private static SecurityConfig createGrpcSecurityConfig(ServerConfig config) {
     return SecurityConfig.createAuthDisabled(
-        config.getGrpcTlsMode(), config.getGrpcCertificateKeyFile(), config.getGrpcCaFile());
+        config.getGrpcTlsMode(),
+        config.getGrpcCertificateKeyFile(),
+        config.getGrpcCertificateKeyFilePasswordFile(),
+        config.getGrpcCaFile());
   }
 
   private static InetSocketAddress parseInetSocketAddress(String address) {
