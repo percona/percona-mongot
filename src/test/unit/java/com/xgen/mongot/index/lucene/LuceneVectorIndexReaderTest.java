@@ -293,7 +293,7 @@ public class LuceneVectorIndexReaderTest {
                   VectorIndex.mockQueryMetricsUpdater()));
       LuceneSearcherManager searcherManager =
           LuceneSearcherManager.create(
-              this.writer, this.searcherFactory, SearchIndex.mockMetricsFactory());
+              this.writer, this.searcherFactory, mockMetricsFactory(), () -> false);
 
       var indexDefinition =
           VectorIndex.MOCK_INDEX_DEFINITION_GENERATION_ALL_QUANTIZATION.getIndexDefinition();

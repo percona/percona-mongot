@@ -8,7 +8,6 @@ import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITI
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_ID;
-import static com.xgen.testing.mongot.mock.index.SearchIndex.mockMetricsFactory;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -174,8 +173,7 @@ public class SingleLuceneIndexWriterTest {
         SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
         Optional.empty(),
         FeatureFlags.getDefault(),
-        DynamicFeatureFlagRegistry.empty(),
-        false);
+        () -> false);
   }
 
   private static SingleLuceneIndexWriter getWriter(
@@ -203,8 +201,7 @@ public class SingleLuceneIndexWriterTest {
         SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
         Optional.empty(),
         FeatureFlags.getDefault(),
-        DynamicFeatureFlagRegistry.empty(),
-        false);
+        () -> false);
   }
 
   private static SingleLuceneIndexWriter getWriter() throws Exception {
@@ -255,8 +252,7 @@ public class SingleLuceneIndexWriterTest {
         indexingMetricsUpdater,
         indexDeletionPolicy,
         FeatureFlags.getDefault(),
-        DynamicFeatureFlagRegistry.empty(),
-        false);
+        () -> false);
   }
 
   private static SingleLuceneIndexWriter getVectorIndexWriter(
@@ -1413,7 +1409,8 @@ public class SingleLuceneIndexWriterTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(indexDefinition.getType())),
-                mockMetricsFactory())) {
+                SearchIndex.mockMetricsFactory(),
+                () -> false)) {
 
           var searcher = manager.acquire();
           var query = new DrillDownQuery(new FacetsConfig());
@@ -1515,8 +1512,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
                 Optional.empty(),
                 FeatureFlags.withDefaults().build(),
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         SingleLuceneIndexWriter writer2 =
             SingleLuceneIndexWriter.createForSearchIndex(
@@ -1532,8 +1528,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
                 Optional.empty(),
                 FeatureFlags.withDefaults().build(),
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         // Add documents to both indices to trigger potential merges
         ObjectId indexId1 = new ObjectId();
@@ -1658,8 +1653,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
                 Optional.empty(),
                 FeatureFlags.withDefaults().build(),
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         SingleLuceneIndexWriter writer2 =
             SingleLuceneIndexWriter.createForSearchIndex(
@@ -1675,8 +1669,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
                 Optional.empty(),
                 FeatureFlags.withDefaults().build(),
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         SingleLuceneIndexWriter writer3 =
             SingleLuceneIndexWriter.createForSearchIndex(
@@ -1692,8 +1685,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
                 Optional.empty(),
                 FeatureFlags.withDefaults().build(),
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         // Add documents to all three indices to trigger potential merges
         ObjectId indexId1 = new ObjectId();
@@ -1820,8 +1812,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH),
                 Optional.empty(),
                 featureFlagsDisabled,
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         // Add some documents to trigger potential merges
         ObjectId indexId = MOCK_INDEX_ID;
@@ -1883,8 +1874,7 @@ public class SingleLuceneIndexWriterTest {
                 SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH),
                 Optional.empty(),
                 featureFlagsEnabled,
-                DynamicFeatureFlagRegistry.empty(),
-                false);
+                () -> false);
 
         // Add some documents to trigger potential merges
         ObjectId indexId = MOCK_INDEX_ID;

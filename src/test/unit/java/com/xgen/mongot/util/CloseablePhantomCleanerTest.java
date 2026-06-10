@@ -173,7 +173,8 @@ public class CloseablePhantomCleanerTest {
                     new DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var metricsUpdater = SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH);
 
         // Get initial index reader ref count.
@@ -229,7 +230,8 @@ public class CloseablePhantomCleanerTest {
                     new DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var metricsUpdater = SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH);
 
         // Get initial index reader ref count.

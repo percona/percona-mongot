@@ -87,7 +87,8 @@ public class LuceneOperatorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
     return LuceneIndexSearcherReference.create(
         searcherManager,
         SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),

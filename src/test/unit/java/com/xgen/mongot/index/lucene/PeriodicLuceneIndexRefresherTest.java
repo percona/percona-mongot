@@ -8,7 +8,6 @@ import static org.mockito.ArgumentMatchers.any;
 
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.analyzer.wrapper.LuceneAnalyzer;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
@@ -138,7 +137,8 @@ public class PeriodicLuceneIndexRefresherTest {
             new QueryCacheProvider.DefaultQueryCacheProvider(),
             Optional.empty(),
             SearchIndex.mockQueryMetricsUpdater(MOCK_INDEX_DEFINITION.getType())),
-        SearchIndex.mockMetricsFactory());
+        SearchIndex.mockMetricsFactory(),
+        () -> false);
   }
 
   private static SingleLuceneIndexWriter getIndexWriter() throws Exception {
@@ -165,8 +165,7 @@ public class PeriodicLuceneIndexRefresherTest {
             SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty(),
-            false);
+            () -> false);
 
     luceneIndexWriter.commit(EncodedUserData.EMPTY);
 

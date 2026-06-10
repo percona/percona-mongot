@@ -64,14 +64,6 @@ public class LuceneSearcherManager extends ReferenceManager<LuceneIndexSearcher>
   }
 
   /** Static factory method that constructs the manager and registers all gauges. */
-  @VisibleForTesting
-  public static LuceneSearcherManager create(
-      IndexWriter writer, LuceneSearcherFactory factory, PerIndexMetricsFactory metrics)
-      throws IOException {
-    return create(writer, factory, metrics, () -> false);
-  }
-
-  /** Static factory method that constructs the manager and registers all gauges. */
   public static LuceneSearcherManager create(
       IndexWriter writer,
       LuceneSearcherFactory factory,

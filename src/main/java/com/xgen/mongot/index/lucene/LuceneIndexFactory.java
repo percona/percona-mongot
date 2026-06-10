@@ -383,6 +383,7 @@ public class LuceneIndexFactory implements IndexFactory {
   }
 
   /** Creates LuceneIndexFactory. */
+  @VisibleForTesting
   public static LuceneIndexFactory fromConfig(
       LuceneConfig config,
       FeatureFlags featureFlags,

@@ -170,7 +170,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -225,7 +226,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -262,7 +264,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -315,7 +318,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -366,7 +370,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -414,7 +419,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -470,7 +476,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -872,7 +879,8 @@ public class BinaryQuantizedVectorRescorerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.VECTOR_SEARCH)),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,

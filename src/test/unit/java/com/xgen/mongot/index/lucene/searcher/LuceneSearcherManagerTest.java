@@ -38,7 +38,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var searcherBefore = manager.acquire();
         var searcherAfter = manager.refreshIfNeeded(searcherBefore);
         Assert.assertNull(searcherAfter);
@@ -62,7 +63,8 @@ public class LuceneSearcherManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            metricsFactory);
+            metricsFactory,
+            () -> false);
 
         Gauge segmentGauge = metricsFactory.get(LuceneSearcherManager.SEGMENT_COUNT_METRIC).gauge();
         assertThat(segmentGauge.value()).isNotNaN();
@@ -83,7 +85,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var searcherBefore = manager.acquire();
 
         var doc = new Document();
@@ -112,7 +115,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var searcher = manager.acquire();
         var count = searcher.getIndexReader().getRefCount();
         Assert.assertEquals(count, manager.getRefCount(searcher));
@@ -135,7 +139,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var searcher = manager.acquire();
         var count = searcher.getIndexReader().getRefCount();
         Assert.assertEquals(count, manager.getRefCount(searcher));
@@ -158,7 +163,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
         var searcher = manager.acquire();
         manager.decRef(searcher);
         manager.decRef(searcher);
@@ -188,7 +194,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
 
         var resultAfterRefresh = manager.acquire().search(new MatchAllDocsQuery(), 10);
         Assert.assertEquals(1, resultAfterRefresh.totalHits.value());
@@ -212,7 +219,8 @@ public class LuceneSearcherManagerTest {
                     new QueryCacheProvider.DefaultQueryCacheProvider(),
                     Optional.empty(),
                     SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-                SearchIndex.mockMetricsFactory());
+                SearchIndex.mockMetricsFactory(),
+                () -> false);
 
         var doc = new Document();
         doc.add(new StringField("name", "value", Field.Store.YES));

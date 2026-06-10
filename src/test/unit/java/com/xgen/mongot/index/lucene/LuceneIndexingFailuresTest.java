@@ -16,7 +16,6 @@ import static org.mockito.Mockito.verify;
 
 import com.google.common.util.concurrent.RateLimiter;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.EncodedUserData;
@@ -98,8 +97,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty(),
-            false);
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     // This ensures the spy delegates to a writer that has the mocked luceneWriter
@@ -224,8 +222,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty(),
-            false);
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -298,8 +295,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty(),
-            false);
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -372,8 +368,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty(),
-            false);
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -446,8 +441,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty(),
-            false);
+            () -> false);
 
     // Spy the writer to mock doLogIndexingFailure method
     var spyWriter = spy(writer);

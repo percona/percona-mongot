@@ -80,7 +80,8 @@ public class LuceneCachingVectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 VectorIndex.mockQueryMetricsUpdater()),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -129,7 +130,8 @@ public class LuceneCachingVectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 VectorIndex.mockQueryMetricsUpdater()),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(

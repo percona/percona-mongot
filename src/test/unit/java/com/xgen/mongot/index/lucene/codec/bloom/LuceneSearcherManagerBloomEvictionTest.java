@@ -44,13 +44,74 @@ import org.junit.Test;
 public class LuceneSearcherManagerBloomEvictionTest {
 
   private static final String ID_FIELD = FieldName.MetaField.ID.getLuceneFieldName();
+  private static final boolean BLOOM_DISABLED_IN_STEADY_STATE = false;
+  private static final boolean BLOOM_ENABLED_IN_STEADY_STATE = true;
+
+  @Test
+  public void initialSyncToSteadyState_onlyForcesReopenWhenPolicyChanges() throws IOException {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
+      LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
+
+      harness.manager.maybeRefreshBlocking();
+      LuceneIndexSearcher searcherAfterSyncRefresh = harness.manager.acquire();
+      try {
+        assertThat(searcherAfterSyncRefresh).isSameInstanceAs(searcherDuringSync);
+      } finally {
+        harness.manager.release(searcherAfterSyncRefresh);
+      }
+
+      harness.indexStatus.set(IndexStatus.steady());
+      harness.manager.maybeRefreshBlocking();
+      LuceneIndexSearcher searcherSteady = harness.manager.acquire();
+      DirectoryReader readerSteady = (DirectoryReader) searcherSteady.getIndexReader();
+      assertThat(readerSteady).isNotSameInstanceAs(readerDuringSync);
+
+      harness.manager.maybeRefreshBlocking();
+      LuceneIndexSearcher searcherAfterSteadyRefresh = harness.manager.acquire();
+      try {
+        assertThat(searcherAfterSteadyRefresh).isSameInstanceAs(searcherSteady);
+      } finally {
+        harness.manager.release(searcherAfterSteadyRefresh);
+      }
+
+      harness.manager.release(searcherDuringSync);
+      harness.manager.release(searcherSteady);
+    }
+  }
+
+  @Test
+  public void withBloomInSteadyStateEnabled_noForceReopenOnStatusTransition() throws IOException {
+    try (Harness harness = newHarness(BLOOM_ENABLED_IN_STEADY_STATE)) {
+      LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
+      assertThat(heapLoadedBloomForIdField(readerDuringSync)).isPresent();
+
+      harness.manager.maybeRefreshBlocking();
+      LuceneIndexSearcher searcherAfterSyncRefresh = harness.manager.acquire();
+      try {
+        assertThat(searcherAfterSyncRefresh).isSameInstanceAs(searcherDuringSync);
+      } finally {
+        harness.manager.release(searcherAfterSyncRefresh);
+      }
+
+      harness.indexStatus.set(IndexStatus.steady());
+      harness.manager.maybeRefreshBlocking();
+      LuceneIndexSearcher searcherSteady = harness.manager.acquire();
+      DirectoryReader readerSteady = (DirectoryReader) searcherSteady.getIndexReader();
+      assertThat(readerSteady).isSameInstanceAs(readerDuringSync);
+      assertThat(heapLoadedBloomForIdField(readerSteady)).isPresent();
+
+      harness.manager.release(searcherDuringSync);
+      harness.manager.release(searcherSteady);
+    }
+  }
 
   @Test
   public void initialSyncToSteadyState_reopensReaderWithoutClosingWriter() throws IOException {
-    try (Harness harness = newHarness()) {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
       LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
-      DirectoryReader readerDuringSync =
-          (DirectoryReader) searcherDuringSync.getIndexReader();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
       assertThat(heapLoadedBloomForIdField(readerDuringSync)).isPresent();
 
       harness.indexStatus.set(IndexStatus.steady());
@@ -78,10 +139,9 @@ public class LuceneSearcherManagerBloomEvictionTest {
    */
   @Test
   public void bloomEviction_refresh_releasesOldDirectoryReader() throws IOException {
-    try (Harness harness = newHarness()) {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
       LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
-      DirectoryReader readerDuringSync =
-          (DirectoryReader) searcherDuringSync.getIndexReader();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
       harness.manager.release(searcherDuringSync);
 
       harness.indexStatus.set(IndexStatus.steady());
@@ -100,10 +160,9 @@ public class LuceneSearcherManagerBloomEvictionTest {
 
   @Test
   public void bloomEviction_refresh_releasesOldReaderAfterLastSearcherRelease() throws IOException {
-    try (Harness harness = newHarness()) {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
       LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
-      DirectoryReader readerDuringSync =
-          (DirectoryReader) searcherDuringSync.getIndexReader();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
 
       harness.indexStatus.set(IndexStatus.steady());
       harness.manager.maybeRefreshBlocking();
@@ -118,16 +177,15 @@ public class LuceneSearcherManagerBloomEvictionTest {
 
   /**
    * Step-by-step {@link DirectoryReader#getRefCount()} checks for bloom eviction via {@code
-   * DirectoryReader.open(IndexCommit)}: the new reader's ref from {@code open()} is owned by
-   * {@link LuceneSearcherManager} after swap; the old reader drops to zero only after the last
-   * {@link LuceneSearcherManager#release}.
+   * DirectoryReader.open(IndexCommit)}: the new reader's ref from {@code open()} is owned by {@link
+   * LuceneSearcherManager} after swap; the old reader drops to zero only after the last {@link
+   * LuceneSearcherManager#release}.
    */
   @Test
   public void bloomEviction_refresh_tracksDirectoryReaderRefCounts() throws IOException {
-    try (Harness harness = newHarness()) {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
       LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
-      DirectoryReader readerDuringSync =
-          (DirectoryReader) searcherDuringSync.getIndexReader();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
       assertThat(readerDuringSync.getRefCount()).isEqualTo(2);
 
       harness.manager.release(searcherDuringSync);
@@ -146,10 +204,9 @@ public class LuceneSearcherManagerBloomEvictionTest {
       assertThat(readerSteady.getRefCount()).isEqualTo(1);
     }
 
-    try (Harness harness = newHarness()) {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
       LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
-      DirectoryReader readerDuringSync =
-          (DirectoryReader) searcherDuringSync.getIndexReader();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
       assertThat(readerDuringSync.getRefCount()).isEqualTo(2);
 
       harness.indexStatus.set(IndexStatus.steady());
@@ -169,12 +226,12 @@ public class LuceneSearcherManagerBloomEvictionTest {
     }
   }
 
-  private static Harness newHarness() throws IOException {
+  private static Harness newHarness(boolean bloomFilterInSteadyState) throws IOException {
     DynamicFeatureFlagRegistry registry = mock(DynamicFeatureFlagRegistry.class);
     when(registry.evaluateClusterInvariant(DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD))
         .thenReturn(true);
     when(registry.evaluateClusterInvariant(DynamicFeatureFlags.BLOOM_FILTER_IN_STEADY_STATE))
-        .thenReturn(false);
+        .thenReturn(bloomFilterInSteadyState);
     AtomicReference<IndexStatus> indexStatus = new AtomicReference<>(IndexStatus.initialSync());
     SearchIndexDefinition indexDefinition = getIndexDefinition();
 
@@ -184,7 +241,7 @@ public class LuceneSearcherManagerBloomEvictionTest {
             .setCodec(
                 LuceneCodec.Factory.forIndexWithBloomFilter(
                     Map.of(), () -> true, Optional.empty()))
-            .setUseCompoundFile(false);
+            .setUseCompoundFile(true);
     IndexWriter writer = new IndexWriter(directory, config);
     Document doc = new Document();
     doc.add(new StringField(ID_FIELD, "doc1", Field.Store.YES));
@@ -199,7 +256,7 @@ public class LuceneSearcherManagerBloomEvictionTest {
             writer,
             new LuceneSearcherFactory(
                 indexDefinition,
-                false,
+                BLOOM_DISABLED_IN_STEADY_STATE,
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
@@ -243,8 +300,8 @@ public class LuceneSearcherManagerBloomEvictionTest {
   private static Optional<MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer>
       unwrapBloomFieldsProducer(FieldsProducer producer, String field) {
     if (producer
-        instanceof MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer
-            bloomProducer) {
+        instanceof
+        MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer bloomProducer) {
       return Optional.of(bloomProducer);
     }
     try {
@@ -254,8 +311,8 @@ public class LuceneSearcherManagerBloomEvictionTest {
       Map<String, FieldsProducer> fields = (Map<String, FieldsProducer>) fieldsField.get(producer);
       FieldsProducer fieldProducer = fields.get(field);
       if (fieldProducer
-          instanceof MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer
-              bloomProducer) {
+          instanceof
+          MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer bloomProducer) {
         return Optional.of(bloomProducer);
       }
     } catch (ReflectiveOperationException e) {
@@ -267,7 +324,8 @@ public class LuceneSearcherManagerBloomEvictionTest {
   private static SearchIndexDefinition getIndexDefinition() {
     return SearchIndexDefinitionBuilder.builder()
         .defaultMetadata()
-        .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
+        .mappings(
+            DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
         .build();
   }
 }

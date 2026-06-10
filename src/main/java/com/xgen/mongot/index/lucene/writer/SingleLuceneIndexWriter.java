@@ -6,7 +6,6 @@ import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocsExceededLimitsException;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.EncodedUserData;
@@ -20,7 +19,6 @@ import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.ingestion.BsonDocumentProcessor;
 import com.xgen.mongot.index.lucene.codec.LuceneCodec;
-import com.xgen.mongot.index.lucene.codec.bloom.BloomCodecPolicy;
 import com.xgen.mongot.index.lucene.commit.LuceneCommitData;
 import com.xgen.mongot.index.lucene.document.DefaultIndexingPolicy;
 import com.xgen.mongot.index.lucene.document.LuceneIndexingPolicy;
@@ -33,7 +31,6 @@ import com.xgen.mongot.index.lucene.sort.LuceneIndexSortCompatibilityValidator;
 import com.xgen.mongot.index.lucene.sort.LuceneIndexSortFactory;
 import com.xgen.mongot.index.lucene.util.LuceneCodecUtils;
 import com.xgen.mongot.index.lucene.util.LuceneDocumentIdEncoder;
-import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.IndexCapabilities;
 import com.xgen.mongot.logging.DefaultKeyValueLogger;
 import com.xgen.mongot.util.Check;
@@ -317,42 +314,6 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
                 .ifThrows(writer::getNumFields))
         .log("Index writer initialized");
     return writer;
-  }
-
-  /** Creates a writer for a Lucene search index (tests and legacy call sites). */
-  @VisibleForTesting
-  public static SingleLuceneIndexWriter createForSearchIndex(
-      Directory directory,
-      InstrumentedConcurrentMergeScheduler.PerIndexPartitionMergeScheduler mergeScheduler,
-      MergePolicy mergePolicy,
-      double ramBufferSizeMb,
-      Optional<Integer> fieldLimit,
-      Optional<Integer> docsLimit,
-      Analyzer indexAnalyzer,
-      SearchFieldDefinitionResolver resolver,
-      IndexMetricsUpdater.IndexingMetricsUpdater indexingMetricsUpdater,
-      Optional<IndexDeletionPolicy> indexDeletionPolicy,
-      FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
-      boolean enableNaturalOrderScan)
-      throws IOException {
-    return createForSearchIndex(
-        directory,
-        mergeScheduler,
-        mergePolicy,
-        ramBufferSizeMb,
-        fieldLimit,
-        docsLimit,
-        indexAnalyzer,
-        resolver,
-        indexingMetricsUpdater,
-        indexDeletionPolicy,
-        featureFlags,
-        BloomCodecPolicy.getBloomFilterEnabledForIdField(
-            dynamicFeatureFlagRegistry,
-            enableNaturalOrderScan,
-            resolver.indexDefinition,
-            IndexStatus::steady));
   }
 
   public org.apache.lucene.index.IndexWriter getLuceneWriter() {
