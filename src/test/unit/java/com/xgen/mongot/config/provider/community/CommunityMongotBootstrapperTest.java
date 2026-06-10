@@ -353,7 +353,10 @@ public class CommunityMongotBootstrapperTest {
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
-        embeddingConfig);
+        embeddingConfig,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty());
   }
 
   private CommunityConfig createMinimalConfigWithFtdc(
@@ -363,6 +366,9 @@ public class CommunityMongotBootstrapperTest {
         new StorageConfig(Path.of(storagePath)),
         this.createMinimalServerConfig(),
         ftdcConfig.orElse(FtdcCommunityConfig.getDefault()),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),

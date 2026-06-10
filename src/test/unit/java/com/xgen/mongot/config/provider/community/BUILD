@@ -5,9 +5,12 @@ java_test_suite(
     srcs = [
         "CommunityConfigTest.java",
         "CommunityConfigUpdaterTest.java",
+        "CommunityIndexingConfigTest.java",
         "CommunityMetadataUpdaterTest.java",
         "CommunityMongotBootstrapperTest.java",
+        "CommunityQueryingConfigTest.java",
         "CommunityReadinessCheckerTest.java",
+        "CommunityReplicationConfigTest.java",
         "CommunityServerIdProviderTest.java",
         "CommunityServerInfoTest.java",
         "ConnectionInfoFactoryTest.java",

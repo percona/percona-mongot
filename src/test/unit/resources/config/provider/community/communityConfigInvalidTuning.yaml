@@ -1,0 +1,20 @@
+syncSource:
+  replicaSet:
+    hostAndPort: "mongod1.internal:27017"
+    scramAuth:
+      username: "user"
+      passwordFile: "/etc/mongot/router.passwd"
+      authSource: "admin"
+      tls:
+        enabled: true
+        tlsCertificateKeyFile: "/etc/mongot/tls/client-combined.pem"
+        caFile: "/etc/mongot/ca.pem"
+storage:
+  dataPath: "data/mongot"
+server:
+  grpc:
+    address: "localhost:27028"
+indexing:
+  lucene:
+    # Invalid: fieldLimit must be positive.
+    fieldLimit: -5

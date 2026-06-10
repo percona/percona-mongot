@@ -84,6 +84,7 @@ import com.xgen.mongot.util.MongotVersionResolver;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.SecretsParser;
 import com.xgen.mongot.util.Shutdown;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.MongoDbMetadataClient;
@@ -130,9 +131,10 @@ public class CommunityMongotBootstrapper {
    */
   public static void bootstrap(Path configPath, boolean internalListAllIndexesForTesting) {
 
-    CommunityConfig config =
+    CommunityConfig.ParsedCommunityConfig parsedConfig =
         Crash.because("failed to parse config file")
             .ifThrowsExceptionOrError(() -> CommunityConfig.readFromFile(configPath));
+    CommunityConfig config = parsedConfig.config();
 
     config
         .loggingConfig()
@@ -160,6 +162,9 @@ public class CommunityMongotBootstrapper {
 
     var meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithCompositeMeterRegistry();
     var meterRegistry = meterAndFtdcRegistry.getCompositeMeterRegistry();
+
+    // Log any BsonParseExceptions from unknown fields when parsing the mongot config.
+    reportUnknownFields(parsedConfig.unknownFieldExceptions());
 
     // InitialSyncHostProvider starts replica-set discovery when it's first instantiated. Initiate
     // it early in the bootstrap process so as a best-effort it can be ready before first use.
@@ -921,6 +926,17 @@ public class CommunityMongotBootstrapper {
         .append("configPath", new BsonString(configPath.toString()))
         .append("mongotVersion", new BsonString(mongotVersion))
         .append("jvmArgs", new BsonArray(bsonJvmArgs));
+  }
+
+  private static void reportUnknownFields(List<BsonParseException> unknownFieldExceptions) {
+    if (unknownFieldExceptions.isEmpty()) {
+      return;
+    }
+    String unknownFields =
+        unknownFieldExceptions.stream()
+            .map(Throwable::getMessage)
+            .collect(Collectors.joining("; "));
+    LOG.atWarn().log("Ignoring unrecognized field(s) in mongot config file: {}", unknownFields);
   }
 
   private static MongotConfigs getMongotConfigs(

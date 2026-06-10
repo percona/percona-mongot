@@ -5,9 +5,12 @@ java_library(
     srcs = [
         "CommunityConfig.java",
         "CommunityConfigUpdater.java",
+        "CommunityIndexingConfig.java",
         "CommunityMetadataUpdater.java",
         "CommunityMongotBootstrapper.java",
+        "CommunityQueryingConfig.java",
         "CommunityReadinessChecker.java",
+        "CommunityReplicationConfig.java",
         "CommunityServerIdProvider.java",
         "CommunityServerInfo.java",
         "ConnectionInfoFactory.java",

@@ -8,9 +8,11 @@ import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
 import com.xgen.mongot.util.bson.parser.Field;
+import com.xgen.mongot.util.bson.parser.PermissiveBsonParseContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import org.bson.BsonDocument;
 import org.slf4j.Logger;
@@ -24,7 +26,10 @@ public record CommunityConfig(
     Optional<MetricsConfig> metricsConfig,
     Optional<HealthCheckConfig> healthCheckConfig,
     Optional<LoggingConfig> loggingConfig,
-    Optional<EmbeddingConfig> embeddingConfig)
+    Optional<EmbeddingConfig> embeddingConfig,
+    Optional<CommunityIndexingConfig> indexingConfig,
+    Optional<CommunityQueryingConfig> queryingConfig,
+    Optional<CommunityReplicationConfig> replicationConfig)
     implements DocumentEncodable {
 
   private static final Logger LOG = LoggerFactory.getLogger(CommunityConfig.class);
@@ -82,9 +87,33 @@ public record CommunityConfig(
             .disallowUnknownFields()
             .optional()
             .noDefault();
+
+    public static final Field.Optional<CommunityIndexingConfig> INDEXING =
+        Field.builder("indexing")
+            .classField(CommunityIndexingConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
+
+    public static final Field.Optional<CommunityQueryingConfig> QUERYING =
+        Field.builder("querying")
+            .classField(CommunityQueryingConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
+
+    public static final Field.Optional<CommunityReplicationConfig> REPLICATION =
+        Field.builder("replication")
+            .classField(CommunityReplicationConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
   }
 
-  public static CommunityConfig readFromFile(Path configPath)
+  public record ParsedCommunityConfig(
+      CommunityConfig config, List<BsonParseException> unknownFieldExceptions) {}
+
+  public static ParsedCommunityConfig readFromFile(Path configPath)
       throws IOException, BsonParseException {
     LOG.atInfo().addKeyValue("configPath", configPath).log("Reading config from file");
     String yaml = Files.readString(configPath);
@@ -92,10 +121,14 @@ public record CommunityConfig(
     return CommunityConfig.fromBson(bson);
   }
 
-  private static CommunityConfig fromBson(BsonDocument document) throws BsonParseException {
-    try (var parser = BsonDocumentParser.fromRoot(document).allowUnknownFields(true).build()) {
-      return fromBson(parser);
+  private static ParsedCommunityConfig fromBson(BsonDocument document) throws BsonParseException {
+    // Use a permissive parse context so we can collect any unknown fields.
+    PermissiveBsonParseContext context = PermissiveBsonParseContext.root();
+    CommunityConfig config;
+    try (var parser = BsonDocumentParser.withContext(context, document).build()) {
+      config = CommunityConfig.fromBson(parser);
     }
+    return new ParsedCommunityConfig(config, context.getUnknownFieldExceptions());
   }
 
   public static CommunityConfig fromBson(DocumentParser parser) throws BsonParseException {
@@ -107,7 +140,10 @@ public record CommunityConfig(
         parser.getField(Fields.METRICS).unwrap(),
         parser.getField(Fields.HEALTH_CHECK).unwrap(),
         parser.getField(Fields.LOGGING).unwrap(),
-        parser.getField(Fields.EMBEDDING).unwrap());
+        parser.getField(Fields.EMBEDDING).unwrap(),
+        parser.getField(Fields.INDEXING).unwrap(),
+        parser.getField(Fields.QUERYING).unwrap(),
+        parser.getField(Fields.REPLICATION).unwrap());
   }
 
   @Override
@@ -121,6 +157,9 @@ public record CommunityConfig(
         .field(Fields.HEALTH_CHECK, this.healthCheckConfig)
         .field(Fields.LOGGING, this.loggingConfig)
         .field(Fields.EMBEDDING, this.embeddingConfig)
+        .field(Fields.INDEXING, this.indexingConfig)
+        .field(Fields.QUERYING, this.queryingConfig)
+        .field(Fields.REPLICATION, this.replicationConfig)
         .build();
   }
 }

@@ -3,7 +3,9 @@ package com.xgen.mongot.config.provider.community;
 import static com.xgen.testing.BsonDeserializationTestSuite.fromDocument;
 import static com.xgen.testing.BsonSerializationTestSuite.fromEncodable;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.google.common.net.HostAndPort;
@@ -107,6 +109,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -209,6 +214,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -237,6 +245,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("INFO", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -272,6 +283,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -307,6 +321,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -342,6 +359,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -377,6 +397,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -412,7 +435,10 @@ public class CommunityConfigTest {
                       Optional.empty(),
                       Optional.empty(),
                       Optional.empty(),
-                      false))));
+                      false)),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -447,7 +473,10 @@ public class CommunityConfigTest {
                       Optional.empty(),
                       Optional.of(50),
                       Optional.empty(),
-                      true))));
+                      true)),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> ftdcOverrides() {
@@ -474,6 +503,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -502,6 +534,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -581,6 +616,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
   }
@@ -592,7 +630,7 @@ public class CommunityConfigTest {
     public void deserializeFromYaml() throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfig.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath);
+      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
       CommunityConfig expected =
           new CommunityConfig(
               new SyncSourceConfig(
@@ -634,6 +672,9 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("WARNING", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty());
 
       assertEquals(expected, result);
@@ -644,7 +685,7 @@ public class CommunityConfigTest {
         throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfigX509.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath);
+      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
 
       var replicaSet = result.syncSourceConfig().replicaSet();
       assertTrue("replicaSet should use x509", replicaSet.x509().isPresent());
@@ -670,7 +711,7 @@ public class CommunityConfigTest {
         throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfigScram.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath);
+      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
 
       var replicaSet = result.syncSourceConfig().replicaSet();
       assertTrue("replicaSet should use scram auth", replicaSet.scram().isPresent());
@@ -687,6 +728,60 @@ public class CommunityConfigTest {
           scram.tls().tlsCertificateKeyFile().get());
       assertTrue("tls.caFile should be present", scram.tls().caFile().isPresent());
       assertEquals(Path.of("/etc/mongot/ca.pem"), scram.tls().caFile().get());
+    }
+
+    @Test
+    public void readFromFile_withTuningConfigs()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigTuning.yaml");
+      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+
+      var lucene = result.indexingConfig().get().luceneConfig().get();
+      assertEquals(Optional.of(2000), lucene.refreshConfig().get().intervalMs());
+      var tiered = lucene.mergePolicyConfig().get().tieredMergePolicyConfig().get();
+      assertEquals(Optional.of(512), tiered.vectorMergePolicyConfig().get().mergeBudgetMb());
+      assertEquals(
+          Optional.of(6),
+          lucene.mergeSchedulerConfig().get().concurrentSchedulerConfig().get().maxThreadCount());
+      assertEquals(Optional.of(500), lucene.fieldLimit());
+      var definition = result.indexingConfig().get().definitionConfig().get();
+      assertEquals(Optional.of(7), definition.maxEmbeddedDocumentsNestingLevel());
+
+      var queryingLucene = result.queryingConfig().get().luceneConfig().get();
+      assertEquals(Optional.of(2048), queryingLucene.maxClauseLimit());
+
+      var mongodb = result.replicationConfig().get().mongoDbConfig().get();
+      assertEquals(Optional.of(3), mongodb.numConcurrentInitialSyncs());
+      assertEquals(Optional.of(12), mongodb.numConcurrentChangeStreams());
+      assertEquals(Optional.of(8), mongodb.numIndexingThreads());
+      assertEquals(Optional.of(2), mongodb.numConcurrentSynonymSyncs());
+    }
+
+    @Test
+    public void readFromFile_withUnsupportedTuningKeys_warnsAndIgnoresButKeepsKnownFields()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigTuningUnknownKey.yaml");
+      CommunityConfig.ParsedCommunityConfig parsed = CommunityConfig.readFromFile(configPath);
+      CommunityConfig result = parsed.config();
+
+      assertFalse(parsed.unknownFieldExceptions().isEmpty());
+      assertEquals(
+          Optional.of(500), result.indexingConfig().get().luceneConfig().get().fieldLimit());
+      assertEquals(
+          Optional.of(1024), result.queryingConfig().get().luceneConfig().get().maxClauseLimit());
+    }
+
+    @Test
+    public void readFromFile_withMalformedValue_failsFast() {
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigInvalidTuning.yaml");
+      assertThrows(BsonParseException.class, () -> CommunityConfig.readFromFile(configPath));
     }
   }
 }
