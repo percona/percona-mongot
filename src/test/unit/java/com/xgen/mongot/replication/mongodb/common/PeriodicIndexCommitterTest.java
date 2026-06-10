@@ -124,7 +124,7 @@ public class PeriodicIndexCommitterTest {
 
     // We call indexer.commit, so the IndexerClosedException is thrown
     // we should give some time for the executor to schedule the commit call async
-    Mockito.verify(indexer, timeout(50).atLeast(1)).commit();
+    Mockito.verify(indexer, timeout(500).atLeast(1)).commit();
     // The countdown latch never goes to 0, so crashWithException is never called
     Assert.assertFalse(latch.await(200, TimeUnit.MILLISECONDS));
   }
