@@ -312,11 +312,15 @@ public class ChangeStreamDocumentUtils {
           metrics.updateApplicable();
           incrementApplicableDocumentMetrics(metrics, event);
 
-          // For materialized view based auto-embedding indexes (AUTO_EMBED fields, version >= 2),
-          // check if embedding generation is required. If not (only filter fields changed),
-          // we can skip embedding and use partial updates. Old EMBEDDING strategy (TEXT fields,
-          // version 1) does not support partial updates as it writes directly to Lucene.
-          if (autoEmbedMapping.isPresent()) {
+          // For materialized view based auto-embedding indexes, skip embedding and use partial
+          // updates when only filter fields changed. The old EMBEDDING strategy (TEXT fields,
+          // version 1) writes directly to Lucene and does not support partial updates.
+          // Partial updates are not supported on view-based indexes: detection of which base
+          // fields the indexed document depends on is missing, so every update re-embeds
+          // (HELP-94834: partial updates silently dropped documents transitioning into the view).
+          // TODO(CLOUDP-412469): derive view-pipeline field dependencies to restore the
+          // optimization.
+          if (autoEmbedMapping.isPresent() && indexDefinition.getView().isEmpty()) {
             AutoEmbedFieldMapping mapping = autoEmbedMapping.get();
             if (!AutoEmbeddingDocumentUtils.requiresEmbeddingGeneration(
                 event.getUpdateDescription(), mapping)) {
