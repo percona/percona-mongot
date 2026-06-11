@@ -13,6 +13,7 @@ import com.xgen.mongot.util.VerboseRunnable;
 import java.io.Closeable;
 import java.time.Duration;
 import java.util.EnumSet;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -29,37 +30,65 @@ public class PeriodicIndexCommitter implements Closeable {
 
   private final Index index;
   private final DocumentIndexer indexer;
-  private final ScheduledFuture<?> commitFuture;
 
   @GuardedBy("this")
   private boolean shutdown = false;
 
-  public PeriodicIndexCommitter(
+  @GuardedBy("this")
+  private Optional<ScheduledFuture<?>> commitFuture = Optional.empty();
+
+  /** Creates a committer and immediately activates periodic commits on the given executor. */
+  public static PeriodicIndexCommitter create(
       Index index, DocumentIndexer indexer, ScheduledExecutorService executor, Duration interval) {
+    var committer = new PeriodicIndexCommitter(index, indexer);
+    committer.start(executor, interval);
+    return committer;
+  }
+
+  /**
+   * Creates a committer with the given index and indexer. No periodic commits will occur unless
+   * {@link #start} is called.
+   */
+  public static PeriodicIndexCommitter createInactive(Index index, DocumentIndexer indexer) {
+    return new PeriodicIndexCommitter(index, indexer);
+  }
+
+  PeriodicIndexCommitter(Index index, DocumentIndexer indexer) {
     this.index = index;
     this.indexer = indexer;
-    this.commitFuture =
-        executor.scheduleWithFixedDelay(
-            new VerboseRunnable() {
-              @Override
-              public void verboseRun() {
-                commitIfNeeded();
-              }
+  }
 
-              @Override
-              public Logger getLogger() {
-                return LOG;
-              }
-            },
-            0,
-            interval.toMillis(),
-            TimeUnit.MILLISECONDS);
+  /** Activates periodic commits on the given executor. Must be called at most once. */
+  public synchronized void start(ScheduledExecutorService executor, Duration interval) {
+    if (this.shutdown) {
+      throw new IllegalStateException("cannot start a closed committer");
+    }
+    if (this.commitFuture.isPresent()) {
+      throw new IllegalStateException("committer already started");
+    }
+    this.commitFuture =
+        Optional.of(
+            executor.scheduleWithFixedDelay(
+                new VerboseRunnable() {
+                  @Override
+                  public void verboseRun() {
+                    commitIfNeeded();
+                  }
+
+                  @Override
+                  public Logger getLogger() {
+                    return LOG;
+                  }
+                },
+                0,
+                interval.toMillis(),
+                TimeUnit.MILLISECONDS));
   }
 
   @Override
   public synchronized void close() {
     this.shutdown = true;
-    this.commitFuture.cancel(false);
+    this.commitFuture.ifPresent(f -> f.cancel(false));
   }
 
   private synchronized void commitIfNeeded() {

@@ -98,11 +98,6 @@ public class MaterializedViewManager implements ReplicationManager {
 
   public static final String MAT_VIEW_MANAGER_STATE = "matViewGeneratorState";
 
-  // TODO(CLOUDP-356241): Make this parameter part of durabilityConfig
-  private static final int NUM_COMMITTING_THREADS = 1;
-  // TODO(CLOUDP-356241): Make this parameter part of durabilityConfig
-  private static final Duration DEFAULT_COMMIT_INTERVAL = Duration.ofSeconds(30);
-
   public static final String OPTIME_UPDATER_ERROR_COUNTER_NAME = "matViewOptimeUpdaterError";
 
   public static final String GENERATOR_SHUTDOWN_FAILURE_COUNTER_NAME =
@@ -135,8 +130,6 @@ public class MaterializedViewManager implements ReplicationManager {
   /** A mapping of materialized view collections to active GenerationIds. */
   @GuardedBy("this")
   private final ActiveGenerationIdCatalog activeGenerationIdCatalog;
-
-  private final NamedScheduledExecutorService commitExecutor;
 
   private final MetricsFactory metricsFactory;
 
@@ -210,7 +203,6 @@ public class MaterializedViewManager implements ReplicationManager {
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       DecodingWorkScheduler decodingWorkScheduler,
       MaterializedViewGeneratorFactory matViewGeneratorFactory,
-      NamedScheduledExecutorService commitExecutor,
       NamedScheduledExecutorService heartbeatExecutor,
       NamedScheduledExecutorService statusRefreshExecutor,
       NamedScheduledExecutorService optimeUpdaterExecutor,
@@ -224,7 +216,6 @@ public class MaterializedViewManager implements ReplicationManager {
         autoEmbeddingMongoClient,
         decodingWorkScheduler,
         matViewGeneratorFactory,
-        commitExecutor,
         heartbeatExecutor,
         statusRefreshExecutor,
         optimeUpdaterExecutor,
@@ -245,7 +236,6 @@ public class MaterializedViewManager implements ReplicationManager {
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       DecodingWorkScheduler decodingWorkScheduler,
       MaterializedViewGeneratorFactory matViewGeneratorFactory,
-      NamedScheduledExecutorService commitExecutor,
       NamedScheduledExecutorService heartbeatExecutor,
       NamedScheduledExecutorService statusRefreshExecutor,
       NamedScheduledExecutorService optimeUpdaterExecutor,
@@ -261,7 +251,6 @@ public class MaterializedViewManager implements ReplicationManager {
     this.meterRegistry = meterRegistry;
     this.managedMaterializedViewGenerators = new ConcurrentHashMap<>();
     this.activeGenerationIdCatalog = new ActiveGenerationIdCatalog(matViewMetadataCatalog);
-    this.commitExecutor = commitExecutor;
     this.heartbeatExecutor = heartbeatExecutor;
     this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;
     this.shutdown = false;
@@ -385,13 +374,6 @@ public class MaterializedViewManager implements ReplicationManager {
             meterRegistry,
             enableLifecycleAttributionMetrics);
 
-    var commitExecutor =
-        Executors.fixedSizeThreadScheduledExecutor(
-            "mat-view-commit", NUM_COMMITTING_THREADS, meterRegistry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("autoembedding").register(commitExecutor, meterRegistry);
-    }
-
     var materializedViewGeneratorFactory =
         new MaterializedViewGeneratorFactory(
             rootPath.resolve("autoEmbedding"),
@@ -400,11 +382,9 @@ public class MaterializedViewManager implements ReplicationManager {
             initialSyncConfig,
             meterAndFtdcRegistry,
             featureFlags,
-            commitExecutor,
             indexingWorkSchedulerFactory,
             decodingWorkScheduler,
             matViewMetadataCatalog,
-            DEFAULT_COMMIT_INTERVAL,
             materializedViewConfig);
 
     var heartbeatExecutor =
@@ -423,7 +403,6 @@ public class MaterializedViewManager implements ReplicationManager {
             autoEmbeddingMongoClient,
             decodingWorkScheduler,
             materializedViewGeneratorFactory,
-            commitExecutor,
             heartbeatExecutor,
             statusRefreshExecutor,
             optimeUpdaterExecutor,
@@ -1093,7 +1072,6 @@ public class MaterializedViewManager implements ReplicationManager {
                     .getIndexingWorkSchedulers()
                     .forEach((strategy, scheduler) -> scheduler.shutdown()),
             shutdownExecutor)
-        .thenRunAsync(() -> Executors.shutdownOrFail(this.commitExecutor), shutdownExecutor)
         .thenRunAsync(() -> Executors.shutdownOrFail(this.heartbeatExecutor), shutdownExecutor)
         .thenRunAsync(() -> Executors.shutdownOrFail(this.optimeUpdaterExecutor), shutdownExecutor)
         .thenRunAsync(() -> Executors.shutdownOrFail(this.lifecycleExecutor), shutdownExecutor)
@@ -1477,8 +1455,6 @@ public class MaterializedViewManager implements ReplicationManager {
     private final MongotCursorManager cursorManager;
     private final MeterAndFtdcRegistry meterAndFtdcRegistry;
     private final FeatureFlags featureFlags;
-    private final NamedScheduledExecutorService commitExecutor;
-    private final Duration commitInterval;
     private final Duration resyncBackoff;
     private final Duration transientBackoff;
     private final Duration requestRateLimitBackoffMs;
@@ -1504,11 +1480,9 @@ public class MaterializedViewManager implements ReplicationManager {
         InitialSyncConfig initialSyncConfig,
         MeterAndFtdcRegistry meterAndFtdcRegistry,
         FeatureFlags featureFlags,
-        NamedScheduledExecutorService commitExecutor,
         IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
         DecodingWorkScheduler decodingWorkScheduler,
         MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog,
-        Duration commitInterval,
         AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
       this.resolvedPath = resolvedPath;
       this.lifecycleExecutor = lifecycleExecutor;
@@ -1516,12 +1490,10 @@ public class MaterializedViewManager implements ReplicationManager {
       this.meterAndFtdcRegistry = meterAndFtdcRegistry;
       this.featureFlags = featureFlags;
       this.enableNaturalOrderScan = initialSyncConfig.enableNaturalOrderScan();
-      this.commitExecutor = commitExecutor;
       this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
       this.decodingWorkScheduler = decodingWorkScheduler;
       this.initialSyncConfig = initialSyncConfig;
       this.matViewMetadataCatalog = matViewMetadataCatalog;
-      this.commitInterval = commitInterval;
       this.materializedViewConfig = materializedViewConfig;
       this.resyncBackoff =
           materializedViewConfig.resyncBackoff.orElse(
@@ -1549,10 +1521,7 @@ public class MaterializedViewManager implements ReplicationManager {
       DocumentIndexer indexer = DefaultDocumentIndexer.create(matViewIndex);
       // TODO(CLOUDP-361153): Remove this or replace this as our customized committer.
       PeriodicIndexCommitter committer =
-          new PeriodicIndexCommitter(
-              matViewIndex, indexer, this.commitExecutor, this.commitInterval);
-      // Close it for now, since we manually commit it in IndexingWorkScheduler::finalizeBatch
-      committer.close();
+          PeriodicIndexCommitter.createInactive(matViewIndex, indexer);
       return MaterializedViewGenerator.create(
           this.lifecycleExecutor,
           this.cursorManager,

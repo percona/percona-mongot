@@ -722,7 +722,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
     Index index = indexGeneration.getIndex();
     DefaultDocumentIndexer indexer = DefaultDocumentIndexer.create(initializedIndex.get());
     PeriodicIndexCommitter committer =
-        new PeriodicIndexCommitter(index, indexer, this.commitExecutor, this.commitInterval);
+        PeriodicIndexCommitter.create(index, indexer, this.commitExecutor, this.commitInterval);
 
     ReplicationIndexManager indexManager =
         this.replicationIndexManagerFactory.create(

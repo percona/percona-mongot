@@ -355,7 +355,6 @@ public class MaterializedViewManagerTest {
     mocks.manager.shutdown().get(5, TimeUnit.SECONDS);
     verify(materializedViewGenerator1).shutdown();
     verify(materializedViewGenerator2).shutdown();
-    verify(mocks.commitExecutor).shutdown();
     verify(mocks.executorService).shutdown();
   }
 
@@ -426,7 +425,6 @@ public class MaterializedViewManagerTest {
     }
 
     // Verify all components were shut down
-    verify(mocks.commitExecutor).shutdown();
     verify(mocks.executorService).shutdown();
   }
 
@@ -3116,7 +3114,6 @@ public class MaterializedViewManagerTest {
     final InitialSyncQueue initialSyncQueue;
     final SteadyStateManager steadyStateManager;
     final MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory;
-    final NamedScheduledExecutorService commitExecutor;
     final NamedScheduledExecutorService heartbeatExecutor;
     final Supplier<MaterializedViewManager> managerSupplier;
     final DecodingWorkScheduler decodingScheduler;
@@ -3139,7 +3136,6 @@ public class MaterializedViewManagerTest {
         InitialSyncQueue initialSyncQueue,
         SteadyStateManager steadyStateManager,
         MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory,
-        NamedScheduledExecutorService commitExecutor,
         NamedScheduledExecutorService heartbeatExecutor,
         NamedScheduledExecutorService statusRefreshExecutor,
         NamedScheduledExecutorService optimeUpdaterExecutor,
@@ -3154,7 +3150,6 @@ public class MaterializedViewManagerTest {
       this.initialSyncQueue = initialSyncQueue;
       this.steadyStateManager = steadyStateManager;
       this.materializedViewGeneratorFactory = materializedViewGeneratorFactory;
-      this.commitExecutor = commitExecutor;
       this.heartbeatExecutor = heartbeatExecutor;
       this.statusRefreshExecutor = statusRefreshExecutor;
       this.optimeUpdaterExecutor = optimeUpdaterExecutor;
@@ -3188,7 +3183,6 @@ public class MaterializedViewManagerTest {
                   autoEmbeddingMongoClient,
                   decodingScheduler,
                   materializedViewGeneratorFactory,
-                  commitExecutor,
                   heartbeatExecutor,
                   statusRefreshExecutor,
                   optimeUpdaterExecutor,
@@ -3237,8 +3231,6 @@ public class MaterializedViewManagerTest {
       when(materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
       when(indexingWorkSchedulerFactory.getIndexingWorkSchedulers()).thenReturn(Map.of());
 
-      NamedScheduledExecutorService commitExecutor = mockScheduledExecutor("index-commit");
-
       NamedScheduledExecutorService heartbeatExecutor =
           mockScheduledExecutor("mat-view-leader-heartbeat");
 
@@ -3274,7 +3266,6 @@ public class MaterializedViewManagerTest {
           initialSyncQueue,
           steadyStateManager,
           materializedViewGeneratorFactory,
-          commitExecutor,
           heartbeatExecutor,
           statusRefreshExecutor,
           optimeUpdaterExecutor,
@@ -3320,8 +3311,6 @@ public class MaterializedViewManagerTest {
       when(materializedViewGeneratorFactory.shutdown())
           .thenReturn(CompletableFuture.completedFuture(null));
       when(indexingWorkSchedulerFactory.getIndexingWorkSchedulers()).thenReturn(Map.of());
-
-      NamedScheduledExecutorService commitExecutor = mockScheduledExecutor("index-commit");
 
       NamedScheduledExecutorService heartbeatExecutor =
           mockScheduledExecutor("mat-view-leader-heartbeat");
@@ -3372,7 +3361,6 @@ public class MaterializedViewManagerTest {
           initialSyncQueue,
           steadyStateManager,
           materializedViewGeneratorFactory,
-          commitExecutor,
           heartbeatExecutor,
           statusRefreshExecutor,
           optimeUpdaterExecutor,
@@ -3458,7 +3446,6 @@ public class MaterializedViewManagerTest {
           mock(SteadyStateManager.class),
           mockGeneratorFactory,
           mock(NamedScheduledExecutorService.class),
-          mock(NamedScheduledExecutorService.class),
           statusRefreshScheduler, // statusRefreshExecutor - captures runnable
           optimeUpdaterScheduler, // optimeUpdaterExecutor - separate mock
           mockLeaseManager,
@@ -3503,8 +3490,6 @@ public class MaterializedViewManagerTest {
       MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
           mock(MaterializedViewManager.MaterializedViewGeneratorFactory.class);
 
-      NamedScheduledExecutorService commitExecutor = mockScheduledExecutor("index-commit");
-
       NamedScheduledExecutorService heartbeatExecutor =
           mockScheduledExecutor("mat-view-leader-heartbeat");
 
@@ -3548,7 +3533,6 @@ public class MaterializedViewManagerTest {
           initialSyncQueue,
           steadyStateManager,
           materializedViewGeneratorFactory,
-          commitExecutor,
           heartbeatExecutor,
           statusRefreshExecutor,
           optimeUpdaterExecutor,
@@ -3585,7 +3569,6 @@ public class MaterializedViewManagerTest {
           .thenReturn(CompletableFuture.completedFuture(null));
       when(materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
 
-      NamedScheduledExecutorService commitExecutor = mockScheduledExecutor("index-commit");
       NamedScheduledExecutorService heartbeatExecutor =
           mockScheduledExecutor("mat-view-leader-heartbeat");
       NamedScheduledExecutorService optimeUpdaterExecutor =
@@ -3639,7 +3622,6 @@ public class MaterializedViewManagerTest {
           initialSyncQueue,
           steadyStateManager,
           materializedViewGeneratorFactory,
-          commitExecutor,
           heartbeatExecutor,
           statusRefreshExecutor,
           optimeUpdaterExecutor,
