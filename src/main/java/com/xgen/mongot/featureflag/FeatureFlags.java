@@ -267,4 +267,28 @@ public class FeatureFlags implements DocumentEncodable {
         .enable(Feature.NESTED_VECTOR)
         .build();
   }
+
+  /**
+   * Returns the Community mongot feature-flag defaults
+   */
+  public static FeatureFlags communityDefaults() {
+    return FeatureFlags.withDefaults()
+        .enable(Feature.FACETING_OVER_TOKEN_FIELDS)
+        .enable(Feature.NEW_EMBEDDED_SEARCH_CAPABILITIES)
+        .enable(Feature.ACCURATE_NUM_EMBEDDED_ROOT_DOCS_METRIC)
+        .enable(Feature.INDEX_FEATURE_VERSION_FOUR)
+        .enable(Feature.SORTED_INDEX)
+        .enable(Feature.STALE_STATE_TRANSITION)
+        .enable(Feature.RETAIN_FAILED_INDEX_DATA_ON_DISK)
+        .enable(Feature.REMOVE_ABSENT_INDEXES_BEFORE_INITIALIZATION)
+        .enable(Feature.SHUT_DOWN_REPLICATION_WHEN_COLLECTION_NOT_FOUND)
+        .enable(Feature.FLOOR_SEGMENT_MB)
+        .enable(Feature.TRUNCATE_AUTOCOMPLETE_TOKENS)
+        .enable(Feature.FTDC_EXECUTOR_METRICS_TO_PROMETHEUS)
+        .enable(Feature.INDEX_SIZE_QUANTIZATION_METRICS)
+        .enable(Feature.CACHE_WARMER)
+        .enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH)
+        .enable(Feature.CANCEL_MERGE)
+        .build();
+  }
 }

@@ -987,7 +987,7 @@ public class CommunityMongotBootstrapper {
 
     var indexDefinitionConfig = IndexDefinitionConfig.getDefault();
     var lifecycleConfig = LifecycleConfig.getDefault();
-    var featureFlags = FeatureFlags.withQueryFeaturesEnabled();
+    var featureFlags = FeatureFlags.communityDefaults();
     var environmentVariantPerfConfig = EnvironmentVariantPerfConfig.getDefault();
     var regularBlockingRequestSettings = RegularBlockingRequestSettings.defaults();
 
