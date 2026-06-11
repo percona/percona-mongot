@@ -78,6 +78,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -914,13 +915,17 @@ public class MaterializedViewManager implements ReplicationManager {
   }
 
   /**
-   * Handles the drop of a materialized view collection by reference counting UUID. Handles both
-   * drop MaterializedView collection and corresponding Lease document
+   * Tears down this mongot's local state for a dropped generation. When this was the last local
+   * user of the MV collection (UUID ref-count hits 0), it decides whether to reclaim the shared MV
+   * collection + lease now, or leave them for the leaderless stale-lease GC. {@code dropIndex} is
+   * only reached via the config-driven removal path, which means either:
    *
-   * <p>Leader mode: Shuts down the generator, drops the materialized view collection and cleans up
-   * lease entry.
-   *
-   * <p>Follower mode: Shuts down the generator and clean up lease entry in memory.
+   * <ul>
+   *   <li><b>autoEmbed-field update (supersession)</b> -- a newer lease for the same indexId
+   *       survives. Leave the shared collection + lease; reclaiming them is gated on every mongot
+   *       flipping off the old version, which only the GC can safely observe.
+   *   <li><b>index deletion</b> -- no surviving sibling lease, so the leader drops both now.
+   * </ul>
    */
   private synchronized CompletableFuture<Void> cleanUpMatViewResources(GenerationId generationId) {
     var metadata = this.matViewMetadataCatalog.getMetadataIfPresent(generationId);
@@ -949,11 +954,9 @@ public class MaterializedViewManager implements ReplicationManager {
           .log("Other generations still active on this MatView collection, skipping drop");
       return COMPLETED_FUTURE;
     }
-    // No other generationIds are using this matview UUID, good to drop the collection.
-    LOG.atInfo()
-        .addKeyValue("generationId", generationId)
-        .addKeyValue("collectionName", metadata.get().collectionName())
-        .log("Dropping lease and materialized view collection");
+    // Last local user of this MV collection: tear down local state below, then decide whether to
+    // reclaim the shared MV collection + lease now or leave them for the stale-lease GC.
+    String leaseKey = metadata.get().collectionName();
     this.activeGenerationIdCatalog.genIdByMatViewCollection.remove(uuid);
     var generator = this.managedMaterializedViewGenerators.remove(uuid);
     var lastMaterializedViewIndexGeneration =
@@ -962,32 +965,74 @@ public class MaterializedViewManager implements ReplicationManager {
       // same UUID should already be dropped.
       LOG.atWarn()
           .addKeyValue("generationId", generationId)
-          .addKeyValue("collectionName", metadata.get().collectionName())
+          .addKeyValue("collectionName", leaseKey)
           .log("Generator and last generation both null, MatView collection may be dropped");
       return COMPLETED_FUTURE;
     }
     var materializedViewIndexGeneration =
         generator != null ? generator.getIndexGeneration() : lastMaterializedViewIndexGeneration;
-    // Checks both generator and leaseManager, since we may dropIndex when sync source changes.
+    // Re-derive leadership from the lease, not the generator: the generator may already be shut
+    // down (e.g. a prior sync-source transition) when this config-driven drop arrives.
     boolean wasLeader =
         this.leaseManager.isLeader(materializedViewIndexGeneration.getGenerationId());
-    // Stop heartbeats immediately by removing from leaderGenerationIds. This must happen AFTER
-    // capturing wasLeader (so we still know to drop the MV collection) but BEFORE the async
-    // cleanup chain (so heartbeats stop while generator shutdown and MV drop are in progress).
-    // The call is idempotent — cleanUpGenerationIdStates() will call leaseManager.drop() again,
-    // which is a safe no-op on ConcurrentHashMap.
+    // Stop this mongot's heartbeat now (remove from leaderGenerationIds) so the old lease can
+    // expire for GC. Idempotent -- cleanUpGenerationIdStates calls drop() again.
     this.leaseManager.drop(materializedViewIndexGeneration.getGenerationId());
     CompletableFuture<Void> generatorShutdownFuture =
-        generator != null ? generator.shutdown() : COMPLETED_FUTURE;
+        (generator != null ? generator.shutdown() : COMPLETED_FUTURE)
+            .exceptionally(
+                throwable -> {
+                  LOG.error(
+                      "Failed to shutdown generator for {}, ignore it for now.",
+                      generationId,
+                      throwable);
+                  return null;
+                });
+
+    // Distinguish why this generation was dropped (only the config-driven removal path reaches
+    // dropIndex):
+    //   - supersession (autoEmbed-field update or ops aev bump): the index moved to a new MV
+    //     collection, whose generation is still registered in the local active catalog (the
+    //     flip ordering guarantees add(newGen) ran before dropIndex(oldGen)). Retiring the old
+    //     MV is safe only once every mongot has flipped off it -- which no single mongot can
+    //     observe -- so leave the shared collection + lease for the stale-lease GC (keyed on
+    //     lease-expiration age). A laggard still on the old version re-elects itself and keeps
+    //     the lease renewed until then.
+    //   - deletion: no other active generation for this index, so drop now.
+    // Keyed on catalog presence rather than definition versions or generator state: an ops aev
+    // bump changes no definition version (so version comparison cannot see it), a sibling whose
+    // retirement already completed has left the catalog (so it does not block a later genuine
+    // deletion), and a state check would misfire if the new generator failed between the flip
+    // and this drop. Known gap: an index deletion arriving mid-flip (both generations still
+    // registered) takes the supersession branch for the first-dropped generation, leaving one
+    // extra MV collection + lease for the stale-lease GC -- conservative (never a wrong drop),
+    // but avoidable garbage.
+    // TODO(CLOUDP-412446): replace this heuristic with an explicit deletion-vs-retirement drop
+    // reason plumbed from DesiredConfigStateUpdater.dropDeletedIndexes.
+    ObjectId indexId = generationId.indexId;
+    boolean supersededByNewMatView =
+        this.activeGenerationIdCatalog.genIdByMatViewCollection.values().stream()
+            .flatMap(Set::stream)
+            .anyMatch(genId -> indexId.equals(genId.indexId));
+
+    if (supersededByNewMatView) {
+      LOG.atInfo()
+          .addKeyValue("generationId", generationId)
+          .addKeyValue("collectionName", leaseKey)
+          .addKeyValue("wasLeader", wasLeader)
+          .log(
+              "Index has an active generation on a newer MV collection; leaving this MV "
+                  + "collection and lease for the stale-lease GC instead of dropping now");
+      return generatorShutdownFuture;
+    }
+
+    // No other active generation for this index: a genuine deletion. Safe to drop the shared MV
+    // collection (leader only) and the lease now.
+    LOG.atInfo()
+        .addKeyValue("generationId", generationId)
+        .addKeyValue("collectionName", leaseKey)
+        .log("Dropping lease and materialized view collection");
     return generatorShutdownFuture
-        .exceptionally(
-            throwable -> {
-              LOG.error(
-                  "Failed to shutdown generator for {}, ignore it for now.",
-                  generationId,
-                  throwable);
-              return null;
-            })
         .thenComposeAsync(
             ignored -> {
               if (wasLeader) {
@@ -1007,7 +1052,7 @@ public class MaterializedViewManager implements ReplicationManager {
               }
               return COMPLETED_FUTURE;
             })
-        .thenComposeAsync(ignored -> this.leaseManager.dropLease(metadata.get().collectionName()));
+        .thenComposeAsync(ignored -> this.leaseManager.dropLease(leaseKey));
   }
 
   @Override

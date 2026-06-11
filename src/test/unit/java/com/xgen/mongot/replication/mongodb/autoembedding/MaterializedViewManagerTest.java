@@ -14,6 +14,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
@@ -92,6 +93,7 @@ import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
@@ -725,6 +727,61 @@ public class MaterializedViewManagerTest {
 
     // setStatus should NOT be called because the generator is a leader.
     verify(matViewIndexGen.getIndex(), never()).setStatus(any(IndexStatus.class));
+  }
+
+  // ==================== Drop discriminator (supersession vs deletion) ====================
+  //
+  // Last local user of an MV collection: another active generation for the same indexId on a
+  // different MV collection means supersession (leave collection + lease for the GC); none means
+  // deletion (drop both now).
+
+  @Test
+  public void dropIndex_aevBumpSupersession_leavesMvCollectionAndLeaseForGc() throws Exception {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    // Sibling generation for the SAME index after an ops autoEmbeddingDefinitionVersion bump:
+    // the definition (and so definitionVersion, here 0 for both) is unchanged -- only the MV
+    // collection differs. The conf push adds the new generation before the old one is dropped.
+    MaterializedViewGenerationId siblingGenId =
+        new MaterializedViewGenerationId(
+            MOCK_MAT_VIEW_GENERATION_ID.indexId,
+            MOCK_MAT_VIEW_GENERATION_ID.generation.incrementUser());
+    registerSiblingCollection(
+        mocks.metadataCatalog, siblingGenId, "test_" + INDEX_ID.toHexString() + "_aev1");
+    MaterializedViewIndexGeneration siblingGen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(siblingGenId));
+    mocks.mockMaterializedViewGenerator(siblingGen);
+    mocks.addIndexForReplication(siblingGen);
+
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    // Local cleanup still happens: generator shut down, and this mongot's heartbeat stopped.
+    verify(generator).shutdown();
+    verify(mocks.leaseManager, atLeast(1)).drop(MOCK_MAT_VIEW_GENERATION_ID);
+    // The shared MV collection + lease are left for the stale-lease GC, not dropped here.
+    verify(gen.getIndex().getWriter(), never()).dropMaterializedViewCollection();
+    verify(mocks.leaseManager, never()).dropLease(any(String.class));
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_dropsMvCollectionAndLease() throws Exception {
+    Mocks mocks = Mocks.create(); // leaseManager.isLeader() returns true by default
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    // No other active generation for this index -> genuine deletion.
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    verify(generator).shutdown();
+    // Leader drops the shared MV collection, then the lease document.
+    verify(gen.getIndex().getWriter()).dropMaterializedViewCollection();
+    verify(mocks.leaseManager).dropLease("test_" + INDEX_ID.toHexString());
   }
 
   @Test
@@ -3713,5 +3770,32 @@ public class MaterializedViewManagerTest {
                       "test_" + id.indexId.toHexString()));
             });
     return catalog;
+  }
+
+  /**
+   * Stubs the mock metadata catalog so all generations sharing {@code matViewGenId}'s user index
+   * version map to their own MV collection (distinct name and UUID), overriding the default
+   * indexId-only mapping of {@link #createMockMetadataCatalog()}. This models an ops
+   * autoEmbeddingDefinitionVersion bump, where the index moves to a new MV collection while the
+   * definition is otherwise unchanged.
+   */
+  private static void registerSiblingCollection(
+      MaterializedViewCollectionMetadataCatalog catalog,
+      MaterializedViewGenerationId matViewGenId,
+      String collectionName) {
+    UUID uuid = UUID.nameUUIDFromBytes(collectionName.getBytes(StandardCharsets.UTF_8));
+    MaterializedViewCollectionMetadata metadata =
+        new MaterializedViewCollectionMetadata(
+            new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(0, Map.of()),
+            uuid,
+            collectionName);
+    ArgumentMatcher<GenerationId> sameUserVersion =
+        id ->
+            id != null
+                && id.indexId.equals(matViewGenId.indexId)
+                && id.generation.userIndexVersion == matViewGenId.generation.userIndexVersion;
+    when(catalog.getMetadata(argThat(sameUserVersion))).thenReturn(metadata);
+    when(catalog.getMetadataIfPresent(argThat(sameUserVersion)))
+        .thenReturn(Optional.of(metadata));
   }
 }
