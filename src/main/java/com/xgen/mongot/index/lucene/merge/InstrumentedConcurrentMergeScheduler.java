@@ -311,6 +311,7 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
   private final Timer mergeTime;
   private final Timer mergeCancellationTime;
   private final Counter numMergesAborted;
+  private final Counter numMergePauseEvents;
   // If our GenerationId is the only reference back to a particular index it is fine to GC.
   private final WeakHashMap<GenerationId, MergeStopwatch> mergeElapsedStopwatches;
 
@@ -466,6 +467,8 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
     this.numMergesAborted =
         this.metricsFactory.counter(
             LuceneMeterData.NUM_MERGES_ABORTED_KEY, Tags.of(luceneTag));
+    this.numMergePauseEvents =
+        this.metricsFactory.counter(LuceneMeterData.MERGE_PAUSE_EVENTS_KEY, Tags.of(luceneTag));
     this.mergeElapsedStopwatches = new WeakHashMap<>();
 
     this.mergeAttribution =
@@ -833,7 +836,8 @@ public class InstrumentedConcurrentMergeScheduler extends ConcurrentMergeSchedul
     }
     // Wrap with PausableDirectory for disk-based pause/resume support
     // This allows merges to block when disk usage is high and resume when it drops
-    @Var Directory wrapped = new PausableDirectory(in, this.mergeGate);
+    @Var Directory wrapped =
+        new PausableDirectory(in, this.mergeGate, this.numMergePauseEvents::increment);
 
     // Then wrap with AbortableDirectory to enable IO-level interruption
     // This allows merges to be aborted quickly even during long-running operations

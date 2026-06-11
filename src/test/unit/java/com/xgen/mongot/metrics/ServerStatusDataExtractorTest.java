@@ -136,6 +136,11 @@ public class ServerStatusDataExtractorTest {
             LuceneMeterData.NUM_MERGES_ABORTED_KEY,
             Tags.of(ServerStatusDataExtractor.Scope.LUCENE.getTag()))
         .increment(2);
+    this.meterRegistry
+        .counter(
+            LuceneMeterData.MERGE_PAUSE_EVENTS_KEY,
+            Tags.of(ServerStatusDataExtractor.Scope.LUCENE.getTag()))
+        .increment(7);
 
     var luceneMeterData = new ServerStatusDataExtractor(this.meterRegistry).createLuceneMeterData();
 
@@ -164,6 +169,7 @@ public class ServerStatusDataExtractorTest {
         SerializableTimerBuilder.builder().count(1).totalTime(0.1).max(0.1).mean(0.1).build(),
         luceneMeterData.mergeCancellationTime);
     Assert.assertEquals(2.0, luceneMeterData.numMergesAborted, 0.0);
+    Assert.assertEquals(7.0, luceneMeterData.numMergePauseEvents, 0.0);
     Assert.assertEquals((Integer) 5, this.meterRegistry.gauge("currentlyMergingDocs", 5));
   }
 

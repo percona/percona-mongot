@@ -171,6 +171,7 @@ public class ServerStatusDataExtractor {
     public static final String SEGMENT_MERGE_TIME_KEY = "mergeTime";
     public static final String MERGE_CANCELLATION_TIME_KEY = "mergeCancellationTime";
     public static final String NUM_MERGES_ABORTED_KEY = "numMergesAborted";
+    public static final String MERGE_PAUSE_EVENTS_KEY = "numMergePauseEvents";
 
     public final double numMerges;
     public final double numSegmentsMerged;
@@ -180,6 +181,7 @@ public class ServerStatusDataExtractor {
     public final SerializableTimer segmentMerge;
     public final SerializableTimer mergeCancellationTime;
     public final double numMergesAborted;
+    public final double numMergePauseEvents;
 
     @VisibleForTesting
     public LuceneMeterData(
@@ -190,7 +192,8 @@ public class ServerStatusDataExtractor {
         SerializableDistributionSummary mergedDocs,
         SerializableTimer segmentMerge,
         SerializableTimer mergeCancellationTime,
-        double numMergesAborted) {
+        double numMergesAborted,
+        double numMergePauseEvents) {
       this.numMerges = numMerges;
       this.numSegmentsMerged = numSegmentsMerged;
       this.mergeSize = mergeSize;
@@ -199,6 +202,7 @@ public class ServerStatusDataExtractor {
       this.segmentMerge = segmentMerge;
       this.mergeCancellationTime = mergeCancellationTime;
       this.numMergesAborted = numMergesAborted;
+      this.numMergePauseEvents = numMergePauseEvents;
     }
 
     private static LuceneMeterData create(MeterExtractorFactory meterExtractorFactory) {
@@ -222,6 +226,8 @@ public class ServerStatusDataExtractor {
               meterExtractorFactory.create(MERGE_CANCELLATION_TIME_KEY).getSingleMeter());
       var numMergesAborted =
           getMeterCount(meterExtractorFactory.create(NUM_MERGES_ABORTED_KEY).getSingleMeter());
+      var numMergePauseEvents =
+          getMeterCount(meterExtractorFactory.create(MERGE_PAUSE_EVENTS_KEY).getSingleMeter());
 
       return new LuceneMeterData(
           numMerges,
@@ -231,7 +237,8 @@ public class ServerStatusDataExtractor {
           mergedDocs,
           segmentMergeTimer,
           mergeCancellationTimer,
-          numMergesAborted);
+          numMergesAborted,
+          numMergePauseEvents);
     }
   }
 
