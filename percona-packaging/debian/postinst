@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+install -d -m 0750 -o root -g mongod /etc/mongot/secrets
+
 chown -R mongod:mongod /var/lib/mongot
 chown -R mongod:mongod /var/log/mongot
 chown -R root:mongod   /etc/mongot

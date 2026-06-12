@@ -41,7 +41,9 @@ override_dh_auto_install:
 	install -m 0640 percona-packaging/conf/mongot.yml       $(TMP)/etc/mongot/mongot.yml
 	install -m 0640 percona-packaging/conf/mongot.env       $(TMP)/etc/default/mongot
 	install -m 0644 percona-packaging/conf/mongot.logrotate $(TMP)/etc/logrotate.d/mongot
-	install -m 0644 percona-packaging/conf/mongot.service   $(TMP)/lib/systemd/system/mongot.service
+	sed 's:/etc/sysconfig/mongot:/etc/default/mongot:' \
+	    percona-packaging/conf/mongot.service > $(TMP)/lib/systemd/system/mongot.service
+	chmod 0644 $(TMP)/lib/systemd/system/mongot.service
 
 override_dh_systemd_start:
 	dh_systemd_enable --name=mongot mongot.service

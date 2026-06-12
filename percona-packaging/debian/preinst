@@ -3,6 +3,11 @@ set -e
 
 if ! getent passwd mongod >/dev/null 2>&1; then
     adduser --system --no-create-home --group --home /var/lib/mongo --shell /bin/false mongod
+    # mongot-only host: PSMDB is not present to create mongod's home, so the JVM
+    # would warn about a missing user.home. Create it; do nothing if mongod
+    # already exists (PSMDB owns /var/lib/mongo in that case).
+    mkdir -p /var/lib/mongo
+    chown mongod:mongod /var/lib/mongo
 fi
 
 #DEBHELPER#

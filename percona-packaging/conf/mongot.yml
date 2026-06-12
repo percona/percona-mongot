@@ -4,6 +4,18 @@ syncSource:
   replicaSet:
     hostAndPort: "localhost:27017"
     username: mongotUser
+    # Bootstrap before first start (the service crash-loops until this is done):
+    #   1. Create the secret file (mongot enforces owner-only perms) and fill it.
+    #      This generates one; swap in your own secret manager if you prefer:
+    #        install -m 0400 -o mongod -g mongod /dev/null /etc/mongot/secrets/passwordFile
+    #        openssl rand -base64 32 | tr -d '\n' > /etc/mongot/secrets/passwordFile
+    #   2. On mongod, create the user mongot authenticates as, with that password
+    #      (cat /etc/mongot/secrets/passwordFile):
+    #        db.getSiblingDB("admin").createUser({
+    #          user: "mongotUser", pwd: "<contents of the file above>",
+    #          roles: [{ role: "searchCoordinator", db: "admin" }] })
+    # Health: curl http://127.0.0.1:8080/health
+    # Logs:   journalctl -u mongot  (or a file, if logging.logPath is enabled below)
     passwordFile: "/etc/mongot/secrets/passwordFile"
     tls: false
 storage:
@@ -20,3 +32,5 @@ healthCheck:
   address: "localhost:8080"
 logging:
   verbosity: INFO
+  # Uncomment to log to a file instead of journald.
+  #logPath: /var/log/mongot/mongot.log

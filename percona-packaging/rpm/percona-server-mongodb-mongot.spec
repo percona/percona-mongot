@@ -54,6 +54,7 @@ rm -rf $RPM_BUILD_ROOT
 install -m 0755 -d $RPM_BUILD_ROOT/usr/lib/percona-server-mongodb-mongot
 install -m 0755 -d $RPM_BUILD_ROOT%{_bindir}
 install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot
+install -m 0750 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot/secrets
 install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig
 install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d
 install -m 0750 -d $RPM_BUILD_ROOT%{_sharedstatedir}/mongot
@@ -77,8 +78,14 @@ install -m 0644 percona-packaging/conf/mongot.service $RPM_BUILD_ROOT%{_unitdir}
 
 %pre
 /usr/bin/getent group mongod  >/dev/null || /usr/sbin/groupadd -r mongod
-/usr/bin/getent passwd mongod >/dev/null || \
+if ! /usr/bin/getent passwd mongod >/dev/null; then
     /usr/sbin/useradd -M -r -g mongod -d /var/lib/mongo -s /bin/false -c mongod mongod
+    # mongot-only host: PSMDB is not present to create mongod's home, so the JVM
+    # would warn about a missing user.home. Create it; do nothing if mongod
+    # already exists (PSMDB owns /var/lib/mongo in that case).
+    mkdir -p /var/lib/mongo
+    chown mongod:mongod /var/lib/mongo
+fi
 
 %post
 %if 0%{?systemd}
@@ -89,6 +96,7 @@ fi
 %endif
 chown -R mongod:mongod %{_sharedstatedir}/mongot
 chown -R mongod:mongod %{_localstatedir}/log/mongot
+install -d -m 0750 -o root -g mongod %{_sysconfdir}/mongot/secrets
 chown -R root:mongod   %{_sysconfdir}/mongot
 chmod 0750             %{_sysconfdir}/mongot
 
@@ -107,6 +115,7 @@ chmod 0750             %{_sysconfdir}/mongot
 /usr/lib/percona-server-mongodb-mongot
 %{_bindir}/mongot
 %dir %attr(0750, root, mongod) %{_sysconfdir}/mongot
+%dir %attr(0750, root, mongod) %{_sysconfdir}/mongot/secrets
 %config(noreplace) %attr(0640, root, mongod) %{_sysconfdir}/mongot/mongot.yml
 %config(noreplace) %attr(0640, root, root)   %{_sysconfdir}/sysconfig/mongot
 %{_sysconfdir}/logrotate.d/mongot

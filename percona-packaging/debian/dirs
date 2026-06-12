@@ -1,2 +1,3 @@
+etc/mongot/secrets
 var/lib/mongot
 var/log/mongot
