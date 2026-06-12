@@ -4,6 +4,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata.VERSION_ZERO;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewIndexGeneration;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -11,6 +12,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoWriteException;
 import com.mongodb.ServerAddress;
 import com.mongodb.WriteError;
@@ -40,6 +42,7 @@ import com.xgen.testing.mongot.metrics.SimpleMetricsFactory;
 import com.xgen.testing.mongot.mock.index.MaterializedViewIndex;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,6 +56,7 @@ import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * Unit tests for {@link DynamicLeaderLeaseManager}.
@@ -1460,6 +1464,209 @@ public class DynamicLeaderLeaseManagerTest {
                 .count())
         .isEqualTo(1.0);
     assertThat(manager.getLeases()).isEmpty();
+  }
+
+  // ==================== findGcCandidates ====================
+
+  @Test
+  public void findGcCandidates_returnsLeases_andRegistersDatabaseMapping() {
+    String collectionName = "gc-orphan-collection";
+    Lease lease = createLeaseWithMatViewUuid(collectionName, UUID.randomUUID());
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(lease.toBson());
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+
+    List<Lease> candidates = this.leaseManager.findGcCandidates(Instant.now());
+
+    assertThat(candidates).hasSize(1);
+    assertThat(candidates.get(0).id()).isEqualTo(collectionName);
+    // The lease→database mapping must be registered even though no configured generation ever
+    // added this lease, so a follow-up markEligibleForCleanup can resolve the database.
+    assertThat(this.leaseManager.getLeaseKeyToDatabase()).containsKey(collectionName);
+    assertThat(this.leaseManager.getLeaseKeyToDatabase().get(collectionName))
+        .isEqualTo(DATABASE_NAME);
+  }
+
+  @Test
+  public void findGcCandidates_queriesByExpirationBeforeCutoff() {
+    Instant cutoff = Instant.parse("2026-01-01T00:00:00Z");
+
+    this.leaseManager.findGcCandidates(cutoff);
+
+    ArgumentCaptor<Bson> filterCaptor = ArgumentCaptor.forClass(Bson.class);
+    verify(this.mockCollection).find(filterCaptor.capture());
+    BsonDocument filter =
+        filterCaptor
+            .getValue()
+            .toBsonDocument(BsonDocument.class, MongoClientSettings.getDefaultCodecRegistry());
+    assertThat(filter.getDocument("leaseExpiration").getDateTime("$lt").getValue())
+        .isEqualTo(cutoff.toEpochMilli());
+  }
+
+  @Test
+  public void findGcCandidates_skipsCorruptedLeases() {
+    Lease good = createLeaseWithMatViewUuid("good-collection", UUID.randomUUID());
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(new BsonDocument("_id", new BsonString("corrupted")));
+    leaseList.add(good.toBson());
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+
+    List<Lease> candidates = this.leaseManager.findGcCandidates(Instant.now());
+
+    assertThat(candidates).hasSize(1);
+    assertThat(candidates.get(0).id()).isEqualTo("good-collection");
+  }
+
+  @Test
+  public void findGcCandidates_queryFailure_returnsEmpty() {
+    when(this.mockCollection.find(any(Bson.class))).thenThrow(new RuntimeException("find failed"));
+
+    assertThat(this.leaseManager.findGcCandidates(Instant.now())).isEmpty();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void findGcCandidates_scansTenantDatabasesKnownToThisManager() {
+    // On multi-tenant clusters each source database resolves to its own internal database; the
+    // scan must cover every internal database the manager has learned, not just the default.
+    String tenantDb = "tenantA-" + DATABASE_NAME;
+    InternalDatabaseResolver tenantResolver =
+        new InternalDatabaseResolver() {
+          @Override
+          public String resolve(String sourceDatabaseName) {
+            return tenantDb;
+          }
+
+          @Override
+          public String resolveDefault() {
+            return DATABASE_NAME;
+          }
+        };
+
+    // Tenant database mocks: one orphaned lease lives there; the default database has none.
+    MongoClient mongoClient =
+        this.mockAutoEmbeddingMongoClient.getLeaseManagerMongoClient().orElseThrow();
+    MongoDatabase tenantDatabase = mock(MongoDatabase.class);
+    MongoCollection<BsonDocument> tenantCollection = mock(MongoCollection.class);
+    FindIterable<BsonDocument> tenantFindIterable = mock(FindIterable.class);
+    when(mongoClient.getDatabase(tenantDb)).thenReturn(tenantDatabase);
+    when(tenantDatabase.getCollection(
+            DynamicLeaderLeaseManager.LEASE_COLLECTION_NAME, BsonDocument.class))
+        .thenReturn(tenantCollection);
+    when(tenantCollection.withReadConcern(any())).thenReturn(tenantCollection);
+    when(tenantCollection.withReadPreference(any())).thenReturn(tenantCollection);
+    when(tenantCollection.withWriteConcern(any())).thenReturn(tenantCollection);
+    when(tenantCollection.find(any(Bson.class))).thenReturn(tenantFindIterable);
+    Lease tenantLease = createLeaseWithMatViewUuid("tenant-orphan-lease", UUID.randomUUID());
+    ArrayList<BsonDocument> tenantLeases = new ArrayList<>();
+    tenantLeases.add(tenantLease.toBson());
+    when(tenantFindIterable.into(any())).thenReturn(tenantLeases);
+
+    DynamicLeaderLeaseManager manager =
+        new DynamicLeaderLeaseManager(
+            this.mockAutoEmbeddingMongoClient,
+            new SimpleMetricsFactory(),
+            HOSTNAME,
+            tenantResolver,
+            this.mvMetadataCatalog);
+    // A configured generation teaches the manager the tenant's internal database.
+    manager.add(createTestIndexGeneration());
+
+    List<Lease> candidates = manager.findGcCandidates(Instant.now());
+
+    assertThat(candidates.stream().anyMatch(c -> c.id().equals("tenant-orphan-lease"))).isTrue();
+    // The orphan's mapping points at the tenant database it was found in.
+    assertThat(manager.getLeaseKeyToDatabase().get("tenant-orphan-lease")).isEqualTo(tenantDb);
+    // Completeness of the restriction: across the whole test only the default database and the
+    // single learned tenant database were ever touched — no other tenant is queried.
+    ArgumentCaptor<String> dbCaptor = ArgumentCaptor.forClass(String.class);
+    verify(mongoClient, atLeastOnce()).getDatabase(dbCaptor.capture());
+    assertThat(new HashSet<>(dbCaptor.getAllValues())).containsExactly(DATABASE_NAME, tenantDb);
+  }
+
+  @Test
+  public void findGcCandidates_scansOnlyDatabasesHostingAutoEmbeddingGenerations() {
+    // The scan set is learned from configured generations, never enumerated from the cluster: a
+    // multi-tenant deployment with no auto-embedding generation registered on this mongot sweeps
+    // the default internal database only, regardless of how many tenants exist.
+    MongoClient mongoClient =
+        this.mockAutoEmbeddingMongoClient.getLeaseManagerMongoClient().orElseThrow();
+    clearInvocations(mongoClient);
+
+    this.leaseManager.findGcCandidates(Instant.now());
+
+    ArgumentCaptor<String> dbCaptor = ArgumentCaptor.forClass(String.class);
+    verify(mongoClient, times(1)).getDatabase(dbCaptor.capture());
+    assertThat(dbCaptor.getAllValues()).containsExactly(DATABASE_NAME);
+  }
+
+  // ==================== markEligibleForCleanup ====================
+
+  @Test
+  public void markEligibleForCleanup_modified_returnsTrueAndUpdatesInMemoryLease() {
+    String collectionName = "stale-collection";
+    Lease lease = createLeaseWithMatViewUuid(collectionName, UUID.randomUUID());
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(lease.toBson());
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+    // Registers the database mapping and seeds the in-memory copy.
+    this.leaseManager.findGcCandidates(Instant.now());
+    this.leaseManager.putLease(collectionName, lease);
+
+    UpdateResult updateResult = mock(UpdateResult.class);
+    when(updateResult.getModifiedCount()).thenReturn(1L);
+    when(this.mockCollection.updateOne(any(Bson.class), any(Bson.class)))
+        .thenReturn(updateResult);
+
+    boolean marked = this.leaseManager.markEligibleForCleanup(collectionName, Instant.now());
+
+    assertThat(marked).isTrue();
+    assertThat(this.leaseManager.getLeases().get(collectionName).cleanupState())
+        .isEqualTo(Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+  }
+
+  @Test
+  public void markEligibleForCleanup_occFilterMiss_returnsFalseAndLeavesInMemoryLease() {
+    String collectionName = "fresh-collection";
+    Lease lease = createLeaseWithMatViewUuid(collectionName, UUID.randomUUID());
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(lease.toBson());
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+    this.leaseManager.findGcCandidates(Instant.now());
+    this.leaseManager.putLease(collectionName, lease);
+
+    UpdateResult updateResult = mock(UpdateResult.class);
+    when(updateResult.getModifiedCount()).thenReturn(0L);
+    when(this.mockCollection.updateOne(any(Bson.class), any(Bson.class)))
+        .thenReturn(updateResult);
+
+    boolean marked = this.leaseManager.markEligibleForCleanup(collectionName, Instant.now());
+
+    assertThat(marked).isFalse();
+    assertThat(this.leaseManager.getLeases().get(collectionName).cleanupState())
+        .isEqualTo(Lease.CleanupState.NOT_ELIGIBLE);
+  }
+
+  @Test
+  public void markEligibleForCleanup_unknownLease_returnsFalseWithoutDbWrite() {
+    boolean marked = this.leaseManager.markEligibleForCleanup("never-seen-lease", Instant.now());
+
+    assertThat(marked).isFalse();
+    verify(this.mockCollection, never()).updateOne(any(Bson.class), any(Bson.class));
+  }
+
+  @Test
+  public void markEligibleForCleanup_updateFailure_returnsFalse() {
+    String collectionName = "error-collection";
+    Lease lease = createLeaseWithMatViewUuid(collectionName, UUID.randomUUID());
+    ArrayList<BsonDocument> leaseList = new ArrayList<>();
+    leaseList.add(lease.toBson());
+    when(this.mockFindIterable.into(any())).thenReturn(leaseList);
+    this.leaseManager.findGcCandidates(Instant.now());
+    when(this.mockCollection.updateOne(any(Bson.class), any(Bson.class)))
+        .thenThrow(new RuntimeException("update failed"));
+
+    assertThat(this.leaseManager.markEligibleForCleanup(collectionName, Instant.now())).isFalse();
   }
 
   // ==================== Helper Methods ====================

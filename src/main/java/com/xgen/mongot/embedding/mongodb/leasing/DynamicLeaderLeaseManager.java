@@ -15,6 +15,7 @@ import com.mongodb.ReadPreference;
 import com.mongodb.WriteConcern;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Updates;
 import com.mongodb.client.result.UpdateResult;
 import com.mongodb.lang.Nullable;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
@@ -49,6 +50,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
@@ -656,6 +658,106 @@ public class DynamicLeaderLeaseManager implements LeaseManager {
             e);
         cleanupAfterMetadataLoss(generationId, leaseKey);
       }
+    }
+  }
+
+  /**
+   * The scanned set is the default internal database plus the per-tenant internal databases learned
+   * from configured generations (on multi-tenant clusters each source database resolves to its own
+   * internal database). Tenant databases hosting no auto-embedding generation are never queried —
+   * the set is learned, not enumerated from the cluster — so sweep cost scales with auto-embedding
+   * adoption, not with the cluster's tenant count.
+   */
+  @Override
+  public List<Lease> findGcCandidates(Instant expirationCutoff) {
+    Set<String> databases = new HashSet<>(this.leaseKeyToDatabase.values());
+    databases.add(this.dbResolver.resolveDefault());
+
+    List<Lease> candidates = new ArrayList<>();
+    for (String dbName : databases) {
+      try {
+        List<BsonDocument> rawLeases =
+            this.operationExecutor.execute(
+                "findGcCandidates",
+                () ->
+                    this.getCollection(dbName)
+                        .find(
+                            Filters.lt(
+                                Lease.Fields.LEASE_EXPIRATION.getName(),
+                                new BsonDateTime(expirationCutoff.toEpochMilli())))
+                        .into(new ArrayList<>()));
+        for (BsonDocument rawLease : rawLeases) {
+          try {
+            Lease lease = parseLeaseOrThrow(rawLease);
+            // An orphaned lease has no configured generation to register the mapping, so register
+            // it here for the markEligibleForCleanup that may follow.
+            this.leaseKeyToDatabase.putIfAbsent(lease.id(), dbName);
+            candidates.add(lease);
+          } catch (BsonParseException e) {
+            // parseLeaseOrThrow already incremented corruptedLeaseCounter. Corrupted leases are
+            // invisible to GC; TODO(CLOUDP-384971) owns their cleanup.
+            LOG.atError()
+                .addKeyValue("leaseId", extractLeaseId(rawLease))
+                .setCause(e)
+                .log("Failed to parse lease document during GC candidate scan, skipping");
+          }
+        }
+      } catch (Exception e) {
+        // Best effort: the periodic GC sweep retries on a later tick.
+        LOG.atWarn()
+            .addKeyValue("database", dbName)
+            .setCause(e)
+            .log("Failed to scan database for GC candidate leases");
+      }
+    }
+    return candidates;
+  }
+
+  @Override
+  public boolean markEligibleForCleanup(String leaseKey, Instant expirationCutoff) {
+    String dbName;
+    try {
+      dbName = getDatabaseForLease(leaseKey);
+    } catch (IllegalStateException e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("No database mapping for lease during cleanup mark, skipping");
+      return false;
+    }
+    // Self-guarding OCC: only mark if the lease is still NOT_ELIGIBLE (or a legacy lease with no
+    // cleanupState field) AND its persisted expiration is past the cutoff. The expiration
+    // predicate lives in the filter, so a heartbeat landing between our read and this write makes
+    // it a no-op rather than a wrong mark.
+    String stateField = Lease.Fields.CLEANUP_STATE.getName();
+    var filter =
+        Filters.and(
+            Filters.eq("_id", leaseKey),
+            Filters.or(
+                Filters.eq(stateField, Lease.CleanupState.NOT_ELIGIBLE.name()),
+                Filters.exists(stateField, false)),
+            Filters.lt(
+                Lease.Fields.LEASE_EXPIRATION.getName(),
+                new BsonDateTime(expirationCutoff.toEpochMilli())));
+    var update = Updates.set(stateField, Lease.CleanupState.ELIGIBLE_FOR_CLEANUP.name());
+    try {
+      var result =
+          this.operationExecutor.execute(
+              "markEligibleForCleanup", () -> this.getCollection(dbName).updateOne(filter, update));
+      if (result.getModifiedCount() > 0) {
+        this.leases.computeIfPresent(
+            leaseKey,
+            (k, lease) -> lease.withCleanupState(Lease.CleanupState.ELIGIBLE_FOR_CLEANUP));
+        return true;
+      }
+      return false;
+    } catch (Exception e) {
+      // Best effort: a failed mark just means the scanner retries on a later tick.
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("Failed to mark lease eligible for cleanup");
+      return false;
     }
   }
 
