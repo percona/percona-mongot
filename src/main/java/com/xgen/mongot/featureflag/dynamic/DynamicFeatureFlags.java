@@ -50,7 +50,13 @@ public enum DynamicFeatureFlags {
    * deadlineTimestampMs}) supplied by mongod, failing the query with a timeout error once it
    * elapses. When disabled, the deadline is ignored and queries run to completion.
    */
-  VECTOR_SEARCH_QUERY_TIMEOUT("mongot.featureFlag.enableVectorSearchQueryTimeout", false);
+  VECTOR_SEARCH_QUERY_TIMEOUT("mongot.featureFlag.enableVectorSearchQueryTimeout", false),
+  /**
+   * When enabled, parks (closes) the change-stream cursor of an index that has seen no change
+   * events for the configured inactivity threshold, and reactivates it when activity resumes.
+   * Gates parking behavior only; inactivity detection and logging are always on.
+   */
+  INACTIVE_CURSOR_PARKING("mongot.featureFlag.enableInactiveCursorParking", false);
 
   private final String name;
   private final boolean fallback;
