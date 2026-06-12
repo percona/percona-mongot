@@ -1,7 +1,6 @@
 package com.xgen.mongot.config.provider.community;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 
 import com.google.common.net.HostAndPort;
@@ -20,186 +19,59 @@ public class MongoConnectionConfigTest {
   private static final List<HostAndPort> HOSTS = List.of(HostAndPort.fromParts("localhost", 27017));
 
   private static ReplicaSetConfig config(
-      Optional<String> username, Optional<Path> passwordFile, Optional<X509Config> x509) {
-    return config(username, passwordFile, x509, false);
-  }
-
-  private static ReplicaSetConfig config(
-      Optional<String> username,
-      Optional<Path> passwordFile,
-      Optional<X509Config> x509,
-      boolean tls) {
-    return new ReplicaSetConfig(
-        HOSTS,
-        username,
-        passwordFile,
-        Optional.of(Databases.ADMIN),
-        Optional.of(tls),
-        Optional.empty(),
-        x509,
-        Optional.empty());
+      Optional<X509Config> x509, Optional<ScramConfig> scram) {
+    return new ReplicaSetConfig(HOSTS, x509, scram);
   }
 
   private static X509Config x509(Path certKeyFile) {
     TlsConfig tlsConfig =
-        new TlsConfig(true, Optional.of(certKeyFile), Optional.empty(), Optional.empty());
+        new TlsConfig(
+            true,
+            Optional.of(certKeyFile),
+            Optional.empty(),
+            Optional.of(Path.of("/etc/tls/ca.pem")));
     return new X509Config(tlsConfig);
   }
 
-  /** Valid: username + passwordFile. */
+  /** Valid: x509 only. */
   @Test
-  public void testValidate_UsernameAndPasswordFile_Passes() throws BsonParseException {
+  public void testValidate_x509Only_Passes() throws BsonParseException {
     ReplicaSetConfig cfg =
-        config(Optional.of("user"), Optional.of(Path.of("/etc/passwd")), Optional.empty());
+        config(Optional.of(x509(Path.of("/etc/tls/client.pem"))), Optional.empty());
 
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      cfg.validate(parser, Optional.empty());
+    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
+      cfg.validate(parser);
     }
   }
 
-  /** Valid: x509 + caFile + tls. */
+  /** Valid: scram only. */
   @Test
-  public void testValidate_x509WithCaFileAndTls_Passes() throws BsonParseException {
-    ReplicaSetConfig cfg =
-        config(
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(x509(Path.of("/etc/tls/client.pem"))),
-            true);
+  public void testValidate_scramOnly_Passes() throws BsonParseException {
+    TlsConfig tls = new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
+    ScramConfig scram =
+        new ScramConfig(Databases.ADMIN, "__system", Path.of("/etc/mongot/keyfile"), tls);
+    ReplicaSetConfig cfg = config(Optional.empty(), Optional.of(scram));
 
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      cfg.validate(parser, Optional.of(Path.of("/etc/ca.pem")));
+    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
+      cfg.validate(parser);
     }
   }
 
   @Test
   public void testValidate_x509WithoutTls_ThrowsError() throws BsonParseException {
-    ReplicaSetConfig cfg =
-        config(
-            Optional.empty(), Optional.empty(), Optional.of(x509(Path.of("/etc/tls/client.pem"))));
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      BsonParseException e =
-          assertThrows(
-              BsonParseException.class,
-              () -> cfg.validate(parser, Optional.of(Path.of("/etc/ca.pem"))));
-      assertEquals("tls must be set to true when using x509", e.getMessage());
-    }
-  }
-
-  @Test
-  public void testValidate_x509WithUsername_ThrowsError() throws BsonParseException {
-    ReplicaSetConfig cfg =
-        config(
-            Optional.of("user"),
-            Optional.empty(),
-            Optional.of(x509(Path.of("/etc/tls/client.pem"))));
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      BsonParseException e =
-          assertThrows(
-              BsonParseException.class,
-              () -> cfg.validate(parser, Optional.of(Path.of("/etc/ca.pem"))));
-      assertEquals(
-          "One authentication mechanism must be used (username/passwordFile, x509 or scram)",
-          e.getMessage());
-    }
-  }
-
-  @Test
-  public void testValidate_x509WithPasswordFile_ThrowsError() throws BsonParseException {
-    ReplicaSetConfig cfg =
-        config(
-            Optional.empty(),
-            Optional.of(Path.of("/etc/passwd")),
-            Optional.of(x509(Path.of("/etc/tls/client.pem"))));
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      BsonParseException e =
-          assertThrows(
-              BsonParseException.class,
-              () -> cfg.validate(parser, Optional.of(Path.of("/etc/ca.pem"))));
-      assertEquals("x509 and username/passwordFile cannot be used together", e.getMessage());
-    }
-  }
-
-  @Test
-  public void testValidate_x509WithMultipleCaFiles_ThrowsError() throws BsonParseException {
     TlsConfig tlsConfig =
         new TlsConfig(
-            true,
+            false,
             Optional.of(Path.of("/etc/tls/client.pem")),
             Optional.empty(),
-            Optional.of(Path.of("/etc/tls/client.pem")));
-    X509Config x509Config = new X509Config(tlsConfig);
-    ReplicaSetConfig cfg =
-        config(Optional.empty(), Optional.empty(), Optional.of(x509Config), true);
+            Optional.of(Path.of("/etc/tls/ca.pem")));
+    X509Config x509 = new X509Config(tlsConfig);
+    ReplicaSetConfig cfg = config(Optional.of(x509), Optional.empty());
 
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
+    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
       BsonParseException e =
-          assertThrows(
-              BsonParseException.class,
-              () -> cfg.validate(parser, Optional.of(Path.of("/etc/tls/client.pem"))));
-      assertEquals(
-          "caFile must be set either within x509 config or parent sync source.", e.getMessage());
-    }
-  }
-
-  @Test
-  public void testValidate_UsernameWithoutPasswordFile_ThrowsError() throws BsonParseException {
-    ReplicaSetConfig cfg = config(Optional.of("user"), Optional.empty(), Optional.empty());
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      BsonParseException e =
-          assertThrows(BsonParseException.class, () -> cfg.validate(parser, Optional.empty()));
-      assertEquals("username/passwordFile is required for authentication", e.getMessage());
-    }
-  }
-
-  @Test
-  public void testValidate_PasswordFileWithoutUsername_ThrowsError() throws BsonParseException {
-    ReplicaSetConfig cfg =
-        config(Optional.empty(), Optional.of(Path.of("/etc/passwd")), Optional.empty());
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      BsonParseException e =
-          assertThrows(BsonParseException.class, () -> cfg.validate(parser, Optional.empty()));
-      assertEquals(
-          "One authentication mechanism must be used (username/passwordFile, x509 or scram)",
-          e.getMessage());
-    }
-  }
-
-  @Test
-  public void testValidate_ScramConfig_delegatesToScramValidate() throws BsonParseException {
-    TlsConfig tls = new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
-    ScramConfig scram =
-        new ScramConfig(
-            Databases.ADMIN, "__system", Path.of("/etc/mongot/keyfile"), tls);
-    ReplicaSetConfig cfg =
-        new ReplicaSetConfig(
-            HOSTS,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(scram));
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      cfg.validate(parser, Optional.empty());
-    }
-  }
-
-  @Test
-  public void testValidate_X509Config_delegatesToX509Validate() throws BsonParseException {
-    X509Config x509 = x509(Path.of("/etc/tls/client.pem"));
-    ReplicaSetConfig cfg = config(Optional.empty(), Optional.empty(), Optional.of(x509), true);
-    Optional<Path> caFile = Optional.of(Path.of("/etc/ca.pem"));
-
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
-      cfg.validate(parser, caFile);
+          assertThrows(BsonParseException.class, () -> cfg.validate(parser));
+      assertEquals("tls must be enabled when tlsCertificateKeyFile is configured", e.getMessage());
     }
   }
 
@@ -210,96 +82,57 @@ public class MongoConnectionConfigTest {
     ScramConfig scram =
         new ScramConfig(
             Databases.ADMIN, "__system", Path.of("/etc/mongot/keyfile"), tls);
-    ReplicaSetConfig cfg =
-        new ReplicaSetConfig(
-            HOSTS,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(Databases.ADMIN),
-            Optional.of(true),
-            Optional.empty(),
-            Optional.of(x509),
-            Optional.of(scram));
-    Optional<Path> caFile = Optional.of(Path.of("/etc/ca.pem"));
+    ReplicaSetConfig cfg = config(Optional.of(x509), Optional.of(scram));
 
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
+    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
       BsonParseException e =
-          assertThrows(BsonParseException.class, () -> cfg.validate(parser, caFile));
+          assertThrows(BsonParseException.class, () -> cfg.validate(parser));
       assertEquals(
-          "One authentication mechanism must be used (username/passwordFile, x509 or scram)",
+          "Exactly one authentication mechanism must be used (x509 or scram)",
           e.getMessage());
     }
   }
 
   @Test
   public void testValidate_NoAuth_ThrowsError() throws BsonParseException {
-    ReplicaSetConfig cfg = config(Optional.empty(), Optional.empty(), Optional.empty());
+    ReplicaSetConfig cfg = config(Optional.empty(), Optional.empty());
 
-    try (var parser = BsonDocumentParser.fromRoot(new org.bson.BsonDocument()).build()) {
+    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
       BsonParseException e =
-          assertThrows(BsonParseException.class, () -> cfg.validate(parser, Optional.empty()));
+          assertThrows(BsonParseException.class, () -> cfg.validate(parser));
       assertEquals(
-          "One authentication mechanism must be used (username/passwordFile, x509 or scram)",
+          "Exactly one authentication mechanism must be used (x509 or scram)",
           e.getMessage());
     }
   }
 
   @Test
-  public void testToBson_ScramConfigured_OmitsDeprecatedFieldsAndRoundTrips()
-      throws BsonParseException {
+  public void testToBson_ScramConfigured_roundTrips() throws BsonParseException {
     TlsConfig tls = new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
     ScramConfig scram =
         new ScramConfig(Databases.ADMIN, "__system", Path.of("/etc/mongot/keyfile"), tls);
-    ReplicaSetConfig cfg =
-        new ReplicaSetConfig(
-            HOSTS,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(scram));
+    ReplicaSetConfig cfg = config(Optional.empty(), Optional.of(scram));
 
     BsonDocument encoded = cfg.toBson();
-    assertFalse(
-        "top-level authSource must not be emitted when scram is configured",
-        encoded.containsKey("authSource"));
-    assertFalse(
-        "top-level tls must not be emitted when scram is configured", encoded.containsKey("tls"));
 
     try (var parser = BsonDocumentParser.fromRoot(encoded).build()) {
       ReplicaSetConfig roundTripped = ReplicaSetConfig.fromBson(parser);
       assertEquals(cfg, roundTripped);
-      roundTripped.validate(parser, Optional.empty());
+      roundTripped.validate(parser);
     }
   }
 
   @Test
-  public void testToBson_X509Configured_OmitsDeprecatedFieldsAndRoundTrips()
-      throws BsonParseException {
+  public void testToBson_X509Configured_roundTrips() throws BsonParseException {
     ReplicaSetConfig cfg =
-        new ReplicaSetConfig(
-            HOSTS,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(x509(Path.of("/etc/tls/client.pem"))),
-            Optional.empty());
+        config(Optional.of(x509(Path.of("/etc/tls/client.pem"))), Optional.empty());
 
     BsonDocument encoded = cfg.toBson();
-    assertFalse(
-        "top-level authSource must not be emitted when x509 is configured",
-        encoded.containsKey("authSource"));
-    assertFalse(
-        "top-level tls must not be emitted when x509 is configured", encoded.containsKey("tls"));
 
     try (var parser = BsonDocumentParser.fromRoot(encoded).build()) {
       ReplicaSetConfig roundTripped = ReplicaSetConfig.fromBson(parser);
       assertEquals(cfg, roundTripped);
-      roundTripped.validate(parser, Optional.of(Path.of("/etc/ca.pem")));
+      roundTripped.validate(parser);
     }
   }
 }

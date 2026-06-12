@@ -174,7 +174,7 @@ public class ScramConfigTest {
     ScramConfig config = new ScramConfig("admin", "__system", Path.of("/etc/mongot/keyfile"), tls);
 
     try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
-      config.validate(parser, Optional.empty());
+      config.validate(parser);
     }
   }
 
@@ -189,7 +189,7 @@ public class ScramConfigTest {
     ScramConfig config = new ScramConfig("admin", "__system", Path.of("/etc/mongot/keyfile"), tls);
 
     try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
-      config.validate(parser, Optional.empty());
+      config.validate(parser);
     }
   }
 
@@ -206,7 +206,7 @@ public class ScramConfigTest {
     var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build();
     @Var BsonParseException caught = null;
     try {
-      config.validate(parser, Optional.empty());
+      config.validate(parser);
     } catch (BsonParseException e) {
       caught = e;
     }
@@ -238,38 +238,8 @@ public class ScramConfigTest {
     ScramConfig config = new ScramConfig("admin", "__system", Path.of("/etc/mongot/keyfile"), tls);
 
     try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
-      config.validate(parser, Optional.empty());
+      config.validate(parser);
     }
-  }
-
-  @Test
-  public void validate_parentCaFilePresent_throws() {
-    TlsConfig tls = new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
-    ScramConfig config = new ScramConfig("admin", "__system", Path.of("/etc/mongot/keyfile"), tls);
-
-    var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build();
-    @Var BsonParseException caught = null;
-    try {
-      config.validate(parser, Optional.of(Path.of("/etc/tls/ca.pem")));
-    } catch (BsonParseException e) {
-      caught = e;
-    }
-    try {
-      parser.close();
-    } catch (BsonParseException e) {
-      if (caught == null) {
-        caught = e;
-      }
-    }
-    assertNotNull("Expected BsonParseException when parent caFile is present", caught);
-    assertTrue(
-        "Expected message about CA file not being supported within sync source definition",
-        caught.getMessage() != null
-            && caught
-                .getMessage()
-                .contains(
-                    "CA file must be defined within SCRAM's TLS config."
-                        + " CA file not supported within sync source definition."));
   }
 
   @Test

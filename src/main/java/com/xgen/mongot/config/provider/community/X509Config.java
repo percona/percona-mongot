@@ -4,9 +4,6 @@ import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
-import java.nio.file.Path;
-import java.util.Optional;
-import java.util.stream.Stream;
 import org.bson.BsonDocument;
 
 public record X509Config(TlsConfig tlsConfig) implements DocumentEncodable {
@@ -15,20 +12,13 @@ public record X509Config(TlsConfig tlsConfig) implements DocumentEncodable {
    * Validates legal member combinations when using x509 authentication mechanisms
    *
    * @param parser the {@link DocumentParser} to read from.
-   * @param caFile - legacy reference to parent CA member in sync source
    * @throws BsonParseException - Throws in cases of malformed configurations
    */
-  public void validate(DocumentParser parser, Optional<Path> caFile) throws BsonParseException {
+  public void validate(DocumentParser parser) throws BsonParseException {
     // x509 uses a private PKI, so caFile is required — the private CA that signs client certs is
-    // not in the JVM default trust store. Exactly one source is allowed (inline or legacy parent)
-    // to avoid ambiguity.
-    long presentCount =
-        Stream.of(caFile, this.tlsConfig.caFile()).filter(Optional::isPresent).count();
-    if (presentCount != 1) {
-      parser
-          .getContext()
-          .handleSemanticError(
-              "caFile must be set either within x509 config or parent sync source.");
+    // not in the JVM default trust store.
+    if (this.tlsConfig.caFile().isEmpty()) {
+      parser.getContext().handleSemanticError("caFile must be set within x509 config");
     }
 
     // x509 authentication is certificate-based, so a client certificate is always required.

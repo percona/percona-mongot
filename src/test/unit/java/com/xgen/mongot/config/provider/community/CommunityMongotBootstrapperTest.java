@@ -379,14 +379,13 @@ public class CommunityMongotBootstrapperTest {
     return new SyncSourceConfig(
         new ReplicaSetConfig(
             List.of(com.google.common.net.HostAndPort.fromParts("localhost", 27017)),
-            Optional.of("user"),
-            Optional.of(Path.of("/tmp/test.passwd")),
-            Optional.of(Databases.ADMIN),
-            Optional.of(false),
             Optional.empty(),
-            Optional.empty(),
-            Optional.empty()),
-        Optional.empty(),
+            Optional.of(
+                new ScramConfig(
+                    Databases.ADMIN,
+                    "user",
+                    Path.of("/tmp/test.passwd"),
+                    new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty())))),
         Optional.empty(),
         Optional.empty());
   }

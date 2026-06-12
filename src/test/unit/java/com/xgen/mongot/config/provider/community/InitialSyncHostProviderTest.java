@@ -62,24 +62,24 @@ public class InitialSyncHostProviderTest {
             List.of(
                 HostAndPort.fromParts("rs1.local", 27017),
                 HostAndPort.fromParts("rs2.local", 27018)),
-            Optional.of("mongot"),
-            Optional.of(this.passwordFile),
-            Optional.of("admin"),
-            Optional.of(false),
-            Optional.of(MongoReadPreferenceName.SECONDARY_PREFERRED),
             Optional.empty(),
-            Optional.empty());
+            Optional.of(
+                new ScramConfig(
+                    "admin",
+                    "mongot",
+                    this.passwordFile,
+                    new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty()))));
 
     this.routerConfig =
         new RouterConfig(
             List.of(HostAndPort.fromParts("mongos.local", 27019)),
-            Optional.of("mongot"),
-            Optional.of(this.passwordFile),
-            Optional.of("admin"),
-            Optional.of(false),
-            Optional.of(MongoReadPreferenceName.SECONDARY_PREFERRED),
             Optional.empty(),
-            Optional.empty());
+            Optional.of(
+                new ScramConfig(
+                    "admin",
+                    "mongot",
+                    this.passwordFile,
+                    new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty()))));
   }
 
   @After
@@ -88,13 +88,12 @@ public class InitialSyncHostProviderTest {
   }
 
   private SyncSourceConfig nonShardedConfig() {
-    return new SyncSourceConfig(
-        this.replicaSetConfig, Optional.empty(), Optional.empty(), Optional.empty());
+    return new SyncSourceConfig(this.replicaSetConfig, Optional.empty(), Optional.empty());
   }
 
   private SyncSourceConfig shardedConfig() {
     return new SyncSourceConfig(
-        this.replicaSetConfig, Optional.of(this.routerConfig), Optional.empty(), Optional.empty());
+        this.replicaSetConfig, Optional.of(this.routerConfig), Optional.empty());
   }
 
   private static ClusterDescription replicaSetCluster(List<ServerAddress> addresses) {
@@ -147,15 +146,17 @@ public class InitialSyncHostProviderTest {
             List.of(
                 HostAndPort.fromParts("rs1.local", 27017),
                 HostAndPort.fromParts("rs2.local", 27018)),
-            Optional.of("mongot"),
-            Optional.of(this.passwordFile),
-            Optional.of("admin"),
-            Optional.of(false),
-            Optional.of(MongoReadPreferenceName.NEAREST),
             Optional.empty(),
-            Optional.empty());
+            Optional.of(
+                new ScramConfig(
+                    "admin",
+                    "mongot",
+                    this.passwordFile,
+                    new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty()))));
     return new SyncSourceConfig(
-        nearestRsConfig, Optional.empty(), Optional.empty(), Optional.empty());
+        nearestRsConfig,
+        Optional.empty(),
+        Optional.of(new ReadPreferenceConfig(MongoReadPreferenceName.NEAREST, Optional.empty())));
   }
 
   // ---- getMongodInitialSyncConnection ----

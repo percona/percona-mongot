@@ -48,17 +48,7 @@ public record ScramConfig(String authSource, String username, Path passwordFile,
   /**
    * Validates this SCRAM config, enforcing constraints on TLS fields and inherited CA file usage.
    */
-  public void validate(DocumentParser parser, Optional<Path> parentCaFile)
-      throws BsonParseException {
-    // TODO(CLOUDP-395903): Remove this check after parent caFile deprecated
-    if (parentCaFile.isPresent()) {
-      parser
-          .getContext()
-          .handleSemanticError(
-              "CA file must be defined within SCRAM's TLS config."
-                  + " CA file not supported within sync source definition.");
-    }
-
+  public void validate(DocumentParser parser) throws BsonParseException {
     // caFile is intentionally not required when tlsCertificateKeyFile is set: SCRAM authenticates
     // via password, so when no caFile is provided the driver falls back to the JVM default trust
     // store for server certificate verification.

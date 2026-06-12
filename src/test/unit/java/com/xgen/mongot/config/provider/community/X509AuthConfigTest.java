@@ -8,7 +8,6 @@ import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import java.nio.file.Path;
-import java.util.Optional;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.junit.Test;
@@ -55,11 +54,12 @@ public class X509AuthConfigTest {
   @Test
   public void validate_caFilePresent_succeeds() throws BsonParseException {
     BsonDocument doc =
-        new BsonDocument("tlsCertificateKeyFile", new BsonString("/etc/tls/client.pem"));
+        new BsonDocument("tlsCertificateKeyFile", new BsonString("/etc/tls/client.pem"))
+            .append("caFile", new BsonString("/etc/mongot/ca.pem"));
 
     try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
       X509Config config = X509Config.fromBson(parser);
-      config.validate(parser, Optional.of(Path.of("/etc/mongot/ca.pem")));
+      config.validate(parser);
     }
   }
 
@@ -72,7 +72,7 @@ public class X509AuthConfigTest {
     @Var BsonParseException caught = null;
     try {
       X509Config config = X509Config.fromBson(parser);
-      config.validate(parser, Optional.empty());
+      config.validate(parser);
     } catch (BsonParseException e) {
       caught = e;
     }
@@ -87,9 +87,7 @@ public class X509AuthConfigTest {
     assertTrue(
         "Expected message about caFile being required for x509",
         caught.getMessage() != null
-            && caught
-                .getMessage()
-                .contains("caFile must be set either within x509 config or parent sync source."));
+            && caught.getMessage().contains("caFile must be set within x509 config"));
   }
 
   @Test
@@ -100,7 +98,7 @@ public class X509AuthConfigTest {
     @Var BsonParseException caught = null;
     try {
       X509Config config = X509Config.fromBson(parser);
-      config.validate(parser, Optional.empty());
+      config.validate(parser);
     } catch (BsonParseException e) {
       caught = e;
     }
@@ -121,14 +119,14 @@ public class X509AuthConfigTest {
   @Test
   public void validate_tlsCertificateKeyFileAbsentPassportPresent_throws() {
     BsonDocument doc =
-        new BsonDocument(
-            "tlsCertificateKeyFilePasswordFile", new BsonString("/etc/tls/client.pem"));
+        new BsonDocument("tlsCertificateKeyFilePasswordFile", new BsonString("/etc/tls/client.pem"))
+            .append("caFile", new BsonString("/etc/mongot/ca.pem"));
 
     var parser = BsonDocumentParser.fromRoot(doc).build();
     @Var BsonParseException caught = null;
     try {
       X509Config config = X509Config.fromBson(parser);
-      config.validate(parser, Optional.of(Path.of("")));
+      config.validate(parser);
     } catch (BsonParseException e) {
       caught = e;
     }
@@ -185,17 +183,6 @@ public class X509AuthConfigTest {
             roundTripped.tlsConfig().tlsCertificateKeyFile().get());
         assertTrue(roundTripped.tlsConfig().tlsCertificateKeyFilePasswordFile().isEmpty());
       }
-    }
-  }
-
-  @Test
-  public void validate_withCaFile_succeeds() throws BsonParseException {
-    BsonDocument doc =
-        new BsonDocument("tlsCertificateKeyFile", new BsonString("/etc/mongot/tls/client.pem"));
-
-    try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
-      X509Config config = X509Config.fromBson(parser);
-      config.validate(parser, Optional.of(Path.of("/etc/mongot/tls/ca.pem")));
     }
   }
 }

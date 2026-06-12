@@ -14,7 +14,6 @@ import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.MongoClientBuilder;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.Closeable;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
@@ -48,7 +47,6 @@ public class InitialSyncHostProvider implements Closeable {
   // Raw community config for building direct-connect URIs with credentials.
   private final MongoConnectionConfig replicaSetConfig;
   private final Optional<RouterConfig> routerConfig;
-  private final Optional<Path> caFile;
 
   // Long-lived SDAM clients that continuously heartbeat to mongod/mongos.
   private final MongoClient mongodClient;
@@ -71,20 +69,19 @@ public class InitialSyncHostProvider implements Closeable {
       SyncSourceConfig communitySyncSourceConfig, MeterRegistry meterRegistry) {
     this.replicaSetConfig = communitySyncSourceConfig.replicaSet();
     this.routerConfig = communitySyncSourceConfig.router();
-    this.caFile = communitySyncSourceConfig.caFile();
     this.replicationReadPreference = communitySyncSourceConfig.getReplicationReaderReadPreference();
 
     this.mongodClient =
         createSdamClient(
             ConnectionInfoFactory.getClusterConnectionInfo(
-                this.replicaSetConfig, this.replicationReadPreference, this.caFile),
+                this.replicaSetConfig, this.replicationReadPreference),
             meterRegistry);
     this.mongosClient =
         this.routerConfig.map(
             router ->
                 createSdamClient(
                     ConnectionInfoFactory.getClusterConnectionInfo(
-                        router, this.replicationReadPreference, this.caFile),
+                        router, this.replicationReadPreference),
                     meterRegistry));
 
     startDiscovery(meterRegistry);
@@ -98,7 +95,6 @@ public class InitialSyncHostProvider implements Closeable {
       boolean ready) {
     this.replicaSetConfig = config.replicaSet();
     this.routerConfig = config.router();
-    this.caFile = config.caFile();
     this.replicationReadPreference = config.getReplicationReaderReadPreference();
     this.mongodClient = mongodClient;
     this.mongosClient = mongosClient;
@@ -205,8 +201,8 @@ public class InitialSyncHostProvider implements Closeable {
     return Optional.of(
         uriReadPref.isPresent()
             ? ConnectionInfoFactory.getSingleHostConnectionInfo(
-                config, hostAndPort, this.caFile, uriReadPref.get())
-            : ConnectionInfoFactory.getSingleHostConnectionInfo(config, hostAndPort, this.caFile));
+                config, hostAndPort, uriReadPref.get())
+            : ConnectionInfoFactory.getSingleHostConnectionInfo(config, hostAndPort));
   }
 
   private boolean isHostStillValid(

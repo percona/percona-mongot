@@ -42,46 +42,20 @@ public class ConnectionInfoFactoryTest {
     return new ReplicaSetConfig(
         hosts,
         Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
         Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)));
   }
 
   private static ReplicaSetConfig replicaSetConfig(X509Config x509) {
-    return new ReplicaSetConfig(
-        HOSTS,
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.of(x509),
-        Optional.empty());
+    return new ReplicaSetConfig(HOSTS, Optional.of(x509), Optional.empty());
   }
 
   private static ReplicaSetConfig replicaSetConfig(ScramConfig scramConfig) {
-    return new ReplicaSetConfig(
-        HOSTS,
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.of(scramConfig));
+    return new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.of(scramConfig));
   }
 
   private static RouterConfig routerConfig(String username, Path passwordFile, TlsConfig tls) {
     return new RouterConfig(
         HOSTS,
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
         Optional.empty(),
         Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)));
   }
@@ -105,8 +79,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig("testuser", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(
-              config, SECONDARY_PREFERRED_RP, Optional.empty());
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("localhost:27017", "localhost:27018");
@@ -132,8 +105,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_ENABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(
-              config, SECONDARY_PREFERRED_RP, Optional.empty());
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getReadConcern()).isEqualTo(ReadConcern.MAJORITY);
@@ -150,7 +122,7 @@ public class ConnectionInfoFactoryTest {
       RouterConfig config = routerConfig("u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, PRIMARY_RP, Optional.empty());
+          ConnectionInfoFactory.getClusterConnectionInfo(config, PRIMARY_RP);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getReadPreference()).isEqualTo(ReadPreference.primary());
@@ -167,7 +139,7 @@ public class ConnectionInfoFactoryTest {
       RouterConfig config = routerConfig("u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), Optional.empty());
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("localhost:27017");
@@ -176,6 +148,24 @@ public class ConnectionInfoFactoryTest {
     } finally {
       Files.deleteIfExists(passwordFile);
     }
+  }
+
+  @Test
+  public void getClusterConnectionInfo_noAuthConfig_throwsAssertionError() {
+    ReplicaSetConfig config = new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.empty());
+
+    assertThrows(
+        AssertionError.class,
+        () -> ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP));
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_noAuthConfig_throwsAssertionError() {
+    ReplicaSetConfig config = new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.empty());
+
+    assertThrows(
+        AssertionError.class,
+        () -> ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0)));
   }
 
   @Test
@@ -194,9 +184,9 @@ public class ConnectionInfoFactoryTest {
             IllegalArgumentException.class,
             () ->
                 ConnectionInfoFactory.getClusterConnectionInfo(
-                    config, SECONDARY_PREFERRED_RP, Optional.empty()));
+                    config, SECONDARY_PREFERRED_RP));
 
-    assertThat(e).hasMessageThat().contains("caFile must be present with x509");
+    assertThat(e).hasMessageThat().contains("caFile must be set within x509 config");
   }
 
   @Test
@@ -207,7 +197,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig("testuser", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), Optional.empty());
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).hasSize(1);
@@ -234,8 +224,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig(oneHost, "u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(
-              config, oneHost.get(0), Optional.empty());
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, oneHost.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("sync.example:27019");
@@ -255,7 +244,7 @@ public class ConnectionInfoFactoryTest {
 
       ConnectionInfo info =
           ConnectionInfoFactory.getSingleHostConnectionInfo(
-              config, HOSTS.get(0), Optional.empty(), ReadPreference.secondary());
+              config, HOSTS.get(0), ReadPreference.secondary());
 
       String uri = info.uri().getConnectionString();
       assertThat(uri).contains("readPreference=secondary");
@@ -276,8 +265,7 @@ public class ConnectionInfoFactoryTest {
           ReadPreference.secondary(List.of(new TagSet(List.of(new Tag("dc", "east")))));
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(
-              config, HOSTS.get(0), Optional.empty(), rpWithTags);
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), rpWithTags);
 
       String uri = info.uri().getConnectionString();
       assertThat(uri).contains("readPreference=secondary");
@@ -301,7 +289,7 @@ public class ConnectionInfoFactoryTest {
                   new TagSet(List.of(new Tag("dc", "west")))));
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithTags, Optional.empty());
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithTags);
 
       String uri = info.uri().getConnectionString();
       assertThat(uri).contains("readPreference=nearest");
@@ -323,7 +311,7 @@ public class ConnectionInfoFactoryTest {
           ReadPreference.nearest(List.of(new TagSet(List.of(new Tag("dc", "east coast")))));
 
       ConnectionInfo infoWithSpace =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithSpace, Optional.empty());
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithSpace);
       assertThat(infoWithSpace.uri().getConnectionString())
           .contains("readPreferenceTags=dc:east+coast");
 
@@ -331,7 +319,7 @@ public class ConnectionInfoFactoryTest {
           ReadPreference.nearest(List.of(new TagSet(List.of(new Tag("key+name", "value")))));
 
       ConnectionInfo infoWithPlus =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithPlus, Optional.empty());
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithPlus);
 
       assertThat(infoWithPlus.uri().getConnectionString())
           .contains("readPreferenceTags=key%2Bname:value");
@@ -350,7 +338,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig(scram);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), Optional.empty());
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getCredential()).isNotNull();
@@ -377,7 +365,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig(scram);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), Optional.empty());
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getCredential()).isNotNull();

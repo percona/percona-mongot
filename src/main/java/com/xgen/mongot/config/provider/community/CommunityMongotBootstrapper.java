@@ -360,19 +360,18 @@ public class CommunityMongotBootstrapper {
       com.xgen.mongot.config.provider.community.SyncSourceConfig communitySyncSourceConfig,
       InitialSyncHostProvider initialSyncHostProvider) {
 
-    var caFile = communitySyncSourceConfig.caFile();
     var replicaSet = communitySyncSourceConfig.replicaSet();
     var replicationReadPreference = communitySyncSourceConfig.getReplicationReaderReadPreference();
 
     var mongodClusterReplicationUri =
         ConnectionInfoFactory.getClusterConnectionInfo(
-            replicaSet, replicationReadPreference, caFile);
+            replicaSet, replicationReadPreference);
 
     // Default the read-preference to secondary-preferred. Callers should override to primary where
     // applicable.
     var mongodClusterReadWriteUri =
         ConnectionInfoFactory.getClusterConnectionInfo(
-            replicaSet, ReadPreference.secondaryPreferred(), caFile);
+            replicaSet, ReadPreference.secondaryPreferred());
 
     var mongosClusterReadWriteUri =
         communitySyncSourceConfig
@@ -380,7 +379,7 @@ public class CommunityMongotBootstrapper {
             .map(
                 router ->
                     ConnectionInfoFactory.getClusterConnectionInfo(
-                        router, ReadPreference.secondaryPreferred(), caFile));
+                        router, ReadPreference.secondaryPreferred()));
 
     // The InitialSyncHostProvider may not have finished replica-set discovery and is not 'ready'
     // yet. If that's the case the SyncSourceConfig will be configured with empty single host

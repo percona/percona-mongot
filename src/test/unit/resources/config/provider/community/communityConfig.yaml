@@ -3,16 +3,16 @@ syncSource:
     hostAndPort:
       - "mongod1:27017"
       - "mongod2:27017"
-    username: user
-    passwordFile: "replicaSet.passwd"
-    tls: true
-    readPreference: primaryPreferred
+    scramAuth:
+      username: user
+      passwordFile: "replicaSet.passwd"
+      tls:
+        enabled: true
   router:
     hostAndPort: "mongos:27017"
-    username: user
-    passwordFile: "router.passwd"
-    tls: false
-  caFile: "/etc/mongot/ca.pem"
+    scramAuth:
+      username: user
+      passwordFile: "router.passwd"
 storage:
   dataPath: "data/mongot"
 server:
