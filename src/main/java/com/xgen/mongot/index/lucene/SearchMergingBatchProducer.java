@@ -3,6 +3,7 @@ package com.xgen.mongot.index.lucene;
 import static com.xgen.mongot.index.lucene.Comparators.RELEVANCE_COMPARATOR;
 import static com.xgen.mongot.util.Check.checkState;
 
+import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.cursor.batch.BatchCursorOptions;
 import com.xgen.mongot.index.BatchProducer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
@@ -194,8 +195,20 @@ public class SearchMergingBatchProducer implements BatchProducer {
 
   @Override
   public void close() throws IOException {
+    @Var Optional<IOException> first = Optional.empty();
     for (var batchProducer : this.batchProducers) {
-      batchProducer.close();
+      try {
+        batchProducer.close();
+      } catch (IOException e) {
+        if (first.isEmpty()) {
+          first = Optional.of(e);
+        } else {
+          first.get().addSuppressed(e);
+        }
+      }
+    }
+    if (first.isPresent()) {
+      throw first.get();
     }
   }
 }

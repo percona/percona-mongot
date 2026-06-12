@@ -1,6 +1,8 @@
 package com.xgen.mongot.index.lucene;
 
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.Var;
@@ -51,6 +53,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.BsonValue;
 import org.junit.Assert;
+import org.junit.Test;
 import org.junit.experimental.theories.DataPoints;
 import org.junit.experimental.theories.Theories;
 import org.junit.experimental.theories.Theory;
@@ -102,6 +105,20 @@ public class SearchMergingBatchProducerTest {
       Assert.assertEquals(1, searchManager.initialSearchCount);
       Assert.assertEquals(0, searchManager.getMoreCount);
     }
+  }
+
+  @Test
+  public void testCloseClosesAllProducersWhenOneThrows() throws Exception {
+    // Each producer holds a searcher reference; close() must release all of them even when an
+    // earlier producer fails to close, otherwise the remaining searcher references leak.
+    LuceneSearchBatchProducer first = mock(LuceneSearchBatchProducer.class);
+    LuceneSearchBatchProducer second = mock(LuceneSearchBatchProducer.class);
+    doThrow(new IOException("simulated close failure")).when(first).close();
+
+    var producer = new SearchMergingBatchProducer(Arrays.asList(first, second));
+
+    Assert.assertThrows(IOException.class, producer::close);
+    verify(second).close();
   }
 
   @Theory
