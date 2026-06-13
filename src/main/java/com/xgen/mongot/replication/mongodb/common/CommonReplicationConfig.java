@@ -78,6 +78,11 @@ public abstract sealed class CommonReplicationConfig
     return new GlobalReplicationConfig(false, List.of(), false, false, List.of(), false);
   }
 
+  public static GlobalReplicationConfig communityDefaultGlobalReplicationConfig() {
+    // Enable splitLargeChangeStreamEvents and matchCollectionUuidForUpdateLookup for community
+    return new GlobalReplicationConfig(false, List.of(), true, false, List.of(), true);
+  }
+
   // Overridable parameters by subclasses.
   public abstract int getNumConcurrentInitialSyncs();
 

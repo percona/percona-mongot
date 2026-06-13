@@ -44,7 +44,6 @@ import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.definition.config.IndexDefinitionConfig;
 import com.xgen.mongot.index.lucene.LuceneGlobalSettings;
 import com.xgen.mongot.index.lucene.LuceneIndexFactory;
-import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.directory.EnvironmentVariantPerfConfig;
 import com.xgen.mongot.lifecycle.LifecycleConfig;
 import com.xgen.mongot.logging.Logging;
@@ -64,7 +63,6 @@ import com.xgen.mongot.replication.mongodb.DurabilityConfig;
 import com.xgen.mongot.replication.mongodb.autoembedding.AutoEmbeddingMaterializedViewManagerFactory;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
-import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.mongot.server.auth.SecurityConfig;
@@ -175,8 +173,7 @@ public class CommunityMongotBootstrapper {
     var initializedIndexCatalog = new InitializedIndexCatalog();
 
     var mongotVersion = MongotVersionResolver.create().getVersion();
-    var mongotConfigs =
-        getMongotConfigs(config.storageConfig().dataPath(), config.embeddingConfig());
+    var mongotConfigs = getMongotConfigs(config);
 
     // Initialize global feature flags for utility classes
     LoggableIdUtils.initialize(mongotConfigs.featureFlags.isEnabled(Feature.LOGGABLE_DOCUMENT_ID));
@@ -938,45 +935,21 @@ public class CommunityMongotBootstrapper {
     LOG.atWarn().log("Ignoring unrecognized field(s) in mongot config file: {}", unknownFields);
   }
 
-  private static MongotConfigs getMongotConfigs(
-      Path dataPath, Optional<EmbeddingConfig> embeddingConfig) {
+  private static MongotConfigs getMongotConfigs(CommunityConfig config) {
     var luceneConfig =
-        LuceneConfig.create(
-            dataPath,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
+        LuceneConfigMapper.toLuceneConfig(
+            config,
+            Runtime.INSTANCE,
             Optional.of(
                 new HysteresisConfig(
                     DISK_USAGE_PAUSE_REPLICATION_THRESHOLD,
-                    DISK_USAGE_PAUSE_REPLICATION_THRESHOLD)),
-            Optional.empty(),
-            Optional.empty());
+                    DISK_USAGE_PAUSE_REPLICATION_THRESHOLD)));
 
-    var replicationConfig = MongoDbReplicationConfig.getDefault();
+    var replicationConfig =
+        MongoDbReplicationConfigMapper.toMongoDbReplicationConfig(
+            CommonReplicationConfig.communityDefaultGlobalReplicationConfig(),
+            Runtime.INSTANCE,
+            config.replicationConfig());
 
     var initialSyncConfig = new InitialSyncConfig();
 
@@ -984,18 +957,23 @@ public class CommunityMongotBootstrapper {
 
     var cursorConfig = CursorConfig.getDefault();
 
-    var indexDefinitionConfig = IndexDefinitionConfig.getDefault();
+    var indexDefinitionConfig =
+        IndexDefinitionConfig.create(
+            config.indexingConfig()
+                .flatMap(CommunityIndexingConfig::definitionConfig)
+                .flatMap(d -> d.maxEmbeddedDocumentsNestingLevel()));
     var lifecycleConfig = LifecycleConfig.getDefault();
     var featureFlags = FeatureFlags.communityDefaults();
     var environmentVariantPerfConfig = EnvironmentVariantPerfConfig.getDefault();
     var regularBlockingRequestSettings = RegularBlockingRequestSettings.defaults();
 
+    Optional<EmbeddingConfig> embeddingConfig = config.embeddingConfig();
     var mvWriteRateLimitRps = embeddingConfig.flatMap(EmbeddingConfig::mvWriteRateLimitRps);
     var embeddingProviderRpsLimit =
         embeddingConfig.flatMap(EmbeddingConfig::embeddingProviderRpsLimit);
     var autoEmbeddingMaterializedViewConfig =
         AutoEmbeddingMaterializedViewConfig.create(
-            CommonReplicationConfig.defaultGlobalReplicationConfig(),
+            CommonReplicationConfig.communityDefaultGlobalReplicationConfig(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),

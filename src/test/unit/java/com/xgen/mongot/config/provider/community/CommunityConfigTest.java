@@ -779,6 +779,7 @@ public class CommunityConfigTest {
 
       var queryingLucene = result.queryingConfig().get().luceneConfig().get();
       assertEquals(Optional.of(2048), queryingLucene.maxClauseLimit());
+      assertEquals(Optional.of(128.0), queryingLucene.floorSegmentMB());
 
       var mongodb = result.replicationConfig().get().mongoDbConfig().get();
       assertEquals(Optional.of(3), mongodb.numConcurrentInitialSyncs());

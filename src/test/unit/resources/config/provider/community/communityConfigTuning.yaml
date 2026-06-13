@@ -31,6 +31,7 @@ indexing:
 querying:
   lucene:
     maxClauseLimit: 2048
+    floorSegmentMB: 128.0
 replication:
   mongodb:
     numConcurrentInitialSyncs: 3
