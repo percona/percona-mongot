@@ -5,6 +5,7 @@ import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadat
 import static com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator.getHashFieldPath;
 import static com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator.getMatViewFieldPath;
 
+import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -14,6 +15,7 @@ import com.google.errorprone.annotations.Var;
 import com.mongodb.client.model.changestream.UpdateDescription;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping.AutoEmbedField;
+import com.xgen.mongot.embedding.VectorAutoEmbedFieldMapping;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.ingestion.BsonDocumentProcessor;
 import com.xgen.mongot.util.BsonUtils;
@@ -23,8 +25,10 @@ import com.xgen.mongot.util.bson.Vector;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -326,6 +330,316 @@ public class AutoEmbeddingDocumentUtils {
       ImmutableMap<FieldPath, ImmutableMap<String, Vector>> reusableEmbeddings) {}
 
   /**
+   * Decides whether a change-stream update can be applied as a partial {@code $set} on the MV
+   * (vs a full document replacement) for an auto-embed index. Returns a {@code path -> chosen
+   * source text} map naming the embed fields that need re-embedding; returns
+   * {@link Optional#empty()} when the caller must fall back to a full replacement.
+   *
+   * <p>Should only be called when {@link #requiresEmbeddingGeneration} already returned true.
+   * The result is non-empty only when all of these hold:
+   *
+   * <ul>
+   *   <li>No removed or truncated field touches any declared embed path. A partial {@code $set}
+   *       has no way to clear an MV vector or hash that the source removed.
+   *   <li>Every updated field is either an exact embed match, an exact passthrough, or
+   *       unrelated to any embed declaration. Indirect touches (e.g. updating an ancestor or
+   *       descendant of an embed path) force a fallback because we can't precisely scope them.
+   *   <li>No changed embed source path traverses an array in the source doc — MongoDB rejects
+   *       dotted {@code $set} keys (e.g. {@code _autoEmbed.items.title}) when an ancestor is an
+   *       array.
+   *   <li>Every changed embed source path resolves to a non-empty source string. An empty new
+   *       value can't be expressed by partial {@code $set}; full replace handles it by dropping
+   *       the MV vector.
+   * </ul>
+   *
+   * <p>Texts in the returned map are document-order first non-empty strings — the same selection
+   * the full-replace path uses in {@link #buildMaterializedViewDocumentEvent} — so the embedding
+   * scheduler and {@link #buildPartialEmbedUpdateSetBody} can consume them without walking the
+   * source document again.
+   */
+  public static Optional<ImmutableMap<FieldPath, String>> computePartialEmbedChangedTexts(
+      UpdateDescription updateDescription,
+      RawBsonDocument fullDocument,
+      AutoEmbedFieldMapping fieldMapping) {
+    if (updateDescription == null) {
+      // Mirror requiresEmbeddingGeneration's null handling: when the update description is
+      // unavailable we can't reason about what changed, so we can't safely emit a partial-embed
+      // update — caller must fall back to a full document replacement.
+      // TODO(CLOUDP-412617): count this fallback reason (null_update_description) in metrics.
+      return Optional.empty();
+    }
+    if (fullDocument == null) {
+      // Defensive: mongot configures change streams with fullDocument lookup, so this should not
+      // happen in production. Match requiresEmbeddingGeneration's conservatism if the assumption
+      // ever breaks — we can't extract embed-field text without the document.
+      // TODO(CLOUDP-412617): count this fallback reason (null_full_document) in metrics.
+      return Optional.empty();
+    }
+    if (affectedFieldPaths(updateDescription).isEmpty()) {
+      // Mirror requiresEmbeddingGeneration's "no channels reported anything" branch — that gate
+      // returns true (be safe) for this shape, so a correctly-gated caller can still dispatch
+      // here. Fall back to a full replace rather than reaching the post-loop precondition.
+      // TODO(CLOUDP-412617): count this fallback reason (no_channels_reported) in metrics.
+      return Optional.empty();
+    }
+    if (!(fieldMapping instanceof VectorAutoEmbedFieldMapping)) {
+      // The destructive-touch check below requires fieldMap() to enumerate every indexed path.
+      // That holds for vector mappings; SearchIndexAutoEmbedFieldMapping's dynamic mode
+      // intentionally under-enumerates, which would let a destructive update misclassify as
+      // partial-safe and leave stale values on the MV. Unsupported mappings degrade to a full
+      // replace rather than risking staleness.
+      return Optional.empty();
+    }
+
+    Set<FieldPath> declaredEmbedPaths = fieldMapping.embedFields().keySet();
+    // All declared indexed paths — embeds plus filters. Complete for vector indexes (the only
+    // index type routed through this classifier); SearchIndexAutoEmbedFieldMapping's dynamic mode
+    // under-enumerates fieldMap() and must not be routed here without revisiting this.
+    Set<FieldPath> declaredIndexedPaths = fieldMapping.fieldMap().keySet();
+
+    // Destructive channels (removedFields, truncatedArrays): partial $set can't express a
+    // remove or shorten on the MV, for embeds (vector + hash must be dropped) and for filter
+    // fields alike (the $set body is built from the post-image, which no longer carries the
+    // removed value, so the stale MV value would survive). Any indexed-field touch here forces
+    // a full replace.
+    // TODO(CLOUDP-412617): count this fallback reason (destructive_indexed_touch) in metrics.
+    // TODO(CLOUDP-412618): extend partial-update body with $unset so these cases stay partial.
+    for (String touched : destructivelyAffectedFieldPaths(updateDescription)) {
+      if (mayAffectDeclaredField(FieldPath.parse(touched), declaredIndexedPaths)) {
+        return Optional.empty();
+      }
+    }
+
+    // Updates: collect exact-match embed paths as re-embed candidates. Bail on indirect touches
+    // (an updated field that's an ancestor/descendant/array-indexed form of an embed path) —
+    // we can't precisely scope what changed. Filter (passthrough) paths are handled by the same
+    // mayAffectDeclaredField check the gate (requiresEmbeddingGeneration) uses, so a filter that
+    // shares an ancestor/descendant relation with an embed (e.g. filter "b", embed "b.c") falls
+    // back here rather than slipping through and producing an empty changedEmbedPaths set.
+    ImmutableSet.Builder<FieldPath> changedEmbedPathsBuilder = ImmutableSet.builder();
+    for (String updated : updatedFieldKeys(updateDescription)) {
+      FieldPath path = FieldPath.parse(updated);
+      // A $set on a strict ancestor of any declared indexed path is a deletion in disguise: a
+      // scalar overwrite (e.g. $set {meta: 5} over filter "meta.category", or $set {a: "y"}
+      // where embed "a" is the ancestor of filter "a.b") can remove the declared value from the
+      // post-image, and the partial $set body — built from the post-image — would then carry
+      // nothing to overwrite the stale MV value. Checked before the embed branch so it covers
+      // exact-embed paths that are also ancestors of filters.
+      // TODO(CLOUDP-412617): count this fallback reason (ancestor_overwrite) in metrics.
+      if (isStrictAncestorOfAny(path, declaredIndexedPaths)) {
+        return Optional.empty();
+      }
+      if (fieldMapping.isEmbed(path)) {
+        // Overlapping embed declarations (e.g. "a" and "a.b" — definition validation only rejects
+        // exact duplicates): a write to one can reshape what the other extracts, and a partial
+        // $set can't drop the other's now-stale vector + hash. Fall back to a full replace.
+        for (FieldPath other : declaredEmbedPaths) {
+          if (!other.equals(path) && path.isDirectRelation(other)) {
+            // TODO(CLOUDP-412617): count this fallback reason (overlapping_embeds) in metrics.
+            return Optional.empty();
+          }
+        }
+        changedEmbedPathsBuilder.add(path);
+        continue;
+      }
+      if (mayAffectDeclaredField(path, declaredEmbedPaths)) {
+        // TODO(CLOUDP-412617): count this fallback reason (indirect_embed_touch) in metrics.
+        return Optional.empty();
+      }
+    }
+
+    ImmutableSet<FieldPath> changedEmbedPaths = changedEmbedPathsBuilder.build();
+    Verify.verify(
+        !changedEmbedPaths.isEmpty(),
+        "computePartialEmbedChangedTexts called with no embed-field touch; "
+            + "caller must gate on requiresEmbeddingGeneration");
+
+    for (FieldPath embedPath : changedEmbedPaths) {
+      if (sourcePathTraversesArray(fullDocument, embedPath)) {
+        // TODO(CLOUDP-412617): count this fallback reason (array_traversal) in metrics.
+        // TODO(CLOUDP-412619): investigate partial-embed support for nested embeddings.
+        return Optional.empty();
+      }
+    }
+
+    // Collect first-non-empty-string in document order for each changed embed path. Uses the same
+    // CollectFieldValueDocumentHandler the full-replace path uses, so partial-embed and full-
+    // replace agree on which text wins for paths with multiple candidate strings.
+    CollectFieldValueDocumentHandler textCollector =
+        CollectFieldValueDocumentHandler.create(
+            fieldMapping, Optional.empty(), changedEmbedPaths::contains, true);
+    try {
+      BsonDocumentProcessor.process(fullDocument, textCollector);
+    } catch (IOException e) {
+      LOG.warn(
+          "Failed to extract embed-field text while classifying partial-embed safety; falling"
+              + " back to full replace",
+          e);
+      return Optional.empty();
+    }
+    ImmutableMap<FieldPath, List<BsonValue>> collectedValues = textCollector.getCollectedValues();
+    ImmutableMap.Builder<FieldPath, String> textsBuilder = ImmutableMap.builder();
+    for (FieldPath embedPath : changedEmbedPaths) {
+      Optional<String> textOpt =
+          collectedValues.getOrDefault(embedPath, List.of()).stream()
+              .filter(bv -> bv.isString() && !bv.asString().getValue().isEmpty())
+              .findFirst()
+              .map(bv -> bv.asString().getValue());
+      if (textOpt.isEmpty()) {
+        // No non-empty text for this changed embed path. A partial $set has no way to $unset the
+        // existing MV vector + hash for the field; fall back to a full replace which clears them
+        // via the ReplaceOne.
+        // TODO(CLOUDP-412617): count this fallback reason (empty_new_value) in metrics.
+        // TODO(CLOUDP-412618): extend partial-update body with $unset so this stays partial.
+        return Optional.empty();
+      }
+      textsBuilder.put(embedPath, textOpt.get());
+    }
+    return Optional.of(textsBuilder.build());
+  }
+
+  /**
+   * Returns the field paths that could have affected source content for this update, drawn from
+   * every {@link UpdateDescription} channel that mongot's change-stream consumer cares about:
+   * {@link UpdateDescription#getUpdatedFields()}, {@link UpdateDescription#getRemovedFields()},
+   * and {@link UpdateDescription#getTruncatedArrays()}. Returned as a flat list of dotted paths;
+   * the channel each entry came from is intentionally discarded — callers that need it should
+   * use {@link #updatedFieldKeys} / {@link #destructivelyAffectedFieldPaths} instead.
+   */
+  private static List<String> affectedFieldPaths(UpdateDescription updateDescription) {
+    List<String> out = new ArrayList<>();
+    out.addAll(updatedFieldKeys(updateDescription));
+    out.addAll(destructivelyAffectedFieldPaths(updateDescription));
+    return out;
+  }
+
+  /** The {@code updatedFields} channel only. Empty when the update set nothing. */
+  private static Set<String> updatedFieldKeys(UpdateDescription updateDescription) {
+    return Optional.ofNullable(updateDescription.getUpdatedFields())
+        .map(BsonDocument::keySet)
+        .orElseGet(Collections::emptySet);
+  }
+
+  /**
+   * The destructive change channels — {@code removedFields} ($unset) and {@code truncatedArrays}
+   * ($pop / $slice) — combined. A partial {@code $set} body cannot express any of these on the
+   * MV side; if any destructive touch lands on an embed path the partial-embed optimization must
+   * fall back to a full ReplaceOne so the MV vector and hash are correctly cleared.
+   */
+  private static List<String> destructivelyAffectedFieldPaths(UpdateDescription updateDescription) {
+    List<String> out = new ArrayList<>();
+    Optional.ofNullable(updateDescription.getRemovedFields()).ifPresent(out::addAll);
+    Optional.ofNullable(updateDescription.getTruncatedArrays())
+        .ifPresent(arrays -> arrays.forEach(t -> out.add(t.getField())));
+    return out;
+  }
+
+  /**
+   * True if {@code path} is a strict (non-equal) ancestor of any path in {@code declaredPaths},
+   * either literally or after stripping array-index segments. A {@code $set} on such a path can
+   * implicitly delete the declared descendant's value from the post-image (e.g. a scalar
+   * overwrite of a subdocument), which a partial {@code $set} built from the post-image cannot
+   * mirror on the MV.
+   */
+  private static boolean isStrictAncestorOfAny(FieldPath path, Set<FieldPath> declaredPaths) {
+    if (isLiteralStrictAncestorOfAny(path, declaredPaths)) {
+      return true;
+    }
+    Optional<FieldPath> stripped = stripArrayIndexSegments(path);
+    return stripped.isPresent() && isLiteralStrictAncestorOfAny(stripped.get(), declaredPaths);
+  }
+
+  private static boolean isLiteralStrictAncestorOfAny(
+      FieldPath path, Set<FieldPath> declaredPaths) {
+    for (FieldPath declared : declaredPaths) {
+      if (declared.isChildOf(path)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if {@code candidate} might affect the source content of any path in {@code
+   * declaredPaths}. Recognizes three forms of contact, in order of cost:
+   *
+   * <ol>
+   *   <li>Exact match (the candidate IS a declared path).
+   *   <li>Literal-segment relation — ancestor or descendant under straight segment comparison.
+   *   <li>Array-index relation — the same check after stripping numeric segments. Catches
+   *       change-stream paths like {@code "items.0.title"} that target a declared path
+   *       {@code "items.title"}; {@link FieldPath#isDirectRelation} compares literally and would
+   *       otherwise miss them.
+   * </ol>
+   *
+   * <p>Callers choose the declared set: embed paths only (re-embed routing) or all indexed paths
+   * (destructive-touch safety, where filter staleness matters too).
+   */
+  private static boolean mayAffectDeclaredField(FieldPath candidate, Set<FieldPath> declaredPaths) {
+    if (declaredPaths.contains(candidate)) {
+      return true;
+    }
+    for (FieldPath declared : declaredPaths) {
+      if (candidate.isDirectRelation(declared)) {
+        return true;
+      }
+    }
+    Optional<FieldPath> stripped = stripArrayIndexSegments(candidate);
+    if (stripped.isEmpty()) {
+      return false;
+    }
+    for (FieldPath declared : declaredPaths) {
+      if (stripped.get().isDirectRelation(declared)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns {@code path} with numeric segments removed. Empty when {@code path} had no numeric
+   * segments (or had only numeric segments) — i.e. there's nothing array-index-related to check.
+   * Numeric segments are how change-stream events address array elements (e.g.
+   * {@code "items.0.title"} for the first element's {@code title} subfield).
+   */
+  private static Optional<FieldPath> stripArrayIndexSegments(FieldPath path) {
+    List<String> kept = new ArrayList<>();
+    @Var boolean strippedAny = false;
+    for (String segment : path.getSegments()) {
+      if (isNumeric(segment)) {
+        strippedAny = true;
+      } else {
+        kept.add(segment);
+      }
+    }
+    if (!strippedAny || kept.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(FieldPath.fromParts(kept.toArray(new String[0])));
+  }
+
+  private static boolean isNumeric(String s) {
+    return !s.isEmpty() && s.chars().allMatch(Character::isDigit);
+  }
+
+  private static boolean sourcePathTraversesArray(RawBsonDocument document, FieldPath path) {
+    @Var BsonValue current = document;
+    Iterator<String> segments = path.getSegments().iterator();
+    while (segments.hasNext()) {
+      String segment = segments.next();
+      if (current == null || !current.isDocument()) {
+        return false;
+      }
+      BsonValue child = current.asDocument().get(segment);
+      if (segments.hasNext() && child != null && child.isArray()) {
+        return true;
+      }
+      current = child;
+    }
+    return false;
+  }
+
+  /**
    * Determines if an update requires embedding generation (i.e., any AUTO_EMBED or TEXT field
    * changed). When this returns false, we can skip the embedding service call and use a partial
    * update for filter-only changes.
@@ -351,34 +665,19 @@ public class AutoEmbeddingDocumentUtils {
       return true;
     }
 
-    List<String> removedFields =
-        Optional.ofNullable(updateDescription.getRemovedFields()).orElseGet(Collections::emptyList);
-
-    Set<String> updatedFields =
-        Optional.ofNullable(updateDescription.getUpdatedFields())
-            .map(BsonDocument::keySet)
-            .orElseGet(Collections::emptySet);
-
-    // If no fields were updated or removed, require embedding to be safe
-    if (removedFields.isEmpty() && updatedFields.isEmpty()) {
+    List<String> affected = affectedFieldPaths(updateDescription);
+    // No fields reported by any channel → can't determine what changed; require embedding to be
+    // safe.
+    if (affected.isEmpty()) {
       return true;
     }
 
-    // Check if any updated field is an AUTO_EMBED or TEXT field
-    for (String field : updatedFields) {
-      if (fieldMapping.isEmbed(FieldPath.parse(field))) {
+    Set<FieldPath> declaredEmbedPaths = fieldMapping.embedFields().keySet();
+    for (String f : affected) {
+      if (mayAffectDeclaredField(FieldPath.parse(f), declaredEmbedPaths)) {
         return true;
       }
     }
-
-    // Check if any removed field is an AUTO_EMBED or TEXT field
-    for (String field : removedFields) {
-      if (fieldMapping.isEmbed(FieldPath.parse(field))) {
-        return true;
-      }
-    }
-
-    // No AUTO_EMBED/TEXT fields changed - only passthrough fields were updated
     return false;
   }
 
@@ -414,6 +713,68 @@ public class AutoEmbeddingDocumentUtils {
           "Failed to extract filter field values, falling back to full document processing", e);
       return new BsonDocument();
     }
+  }
+
+  /**
+   * Augments a filter-only {@code $set} body with the new vector and hash entries for each changed
+   * auto-embed field. Used by the partial-embed update optimization: instead of replacing the
+   * entire materialized-view document, we issue a {@code $set} that touches only the filter fields
+   * plus the embeddings of the embed fields that actually changed, leaving every other embedding
+   * untouched on the MV document.
+   *
+   * <p>The MV vector and hash entries are written under their dotted MV paths (e.g. {@code
+   * "_autoEmbed.ae1"} and {@code "_autoEmbed._hash.ae1"}). The caller is responsible for verifying
+   * — via {@link #computePartialEmbedChangedTexts} — that none of these paths traverses an array
+   * on the source document, since MongoDB would otherwise reject the dotted-key {@code $set}.
+   *
+   * <p>On MV schema v1+ the vector and hash keys live under the MV-reserved {@code _autoEmbed.*}
+   * namespace, and the index-definition layer rejects filter declarations under it — so {@code
+   * filterFieldSetBody} cannot contain an entry that conflicts (ancestor or descendant) with the
+   * dotted keys written here, and MongoDB will not reject the resulting {@code $set} for path
+   * overlap. Schema v0 placed these keys at source-relative paths where that guarantee does not
+   * hold; v0 is retired (all new MV collections are stamped v1+, and the community/EA naming
+   * unification in CLOUDP-409822 orphans the remaining v0 collections).
+   *
+   * <p>If the embedding service returned no vector for a non-empty changed-path text, this method
+   * throws an {@link IllegalStateException}. Voyage's contract is one vector per non-empty input;
+   * a null vector indicates a contract violation, so the batch is failed loudly rather than
+   * silently writing an inconsistent MV state.
+   *
+   * @param filterFieldSetBody the filter-field {@code $set} body produced by {@link
+   *     #extractFilterFieldValues} — copied, not mutated.
+   * @param changedEmbedTexts source-side declared embed paths whose embeddings changed, mapped to
+   *     the chosen non-empty text for each (from {@link #computePartialEmbedChangedTexts}).
+   *     Precondition: every value is a non-empty source-side text; the builder does not re-verify.
+   * @param vectorsPerField the embedding service response, keyed by source field path then by
+   *     text
+   * @param schemaMetadata the MV schema metadata, used to derive MV and hash paths
+   * @return a new {@link BsonDocument} containing the filter-field entries plus vector and hash
+   *     entries for each changed embed path. Suitable for use as the body of a {@code $set}.
+   */
+  public static BsonDocument buildPartialEmbedUpdateSetBody(
+      BsonDocument filterFieldSetBody,
+      ImmutableMap<FieldPath, String> changedEmbedTexts,
+      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> vectorsPerField,
+      MaterializedViewSchemaMetadata schemaMetadata) {
+    BsonDocument result = filterFieldSetBody.clone();
+    for (Map.Entry<FieldPath, String> entry : changedEmbedTexts.entrySet()) {
+      FieldPath sourcePath = entry.getKey();
+      String text = entry.getValue();
+      Vector vector = vectorsPerField.getOrDefault(sourcePath, ImmutableMap.of()).get(text);
+      if (vector == null) {
+        throw new IllegalStateException(
+            "Embedding service returned no vector for non-empty text at path "
+                + sourcePath
+                + "; failing the batch so the inconsistency is surfaced rather than written to MV");
+      }
+      FieldPath mvPath =
+          getMatViewFieldPath(sourcePath, schemaMetadata.autoEmbeddingFieldsMapping());
+      FieldPath hashPath =
+          getHashFieldPath(sourcePath, schemaMetadata.materializedViewSchemaVersion());
+      result.put(mvPath.toString(), BsonVectorParser.encode(vector));
+      result.put(hashPath.toString(), new BsonString(computeTextHash(text)));
+    }
+    return result;
   }
 
   /**
