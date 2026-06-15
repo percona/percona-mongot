@@ -57,7 +57,8 @@ public class AutoEmbedFieldMappingCreatorTest {
                     Optional.of(100),
                     Optional.of(1000),
                     Optional.of("text"),
-                    Optional.of(VectorAutoEmbedQuantization.FLOAT)),
+                    Optional.of(VectorAutoEmbedQuantization.FLOAT),
+                    Optional.empty()),
                 new EmbeddingServiceConfig.ErrorHandlingConfig(50, 50L, 10L, 0.1),
                 new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
                     "token123", "2024-10-15T22:32:20.925Z"),

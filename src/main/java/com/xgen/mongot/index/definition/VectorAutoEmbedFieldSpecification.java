@@ -9,10 +9,13 @@ import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
 import com.xgen.mongot.util.bson.parser.Field;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import org.apache.commons.lang3.Range;
 import org.bson.BsonDocument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A vector field specification for autoEmbed fields that require embedding model information.
@@ -23,6 +26,9 @@ import org.bson.BsonDocument;
  */
 public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecification
     implements VectorFieldAutoEmbeddingSpecification {
+
+  private static final Logger LOG =
+      LoggerFactory.getLogger(VectorAutoEmbedFieldSpecification.class);
 
   public static final String DEFAULT_MODALITY = "text";
 
@@ -205,9 +211,10 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
       VectorAutoEmbedQuantization providerQuantization) {}
 
   /**
-   * Resolution order: BSON (if present) → Voyage {@code modelConfig} (dimensions, quantization) →
-   * static defaults. When BSON omits {@code similarity}, defaults match MMS bucket labels: {@code
-   * float}/{@code scalar} → dot product; {@code binary}/{@code binaryNoRescore} → euclidean.
+   * Resolution order: BSON (if present) → Voyage {@code modelConfig} (dimensions, quantization, and
+   * the per-quantization similarity default) → static defaults. When BSON and the model config both
+   * omit {@code similarity}, the static fallback matches MMS bucket labels: {@code float}/{@code
+   * scalar} → dot product; {@code binary}/{@code binaryNoRescore} → euclidean.
    *
    * <p>Package-private for unit tests in this package; not part of the public API.
    */
@@ -217,12 +224,14 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
       Optional<VectorSimilarity> userSimilarity,
       Optional<VectorAutoEmbedQuantization> userQuantization)
       throws BsonParseException {
-    // Fast‑path: if the user provided all optional values, avoid touching the model catalog.
-    if (userNumDimensions.isPresent() && userQuantization.isPresent()) {
+    // Fast‑path: if the user provided all optional values, avoid touching the model catalog. When
+    // similarity is omitted we fall through so the per-quantization default from the model config
+    // can apply.
+    if (userNumDimensions.isPresent()
+        && userQuantization.isPresent()
+        && userSimilarity.isPresent()) {
       return new ResolvedAutoEmbedVectorParams(
-          userNumDimensions.get(),
-          userSimilarity.orElse(getDefaultSimilarity(userQuantization.get())),
-          userQuantization.get());
+          userNumDimensions.get(), userSimilarity.get(), userQuantization.get());
     }
 
     // Resolve model config from catalog. When confcall response doesn't contain embedding model
@@ -252,8 +261,11 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
     VectorAutoEmbedQuantization resolvedQuantization =
         userQuantization.orElse(modelConfig.quantization.get());
 
-    // resolve VectorSimilarity: prefer explicit BSON value, otherwise map from quantization.
-    VectorSimilarity similarity = userSimilarity.orElse(getDefaultSimilarity(resolvedQuantization));
+    // resolve VectorSimilarity: explicit BSON value, then model-config per-quantization default,
+    // then the static quantization-based fallback.
+    VectorSimilarity similarity =
+        resolveSimilarity(
+            modelName, userSimilarity, resolvedQuantization, modelConfig.similarityByQuantization);
 
     return new ResolvedAutoEmbedVectorParams(
         resolvedNumDimensions, similarity, resolvedQuantization);
@@ -264,5 +276,40 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
       case BINARY, BINARY_NO_RESCORE -> VectorSimilarity.EUCLIDEAN;
       default -> VectorSimilarity.DOT_PRODUCT;
     };
+  }
+
+  /**
+   * Resolves the similarity for an auto-embed field. Resolution order: the explicit value from the
+   * index definition BSON, then the per-quantization default from the model config conf call, then
+   * the static quantization-based fallback.
+   *
+   * <p>Package-private for unit tests in this package; not part of the public API.
+   */
+  static VectorSimilarity resolveSimilarity(
+      String modelName,
+      Optional<VectorSimilarity> userSimilarity,
+      VectorAutoEmbedQuantization quantization,
+      Optional<Map<String, String>> modelConfigSimilarityByQuantization) {
+    if (userSimilarity.isPresent()) {
+      return userSimilarity.get();
+    }
+    Optional<String> configuredSimilarity =
+        modelConfigSimilarityByQuantization.map(
+            byQuantization -> byQuantization.get(quantization.getName()));
+    if (configuredSimilarity.isPresent()) {
+      Optional<VectorSimilarity> resolved = VectorSimilarity.fromName(configuredSimilarity.get());
+      if (resolved.isPresent()) {
+        return resolved.get();
+      }
+      // The model config carried a similarity for this quantization that mongot does not
+      // recognize (typo, casing, or a value newer than this binary). Fall back rather than fail
+      // the index, but surface it so a silently-skipped default is observable.
+      LOG.atWarn()
+          .addKeyValue("model", modelName)
+          .addKeyValue("quantization", quantization.getName())
+          .addKeyValue("similarity", configuredSimilarity.get())
+          .log("Unrecognized model-config similarity; falling back to quantization default");
+    }
+    return getDefaultSimilarity(quantization);
   }
 }

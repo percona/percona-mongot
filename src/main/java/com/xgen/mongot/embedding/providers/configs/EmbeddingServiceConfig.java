@@ -523,6 +523,16 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     public final Optional<String> modality;
     public final Optional<VectorAutoEmbedQuantization> quantization;
 
+    /**
+     * Per-quantization default similarity sent by MMS in the conf call, keyed by quantization name
+     * with the similarity name as the value.
+     *
+     * <p>Stored as raw strings so this config layer stays free of the index-definition enums.
+     * Conversion to a VectorSimilarity happens in VectorAutoEmbedFieldSpecification when resolving
+     * an auto-embed field with no similarity set.
+     */
+    public final Optional<Map<String, String>> similarityByQuantization;
+
     public VoyageModelConfig(
         Optional<Integer> outputDimensions,
         Optional<TruncationOption> truncation,
@@ -534,6 +544,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           batchSize,
           batchTokenLimit,
           Optional.empty(),
+          Optional.empty(),
           Optional.empty());
     }
 
@@ -543,13 +554,15 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
         Optional<Integer> batchSize,
         Optional<Integer> batchTokenLimit,
         Optional<String> modality,
-        Optional<VectorAutoEmbedQuantization> quantization) {
+        Optional<VectorAutoEmbedQuantization> quantization,
+        Optional<Map<String, String>> similarityByQuantization) {
       this.outputDimensions = outputDimensions;
       this.truncation = truncation;
       this.batchSize = batchSize;
       this.batchTokenLimit = batchTokenLimit;
       this.modality = modality;
       this.quantization = quantization;
+      this.similarityByQuantization = similarityByQuantization;
     }
 
     @Override
@@ -581,6 +594,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           .field(Fields.TRUNCATION, this.truncation)
           .field(Fields.MODALITY, this.modality)
           .field(Fields.QUANTIZATION, this.quantization.map(VectorAutoEmbedQuantization::getName))
+          .field(Fields.SIMILARITY, this.similarityByQuantization)
           .build();
     }
 
@@ -591,7 +605,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           parser.getField(Fields.BATCH_SIZE).unwrap(),
           parser.getField(Fields.BATCH_TOKEN_LIMIT).unwrap(),
           parser.getField(Fields.MODALITY).unwrap(),
-          parseQuantization(parser));
+          parseQuantization(parser),
+          parser.getField(Fields.SIMILARITY).unwrap());
     }
 
     private static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
@@ -625,6 +640,11 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           Field.builder("modality").stringField().optional().noDefault();
       static final Field.Optional<String> QUANTIZATION =
           Field.builder("quantization").stringField().optional().noDefault();
+      static final Field.Optional<Map<String, String>> SIMILARITY =
+          Field.builder("similarity")
+              .mapOf(Value.builder().stringValue().required())
+              .optional()
+              .noDefault();
     }
 
     @Override
@@ -641,7 +661,10 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           && Objects.equals(this.outputDimensions.orElse(null), that.outputDimensions.orElse(null))
           && Objects.equals(this.truncation.orElse(null), that.truncation.orElse(null))
           && Objects.equals(this.modality.orElse(null), that.modality.orElse(null))
-          && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null));
+          && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null))
+          && Objects.equals(
+              this.similarityByQuantization.orElse(null),
+              that.similarityByQuantization.orElse(null));
     }
 
     @Override
@@ -652,7 +675,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           this.outputDimensions.orElse(null),
           this.truncation.orElse(null),
           this.modality.orElse(null),
-          this.quantization.orElse(null));
+          this.quantization.orElse(null),
+          this.similarityByQuantization.orElse(null));
     }
   }
 
