@@ -1,0 +1,17 @@
+{
+  "search": [
+    { "flags": ["sortedIndex"], "schema": "search/index_sort.json" },
+    { "flags": [], "schema": "search/index.json" }
+  ],
+  "vectorSearch": [
+    {
+      "flags": ["autoEmbeddingPublicPreview"],
+      "schema": "vectorSearch/index_autoEmbeddingPublicPreview.json"
+    },
+    {
+      "flags": ["autoEmbeddingPrivatePreview"],
+      "schema": "vectorSearch/index_autoEmbeddingPrivatePreview.json"
+    },
+    { "flags": [], "schema": "vectorSearch/index.json" }
+  ]
+}
