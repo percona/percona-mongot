@@ -34,7 +34,11 @@ public final class LuceneConfigMapper {
       CommunityConfig config,
       Runtime runtime,
       Optional<HysteresisConfig> mergePolicyDiskUtilizationConfig) {
-    var indexingLucene = config.indexingConfig().flatMap(CommunityIndexingConfig::luceneConfig);
+    var indexingLucene =
+        config
+            .advancedConfigs()
+            .flatMap(AdvancedConfigs::indexingConfig)
+            .flatMap(CommunityIndexingConfig::luceneConfig);
 
     var refreshInterval =
         indexingLucene
@@ -65,7 +69,10 @@ public final class LuceneConfigMapper {
             .flatMap(l -> l.fieldLimit());
 
     var queryingLucene =
-        config.queryingConfig().flatMap(CommunityQueryingConfig::luceneConfig);
+        config
+            .advancedConfigs()
+            .flatMap(AdvancedConfigs::queryingConfig)
+            .flatMap(CommunityQueryingConfig::luceneConfig);
 
     var maxClauseLimit = queryingLucene.flatMap(q -> q.maxClauseLimit());
 

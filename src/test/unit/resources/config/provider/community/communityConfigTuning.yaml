@@ -14,27 +14,28 @@ storage:
 server:
   grpc:
     address: "localhost:27028"
-indexing:
-  lucene:
-    refresh:
-      intervalMs: 2000
-    mergePolicy:
-      tiered:
-        vectorMergePolicy:
-          mergeBudgetMb: 512
-    mergeScheduler:
-      concurrent:
-        maxThreadCount: 6
-    fieldLimit: 500
-  definition:
-    maxEmbeddedDocumentsNestingLevel: 7
-querying:
-  lucene:
-    maxClauseLimit: 2048
-    floorSegmentMB: 128.0
-replication:
-  mongodb:
-    numConcurrentInitialSyncs: 3
-    numConcurrentChangeStreams: 12
-    numIndexingThreads: 8
-    numConcurrentSynonymSyncs: 2
+advancedConfigs:
+  indexing:
+    lucene:
+      refresh:
+        intervalMs: 2000
+      mergePolicy:
+        tiered:
+          vectorMergePolicy:
+            mergeBudgetMb: 512
+      mergeScheduler:
+        concurrent:
+          maxThreadCount: 6
+      fieldLimit: 500
+    definition:
+      maxEmbeddedDocumentsNestingLevel: 7
+  querying:
+    lucene:
+      maxClauseLimit: 2048
+      floorSegmentMB: 128.0
+  replication:
+    mongodb:
+      numConcurrentInitialSyncs: 3
+      numConcurrentChangeStreams: 12
+      numIndexingThreads: 8
+      numConcurrentSynonymSyncs: 2

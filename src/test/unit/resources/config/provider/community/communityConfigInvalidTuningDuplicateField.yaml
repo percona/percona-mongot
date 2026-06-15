@@ -15,14 +15,5 @@ server:
   grpc:
     address: "localhost:27028"
 advancedConfigs:
-  indexing:
-    lucene:
-      fieldLimit: 500
-      unkownKey:
-        cache:
-          enabled: true
-  querying:
-    lucene:
-      maxClauseLimit: 1024
-      # Never configurable in Community. Warned about and ignored.
-      disableMaxClauseLimit: true
+  storage:
+    dataPath: "data/mongotinvalid"

@@ -355,8 +355,6 @@ public class CommunityMongotBootstrapperTest {
         Optional.empty(),
         Optional.empty(),
         embeddingConfig,
-        Optional.empty(),
-        Optional.empty(),
         Optional.empty());
   }
 
@@ -368,8 +366,6 @@ public class CommunityMongotBootstrapperTest {
         this.createMinimalServerConfig(),
         ftdcConfig.orElse(FtdcCommunityConfig.getDefault()),
         DiskMonitorConfig.getDefault(),
-        Optional.empty(),
-        Optional.empty(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),

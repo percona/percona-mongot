@@ -14,7 +14,8 @@ storage:
 server:
   grpc:
     address: "localhost:27028"
-indexing:
-  lucene:
-    # Invalid: fieldLimit must be positive.
-    fieldLimit: -5
+advancedConfigs:
+  indexing:
+    lucene:
+      # Invalid: fieldLimit must be positive.
+      fieldLimit: -5

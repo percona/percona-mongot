@@ -950,7 +950,7 @@ public class CommunityMongotBootstrapper {
         MongoDbReplicationConfigMapper.toMongoDbReplicationConfig(
             CommonReplicationConfig.communityDefaultGlobalReplicationConfig(),
             Runtime.INSTANCE,
-            config.replicationConfig());
+            config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
 
     var initialSyncConfig = new InitialSyncConfig();
 
@@ -960,7 +960,9 @@ public class CommunityMongotBootstrapper {
 
     var indexDefinitionConfig =
         IndexDefinitionConfig.create(
-            config.indexingConfig()
+            config
+                .advancedConfigs()
+                .flatMap(AdvancedConfigs::indexingConfig)
                 .flatMap(CommunityIndexingConfig::definitionConfig)
                 .flatMap(d -> d.maxEmbeddedDocumentsNestingLevel()));
     var lifecycleConfig = LifecycleConfig.getDefault();

@@ -37,7 +37,7 @@ public class MongoDbReplicationConfigMapperTest {
         MongoDbReplicationConfigMapper.toMongoDbReplicationConfig(
             CommonReplicationConfig.defaultGlobalReplicationConfig(),
             runtime,
-            config.replicationConfig());
+            config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
 
     assertEquals(3, rc.numConcurrentInitialSyncs);
     assertEquals(12, rc.numConcurrentChangeStreams);

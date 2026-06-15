@@ -28,9 +28,7 @@ public record CommunityConfig(
     Optional<HealthCheckConfig> healthCheckConfig,
     Optional<LoggingConfig> loggingConfig,
     Optional<EmbeddingConfig> embeddingConfig,
-    Optional<CommunityIndexingConfig> indexingConfig,
-    Optional<CommunityQueryingConfig> queryingConfig,
-    Optional<CommunityReplicationConfig> replicationConfig)
+    Optional<AdvancedConfigs> advancedConfigs)
     implements DocumentEncodable {
 
   private static final Logger LOG = LoggerFactory.getLogger(CommunityConfig.class);
@@ -96,23 +94,9 @@ public record CommunityConfig(
             .optional()
             .noDefault();
 
-    public static final Field.Optional<CommunityIndexingConfig> INDEXING =
-        Field.builder("indexing")
-            .classField(CommunityIndexingConfig::fromBson)
-            .disallowUnknownFields()
-            .optional()
-            .noDefault();
-
-    public static final Field.Optional<CommunityQueryingConfig> QUERYING =
-        Field.builder("querying")
-            .classField(CommunityQueryingConfig::fromBson)
-            .disallowUnknownFields()
-            .optional()
-            .noDefault();
-
-    public static final Field.Optional<CommunityReplicationConfig> REPLICATION =
-        Field.builder("replication")
-            .classField(CommunityReplicationConfig::fromBson)
+    public static final Field.Optional<AdvancedConfigs> ADVANCED_CONFIGS =
+        Field.builder("advancedConfigs")
+            .classField(AdvancedConfigs::fromBson)
             .disallowUnknownFields()
             .optional()
             .noDefault();
@@ -150,9 +134,7 @@ public record CommunityConfig(
         parser.getField(Fields.HEALTH_CHECK).unwrap(),
         parser.getField(Fields.LOGGING).unwrap(),
         parser.getField(Fields.EMBEDDING).unwrap(),
-        parser.getField(Fields.INDEXING).unwrap(),
-        parser.getField(Fields.QUERYING).unwrap(),
-        parser.getField(Fields.REPLICATION).unwrap());
+        parser.getField(Fields.ADVANCED_CONFIGS).unwrap());
   }
 
   @Override
@@ -167,9 +149,7 @@ public record CommunityConfig(
         .field(Fields.HEALTH_CHECK, this.healthCheckConfig)
         .field(Fields.LOGGING, this.loggingConfig)
         .field(Fields.EMBEDDING, this.embeddingConfig)
-        .field(Fields.INDEXING, this.indexingConfig)
-        .field(Fields.QUERYING, this.queryingConfig)
-        .field(Fields.REPLICATION, this.replicationConfig)
+        .field(Fields.ADVANCED_CONFIGS, this.advancedConfigs)
         .build();
   }
 }

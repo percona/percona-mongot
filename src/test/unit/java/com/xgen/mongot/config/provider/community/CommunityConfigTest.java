@@ -106,8 +106,6 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -187,8 +185,6 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -218,8 +214,6 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("INFO", Optional.of("/var/log/mongot"))),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty(),
               Optional.empty()));
     }
@@ -258,8 +252,6 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -296,8 +288,6 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty(),
               Optional.empty()));
     }
@@ -336,8 +326,6 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -375,8 +363,6 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -409,8 +395,6 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty(),
               Optional.empty()));
     }
@@ -449,8 +433,6 @@ public class CommunityConfigTest {
                       Optional.empty(),
                       Optional.empty(),
                       false)),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -488,8 +470,6 @@ public class CommunityConfigTest {
                       Optional.of(50),
                       Optional.empty(),
                       true)),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
 
@@ -518,8 +498,6 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty(),
               Optional.empty()));
     }
@@ -550,8 +528,6 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty(),
               Optional.empty()));
     }
@@ -647,8 +623,6 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty()));
     }
   }
@@ -707,8 +681,6 @@ public class CommunityConfigTest {
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("WARNING", Optional.of("/var/log/mongot"))),
-              Optional.empty(),
-              Optional.empty(),
               Optional.empty(),
               Optional.empty());
 
@@ -793,8 +765,9 @@ public class CommunityConfigTest {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfigTuning.yaml");
       CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+      var advanced = result.advancedConfigs().get();
 
-      var lucene = result.indexingConfig().get().luceneConfig().get();
+      var lucene = advanced.indexingConfig().get().luceneConfig().get();
       assertEquals(Optional.of(2000), lucene.refreshConfig().get().intervalMs());
       var tiered = lucene.mergePolicyConfig().get().tieredMergePolicyConfig().get();
       assertEquals(Optional.of(512), tiered.vectorMergePolicyConfig().get().mergeBudgetMb());
@@ -802,14 +775,14 @@ public class CommunityConfigTest {
           Optional.of(6),
           lucene.mergeSchedulerConfig().get().concurrentSchedulerConfig().get().maxThreadCount());
       assertEquals(Optional.of(500), lucene.fieldLimit());
-      var definition = result.indexingConfig().get().definitionConfig().get();
+      var definition = advanced.indexingConfig().get().definitionConfig().get();
       assertEquals(Optional.of(7), definition.maxEmbeddedDocumentsNestingLevel());
 
-      var queryingLucene = result.queryingConfig().get().luceneConfig().get();
+      var queryingLucene = advanced.queryingConfig().get().luceneConfig().get();
       assertEquals(Optional.of(2048), queryingLucene.maxClauseLimit());
       assertEquals(Optional.of(128.0), queryingLucene.floorSegmentMB());
 
-      var mongodb = result.replicationConfig().get().mongoDbConfig().get();
+      var mongodb = advanced.replicationConfig().get().mongoDbConfig().get();
       assertEquals(Optional.of(3), mongodb.numConcurrentInitialSyncs());
       assertEquals(Optional.of(12), mongodb.numConcurrentChangeStreams());
       assertEquals(Optional.of(8), mongodb.numIndexingThreads());
@@ -825,12 +798,14 @@ public class CommunityConfigTest {
                   + "communityConfigTuningUnknownKey.yaml");
       CommunityConfig.ParsedCommunityConfig parsed = CommunityConfig.readFromFile(configPath);
       CommunityConfig result = parsed.config();
+      var advanced = result.advancedConfigs().get();
 
       assertFalse(parsed.unknownFieldExceptions().isEmpty());
       assertEquals(
-          Optional.of(500), result.indexingConfig().get().luceneConfig().get().fieldLimit());
+          Optional.of(500), advanced.indexingConfig().get().luceneConfig().get().fieldLimit());
       assertEquals(
-          Optional.of(1024), result.queryingConfig().get().luceneConfig().get().maxClauseLimit());
+          Optional.of(1024),
+          advanced.queryingConfig().get().luceneConfig().get().maxClauseLimit());
     }
 
     @Test
@@ -840,6 +815,19 @@ public class CommunityConfigTest {
               "src/test/unit/resources/config/provider/community/"
                   + "communityConfigInvalidTuning.yaml");
       assertThrows(BsonParseException.class, () -> CommunityConfig.readFromFile(configPath));
+    }
+
+
+    @Test
+    public void readFromFile_ignoreDuplicateFieldInAdvancedConfigs()
+        throws BsonParseException, IOException {
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigInvalidTuningDuplicateField.yaml");
+      CommunityConfig.ParsedCommunityConfig parsedConfig = CommunityConfig.readFromFile(configPath);
+      assertEquals("data/mongot", parsedConfig.config().storageConfig().dataPath().toString());
+      assertFalse(parsedConfig.unknownFieldExceptions().isEmpty());
     }
   }
 }

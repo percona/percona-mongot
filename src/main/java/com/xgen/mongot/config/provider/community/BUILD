@@ -3,6 +3,7 @@ load("//bazel/java:package.bzl", "java_library")
 java_library(
     name = "community",
     srcs = [
+        "AdvancedConfigs.java",
         "CommunityConfig.java",
         "CommunityConfigUpdater.java",
         "CommunityIndexingConfig.java",
