@@ -23,6 +23,7 @@ public record CommunityConfig(
     StorageConfig storageConfig,
     ServerConfig serverConfig,
     FtdcCommunityConfig ftdcConfig,
+    DiskMonitorConfig diskMonitorConfig,
     Optional<MetricsConfig> metricsConfig,
     Optional<HealthCheckConfig> healthCheckConfig,
     Optional<LoggingConfig> loggingConfig,
@@ -59,6 +60,13 @@ public record CommunityConfig(
             .disallowUnknownFields()
             .optional()
             .withDefault(FtdcCommunityConfig.getDefault());
+
+    public static final Field.WithDefault<DiskMonitorConfig> DISK_MONITOR =
+        Field.builder("diskMonitor")
+            .classField(DiskMonitorConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .withDefault(DiskMonitorConfig.getDefault());
 
     public static final Field.Optional<MetricsConfig> METRICS =
         Field.builder("metrics")
@@ -137,6 +145,7 @@ public record CommunityConfig(
         parser.getField(Fields.STORAGE).unwrap(),
         parser.getField(Fields.SERVER).unwrap(),
         parser.getField(Fields.FTDC).unwrap(),
+        parser.getField(Fields.DISK_MONITOR).unwrap(),
         parser.getField(Fields.METRICS).unwrap(),
         parser.getField(Fields.HEALTH_CHECK).unwrap(),
         parser.getField(Fields.LOGGING).unwrap(),
@@ -153,6 +162,7 @@ public record CommunityConfig(
         .field(Fields.STORAGE, this.storageConfig)
         .field(Fields.SERVER, this.serverConfig)
         .field(Fields.FTDC, this.ftdcConfig)
+        .field(Fields.DISK_MONITOR, this.diskMonitorConfig)
         .field(Fields.METRICS, this.metricsConfig)
         .field(Fields.HEALTH_CHECK, this.healthCheckConfig)
         .field(Fields.LOGGING, this.loggingConfig)

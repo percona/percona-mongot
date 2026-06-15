@@ -14,6 +14,7 @@ java_library(
         "CommunityServerIdProvider.java",
         "CommunityServerInfo.java",
         "ConnectionInfoFactory.java",
+        "DiskMonitorConfig.java",
         "DroppedCollectionIndexCleaner.java",
         "FtdcCommunityConfig.java",
         "HealthCheckConfig.java",

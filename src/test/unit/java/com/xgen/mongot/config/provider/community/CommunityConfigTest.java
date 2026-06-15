@@ -71,7 +71,8 @@ public class CommunityConfigTest {
           withEmbeddingMvWriteRateLimitRps(),
           ftdcOverrides(),
           withReplicationReader(),
-          withReplicationReaderTagSets());
+          withReplicationReaderTagSets(),
+          withDiskMonitor());
     }
 
     @Test
@@ -100,6 +101,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -180,6 +182,7 @@ public class CommunityConfigTest {
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.of("server-name")),
               new FtdcCommunityConfig(false, 200, 20, 3000),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -211,6 +214,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("INFO", Optional.of("/var/log/mongot"))),
@@ -249,6 +253,7 @@ public class CommunityConfigTest {
                               Optional.empty()))),
                   Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -287,6 +292,7 @@ public class CommunityConfigTest {
                               Optional.empty()))),
                   Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -325,6 +331,7 @@ public class CommunityConfigTest {
                               Optional.empty()))),
                   Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -363,6 +370,7 @@ public class CommunityConfigTest {
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -397,6 +405,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -428,6 +437,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -466,6 +476,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -503,6 +514,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               new FtdcCommunityConfig(false, 200, 20, 3000),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -534,6 +546,7 @@ public class CommunityConfigTest {
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -541,6 +554,19 @@ public class CommunityConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.empty()));
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> withDiskMonitor() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "with diskMonitor",
+          (CommunityConfig config) -> {
+            var diskMonitor = config.diskMonitorConfig();
+            assertEquals(0.92, diskMonitor.pauseReplicationThreshold(), 0.0);
+            assertEquals(0.87, diskMonitor.resumeReplicationThreshold(), 0.0);
+            assertEquals(0.97, diskMonitor.crashThreshold(), 0.0);
+            assertEquals(0.82, diskMonitor.pauseInitialSyncThreshold(), 0.0);
+            assertEquals(0.77, diskMonitor.resumeInitialSyncThreshold(), 0.0);
+          });
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -616,6 +642,7 @@ public class CommunityConfigTest {
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.of("server-name")),
               FtdcCommunityConfig.getDefault(),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -676,6 +703,7 @@ public class CommunityConfigTest {
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.empty()),
               new FtdcCommunityConfig(false, 200, 20, 3000),
+              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("WARNING", Optional.of("/var/log/mongot"))),

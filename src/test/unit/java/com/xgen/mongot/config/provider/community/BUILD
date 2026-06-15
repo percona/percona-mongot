@@ -14,6 +14,7 @@ java_test_suite(
         "CommunityServerIdProviderTest.java",
         "CommunityServerInfoTest.java",
         "ConnectionInfoFactoryTest.java",
+        "DiskMonitorConfigTest.java",
         "DroppedCollectionIndexCleanerTest.java",
         "InitialSyncHostProviderTest.java",
         "LuceneConfigMapperTest.java",

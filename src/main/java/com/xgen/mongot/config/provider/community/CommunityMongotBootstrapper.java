@@ -112,11 +112,6 @@ public class CommunityMongotBootstrapper {
 
   public static final Logger LOG = LoggerFactory.getLogger(CommunityMongotBootstrapper.class);
 
-  private static final double DISK_USAGE_PAUSE_REPLICATION_THRESHOLD = 0.9;
-  private static final double DISK_USAGE_RESUME_REPLICATION_THRESHOLD = 0.85;
-  // Never crash in community.
-  private static final double CRASH_THRESHOLD = 1.01;
-
   private static final Duration DEFAULT_CONFIG_UPDATE_PERIOD = Duration.ofSeconds(1);
 
   // Fixed cadence for refreshing system metrics (disk/memory/netstat/process) gauges.
@@ -202,16 +197,22 @@ public class CommunityMongotBootstrapper {
         MongotCursorManagerImpl.fromConfig(
             CursorConfig.getDefault(), meterRegistry, indexCatalog, initializedIndexCatalog);
 
+    var diskMonitorConfig = config.diskMonitorConfig();
     var diskMonitor =
         PeriodicDiskMonitor.createAndStart(
-            config.storageConfig().dataPath(), CRASH_THRESHOLD, meterRegistry);
+            config.storageConfig().dataPath(), diskMonitorConfig.crashThreshold(), meterRegistry);
     var replicationGateConfig =
         new HysteresisConfig(
-            DISK_USAGE_RESUME_REPLICATION_THRESHOLD, DISK_USAGE_PAUSE_REPLICATION_THRESHOLD);
-    // Never pause initial syncs in community.
-    Optional<HysteresisConfig> initialSyncConfig = Optional.empty();
+            diskMonitorConfig.resumeReplicationThreshold(),
+            diskMonitorConfig.pauseReplicationThreshold());
+    var initialSyncGateConfig =
+        Optional.of(
+            new HysteresisConfig(
+                diskMonitorConfig.resumeInitialSyncThreshold(),
+                diskMonitorConfig.pauseInitialSyncThreshold()));
     var replicationStateMonitor =
-        ReplicationStateMonitor.diskBased(replicationGateConfig, initialSyncConfig, diskMonitor);
+        ReplicationStateMonitor.diskBased(
+            replicationGateConfig, initialSyncGateConfig, diskMonitor);
 
     var syncSourceConfig = syncSourceConfig(config.syncSourceConfig(), initialSyncHostProvider);
     var mongoDbMetadataClient =
@@ -942,8 +943,8 @@ public class CommunityMongotBootstrapper {
             Runtime.INSTANCE,
             Optional.of(
                 new HysteresisConfig(
-                    DISK_USAGE_PAUSE_REPLICATION_THRESHOLD,
-                    DISK_USAGE_PAUSE_REPLICATION_THRESHOLD)));
+                    config.diskMonitorConfig().resumeReplicationThreshold(),
+                    config.diskMonitorConfig().pauseReplicationThreshold())));
 
     var replicationConfig =
         MongoDbReplicationConfigMapper.toMongoDbReplicationConfig(

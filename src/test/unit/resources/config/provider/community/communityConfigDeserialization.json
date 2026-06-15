@@ -620,6 +620,35 @@
           "collectionPeriodMillis": 1000
         }
       }
+    },
+    {
+      "description": "with diskMonitor",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "diskMonitor": {
+          "pauseReplicationThreshold": 0.92,
+          "resumeReplicationThreshold": 0.87,
+          "crashThreshold": 0.97,
+          "pauseInitialSyncThreshold": 0.82,
+          "resumeInitialSyncThreshold": 0.77
+        }
+      }
     }
   ],
   "invalid": [
@@ -1230,6 +1259,33 @@
         }
       },
       "errorMessageContains": "tagSets must be empty or null when readPreference is PRIMARY"
+    },
+    {
+      "description": "diskMonitor pauseReplicationThreshold below resumeReplicationThreshold",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "diskMonitor": {
+          "pauseReplicationThreshold": 0.85,
+          "resumeReplicationThreshold": 0.90
+        }
+      },
+      "errorMessageContains": "pauseReplicationThreshold must be greater than or equal to resumeReplicationThreshold"
     }
   ]
 }
