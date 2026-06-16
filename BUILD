@@ -1,5 +1,5 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
-load("//bazel/java:netty_tcnative.bzl", "NETTY_TCNATIVE_X86_64_AL2023_TARGET", "NETTY_TCNATIVE_X86_64_AL2_TARGET")
+load("//bazel/java:netty_tcnative.bzl", "NETTY_TCNATIVE_AARCH64_TARGET", "NETTY_TCNATIVE_X86_64_AL2023_TARGET", "NETTY_TCNATIVE_X86_64_AL2_TARGET")
 load("//bazel/java:package.bzl", "java_binary_stamped_manifest")
 load("//deploy:def.bzl", "extracted_libraries")
 
@@ -73,7 +73,7 @@ extracted_libraries({
                 "linux_aarch64": "META-INF/native/libnetty_tcnative_linux_aarch_64.so",
             },
         },
-        "src": "//bazel/java:netty-tcnative",
+        "src": NETTY_TCNATIVE_AARCH64_TARGET,
     },
     "tcnative-x86_64-al2": {
         "outputs": {

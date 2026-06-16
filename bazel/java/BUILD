@@ -3,6 +3,7 @@ load("@rules_java//java:defs.bzl", "java_package_configuration", "java_plugin", 
 load("@rules_java//toolchains:default_java_toolchain.bzl", "default_java_toolchain")
 load("@rules_jvm_external//:defs.bzl", "artifact")
 load("//bazel/java:netty_tcnative.bzl", "NETTY_TCNATIVE_AARCH64_TARGET", "NETTY_TCNATIVE_X86_64_TARGET")
+load("//bazel/java:package.bzl", "java_library")
 
 java_plugin(
     name = "nullaway_annotation_processor",
@@ -57,17 +58,21 @@ java_runtime(
     visibility = ["//visibility:public"],
 )
 
-# netty-tcnative alias for runtime dependency resolution.
-alias(
+# netty-tcnative target for runtime dependency resolution.
+# Exports both the platform-specific native jar and the netty-tcnative-classes jar,
+# which provides the io.netty.internal.tcnative.* Java bridge needed by the OpenSSL provider.
+java_library(
     name = "netty-tcnative",
-    actual = select({
-        "//bazel/platforms:is_linux_aarch64": NETTY_TCNATIVE_AARCH64_TARGET,
+    visibility = ["//visibility:public"],
+    exports = [
+        "@maven//:io_netty_netty_tcnative_classes",
+    ] + select({
+        "//bazel/platforms:is_linux_aarch64": [NETTY_TCNATIVE_AARCH64_TARGET],
         # We assume all local testing that will end up using tcnative on Apple Silicon will be
         # done through docker, so we say to use the Linux version for the docker image.
-        "//bazel/platforms:is_macos_aarch64": NETTY_TCNATIVE_AARCH64_TARGET,
-        "//conditions:default": NETTY_TCNATIVE_X86_64_TARGET,
+        "//bazel/platforms:is_macos_aarch64": [NETTY_TCNATIVE_AARCH64_TARGET],
+        "//conditions:default": [NETTY_TCNATIVE_X86_64_TARGET],
     }),
-    visibility = ["//visibility:public"],
 )
 
 alias(
