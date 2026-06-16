@@ -397,7 +397,7 @@
       }
     },
     {
-      "description": "with embedding mv write rate limit rps",
+      "description": "with materialized view write rate limit rps",
       "value": {
         "syncSource": {
           "replicaSet": {
@@ -428,8 +428,14 @@
           "logPath": "/var/log/mongot"
         },
         "embedding": {
-          "mvWriteRateLimitRps": 50,
           "isAutoEmbeddingViewWriter": true
+        },
+        "advancedConfigs": {
+          "autoEmbedding": {
+            "materializedView": {
+              "mvWriteRateLimitRps": 50
+            }
+          }
         },
         "ftdc": {
           "enabled": true,

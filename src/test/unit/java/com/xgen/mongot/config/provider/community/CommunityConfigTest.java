@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import org.bson.types.ObjectId;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -68,7 +69,7 @@ public class CommunityConfigTest {
           grpcMtls(),
           scramTlsWithCertKeyPasswordAndCa(),
           withEmbeddingEndpointOverride(),
-          withEmbeddingMvWriteRateLimitRps(),
+          withMaterializedViewWriteRateLimitRps(),
           ftdcOverrides(),
           withReplicationReader(),
           withReplicationReaderTagSets(),
@@ -430,16 +431,14 @@ public class CommunityConfigTest {
                       Optional.of("https://custom-api.example.com/v1/embeddings"),
                       Optional.empty(),
                       Optional.empty(),
-                      Optional.empty(),
-                      Optional.empty(),
                       false)),
               Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
-        withEmbeddingMvWriteRateLimitRps() {
+        withMaterializedViewWriteRateLimitRps() {
       return BsonDeserializationTestSuite.TestSpec.valid(
-          "with embedding mv write rate limit rps",
+          "with materialized view write rate limit rps",
           new CommunityConfig(
               new SyncSourceConfig(
                   new ReplicaSetConfig(
@@ -464,13 +463,31 @@ public class CommunityConfigTest {
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.of(
                   new EmbeddingConfig(
-                      Optional.empty(),
-                      Optional.empty(),
-                      Optional.empty(),
-                      Optional.of(50),
-                      Optional.empty(),
-                      true)),
-              Optional.empty()));
+                      Optional.empty(), Optional.empty(), Optional.empty(), true)),
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(
+                      new CommunityAutoEmbeddingConfig(
+                          Optional.of(
+                              new CommunityAutoEmbeddingConfig.MaterializedViewConfig(
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.of(50),
+                                  Optional.empty(),
+                                  Optional.empty(),
+                                  Optional.empty())))),
+                  Optional.empty()))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> ftdcOverrides() {
@@ -787,6 +804,39 @@ public class CommunityConfigTest {
       assertEquals(Optional.of(12), mongodb.numConcurrentChangeStreams());
       assertEquals(Optional.of(8), mongodb.numIndexingThreads());
       assertEquals(Optional.of(2), mongodb.numConcurrentSynonymSyncs());
+      assertEquals(Optional.of(500), mongodb.changeStreamMaxTimeMs());
+      assertEquals(Optional.of(900), mongodb.changeStreamCursorMaxTimeSec());
+      assertEquals(Optional.of(4), mongodb.numChangeStreamDecodingThreads());
+      assertEquals(Optional.of(true), mongodb.pauseAllInitialSyncs());
+      assertEquals(
+          Optional.of(
+              List.of(
+                  new ObjectId("507f1f77bcf86cd799439011"),
+                  new ObjectId("507f1f77bcf86cd799439012"))),
+          mongodb.pauseInitialSyncOnIndexIds());
+      assertEquals(
+          Optional.of(List.of("lsid", "txnNumber")), mongodb.excludedChangestreamFields());
+
+      var matView = advanced.autoEmbeddingConfig().get().materializedViewConfig().get();
+      assertEquals(Optional.of(10), matView.numConcurrentChangeStreams());
+      assertEquals(Optional.of(5), matView.numIndexingThreads());
+      assertEquals(Optional.of(6), matView.numEmbeddingThreads());
+      assertEquals(Optional.of(2), matView.numConcurrentInitialSyncs());
+      assertEquals(Optional.of(8), matView.matViewWriterMaxConnections());
+      assertEquals(Optional.of(3), matView.maxInFlightEmbeddingGetMores());
+      assertEquals(Optional.of(2000), matView.embeddingGetMoreBatchSize());
+      assertEquals(Optional.of(700), matView.changeStreamMaxTimeMs());
+      assertEquals(Optional.of(1200), matView.changeStreamCursorMaxTimeSec());
+      assertEquals(Optional.of(3), matView.numChangeStreamDecodingThreads());
+      assertEquals(Optional.of(250), matView.requestRateLimitBackoffMs());
+      assertEquals(Optional.of(60), matView.mvWriteRateLimitRps());
+      assertEquals(Optional.of(30), matView.embeddingProviderRpsLimit());
+      assertEquals(Optional.of(80), matView.globalMemoryBudgetHeapPercent());
+      assertEquals(Optional.of(40), matView.perBatchMemoryBudgetHeapPercent());
+
+      var cursor = advanced.cursorConfig().get();
+      assertEquals(Optional.of(1800000), cursor.idleCursorHandlingRateMs());
+      assertEquals(Optional.of(3600000), cursor.cursorIdleTimeMs());
     }
 
     @Test
@@ -816,7 +866,6 @@ public class CommunityConfigTest {
                   + "communityConfigInvalidTuning.yaml");
       assertThrows(BsonParseException.class, () -> CommunityConfig.readFromFile(configPath));
     }
-
 
     @Test
     public void readFromFile_ignoreDuplicateFieldInAdvancedConfigs()

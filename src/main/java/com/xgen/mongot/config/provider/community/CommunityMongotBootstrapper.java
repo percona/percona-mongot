@@ -26,7 +26,6 @@ import com.xgen.mongot.config.provider.community.embedding.EmbeddingServiceManag
 import com.xgen.mongot.config.provider.monitor.PeriodicConfigMonitor;
 import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.config.util.HysteresisConfig;
-import com.xgen.mongot.cursor.CursorConfig;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.cursor.MongotCursorManagerImpl;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
@@ -61,8 +60,6 @@ import com.xgen.mongot.monitor.PeriodicDiskMonitor;
 import com.xgen.mongot.monitor.ReplicationStateMonitor;
 import com.xgen.mongot.replication.mongodb.DurabilityConfig;
 import com.xgen.mongot.replication.mongodb.autoembedding.AutoEmbeddingMaterializedViewManagerFactory;
-import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
-import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.mongot.server.auth.SecurityConfig;
@@ -198,7 +195,7 @@ public class CommunityMongotBootstrapper {
 
     var cursorManager =
         MongotCursorManagerImpl.fromConfig(
-            CursorConfig.getDefault(), meterRegistry, indexCatalog, initializedIndexCatalog);
+            mongotConfigs.cursorConfig, meterRegistry, indexCatalog, initializedIndexCatalog);
 
     var diskMonitorConfig = config.diskMonitorConfig();
     var diskMonitor =
@@ -608,10 +605,11 @@ public class CommunityMongotBootstrapper {
                 new EmbeddingClientFactory(meterRegistry, DeploymentEnvironment.COMMUNITY),
                 Executors.fixedSizeThreadScheduledExecutor(
                     "embedding-providers",
-                    mongotConfigs.autoEmbeddingMaterializedViewConfig.numIndexingThreads * 2,
+                    mongotConfigs.autoEmbeddingMaterializedViewConfig.numEmbeddingThreads,
                     meterRegistry),
                 meterRegistry,
-                mongotConfigs.autoEmbeddingMaterializedViewConfig.congestionControl));
+                mongotConfigs.autoEmbeddingMaterializedViewConfig.congestionControl,
+                mongotConfigs.autoEmbeddingMaterializedViewConfig.embeddingProviderRpsLimit));
   }
 
   /** Loads Voyage API credential secrets from files specified in embedding config. */
@@ -949,17 +947,21 @@ public class CommunityMongotBootstrapper {
                     config.diskMonitorConfig().resumeReplicationThreshold(),
                     config.diskMonitorConfig().pauseReplicationThreshold())));
 
+    var globalReplicationConfig =
+        MongoDbReplicationConfigMapper.toGlobalReplicationConfig(
+            config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
+
     var replicationConfig =
         MongoDbReplicationConfigMapper.toMongoDbReplicationConfig(
-            CommonReplicationConfig.communityDefaultGlobalReplicationConfig(),
-            Runtime.INSTANCE,
+            globalReplicationConfig, Runtime.INSTANCE,
             config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
 
     var initialSyncConfig = new InitialSyncConfig();
 
     var durabilityConfig = DurabilityConfig.create(Optional.empty(), Optional.empty());
 
-    var cursorConfig = CursorConfig.getDefault();
+    var cursorConfig = CursorConfigMapper.toCursorConfig(
+        config.advancedConfigs().flatMap(AdvancedConfigs::cursorConfig));
 
     var indexDefinitionConfig =
         IndexDefinitionConfig.create(
@@ -973,38 +975,9 @@ public class CommunityMongotBootstrapper {
     var environmentVariantPerfConfig = EnvironmentVariantPerfConfig.getDefault();
     var regularBlockingRequestSettings = RegularBlockingRequestSettings.defaults();
 
-    Optional<EmbeddingConfig> embeddingConfig = config.embeddingConfig();
-    var mvWriteRateLimitRps = embeddingConfig.flatMap(EmbeddingConfig::mvWriteRateLimitRps);
-    var embeddingProviderRpsLimit =
-        embeddingConfig.flatMap(EmbeddingConfig::embeddingProviderRpsLimit);
     var autoEmbeddingMaterializedViewConfig =
-        AutoEmbeddingMaterializedViewConfig.create(
-            CommonReplicationConfig.communityDefaultGlobalReplicationConfig(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            mvWriteRateLimitRps,
-            embeddingProviderRpsLimit,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty());
+        AutoEmbeddingMaterializedViewConfigMapper.toAutoEmbeddingMaterializedViewConfig(
+            globalReplicationConfig, config);
     return new MongotConfigs(
         luceneConfig,
         replicationConfig,

@@ -6,9 +6,14 @@ import static org.junit.Assert.assertThrows;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.PermissiveBsonParseContext;
+import java.util.List;
 import java.util.Optional;
+import org.bson.BsonArray;
+import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
+import org.bson.BsonString;
+import org.bson.types.ObjectId;
 import org.junit.Test;
 
 public class CommunityReplicationConfigTest {
@@ -26,7 +31,16 @@ public class CommunityReplicationConfigTest {
         new CommunityReplicationConfig(
             Optional.of(
                 new CommunityReplicationConfig.MongoDbConfig(
-                    Optional.of(3), Optional.of(12), Optional.of(8), Optional.of(2))));
+                    Optional.of(3),
+                    Optional.of(12),
+                    Optional.of(8),
+                    Optional.of(2),
+                    Optional.of(500),
+                    Optional.of(900),
+                    Optional.of(4),
+                    Optional.of(true),
+                    Optional.of(List.of(new ObjectId("507f1f77bcf86cd799439011"))),
+                    Optional.of(List.of("lsid", "txnNumber")))));
     assertEquals(original, parse(original.toBson()));
   }
 
@@ -43,12 +57,48 @@ public class CommunityReplicationConfigTest {
             .append("numConcurrentInitialSyncs", new BsonInt32(3))
             .append("numConcurrentChangeStreams", new BsonInt32(12))
             .append("numIndexingThreads", new BsonInt32(8))
-            .append("numConcurrentSynonymSyncs", new BsonInt32(2));
+            .append("numConcurrentSynonymSyncs", new BsonInt32(2))
+            .append("changeStreamMaxTimeMs", new BsonInt32(500))
+            .append("changeStreamCursorMaxTimeSec", new BsonInt32(900))
+            .append("numChangeStreamDecodingThreads", new BsonInt32(4))
+            .append("pauseAllInitialSyncs", new BsonBoolean(true))
+            .append(
+                "pauseInitialSyncOnIndexIds",
+                new BsonArray(List.of(new BsonString("507f1f77bcf86cd799439011"))))
+            .append(
+                "excludedChangestreamFields",
+                new BsonArray(List.of(new BsonString("lsid"), new BsonString("txnNumber"))));
     var mongo = parse(new BsonDocument("mongodb", mongodb)).mongoDbConfig().get();
     assertEquals(Optional.of(3), mongo.numConcurrentInitialSyncs());
     assertEquals(Optional.of(12), mongo.numConcurrentChangeStreams());
     assertEquals(Optional.of(8), mongo.numIndexingThreads());
     assertEquals(Optional.of(2), mongo.numConcurrentSynonymSyncs());
+    assertEquals(Optional.of(500), mongo.changeStreamMaxTimeMs());
+    assertEquals(Optional.of(900), mongo.changeStreamCursorMaxTimeSec());
+    assertEquals(Optional.of(4), mongo.numChangeStreamDecodingThreads());
+    assertEquals(Optional.of(true), mongo.pauseAllInitialSyncs());
+    assertEquals(
+        Optional.of(List.of(new ObjectId("507f1f77bcf86cd799439011"))),
+        mongo.pauseInitialSyncOnIndexIds());
+    assertEquals(Optional.of(List.of("lsid", "txnNumber")), mongo.excludedChangestreamFields());
+  }
+
+  @Test
+  public void parse_invalidPauseInitialSyncOnIndexId_throws() {
+    BsonDocument doc =
+        new BsonDocument(
+            "mongodb",
+            new BsonDocument(
+                "pauseInitialSyncOnIndexIds",
+                new BsonArray(List.of(new BsonString("not-an-object-id")))));
+    assertThrows(BsonParseException.class, () -> parse(doc));
+  }
+
+  @Test
+  public void parse_negativeChangeStreamMaxTimeMs_throws() {
+    BsonDocument doc =
+        new BsonDocument("mongodb", new BsonDocument("changeStreamMaxTimeMs", new BsonInt32(-1)));
+    assertThrows(BsonParseException.class, () -> parse(doc));
   }
 
   @Test

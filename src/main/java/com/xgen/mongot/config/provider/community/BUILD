@@ -4,8 +4,11 @@ java_library(
     name = "community",
     srcs = [
         "AdvancedConfigs.java",
+        "AutoEmbeddingMaterializedViewConfigMapper.java",
+        "CommunityAutoEmbeddingConfig.java",
         "CommunityConfig.java",
         "CommunityConfigUpdater.java",
+        "CommunityCursorConfig.java",
         "CommunityIndexingConfig.java",
         "CommunityMetadataUpdater.java",
         "CommunityMongotBootstrapper.java",
@@ -15,6 +18,7 @@ java_library(
         "CommunityServerIdProvider.java",
         "CommunityServerInfo.java",
         "ConnectionInfoFactory.java",
+        "CursorConfigMapper.java",
         "DiskMonitorConfig.java",
         "DroppedCollectionIndexCleaner.java",
         "FtdcCommunityConfig.java",
@@ -40,6 +44,7 @@ java_library(
     exports = [
         "//src/main/java/com/xgen/mongot/catalogservice",
         "//src/main/java/com/xgen/mongot/config/util",
+        "//src/main/java/com/xgen/mongot/cursor",
         "//src/main/java/com/xgen/mongot/embedding/providers",
         "//src/main/java/com/xgen/mongot/embedding/providers/configs",
         "//src/main/java/com/xgen/mongot/index",

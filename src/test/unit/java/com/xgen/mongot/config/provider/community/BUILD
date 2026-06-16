@@ -3,8 +3,11 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "community",
     srcs = [
+        "AutoEmbeddingMaterializedViewConfigMapperTest.java",
+        "CommunityAutoEmbeddingConfigTest.java",
         "CommunityConfigTest.java",
         "CommunityConfigUpdaterTest.java",
+        "CommunityCursorConfigTest.java",
         "CommunityIndexingConfigTest.java",
         "CommunityMetadataUpdaterTest.java",
         "CommunityMongotBootstrapperTest.java",
@@ -14,6 +17,7 @@ java_test_suite(
         "CommunityServerIdProviderTest.java",
         "CommunityServerInfoTest.java",
         "ConnectionInfoFactoryTest.java",
+        "CursorConfigMapperTest.java",
         "DiskMonitorConfigTest.java",
         "DroppedCollectionIndexCleanerTest.java",
         "InitialSyncHostProviderTest.java",
@@ -38,6 +42,7 @@ java_test_suite(
         "//src/main/java/com/xgen/mongot/config/provider/community",
         "//src/main/java/com/xgen/mongot/config/provider/community/embedding",
         "//src/main/java/com/xgen/mongot/config/util",
+        "//src/main/java/com/xgen/mongot/cursor",
         "//src/main/java/com/xgen/mongot/embedding/providers",
         "//src/main/java/com/xgen/mongot/embedding/providers/configs",
         "//src/main/java/com/xgen/mongot/featureflag",

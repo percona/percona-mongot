@@ -15,7 +15,9 @@ import org.bson.BsonDocument;
 public record AdvancedConfigs(
     Optional<CommunityIndexingConfig> indexingConfig,
     Optional<CommunityQueryingConfig> queryingConfig,
-    Optional<CommunityReplicationConfig> replicationConfig)
+    Optional<CommunityReplicationConfig> replicationConfig,
+    Optional<CommunityAutoEmbeddingConfig> autoEmbeddingConfig,
+    Optional<CommunityCursorConfig> cursorConfig)
     implements DocumentEncodable {
 
   static class Fields {
@@ -39,13 +41,29 @@ public record AdvancedConfigs(
             .disallowUnknownFields()
             .optional()
             .noDefault();
+
+    public static final Field.Optional<CommunityAutoEmbeddingConfig> AUTO_EMBEDDING =
+        Field.builder("autoEmbedding")
+            .classField(CommunityAutoEmbeddingConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
+
+    public static final Field.Optional<CommunityCursorConfig> CURSOR =
+        Field.builder("cursor")
+            .classField(CommunityCursorConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
   }
 
   public static AdvancedConfigs fromBson(DocumentParser parser) throws BsonParseException {
     return new AdvancedConfigs(
         parser.getField(Fields.INDEXING).unwrap(),
         parser.getField(Fields.QUERYING).unwrap(),
-        parser.getField(Fields.REPLICATION).unwrap());
+        parser.getField(Fields.REPLICATION).unwrap(),
+        parser.getField(Fields.AUTO_EMBEDDING).unwrap(),
+        parser.getField(Fields.CURSOR).unwrap());
   }
 
   @Override
@@ -54,6 +72,8 @@ public record AdvancedConfigs(
         .field(Fields.INDEXING, this.indexingConfig)
         .field(Fields.QUERYING, this.queryingConfig)
         .field(Fields.REPLICATION, this.replicationConfig)
+        .field(Fields.AUTO_EMBEDDING, this.autoEmbeddingConfig)
+        .field(Fields.CURSOR, this.cursorConfig)
         .build();
   }
 }
