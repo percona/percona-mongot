@@ -487,6 +487,7 @@ public class CommunityConfigTest {
                                   Optional.empty(),
                                   Optional.empty(),
                                   Optional.empty())))),
+                  Optional.empty(),
                   Optional.empty()))));
     }
 
@@ -837,6 +838,11 @@ public class CommunityConfigTest {
       var cursor = advanced.cursorConfig().get();
       assertEquals(Optional.of(1800000), cursor.idleCursorHandlingRateMs());
       assertEquals(Optional.of(3600000), cursor.cursorIdleTimeMs());
+
+      var regularBlockingRequest = advanced.regularBlockingRequestConfig().get();
+      assertEquals(Optional.of(3.0), regularBlockingRequest.threadPoolSizeMultiplier());
+      assertEquals(Optional.of(30.0), regularBlockingRequest.queueCapacityMultiplier());
+      assertEquals(Optional.of(true), regularBlockingRequest.virtualQueueCapacity());
     }
 
     @Test

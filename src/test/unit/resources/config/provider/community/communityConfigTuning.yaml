@@ -69,3 +69,7 @@ advancedConfigs:
   cursor:
     idleCursorHandlingRateMs: 1800000
     cursorIdleTimeMs: 3600000
+  searchQueryAdmissionControl:
+    threadPoolSizeMultiplier: 3.0
+    queueCapacityMultiplier: 30.0
+    virtualQueueCapacity: true

@@ -17,7 +17,8 @@ public record AdvancedConfigs(
     Optional<CommunityQueryingConfig> queryingConfig,
     Optional<CommunityReplicationConfig> replicationConfig,
     Optional<CommunityAutoEmbeddingConfig> autoEmbeddingConfig,
-    Optional<CommunityCursorConfig> cursorConfig)
+    Optional<CommunityCursorConfig> cursorConfig,
+    Optional<RegularBlockingRequestConfig> regularBlockingRequestConfig)
     implements DocumentEncodable {
 
   static class Fields {
@@ -55,6 +56,15 @@ public record AdvancedConfigs(
             .disallowUnknownFields()
             .optional()
             .noDefault();
+
+    // The field is mapped to runtime RegularBlockingRequestSettings.
+    public static final Field.Optional<RegularBlockingRequestConfig>
+        REGULAR_BLOCKING_REQUEST =
+            Field.builder("searchQueryAdmissionControl")
+                .classField(RegularBlockingRequestConfig::fromBson)
+                .disallowUnknownFields()
+                .optional()
+                .noDefault();
   }
 
   public static AdvancedConfigs fromBson(DocumentParser parser) throws BsonParseException {
@@ -63,7 +73,8 @@ public record AdvancedConfigs(
         parser.getField(Fields.QUERYING).unwrap(),
         parser.getField(Fields.REPLICATION).unwrap(),
         parser.getField(Fields.AUTO_EMBEDDING).unwrap(),
-        parser.getField(Fields.CURSOR).unwrap());
+        parser.getField(Fields.CURSOR).unwrap(),
+        parser.getField(Fields.REGULAR_BLOCKING_REQUEST).unwrap());
   }
 
   @Override
@@ -74,6 +85,7 @@ public record AdvancedConfigs(
         .field(Fields.REPLICATION, this.replicationConfig)
         .field(Fields.AUTO_EMBEDDING, this.autoEmbeddingConfig)
         .field(Fields.CURSOR, this.cursorConfig)
+        .field(Fields.REGULAR_BLOCKING_REQUEST, this.regularBlockingRequestConfig)
         .build();
   }
 }

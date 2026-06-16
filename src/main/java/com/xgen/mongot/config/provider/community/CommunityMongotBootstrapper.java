@@ -973,7 +973,9 @@ public class CommunityMongotBootstrapper {
     var lifecycleConfig = LifecycleConfig.getDefault();
     var featureFlags = FeatureFlags.communityDefaults();
     var environmentVariantPerfConfig = EnvironmentVariantPerfConfig.getDefault();
-    var regularBlockingRequestSettings = RegularBlockingRequestSettings.defaults();
+    var regularBlockingRequestSettings =
+        RegularBlockingRequestConfigMapper.createRegularBlockingRequestSettings(
+            config.advancedConfigs().flatMap(AdvancedConfigs::regularBlockingRequestConfig));
 
     var autoEmbeddingMaterializedViewConfig =
         AutoEmbeddingMaterializedViewConfigMapper.toAutoEmbeddingMaterializedViewConfig(

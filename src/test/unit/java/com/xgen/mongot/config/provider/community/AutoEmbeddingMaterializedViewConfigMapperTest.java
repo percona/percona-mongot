@@ -159,6 +159,7 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
             Optional.empty(),
             Optional.of(replicationConfig),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty())));
   }
 
@@ -179,6 +180,7 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(autoEmbeddingConfig),
+            Optional.empty(),
             Optional.empty())));
   }
 }
