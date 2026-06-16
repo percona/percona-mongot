@@ -176,6 +176,71 @@ public class LuceneSearcherManagerBloomEvictionTest {
   }
 
   /**
+   * After the writer commits past the reader's commit point, the old segments_N file may be deleted
+   * while the stale reader still serves in-memory segments. Bloom eviction must reopen from the
+   * writer's latest commit, not the reader's stale commit.
+   */
+  @Test
+  public void bloomEviction_afterWriterCommit_reopensFromLatestCommitOnDisk() throws IOException {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
+      LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
+      DirectoryReader readerDuringSync = (DirectoryReader) searcherDuringSync.getIndexReader();
+      assertThat(heapLoadedBloomForIdField(readerDuringSync)).isPresent();
+      harness.manager.release(searcherDuringSync);
+
+      Document doc2 = new Document();
+      doc2.add(new StringField(ID_FIELD, "doc2", Field.Store.YES));
+      harness.writer.addDocument(doc2);
+      harness.writer.commit();
+
+      harness.indexStatus.set(IndexStatus.steady());
+      harness.manager.maybeRefreshBlocking();
+
+      LuceneIndexSearcher searcherSteady = harness.manager.acquire();
+      try {
+        DirectoryReader readerSteady = (DirectoryReader) searcherSteady.getIndexReader();
+        assertThat(heapLoadedBloomForIdField(readerSteady)).isEmpty();
+        assertThat(readerSteady.numDocs()).isEqualTo(2);
+      } finally {
+        harness.manager.release(searcherSteady);
+      }
+    }
+  }
+
+  /**
+   * Bloom eviction must reopen via {@link DirectoryReader#open(IndexWriter)} so subsequent
+   * refreshes still expose uncommitted writer changes.
+   */
+  @Test
+  public void bloomEviction_afterSteadyTransition_stillExposesUncommittedChanges()
+      throws IOException {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
+      LuceneIndexSearcher searcherDuringSync = harness.manager.acquire();
+      assertThat(heapLoadedBloomForIdField((DirectoryReader) searcherDuringSync.getIndexReader()))
+          .isPresent();
+      harness.manager.release(searcherDuringSync);
+
+      harness.indexStatus.set(IndexStatus.steady());
+      harness.manager.maybeRefreshBlocking();
+
+      Document doc2 = new Document();
+      doc2.add(new StringField(ID_FIELD, "doc2", Field.Store.YES));
+      harness.writer.addDocument(doc2);
+
+      harness.manager.maybeRefreshBlocking();
+
+      LuceneIndexSearcher searcherAfterUncommittedRefresh = harness.manager.acquire();
+      try {
+        DirectoryReader reader = (DirectoryReader) searcherAfterUncommittedRefresh.getIndexReader();
+        assertThat(heapLoadedBloomForIdField(reader)).isEmpty();
+        assertThat(reader.numDocs()).isEqualTo(2);
+      } finally {
+        harness.manager.release(searcherAfterUncommittedRefresh);
+      }
+    }
+  }
+
+  /**
    * Step-by-step {@link DirectoryReader#getRefCount()} checks for bloom eviction via {@code
    * DirectoryReader.open(IndexCommit)}: the new reader's ref from {@code open()} is owned by {@link
    * LuceneSearcherManager} after swap; the old reader drops to zero only after the last {@link
@@ -239,8 +304,7 @@ public class LuceneSearcherManagerBloomEvictionTest {
     IndexWriterConfig config =
         new IndexWriterConfig()
             .setCodec(
-                LuceneCodec.Factory.forIndexWithBloomFilter(
-                    Map.of(), () -> true, Optional.empty()))
+                LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), () -> true, Optional.empty()))
             .setUseCompoundFile(true);
     IndexWriter writer = new IndexWriter(directory, config);
     Document doc = new Document();
@@ -293,39 +357,25 @@ public class LuceneSearcherManagerBloomEvictionTest {
 
   private static Optional<FuzzySet> heapLoadedBloomForIdField(DirectoryReader reader) {
     SegmentReader segment = (SegmentReader) reader.leaves().get(0).reader();
-    return unwrapBloomFieldsProducer(segment.getPostingsReader(), ID_FIELD)
+    return unwrapBloomFieldsProducer(segment, ID_FIELD)
         .map(producer -> producer.getHeapLoadedBloomForField(ID_FIELD));
   }
 
   private static Optional<MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer>
-      unwrapBloomFieldsProducer(FieldsProducer producer, String field) {
+      unwrapBloomFieldsProducer(SegmentReader segment, String field) {
+    FieldsProducer producer = segment.getPostingsReader();
     if (producer
         instanceof
         MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer bloomProducer) {
       return Optional.of(bloomProducer);
     }
-    try {
-      java.lang.reflect.Field fieldsField = producer.getClass().getDeclaredField("fields");
-      fieldsField.setAccessible(true);
-      @SuppressWarnings("unchecked")
-      Map<String, FieldsProducer> fields = (Map<String, FieldsProducer>) fieldsField.get(producer);
-      FieldsProducer fieldProducer = fields.get(field);
-      if (fieldProducer
-          instanceof
-          MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer bloomProducer) {
-        return Optional.of(bloomProducer);
-      }
-    } catch (ReflectiveOperationException e) {
-      // Not a PerFieldPostingsFormat.FieldsReader, or API mismatch.
-    }
-    return Optional.empty();
+    return MongotBloomFieldsProducerRegistry.lookup(segment, field);
   }
 
   private static SearchIndexDefinition getIndexDefinition() {
     return SearchIndexDefinitionBuilder.builder()
         .defaultMetadata()
-        .mappings(
-            DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
+        .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
         .build();
   }
 }

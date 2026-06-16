@@ -5,7 +5,6 @@ import static com.google.common.truth.Truth.assertThat;
 import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import java.io.IOException;
-import java.util.Map;
 import java.util.Optional;
 import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.CodecUtil;
@@ -64,8 +63,7 @@ public class MongotBloomHeapEvictionTest {
         try (DirectoryReader bloomReader = DirectoryReader.open(directory)) {
           SegmentReader segment = (SegmentReader) bloomReader.leaves().get(0).reader();
           assertThat(getHeapLoadedBloomForField(segment, ID_FIELD)).isPresent();
-          bloomProducer =
-              unwrapBloomFieldsProducer(segment.getPostingsReader(), ID_FIELD).orElseThrow();
+          bloomProducer = unwrapBloomFieldsProducer(segment, ID_FIELD).orElseThrow();
           assertThat(bloomProducer.getHeapLoadedBloomForField(ID_FIELD) != null).isTrue();
         }
       } finally {
@@ -124,7 +122,7 @@ public class MongotBloomHeapEvictionTest {
 
       try (DirectoryReader reader = DirectoryReader.open(directory)) {
         SegmentReader segment = (SegmentReader) reader.leaves().get(0).reader();
-        assertThat(unwrapBloomFieldsProducer(segment.getPostingsReader(), ID_FIELD)).isEmpty();
+        assertThat(unwrapBloomFieldsProducer(segment, ID_FIELD)).isEmpty();
         assertThat(getHeapLoadedBloomForField(segment, ID_FIELD)).isEmpty();
         assertThat(segment.terms(ID_FIELD)).isNotNull();
       }
@@ -168,9 +166,7 @@ public class MongotBloomHeapEvictionTest {
     String segmentNamePrefix = segmentInfo.name + "_";
     String bloomFileName =
         java.util.Arrays.stream(directory.listAll())
-            .filter(
-                name ->
-                    name.startsWith(segmentNamePrefix) && name.endsWith(bloomExtension))
+            .filter(name -> name.startsWith(segmentNamePrefix) && name.endsWith(bloomExtension))
             .findFirst()
             .orElseThrow(
                 () ->
@@ -195,27 +191,16 @@ public class MongotBloomHeapEvictionTest {
   }
 
   private static Optional<FuzzySet> getHeapLoadedBloomForField(SegmentReader reader, String field) {
-    return unwrapBloomFieldsProducer(reader.getPostingsReader(), field)
+    return unwrapBloomFieldsProducer(reader, field)
         .map(producer -> producer.getHeapLoadedBloomForField(field));
   }
 
   private static Optional<MongotBloomFilteredFieldsProducer> unwrapBloomFieldsProducer(
-      FieldsProducer producer, String field) {
+      SegmentReader segment, String field) {
+    FieldsProducer producer = segment.getPostingsReader();
     if (producer instanceof MongotBloomFilteredFieldsProducer bloomProducer) {
       return Optional.of(bloomProducer);
     }
-    try {
-      java.lang.reflect.Field fieldsField = producer.getClass().getDeclaredField("fields");
-      fieldsField.setAccessible(true);
-      @SuppressWarnings("unchecked")
-      Map<String, FieldsProducer> fields = (Map<String, FieldsProducer>) fieldsField.get(producer);
-      FieldsProducer fieldProducer = fields.get(field);
-      if (fieldProducer instanceof MongotBloomFilteredFieldsProducer bloomProducer) {
-        return Optional.of(bloomProducer);
-      }
-    } catch (ReflectiveOperationException e) {
-      // Not a PerFieldPostingsFormat.FieldsReader, or API mismatch.
-    }
-    return Optional.empty();
+    return MongotBloomFieldsProducerRegistry.lookup(segment, field);
   }
 }

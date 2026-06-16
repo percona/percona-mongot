@@ -13,6 +13,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.FieldsConsumer;
 import org.apache.lucene.codecs.FieldsProducer;
@@ -215,7 +216,8 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
 
   static class MongotBloomFilteredFieldsProducer extends FieldsProducer {
     private FieldsProducer delegateFieldsProducer;
-    HashMap<String, FuzzySet> bloomsByFieldName = new HashMap<>();
+    private final Map<String, FuzzySet> bloomsByFieldName = new ConcurrentHashMap<>();
+    private final List<MongotBloomFieldsProducerRegistry.Key> registryKeys = new ArrayList<>();
 
     public MongotBloomFilteredFieldsProducer(SegmentReadState state) throws IOException {
 
@@ -238,6 +240,10 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
         }
         CodecUtil.checkFooter(bloomIn);
         IOUtils.close(bloomIn);
+        for (String fieldName : bloomsByFieldName.keySet()) {
+          registryKeys.add(
+              MongotBloomFieldsProducerRegistry.register(state, fieldName, this));
+        }
         success = true;
       } finally {
         if (!success) {
@@ -253,6 +259,10 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
 
     @Override
     public void close() throws IOException {
+      for (MongotBloomFieldsProducerRegistry.Key key : registryKeys) {
+        MongotBloomFieldsProducerRegistry.unregister(key, this);
+      }
+      registryKeys.clear();
       bloomsByFieldName.clear();
       delegateFieldsProducer.close();
     }
@@ -279,6 +289,17 @@ public final class MongotBloomFilteringPostingsFormat extends PostingsFormat {
     @VisibleForTesting
     FuzzySet getHeapLoadedBloomForField(String fieldName) {
       return bloomsByFieldName.get(fieldName);
+    }
+
+    /**
+     * Drops in-heap bloom bitsets while keeping the delegate postings reader open.
+     *
+     * <p>Safe to call while other threads search the same segment: {@link #terms} only reads the
+     * map, and in-flight {@link MongotBloomFilteredTerms} instances retain their {@link FuzzySet}
+     * reference. {@link ConcurrentHashMap} makes {@code clear()} safe with concurrent {@code get}.
+     */
+    void evictHeapBloom() {
+      bloomsByFieldName.clear();
     }
 
     static class MongotBloomFilteredTerms extends Terms {

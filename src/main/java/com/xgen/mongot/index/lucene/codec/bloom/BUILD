@@ -4,7 +4,9 @@ java_library(
     name = "bloom",
     srcs = [
         "BloomCodecPolicy.java",
+        "MongotBloomFieldsProducerRegistry.java",
         "MongotBloomFilteringPostingsFormat.java",
+        "MongotBloomHeapEvictor.java",
         "MongotBloomReadPolicy.java",
     ],
     # Cloned from Lucene; exclude from Error Prone (paths use slashes, not package dots).
@@ -17,6 +19,7 @@ java_library(
     deps = [
         "//src/main/java/com/xgen/mongot/featureflag/dynamic",
         "//src/main/java/com/xgen/mongot/index/definition",
+        "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/status",
         "@maven//:com_google_auto_service_auto_service_annotations",
         "@maven//:com_google_guava_guava",

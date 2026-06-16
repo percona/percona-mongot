@@ -4,6 +4,7 @@ import static com.xgen.mongot.util.Check.checkArg;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomHeapEvictor;
 import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomReadPolicy;
 import com.xgen.mongot.metrics.CachedGauge;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
@@ -97,28 +98,33 @@ public class LuceneSearcherManager extends ReferenceManager<LuceneIndexSearcher>
       throws IOException {
     var oldReader = referenceToRefresh.getIndexReader();
     checkArg(oldReader instanceof DirectoryReader, "IndexReader should be a DirectoryReader");
+    var oldDirectoryReader = (DirectoryReader) oldReader;
 
     boolean loadBloomOnHeap = this.useIdBloomFilter.getAsBoolean();
     MongotBloomReadPolicy.setLoadBloomOnHeap(this.indexWriter.getDirectory(), loadBloomOnHeap);
     boolean evictBloom = this.lastBloomLoadState && !loadBloomOnHeap;
     this.lastBloomLoadState = loadBloomOnHeap;
-    DirectoryReader newReader;
+    @Var DirectoryReader newReader;
     if (evictBloom) {
       // Bloom eviction reopens only the DirectoryReader, not the Directory or IndexWriter.
       // The writer and on-disk index stay open for the life of the index partition.
       //
       // openIfChanged and DirectoryReader.open(IndexWriter) can reuse unchanged SegmentReaders
       // from a prior reader; those readers still hold heap-resident bloom bitsets opened under the
-      // initial-sync policy. Reopening from the current IndexCommit snapshot creates new segment
-      // readers that honor the updated MongotBloomReadPolicy (bloom sidecar remains on disk; heap
-      // bitsets are not loaded when policy is false).
+      // initial-sync policy. Clear heap bloom on the live segment readers, then reopen from the
+      // writer so near-real-time refresh is preserved and we do not consult a stale IndexCommit
+      // (which may reference a deleted segments_N file after the writer commits).
       //
       // ReferenceManager swaps to the returned searcher and release()s the previous one, which
       // decRefs and closes the old DirectoryReader. That closes bloom FieldsProducers and clears
       // their in-heap bitsets (see MongotBloomFilteredFieldsProducer#close).
-      newReader = DirectoryReader.open(((DirectoryReader) oldReader).getIndexCommit());
+      MongotBloomHeapEvictor.evictHeapBloomFromReader(oldDirectoryReader);
+      newReader = DirectoryReader.openIfChanged(oldDirectoryReader, this.indexWriter);
+      if (newReader == null) {
+        newReader = DirectoryReader.open(this.indexWriter);
+      }
     } else {
-      newReader = DirectoryReader.openIfChanged((DirectoryReader) oldReader);
+      newReader = DirectoryReader.openIfChanged(oldDirectoryReader);
       if (newReader == null) {
         return null;
       }
