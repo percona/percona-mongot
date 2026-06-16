@@ -201,9 +201,16 @@ public class AutoEmbeddingCompositeIndex implements Index {
       return IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND);
     }
 
-    // FAILED status on any component propagates
-    if (mvStatus == StatusCode.FAILED || luceneStatus == StatusCode.FAILED) {
-      return IndexStatus.failed("Index failed");
+    // FAILED on a component propagates with a fixed, customer-safe message naming the failing stage
+    // (MV takes precedence). The underlying component error is intentionally not surfaced here; it
+    // remains on the component index's own status for internal diagnostics.
+    if (mvStatus == StatusCode.FAILED) {
+      return IndexStatus.failed(
+          AutoEmbeddingFailureMessages.withFailurePrefix("embedding generation failed"));
+    }
+    if (luceneStatus == StatusCode.FAILED) {
+      return IndexStatus.failed(
+          AutoEmbeddingFailureMessages.withFailurePrefix("index build failed"));
     }
 
     // STALE status on any component propagates

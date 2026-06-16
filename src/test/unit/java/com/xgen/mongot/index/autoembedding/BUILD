@@ -4,14 +4,17 @@ java_test_suite(
     name = "autoembedding",
     srcs = [
         "AutoEmbeddingCompositeIndexTest.java",
+        "AutoEmbeddingFailureMessagesTest.java",
         "AutoEmbeddingIndexGenerationFactoryTest.java",
         "InitializedMaterializedViewIndexTest.java",
         "MaterializedViewGenerationIdTest.java",
         "MaterializedViewIndexGenerationUtilTest.java",
+        "UnresolvedAutoEmbeddingIndexGenerationTest.java",
     ],
     tags = ["unit"],
     deps = [
         "//src/main/java/com/xgen/mongot/embedding/config",
+        "//src/main/java/com/xgen/mongot/embedding/exceptions",
         "//src/main/java/com/xgen/mongot/embedding/mongodb/leasing",
         "//src/main/java/com/xgen/mongot/index",
         "//src/main/java/com/xgen/mongot/index/autoembedding",

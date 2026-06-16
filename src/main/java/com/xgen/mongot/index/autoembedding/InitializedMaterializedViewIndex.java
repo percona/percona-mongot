@@ -136,6 +136,8 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
               .orElse(DEFAULT_INDEX_DEFINITION_VERSION),
           status);
     } catch (MaterializedViewNonTransientException e) {
+      // Raw message; AutoEmbeddingCompositeIndex adds the failure prefix and stage
+      // label when it surfaces this component's status.
       this.statusRef.set(IndexStatus.failed("Corrupted Lease documents for this index."));
       return;
     } catch (MaterializedViewTransientException ignored) {

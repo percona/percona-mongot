@@ -17,6 +17,7 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.IndexFactory;
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingFailureMessages;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
@@ -455,7 +456,8 @@ public class ConfigState {
                     // Set a failed status but recoverable (AUTO_EMBEDDING_RESOLUTION_RETRY)
                     .setStatus(
                         IndexStatus.failed(
-                            "Failed to resolve auto embedding index. Retrying...",
+                            AutoEmbeddingFailureMessages.withFailurePrefix(
+                                "Failed to resolve auto embedding index. Retrying..."),
                             IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY)));
   }
 }

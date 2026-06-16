@@ -75,6 +75,35 @@ public class AutoEmbeddingCompositeIndexTest {
   }
 
   @Test
+  public void getStatus_materializedViewFailed_reportsEmbeddingGenerationFailed() {
+    AutoEmbeddingCompositeIndex index =
+        compositeWith(new IndexStatus(StatusCode.FAILED), IndexStatus.steady());
+    assertEquals(StatusCode.FAILED, index.getStatus().getStatusCode());
+    assertEquals(
+        Optional.of("Automated Embedding Index Failed: embedding generation failed"),
+        index.getStatus().getMessage());
+  }
+
+  @Test
+  public void getStatus_derivedIndexFailed_reportsIndexBuildFailed() {
+    AutoEmbeddingCompositeIndex index =
+        compositeWith(IndexStatus.steady(), new IndexStatus(StatusCode.FAILED));
+    assertEquals(StatusCode.FAILED, index.getStatus().getStatusCode());
+    assertEquals(
+        Optional.of("Automated Embedding Index Failed: index build failed"),
+        index.getStatus().getMessage());
+  }
+
+  @Test
+  public void getStatus_bothComponentsFailed_reportsEmbeddingGenerationFailed() {
+    AutoEmbeddingCompositeIndex index =
+        compositeWith(new IndexStatus(StatusCode.FAILED), new IndexStatus(StatusCode.FAILED));
+    assertEquals(
+        Optional.of("Automated Embedding Index Failed: embedding generation failed"),
+        index.getStatus().getMessage());
+  }
+
+  @Test
   public void testConsolidateStatusesHandlesAllStatusCodes() {
     for (StatusCode mvStatus : EnumSet.allOf(StatusCode.class)) {
       for (StatusCode luceneStatus : EnumSet.allOf(StatusCode.class)) {
@@ -225,6 +254,24 @@ public class AutoEmbeddingCompositeIndexTest {
         String.format("MV=%s, Lucene=%s should yield %s", mvStatus, luceneStatus, expected),
         expected,
         index.getStatus().getStatusCode());
+  }
+
+  /**
+   * Builds a composite whose components return the given full statuses (with messages), for
+   * asserting the consolidated FAILED message. A failing or non-STEADY Lucene status short-circuits
+   * the lag check; a STEADY Lucene status passes through because no steady position is recorded.
+   */
+  private AutoEmbeddingCompositeIndex compositeWith(
+      IndexStatus mvStatus, IndexStatus luceneStatus) {
+    InitializedMaterializedViewIndex mockMvIndex = mock(InitializedMaterializedViewIndex.class);
+    when(mockMvIndex.getStatus()).thenReturn(mvStatus);
+    when(mockMvIndex.getSteadyAsOfOplogPosition()).thenReturn(Optional.empty());
+    when(mockMvIndex.isCurrentVersionQueryablePerLease()).thenReturn(false);
+
+    InitializedVectorIndex mockLuceneIndex = mock(InitializedVectorIndex.class);
+    when(mockLuceneIndex.getStatus()).thenReturn(luceneStatus);
+
+    return new AutoEmbeddingCompositeIndex(mockMvIndex, mockLuceneIndex, Optional::empty);
   }
 
   private AutoEmbeddingCompositeIndex createIndexWithStatuses(

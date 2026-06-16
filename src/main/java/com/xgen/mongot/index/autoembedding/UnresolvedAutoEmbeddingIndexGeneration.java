@@ -21,11 +21,13 @@ public class UnresolvedAutoEmbeddingIndexGeneration extends IndexGeneration {
         switch (reason) {
           case MONGO_CLIENT_NOT_AVAILABLE ->
               IndexStatus.failed(
-                  "Unable to create Automated Embedding index at this time",
+                  AutoEmbeddingFailureMessages.withFailurePrefix(
+                      "Unable to create Automated Embedding index at this time"),
                   AUTO_EMBEDDING_RESOLUTION_FAILED);
           default ->
               IndexStatus.failed(
-                  "Unable to create Automated Embedding index at this time",
+                  AutoEmbeddingFailureMessages.withFailurePrefix(
+                      "Unable to create Automated Embedding index at this time"),
                   AUTO_EMBEDDING_RESOLUTION_RETRY);
         };
     var failedIndex =
