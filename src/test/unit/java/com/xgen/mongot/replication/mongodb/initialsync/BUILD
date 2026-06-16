@@ -3,6 +3,7 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "initialsync",
     srcs = [
+        "AutoEmbeddingSortedIdCollectionScannerTest.java",
         "BufferlessChangeStreamApplierTest.java",
         "BufferlessCollectionScannerTest.java",
         "BufferlessInitialSyncManagerTest.java",
@@ -12,6 +13,7 @@ java_test_suite(
     ],
     tags = ["unit"],
     deps = [
+        "//src/main/java/com/xgen/mongot/embedding/config",
         "//src/main/java/com/xgen/mongot/index",
         "//src/main/java/com/xgen/mongot/index/definition",
         "//src/main/java/com/xgen/mongot/index/version",
