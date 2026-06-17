@@ -148,8 +148,6 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
         base.syncSourceConfig(),
         base.storageConfig(),
         base.serverConfig(),
-        base.ftdcConfig(),
-        base.diskMonitorConfig(),
         base.metricsConfig(),
         base.healthCheckConfig(),
         base.loggingConfig(),
@@ -158,6 +156,8 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(replicationConfig),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty())));
@@ -169,8 +169,6 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
         base.syncSourceConfig(),
         base.storageConfig(),
         base.serverConfig(),
-        base.ftdcConfig(),
-        base.diskMonitorConfig(),
         base.metricsConfig(),
         base.healthCheckConfig(),
         base.loggingConfig(),
@@ -180,6 +178,8 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(autoEmbeddingConfig),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty())));
   }

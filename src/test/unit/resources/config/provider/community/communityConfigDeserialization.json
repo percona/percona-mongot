@@ -31,11 +31,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -96,11 +98,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": false,
-          "directorySizeMb": 200,
-          "fileSizeMb": 20,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": false,
+            "directorySizeMb": 200,
+            "fileSizeMb": 20,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -135,11 +139,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -173,11 +179,13 @@
         "logging": {
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -215,11 +223,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -258,11 +268,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -302,11 +314,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -346,11 +360,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -388,11 +404,13 @@
         "embedding": {
           "providerEndpoint": "https://custom-api.example.com/v1/embeddings"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -435,13 +453,13 @@
             "materializedView": {
               "mvWriteRateLimitRps": 50
             }
+          },
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
           }
-        },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
         }
       }
     },
@@ -476,11 +494,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": false,
-          "directorySizeMb": 200,
-          "fileSizeMb": 20,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": false,
+            "directorySizeMb": 200,
+            "fileSizeMb": 20,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -518,11 +538,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -563,11 +585,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -619,11 +643,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -647,12 +673,14 @@
             "address": "localhost:27028"
           }
         },
-        "diskMonitor": {
-          "pauseReplicationThreshold": 0.92,
-          "resumeReplicationThreshold": 0.87,
-          "crashThreshold": 0.97,
-          "pauseInitialSyncThreshold": 0.82,
-          "resumeInitialSyncThreshold": 0.77
+        "advancedConfigs": {
+          "diskMonitor": {
+            "pauseReplicationThreshold": 0.92,
+            "resumeReplicationThreshold": 0.87,
+            "crashThreshold": 0.97,
+            "pauseInitialSyncThreshold": 0.82,
+            "resumeInitialSyncThreshold": 0.77
+          }
         }
       }
     }
@@ -689,11 +717,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       },
       "errorMessageContains": "unrecognized"
@@ -859,11 +889,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 9,
-          "fileSizeMb": 2,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 9,
+            "fileSizeMb": 2,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -887,11 +919,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 0,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 0,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -915,11 +949,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 100,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 100,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -943,11 +979,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 99
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 99
+          }
         }
       }
     },
@@ -1286,9 +1324,11 @@
             "address": "localhost:27028"
           }
         },
-        "diskMonitor": {
-          "pauseReplicationThreshold": 0.85,
-          "resumeReplicationThreshold": 0.90
+        "advancedConfigs": {
+          "diskMonitor": {
+            "pauseReplicationThreshold": 0.85,
+            "resumeReplicationThreshold": 0.90
+          }
         }
       },
       "errorMessageContains": "pauseReplicationThreshold must be greater than or equal to resumeReplicationThreshold"

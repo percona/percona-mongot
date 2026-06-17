@@ -101,13 +101,19 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> replicaSetX509() {
@@ -180,13 +186,19 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.of("server-name")),
-              new FtdcCommunityConfig(false, 200, 20, 3000),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000))))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -210,13 +222,19 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("INFO", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcDisabledTls() {
@@ -247,13 +265,19 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.empty()))),
                   Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcTls() {
@@ -284,13 +308,19 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.empty()))),
                   Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcTlsWithPassword() {
@@ -321,13 +351,19 @@ public class CommunityConfigTest {
                               Optional.of(Path.of("/etc/ssl/common-cert.pass")),
                               Optional.empty()))),
                   Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcMtls() {
@@ -358,13 +394,19 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -391,13 +433,19 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -421,8 +469,6 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -432,7 +478,15 @@ public class CommunityConfigTest {
                       Optional.empty(),
                       Optional.empty(),
                       false)),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -456,8 +510,6 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
@@ -488,7 +540,9 @@ public class CommunityConfigTest {
                                   Optional.empty(),
                                   Optional.empty())))),
                   Optional.empty(),
-                  Optional.empty()))));
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> ftdcOverrides() {
@@ -511,13 +565,19 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              new FtdcCommunityConfig(false, 200, 20, 3000),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000))))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> withReplicationReader() {
@@ -541,13 +601,19 @@ public class CommunityConfigTest {
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(FtdcCommunityConfig.getDefault())))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> withDiskMonitor() {
@@ -635,13 +701,20 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.of("server-name")),
-              FtdcCommunityConfig.getDefault(),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty()));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(DiskMonitorConfig.getDefault()),
+                      Optional.of(FtdcCommunityConfig.getDefault())))));
     }
   }
 
@@ -694,13 +767,19 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.empty()),
-              new FtdcCommunityConfig(false, 200, 20, 3000),
-              DiskMonitorConfig.getDefault(),
               Optional.of(new MetricsConfig(true, "localhost:9946")),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("WARNING", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.empty());
+              Optional.of(new AdvancedConfigs(
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000)))));
 
       assertEquals(expected, result);
     }
@@ -843,6 +922,19 @@ public class CommunityConfigTest {
       assertEquals(Optional.of(3.0), regularBlockingRequest.threadPoolSizeMultiplier());
       assertEquals(Optional.of(30.0), regularBlockingRequest.queueCapacityMultiplier());
       assertEquals(Optional.of(true), regularBlockingRequest.virtualQueueCapacity());
+
+      var diskMonitor = advanced.diskMonitorConfig().get();
+      assertEquals(0.93, diskMonitor.pauseReplicationThreshold(), 0.0);
+      assertEquals(0.88, diskMonitor.resumeReplicationThreshold(), 0.0);
+      assertEquals(0.98, diskMonitor.crashThreshold(), 0.0);
+      assertEquals(0.86, diskMonitor.pauseInitialSyncThreshold(), 0.0);
+      assertEquals(0.83, diskMonitor.resumeInitialSyncThreshold(), 0.0);
+
+      var ftdc = advanced.ftdcConfig().get();
+      assertFalse(ftdc.enabled());
+      assertEquals(Integer.valueOf(250), ftdc.directorySizeMB());
+      assertEquals(Integer.valueOf(25), ftdc.fileSizeMB());
+      assertEquals(Integer.valueOf(2500), ftdc.collectionPeriodMillis());
     }
 
     @Test

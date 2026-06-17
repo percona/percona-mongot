@@ -30,8 +30,9 @@ healthCheck:
 logging:
   verbosity: WARNING
   logPath: "/var/log/mongot"
-ftdc:
-  enabled: false
-  directorySizeMb: 200
-  fileSizeMb: 20
-  collectionPeriodMillis: 3000
+advancedConfigs:
+  ftdc:
+    enabled: false
+    directorySizeMb: 200
+    fileSizeMb: 20
+    collectionPeriodMillis: 3000

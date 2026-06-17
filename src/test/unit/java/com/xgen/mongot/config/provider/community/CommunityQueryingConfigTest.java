@@ -53,7 +53,7 @@ public class CommunityQueryingConfigTest {
   @Test
   public void parse_exposesFloorSegmentMB() throws BsonParseException {
     BsonDocument doc =
-        new BsonDocument("lucene", new BsonDocument("floorSegmentMB", new BsonDouble(128.0)));
+        new BsonDocument("lucene", new BsonDocument("vectorFloorSegmentMB", new BsonDouble(128.0)));
     assertEquals(Optional.of(128.0), parse(doc).luceneConfig().get().floorSegmentMB());
   }
 
@@ -67,14 +67,14 @@ public class CommunityQueryingConfigTest {
   @Test
   public void parse_negativeFloorSegmentMB_throws() {
     BsonDocument doc =
-        new BsonDocument("lucene", new BsonDocument("floorSegmentMB", new BsonDouble(-1.0)));
+        new BsonDocument("lucene", new BsonDocument("vectorFloorSegmentMB", new BsonDouble(-1.0)));
     assertThrows(BsonParseException.class, () -> parse(doc));
   }
 
   @Test
   public void parse_zeroFloorSegmentMB_throws() {
     BsonDocument doc =
-        new BsonDocument("lucene", new BsonDocument("floorSegmentMB", new BsonDouble(0.0)));
+        new BsonDocument("lucene", new BsonDocument("vectorFloorSegmentMB", new BsonDouble(0.0)));
     assertThrows(BsonParseException.class, () -> parse(doc));
   }
 

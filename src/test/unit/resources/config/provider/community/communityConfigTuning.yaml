@@ -32,7 +32,7 @@ advancedConfigs:
   querying:
     lucene:
       maxClauseLimit: 2048
-      floorSegmentMB: 128.0
+      vectorFloorSegmentMB: 128.0
   replication:
     mongodb:
       numConcurrentInitialSyncs: 3
@@ -73,3 +73,14 @@ advancedConfigs:
     threadPoolSizeMultiplier: 3.0
     queueCapacityMultiplier: 30.0
     virtualQueueCapacity: true
+  diskMonitor:
+    pauseReplicationThreshold: 0.93
+    resumeReplicationThreshold: 0.88
+    crashThreshold: 0.98
+    pauseInitialSyncThreshold: 0.86
+    resumeInitialSyncThreshold: 0.83
+  ftdc:
+    enabled: false
+    directorySizeMb: 250
+    fileSizeMb: 25
+    collectionPeriodMillis: 2500

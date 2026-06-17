@@ -18,7 +18,9 @@ public record AdvancedConfigs(
     Optional<CommunityReplicationConfig> replicationConfig,
     Optional<CommunityAutoEmbeddingConfig> autoEmbeddingConfig,
     Optional<CommunityCursorConfig> cursorConfig,
-    Optional<RegularBlockingRequestConfig> regularBlockingRequestConfig)
+    Optional<RegularBlockingRequestConfig> regularBlockingRequestConfig,
+    Optional<DiskMonitorConfig> diskMonitorConfig,
+    Optional<FtdcCommunityConfig> ftdcConfig)
     implements DocumentEncodable {
 
   static class Fields {
@@ -65,6 +67,20 @@ public record AdvancedConfigs(
                 .disallowUnknownFields()
                 .optional()
                 .noDefault();
+
+    public static final Field.Optional<DiskMonitorConfig> DISK_MONITOR =
+        Field.builder("diskMonitor")
+            .classField(DiskMonitorConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
+
+    public static final Field.Optional<FtdcCommunityConfig> FTDC =
+        Field.builder("ftdc")
+            .classField(FtdcCommunityConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
   }
 
   public static AdvancedConfigs fromBson(DocumentParser parser) throws BsonParseException {
@@ -74,7 +90,9 @@ public record AdvancedConfigs(
         parser.getField(Fields.REPLICATION).unwrap(),
         parser.getField(Fields.AUTO_EMBEDDING).unwrap(),
         parser.getField(Fields.CURSOR).unwrap(),
-        parser.getField(Fields.REGULAR_BLOCKING_REQUEST).unwrap());
+        parser.getField(Fields.REGULAR_BLOCKING_REQUEST).unwrap(),
+        parser.getField(Fields.DISK_MONITOR).unwrap(),
+        parser.getField(Fields.FTDC).unwrap());
   }
 
   @Override
@@ -86,6 +104,8 @@ public record AdvancedConfigs(
         .field(Fields.AUTO_EMBEDDING, this.autoEmbeddingConfig)
         .field(Fields.CURSOR, this.cursorConfig)
         .field(Fields.REGULAR_BLOCKING_REQUEST, this.regularBlockingRequestConfig)
+        .field(Fields.DISK_MONITOR, this.diskMonitorConfig)
+        .field(Fields.FTDC, this.ftdcConfig)
         .build();
   }
 }

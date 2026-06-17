@@ -345,8 +345,6 @@ public class CommunityMongotBootstrapperTest {
         this.createMinimalSyncSourceConfig(),
         new StorageConfig(Path.of("test-data")),
         this.createMinimalServerConfig(),
-        FtdcCommunityConfig.getDefault(),
-        DiskMonitorConfig.getDefault(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
@@ -360,13 +358,19 @@ public class CommunityMongotBootstrapperTest {
         this.createMinimalSyncSourceConfig(),
         new StorageConfig(Path.of(storagePath)),
         this.createMinimalServerConfig(),
-        ftdcConfig.orElse(FtdcCommunityConfig.getDefault()),
-        DiskMonitorConfig.getDefault(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
-        Optional.empty());
+        Optional.of(new AdvancedConfigs(
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            ftdcConfig)));
   }
 
   private SyncSourceConfig createMinimalSyncSourceConfig() {

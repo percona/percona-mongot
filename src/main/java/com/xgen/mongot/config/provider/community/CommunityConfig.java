@@ -22,8 +22,6 @@ public record CommunityConfig(
     SyncSourceConfig syncSourceConfig,
     StorageConfig storageConfig,
     ServerConfig serverConfig,
-    FtdcCommunityConfig ftdcConfig,
-    DiskMonitorConfig diskMonitorConfig,
     Optional<MetricsConfig> metricsConfig,
     Optional<HealthCheckConfig> healthCheckConfig,
     Optional<LoggingConfig> loggingConfig,
@@ -51,20 +49,6 @@ public record CommunityConfig(
             .classField(ServerConfig::fromBson)
             .disallowUnknownFields()
             .required();
-
-    public static final Field.WithDefault<FtdcCommunityConfig> FTDC =
-        Field.builder("ftdc")
-            .classField(FtdcCommunityConfig::fromBson)
-            .disallowUnknownFields()
-            .optional()
-            .withDefault(FtdcCommunityConfig.getDefault());
-
-    public static final Field.WithDefault<DiskMonitorConfig> DISK_MONITOR =
-        Field.builder("diskMonitor")
-            .classField(DiskMonitorConfig::fromBson)
-            .disallowUnknownFields()
-            .optional()
-            .withDefault(DiskMonitorConfig.getDefault());
 
     public static final Field.Optional<MetricsConfig> METRICS =
         Field.builder("metrics")
@@ -128,8 +112,6 @@ public record CommunityConfig(
         parser.getField(Fields.SYNC_SOURCE).unwrap(),
         parser.getField(Fields.STORAGE).unwrap(),
         parser.getField(Fields.SERVER).unwrap(),
-        parser.getField(Fields.FTDC).unwrap(),
-        parser.getField(Fields.DISK_MONITOR).unwrap(),
         parser.getField(Fields.METRICS).unwrap(),
         parser.getField(Fields.HEALTH_CHECK).unwrap(),
         parser.getField(Fields.LOGGING).unwrap(),
@@ -143,13 +125,31 @@ public record CommunityConfig(
         .field(Fields.SYNC_SOURCE, this.syncSourceConfig)
         .field(Fields.STORAGE, this.storageConfig)
         .field(Fields.SERVER, this.serverConfig)
-        .field(Fields.FTDC, this.ftdcConfig)
-        .field(Fields.DISK_MONITOR, this.diskMonitorConfig)
         .field(Fields.METRICS, this.metricsConfig)
         .field(Fields.HEALTH_CHECK, this.healthCheckConfig)
         .field(Fields.LOGGING, this.loggingConfig)
         .field(Fields.EMBEDDING, this.embeddingConfig)
         .field(Fields.ADVANCED_CONFIGS, this.advancedConfigs)
         .build();
+  }
+
+  /**
+   * Returns the disk-monitor thresholds from {@code advancedConfigs.diskMonitor}, falling back to
+   * {@link DiskMonitorConfig#getDefault()} when the block is omitted.
+   */
+  public DiskMonitorConfig diskMonitorConfig() {
+    return this.advancedConfigs
+        .flatMap(AdvancedConfigs::diskMonitorConfig)
+        .orElseGet(DiskMonitorConfig::getDefault);
+  }
+
+  /**
+   * Returns the FTDC config from {@code advancedConfigs.ftdc}, falling back to
+   * {@link FtdcCommunityConfig#getDefault()} when the block is omitted.
+   */
+  public FtdcCommunityConfig ftdcConfig() {
+    return this.advancedConfigs
+        .flatMap(AdvancedConfigs::ftdcConfig)
+        .orElseGet(FtdcCommunityConfig::getDefault);
   }
 }

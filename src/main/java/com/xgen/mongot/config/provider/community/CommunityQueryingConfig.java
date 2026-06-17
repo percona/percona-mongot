@@ -41,13 +41,18 @@ public record CommunityQueryingConfig(Optional<LuceneConfig> luceneConfig)
           Field.builder("maxClauseLimit").intField().mustBePositive().optional().noDefault();
 
       /**
-       * Sets FloorSegmentMB in Lucene's {@code TieredMergePolicy}. Larger values improve query
-       * performance at the cost of merging smaller segments more aggressively. Must be strictly
-       * positive. Only consumed by the vector merge policy; regular search indexes use Lucene's
-       * default floor segment size. Defaults to 64.0 when unset.
+       * Sets vector FloorSegmentMB in Lucene's {@code TieredMergePolicy}.
+       * Larger values improve query performance at the cost of merging smaller segments more
+       * aggressively. Must be strictly positive. Only consumed by the vector merge policy;
+       * regular search indexes use Lucene's default floor segment size.
+       * Defaults to 64.0 when unset.
        */
       public static final Field.Optional<Double> FLOOR_SEGMENT_MB =
-          Field.builder("floorSegmentMB").doubleField().mustBePositive().optional().noDefault();
+          Field.builder("vectorFloorSegmentMB")
+              .doubleField()
+              .mustBePositive()
+              .optional()
+              .noDefault();
     }
 
     public static LuceneConfig fromBson(DocumentParser parser) throws BsonParseException {
