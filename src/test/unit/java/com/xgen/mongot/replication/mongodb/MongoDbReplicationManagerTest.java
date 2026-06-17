@@ -33,6 +33,7 @@ import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.monitor.Gate;
+import com.xgen.mongot.replication.mongodb.IndexManager;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
@@ -114,10 +115,12 @@ public class MongoDbReplicationManagerTest {
             any(),
             any(),
             any(),
+            any(),
             anyBoolean());
     Mockito.clearInvocations(mocks.replicationIndexManagerFactory);
     verify(mocks.replicationIndexManagerFactory, never())
         .create(
+            any(),
             any(),
             any(),
             any(),
@@ -503,7 +506,7 @@ public class MongoDbReplicationManagerTest {
     assertTrue(mocks.indexReplicationManagerGaugeMetricsExist());
 
     // check that all gauges have 0 by default
-    for (ReplicationIndexManager.State state : ReplicationIndexManager.State.values()) {
+    for (IndexManager.State state : IndexManager.State.values()) {
       mocks.waitForIndexReplicationManagerGaugeMetric(state.name(), 0);
     }
   }
@@ -767,7 +770,7 @@ public class MongoDbReplicationManagerTest {
     final SteadyStateManager steadyStateManager;
     final SynonymManager synonymManager;
     final ReplicationIndexManagerFactory replicationIndexManagerFactory;
-    @Keep final Map<GenerationId, ReplicationIndexManager> lifecycleManagers;
+    @Keep final Map<GenerationId, IndexManager> lifecycleManagers;
     final NamedScheduledExecutorService commitExecutor;
     final Supplier<MongoDbReplicationManager> managerSupplier;
     MongoDbReplicationManager manager;
@@ -788,7 +791,7 @@ public class MongoDbReplicationManagerTest {
         Optional<MongoClient> synonymsSyncMongoClient,
         Optional<SessionRefresher> synonymsSessionRefresher,
         ReplicationIndexManagerFactory replicationIndexManagerFactory,
-        Map<GenerationId, ReplicationIndexManager> lifecycleManagers,
+        Map<GenerationId, IndexManager> lifecycleManagers,
         NamedScheduledExecutorService commitExecutor,
         InitializedIndexCatalog initializedIndexCatalog,
         Duration commitInterval,
@@ -898,7 +901,7 @@ public class MongoDbReplicationManagerTest {
 
       ReplicationIndexManagerFactory replicationIndexManagerFactory =
           mock(ReplicationIndexManagerFactory.class);
-      Map<GenerationId, ReplicationIndexManager> lifecycleManagers = new ConcurrentHashMap<>();
+      Map<GenerationId, IndexManager> lifecycleManagers = new ConcurrentHashMap<>();
 
       NamedScheduledExecutorService commitExecutor =
           spy(
@@ -955,6 +958,7 @@ public class MongoDbReplicationManagerTest {
               any(),
               any(),
               any(),
+              any(),
               anyBoolean()))
           .thenReturn(replicationIndexManager);
       return replicationIndexManager;
@@ -965,6 +969,7 @@ public class MongoDbReplicationManagerTest {
       when(replicationIndexManager.drop()).thenReturn(COMPLETED_FUTURE);
       when(replicationIndexManager.shutdown()).thenReturn(COMPLETED_FUTURE);
       when(this.replicationIndexManagerFactory.create(
+              any(),
               any(),
               any(),
               any(),

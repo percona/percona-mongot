@@ -14,7 +14,6 @@ import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.version.GenerationId;
@@ -30,7 +29,6 @@ import com.xgen.mongot.replication.mongodb.common.DefaultDocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.DefaultSessionRefresher;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
 import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
-import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
 import com.xgen.mongot.replication.mongodb.common.ReplicationOptimeUpdater;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
@@ -126,7 +124,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
   /** A mapping of existing IndexLifecycleManagers. */
   @GuardedBy("this")
-  private final Map<GenerationId, ReplicationIndexManager> indexManagers;
+  private final Map<GenerationId, IndexManager> indexManagers;
 
   private final NamedScheduledExecutorService commitExecutor;
 
@@ -168,7 +166,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       Optional<? extends SessionRefresher> synonymsSessionRefresher,
       ReplicationIndexManagerFactory replicationIndexManagerFactory,
       MeterRegistry meterRegistry,
-      Map<GenerationId, ReplicationIndexManager> indexManagers,
+      Map<GenerationId, IndexManager> indexManagers,
       NamedScheduledExecutorService commitExecutor,
       ReplicationOptimeUpdater replicationOptimeUpdater,
       InitializedIndexCatalog initializedIndexCatalog,
@@ -220,7 +218,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       Optional<? extends SessionRefresher> synonymsSessionRefresher,
       ReplicationIndexManagerFactory replicationIndexManagerFactory,
       MeterRegistry meterRegistry,
-      Map<GenerationId, ReplicationIndexManager> indexManagers,
+      Map<GenerationId, IndexManager> indexManagers,
       NamedScheduledExecutorService commitExecutor,
       ReplicationOptimeUpdater replicationOptimeUpdater,
       InitializedIndexCatalog initializedIndexCatalog,
@@ -519,7 +517,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   /** Creates gauges to track the number of index replication managers by state */
   private static void createStateGauges(
       MongoDbReplicationManager mongoDbReplicationManager, MetricsFactory metricsFactory) {
-    Arrays.stream(ReplicationIndexManager.State.values())
+    Arrays.stream(IndexManager.State.values())
         .forEach(
             state ->
                 metricsFactory.objectValueGauge(
@@ -530,7 +528,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   }
 
   // lock is not needed because we iterate through a copy of managers
-  private double gaugeReplicationManagers(ReplicationIndexManager.State state) {
+  private double gaugeReplicationManagers(IndexManager.State state) {
     return this.getIndexManagers().entrySet().stream()
         .filter(m -> m.getValue().getState() == state)
         .count();
@@ -700,7 +698,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   @Override
   public synchronized boolean isInitialized() {
     return this.indexManagers.values().stream()
-        .map(ReplicationIndexManager::getInitFuture)
+        .map(IndexManager::getInitFuture)
         .allMatch(initFuture -> initFuture.isDone() && !initFuture.isCompletedExceptionally());
   }
 
@@ -719,26 +717,26 @@ public class MongoDbReplicationManager implements ReplicationManager {
       return;
     }
 
-    Index index = indexGeneration.getIndex();
     DefaultDocumentIndexer indexer = DefaultDocumentIndexer.create(initializedIndex.get());
-    PeriodicIndexCommitter committer =
-        PeriodicIndexCommitter.create(index, indexer, this.commitExecutor, this.commitInterval);
 
-    ReplicationIndexManager indexManager =
-        this.replicationIndexManagerFactory.create(
-            this.lifecycleExecutor,
-            this.cursorManager,
-            this.initialSyncQueue,
-            this.steadyStateManager,
-            Optional.of(this.synonymManager),
-            indexGeneration,
-            initializedIndex.get(),
-            indexer,
-            committer,
-            this.requestRateLimitBackoffDuration,
-            this.meterRegistry,
-            this.featureFlags,
-            this.enableNaturalOrderScan);
+    IndexManager indexManager =
+        ReplicationIndexManagerFactory.forIndexGeneration(
+                indexGeneration, this.replicationIndexManagerFactory)
+            .create(
+                this.lifecycleExecutor,
+                this.cursorManager,
+                this.initialSyncQueue,
+                this.steadyStateManager,
+                Optional.of(this.synonymManager),
+                indexGeneration,
+                initializedIndex.get(),
+                indexer,
+                this.commitExecutor,
+                this.commitInterval,
+                this.requestRateLimitBackoffDuration,
+                this.meterRegistry,
+                this.featureFlags,
+                this.enableNaturalOrderScan);
 
     this.indexManagers.put(generationId, indexManager);
   }
@@ -751,7 +749,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       return CompletableFuture.completedFuture(null);
     }
 
-    ReplicationIndexManager indexManager = this.indexManagers.remove(generationId);
+    IndexManager indexManager = this.indexManagers.remove(generationId);
     return indexManager.drop();
   }
 
@@ -763,7 +761,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
     List<CompletableFuture<?>> futures =
         this.indexManagers.values().stream()
-            .map(ReplicationIndexManager::shutdown)
+            .map(IndexManager::shutdown)
             .collect(Collectors.toList());
 
     // Need to create a separate executor to run the shutdown tasks, otherwise it may end up running
@@ -817,13 +815,13 @@ public class MongoDbReplicationManager implements ReplicationManager {
   }
 
   @VisibleForTesting
-  synchronized ReplicationIndexManager getReplicationIndexManager(IndexGeneration indexGeneration) {
+  synchronized IndexManager getReplicationIndexManager(IndexGeneration indexGeneration) {
     return this.indexManagers.get(indexGeneration.getGenerationId());
   }
 
   /** Creates a copy of {@link MongoDbReplicationManager#indexManagers}. Thread safe method. */
   @SuppressWarnings("GuardedBy") // iterations through ConcurrentHashMap (copying) are thread safe
-  private Map<GenerationId, ReplicationIndexManager> getIndexManagers() {
+  private Map<GenerationId, IndexManager> getIndexManagers() {
     return new HashMap<>(this.indexManagers);
   }
 

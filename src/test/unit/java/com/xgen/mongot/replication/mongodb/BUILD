@@ -6,6 +6,8 @@ java_test_suite(
         "DurabilityConfigTest.java",
         "MongoDbNoOpReplicationManagerTest.java",
         "MongoDbReplicationManagerTest.java",
+        "RecyclableReplicationIndexManagerTest.java",
+        "ReplicationIndexManagerFactoryTest.java",
         "ReplicationIndexManagerTest.java",
     ],
     data = ["//src/test/unit/resources/replication/mongodb:srcs"],

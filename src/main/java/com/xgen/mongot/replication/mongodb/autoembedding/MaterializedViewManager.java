@@ -1,12 +1,12 @@
 package com.xgen.mongot.replication.mongodb.autoembedding;
 
 import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog.canonicalKey;
+import static com.xgen.mongot.replication.mongodb.IndexManager.State.FAILED;
+import static com.xgen.mongot.replication.mongodb.IndexManager.State.FAILED_EXCEEDED;
+import static com.xgen.mongot.replication.mongodb.IndexManager.State.SHUT_DOWN;
 import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getClientSessionRecords;
 import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getSyncBatchMongoClient;
 import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getSyncSourceHost;
-import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State.FAILED;
-import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State.FAILED_EXCEEDED;
-import static com.xgen.mongot.replication.mongodb.ReplicationIndexManager.State.SHUT_DOWN;
 import static com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig.Type.AUTO_EMBEDDING;
 import static com.xgen.mongot.util.Check.checkState;
 import static com.xgen.mongot.util.FutureUtils.COMPLETED_FUTURE;
@@ -38,6 +38,7 @@ import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.ReplicationManager;
+import com.xgen.mongot.replication.mongodb.IndexManager;
 import com.xgen.mongot.replication.mongodb.ReplicationIndexManager;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
@@ -117,7 +118,7 @@ public class MaterializedViewManager implements ReplicationManager {
   // STEADY_STATE_SHUT_DOWN is intentionally excluded — it is a transient pre-classification
   // state in handleSteadyStateException and the classifier can transition back to non-terminal
   // for recoverable cases (transient errors, renames, invalidates, resyncs).
-  static final Set<ReplicationIndexManager.State> TERMINAL_STATES =
+  static final Set<IndexManager.State> TERMINAL_STATES =
       Set.of(SHUT_DOWN, FAILED, FAILED_EXCEEDED);
 
   // ==================== Common Fields ====================
@@ -480,7 +481,7 @@ public class MaterializedViewManager implements ReplicationManager {
   /** Creates gauges to track the number of view generators by state */
   private static void createStateGauges(
       MaterializedViewManager autoEmbeddingMatViewManager, MetricsFactory metricsFactory) {
-    Arrays.stream(ReplicationIndexManager.State.values())
+    Arrays.stream(IndexManager.State.values())
         .forEach(
             state ->
                 metricsFactory.objectValueGauge(
@@ -491,7 +492,7 @@ public class MaterializedViewManager implements ReplicationManager {
   }
 
   /** helper function similar to MongoDbReplicationManager::gaugeReplicationManagers */
-  private double gaugeViewGenerators(ReplicationIndexManager.State state) {
+  private double gaugeViewGenerators(IndexManager.State state) {
     return this.getMatViewGenerators().entrySet().stream()
         .filter(m -> m.getValue().getState() == state)
         .count();

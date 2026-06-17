@@ -1,5 +1,6 @@
 package com.xgen.mongot.replication.mongodb;
 
+import static com.xgen.mongot.replication.mongodb.IndexManager.State;
 import static com.xgen.mongot.util.Check.checkState;
 import static com.xgen.mongot.util.mongodb.Errors.isMatchCollectionUuidUnsupportedException;
 
@@ -13,6 +14,7 @@ import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.EncodedUserData;
+import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.ReplicationOpTimeInfo;
@@ -55,13 +57,14 @@ import java.util.HashMap;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.bson.BsonTimestamp;
 
 /** Handles replication for a single index generation. */
-public class ReplicationIndexManager {
+public class ReplicationIndexManager implements IndexManager {
   // TODO(CLOUDP-365528): Visibility of some of these fields have been raised for re-use in
   // MaterializedViewGenerator. Need to revisit these fields/values for auto-embedding.
   /** Default resync backoff when replication config does not specify {@code resyncBackoffMs}. */
@@ -75,25 +78,6 @@ public class ReplicationIndexManager {
   private static final String EMPTY_EXCEPTION_METRIC_FIELD = "None";
   private static final String INDEX_DROPPED_COUNTER_UNKNOWN_TAG = "unknown";
   @VisibleForTesting static final String EXCEEDED_LIMIT_REASON_PREFIX = "Exceeded max limit: ";
-
-  /**
-   * The state of the ReplicationIndexManager. Note that this is not a direct mapping to the Index's
-   * state.
-   */
-  public enum State {
-    INITIALIZING,
-    INITIAL_SYNC,
-    INITIAL_SYNC_BACKOFF,
-    STEADY_STATE,
-    STEADY_STATE_SHUT_DOWN,
-    FAILED,
-    /**
-     * Similar to FAILED only due to a user exceeding a usage limit. Unlike FAILED, this state is
-     * persisted and recoverable after restart.
-     */
-    FAILED_EXCEEDED,
-    SHUT_DOWN,
-  }
 
   /** The action taken when an index fails. */
   enum FailedIndexAction {
@@ -234,8 +218,6 @@ public class ReplicationIndexManager {
    *     tasks onto
    * @param indexGeneration the index whose lifecycle the created ReplicationIndexManager should own
    * @param documentIndexer the indexer used to process document events and commit the index
-   * @param periodicCommitter the periodic committer, which triggers commits with a configured
-   *     frequency
    * @return an ReplicationIndexManager that owns the supplied index
    */
   public static ReplicationIndexManager create(
@@ -247,11 +229,15 @@ public class ReplicationIndexManager {
       IndexGeneration indexGeneration,
       InitializedIndex initializedIndex,
       DocumentIndexer documentIndexer,
-      PeriodicIndexCommitter periodicCommitter,
+      ScheduledExecutorService commitExecutor,
+      Duration commitInterval,
       Duration requestRateLimitBackoff,
       MeterRegistry meterRegistry,
       FeatureFlags featureFlags,
       boolean enableNaturalOrderScan) {
+    Index index = indexGeneration.getIndex();
+    PeriodicIndexCommitter periodicCommitter =
+        PeriodicIndexCommitter.create(index, documentIndexer, commitExecutor, commitInterval);
     return create(
         lifecycleExecutor,
         cursorManager,
@@ -347,6 +333,7 @@ public class ReplicationIndexManager {
    * @return a future that completes when the ReplicationIndexManager has completed shutting down.
    *     The future will only ever complete successfully.
    */
+  @Override
   public synchronized CompletableFuture<Void> shutdown() {
     // Set our state to SHUT_DOWN so no further events will be scheduled.
     State currentState = this.state;
@@ -362,10 +349,12 @@ public class ReplicationIndexManager {
             .collect(Collectors.toList()));
   }
 
+  @Override
   public synchronized CompletableFuture<Void> getInitFuture() {
     return this.initFuture;
   }
 
+  @Override
   public synchronized State getState() {
     return this.state;
   }
@@ -394,7 +383,8 @@ public class ReplicationIndexManager {
    * @return a future that completes when the ReplicationIndexManager has been dropped. The future
    *     will only ever complete successfully.
    */
-  synchronized CompletableFuture<Void> drop() {
+  @Override
+  public synchronized CompletableFuture<Void> drop() {
     return this.shutdown().thenRunAsync(this::dropIndex, this.lifecycleExecutor);
   }
 
@@ -1260,8 +1250,7 @@ public class ReplicationIndexManager {
     this.logger.error("Failing due to unexpected error.", throwable);
     incrementFailedIndexCounter(FailedIndexAction.DROP, getState(), throwable);
     transitionState(State.FAILED);
-    dropIndex(
-        IndexStatus.failed(failureMessage(FailedIndexAction.DROP, throwable), reason));
+    dropIndex(IndexStatus.failed(failureMessage(FailedIndexAction.DROP, throwable), reason));
   }
 
   protected void failAndCloseIndex(Throwable throwable, IndexStatus.Reason reason) {
@@ -1352,9 +1341,9 @@ public class ReplicationIndexManager {
   }
 
   private String failureMessage(FailedIndexAction action, Throwable throwable) {
-    return String.format("replication failed (action=%s)%s",
-                         action.name().toLowerCase(),
-                         throwable == null ? "" : ": " + throwable.getMessage());
+    return String.format(
+        "replication failed (action=%s)%s",
+        action.name().toLowerCase(), throwable == null ? "" : ": " + throwable.getMessage());
   }
 
   private void incrementFailedIndexCounter(

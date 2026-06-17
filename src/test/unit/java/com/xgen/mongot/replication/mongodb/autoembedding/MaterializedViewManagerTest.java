@@ -55,7 +55,7 @@ import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.index.version.MaterializedViewGeneration;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import com.xgen.mongot.index.version.UserIndexVersion;
-import com.xgen.mongot.replication.mongodb.ReplicationIndexManager;
+import com.xgen.mongot.replication.mongodb.IndexManager;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
@@ -200,7 +200,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(materializedViewIndexGeneration);
 
     // Simulate the generator entering FAILED state.
-    doReturn(ReplicationIndexManager.State.FAILED).when(materializedViewGenerator).getState();
+    doReturn(IndexManager.State.FAILED).when(materializedViewGenerator).getState();
 
     // Add a new generation of the same index with the same definition version.
     var gen2 =
@@ -234,7 +234,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(materializedViewIndexGeneration);
 
     // Simulate the generator entering SHUT_DOWN state.
-    doReturn(ReplicationIndexManager.State.SHUT_DOWN).when(materializedViewGenerator).getState();
+    doReturn(IndexManager.State.SHUT_DOWN).when(materializedViewGenerator).getState();
 
     // Add a new generation of the same index with the same definition version.
     var gen2 =
@@ -1759,7 +1759,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     // Simulate the generator entering FAILED state.
-    doReturn(ReplicationIndexManager.State.FAILED).when(generator).getState();
+    doReturn(IndexManager.State.FAILED).when(generator).getState();
 
     // Configure pollFollowerStatuses to return this generation as acquirable.
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
@@ -1788,7 +1788,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     // Simulate the generator entering SHUT_DOWN state.
-    doReturn(ReplicationIndexManager.State.SHUT_DOWN).when(generator).getState();
+    doReturn(IndexManager.State.SHUT_DOWN).when(generator).getState();
 
     // Configure pollFollowerStatuses to return this generation as acquirable.
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
@@ -1818,7 +1818,7 @@ public class MaterializedViewManagerTest {
 
     // Simulate the generator entering FAILED_EXCEEDED state (e.g., exceededIndex via
     // FIELD_EXCEEDED in initial sync or steady state, or DOCS_EXCEEDED in initial sync).
-    doReturn(ReplicationIndexManager.State.FAILED_EXCEEDED).when(generator).getState();
+    doReturn(IndexManager.State.FAILED_EXCEEDED).when(generator).getState();
 
     // Configure pollFollowerStatuses to return this generation as acquirable.
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
@@ -1847,7 +1847,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     // Generator is in a healthy state.
-    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+    doReturn(IndexManager.State.INITIAL_SYNC).when(generator).getState();
 
     // Configure pollFollowerStatuses to return this generation as acquirable.
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
@@ -1876,7 +1876,7 @@ public class MaterializedViewManagerTest {
     MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
     mocks.addIndexForReplication(matViewIndexGen);
 
-    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+    doReturn(IndexManager.State.INITIAL_SYNC).when(generator).getState();
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
     when(mocks.leaseManager.pollFollowerStatuses())
@@ -1910,7 +1910,7 @@ public class MaterializedViewManagerTest {
     MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
     mocks.addIndexForReplication(matViewIndexGen);
 
-    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+    doReturn(IndexManager.State.INITIAL_SYNC).when(generator).getState();
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
     when(mocks.leaseManager.pollFollowerStatuses())
@@ -1942,7 +1942,7 @@ public class MaterializedViewManagerTest {
     MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
     mocks.addIndexForReplication(matViewIndexGen);
 
-    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+    doReturn(IndexManager.State.INITIAL_SYNC).when(generator).getState();
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
     when(mocks.leaseManager.pollFollowerStatuses())
@@ -2188,7 +2188,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
-    doReturn(ReplicationIndexManager.State.INITIAL_SYNC).when(generator).getState();
+    doReturn(IndexManager.State.INITIAL_SYNC).when(generator).getState();
 
     when(mocks.leaseManager.pollFollowerStatuses())
         .thenReturn(
@@ -2200,7 +2200,7 @@ public class MaterializedViewManagerTest {
     when(mocks.leaseManager.tryAcquireLeadership(matViewGenId))
         .thenAnswer(
             invocation -> {
-              doReturn(ReplicationIndexManager.State.SHUT_DOWN).when(generator).getState();
+              doReturn(IndexManager.State.SHUT_DOWN).when(generator).getState();
               return true;
             });
 
@@ -2228,7 +2228,7 @@ public class MaterializedViewManagerTest {
 
     // Simulate the zombie state: generator failed with isLeader=false,
     // but leaseManager still has it as leader
-    doReturn(ReplicationIndexManager.State.FAILED).when(generator).getState();
+    doReturn(IndexManager.State.FAILED).when(generator).getState();
     doReturn(false).when(generator).isLeader();
     assertTrue(
         "leaseManager should still consider it a leader",
@@ -2261,7 +2261,7 @@ public class MaterializedViewManagerTest {
     assertTrue(generator.isLeader());
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
-    doReturn(ReplicationIndexManager.State.FAILED).when(generator).getState();
+    doReturn(IndexManager.State.FAILED).when(generator).getState();
 
     ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
     verify(mocks.heartbeatExecutor)
@@ -2285,7 +2285,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
-    doReturn(ReplicationIndexManager.State.SHUT_DOWN).when(generator).getState();
+    doReturn(IndexManager.State.SHUT_DOWN).when(generator).getState();
     doReturn(true).when(generator).isLeader();
 
     ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
@@ -2307,7 +2307,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
-    doReturn(ReplicationIndexManager.State.FAILED_EXCEEDED).when(generator).getState();
+    doReturn(IndexManager.State.FAILED_EXCEEDED).when(generator).getState();
     doReturn(true).when(generator).isLeader();
 
     ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
@@ -2330,7 +2330,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
-    doReturn(ReplicationIndexManager.State.STEADY_STATE_SHUT_DOWN).when(generator).getState();
+    doReturn(IndexManager.State.STEADY_STATE_SHUT_DOWN).when(generator).getState();
     doReturn(true).when(generator).isLeader();
 
     ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
@@ -2359,7 +2359,7 @@ public class MaterializedViewManagerTest {
     UUID matViewUuid = mocks.manager.getCollectionUuid(matViewGenId);
 
     // Old generator is healthy (non-terminal) but with stale cached isLeader=true.
-    doReturn(ReplicationIndexManager.State.STEADY_STATE).when(oldGenerator).getState();
+    doReturn(IndexManager.State.STEADY_STATE).when(oldGenerator).getState();
     doReturn(true).when(oldGenerator).isLeader();
 
     // Lease manager says we no longer hold the lease — leadership-loss condition.
@@ -2370,7 +2370,7 @@ public class MaterializedViewManagerTest {
     MaterializedViewGenerator newGenerator = mock(MaterializedViewGenerator.class);
     when(newGenerator.getIndexGeneration()).thenReturn(matViewIndexGen);
     doReturn(false).when(newGenerator).isLeader();
-    doReturn(ReplicationIndexManager.State.INITIALIZING).when(newGenerator).getState();
+    doReturn(IndexManager.State.INITIALIZING).when(newGenerator).getState();
 
     // Use reflection to swap the live map entry during the leadership-loss pass,
     // simulating a concurrent same-genId replaceGenerator. emitHeartbeat() runs two passes
@@ -2458,8 +2458,8 @@ public class MaterializedViewManagerTest {
     doAnswer(
             inv ->
                 getStateCallCount.incrementAndGet() <= 2
-                    ? ReplicationIndexManager.State.STEADY_STATE
-                    : ReplicationIndexManager.State.FAILED)
+                    ? IndexManager.State.STEADY_STATE
+                    : IndexManager.State.FAILED)
         .when(generator)
         .getState();
 
@@ -2486,7 +2486,7 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(matViewIndexGen);
 
     MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
-    doReturn(ReplicationIndexManager.State.INITIAL_SYNC_BACKOFF).when(generator).getState();
+    doReturn(IndexManager.State.INITIAL_SYNC_BACKOFF).when(generator).getState();
     doReturn(true).when(generator).isLeader();
 
     ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
@@ -3576,7 +3576,7 @@ public class MaterializedViewManagerTest {
                 MaterializedViewGenerator mockGenerator = mock(MaterializedViewGenerator.class);
                 when(mockGenerator.getIndexGeneration()).thenReturn(matViewIndexGen);
                 when(mockGenerator.getState())
-                    .thenReturn(ReplicationIndexManager.State.INITIAL_SYNC);
+                    .thenReturn(IndexManager.State.INITIAL_SYNC);
                 when(mockGenerator.shutdown()).thenReturn(CompletableFuture.completedFuture(null));
                 return mockGenerator;
               });
