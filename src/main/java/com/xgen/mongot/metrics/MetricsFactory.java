@@ -30,6 +30,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Wraps the Meter instantiation APIs of the backing MeterRegistry by prepending the Meter names
@@ -38,6 +40,8 @@ import java.util.stream.Stream;
  * <p>This class is required to be thread-safe.
  */
 public class MetricsFactory {
+
+  private static final Logger LOG = LoggerFactory.getLogger(MetricsFactory.class);
 
   private final String namespace;
   private final MeterRegistry registry;
@@ -159,6 +163,13 @@ public class MetricsFactory {
             .tags(fullTags)
             .register(this.registry);
     this.registeredMeters.add(objectValueGauge);
+    if (previousGauge.isPresent() && fullName.endsWith(".leaderStatus")) {
+      LOG.atInfo()
+          .addKeyValue("name", fullName)
+          .addKeyValue("tags", fullTags)
+          .addKeyValue("newStateObjectIdentity", System.identityHashCode(stateObject))
+          .log("Re-registered gauge with same id");
+    }
     return stateObject;
   }
 

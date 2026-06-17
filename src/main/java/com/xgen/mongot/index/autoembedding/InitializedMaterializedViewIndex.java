@@ -37,8 +37,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bson.BsonArray;
 import org.bson.BsonTimestamp;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class InitializedMaterializedViewIndex implements InitializedAutoEmbedIndex {
+  private static final Logger LOG = LoggerFactory.getLogger(InitializedMaterializedViewIndex.class);
   private static final NoOpIndexReader NO_OP_INDEX_READER = new NoOpIndexReader();
   private final IndexDefinition indexDefinition;
   private final MaterializedViewGenerationId generationId;
@@ -96,6 +99,11 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
    */
   public void setLeaderMode(boolean isLeader) {
     this.leaderStatusGauge.set(isLeader ? 1 : 0);
+    LOG.atInfo()
+        .addKeyValue("generationId", this.generationId)
+        .addKeyValue("isLeader", isLeader)
+        .addKeyValue("stateObjectIdentity", System.identityHashCode(this.leaderStatusGauge))
+        .log("Set leaderStatus gauge");
   }
 
   @Override
