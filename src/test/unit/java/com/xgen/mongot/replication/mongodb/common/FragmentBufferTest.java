@@ -138,11 +138,14 @@ public class FragmentBufferTest {
   
   @Test
   public void testDifferentEventInterruption() throws FragmentProcessingException {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    FragmentBuffer buffer = new FragmentBuffer(new MetricsFactory("test", registry));
+
     // Start buffering event A
     String tokenA = "820000000000000000010000"; // Valid resume token hex
     BsonDocument a1 = createFragment(tokenA, 1, 3, "operationType", "insert");
-    assertTrue(this.buffer.processEvent(new RawBsonDocument(a1, CODEC)).isEmpty());
-    assertTrue(this.buffer.isBuffering());
+    assertTrue(buffer.processEvent(new RawBsonDocument(a1, CODEC)).isEmpty());
+    assertTrue(buffer.isBuffering());
     
     // Try to process fragment from different event B
     String tokenB = "820000000000000100000000"; // Valid resume token hex with different timestamp
@@ -150,8 +153,9 @@ public class FragmentBufferTest {
     
     FragmentProcessingException e = Assert.assertThrows(
         FragmentProcessingException.class, 
-        () -> this.buffer.processEvent(new RawBsonDocument(b1, CODEC)));
+        () -> buffer.processEvent(new RawBsonDocument(b1, CODEC)));
     assertThat(e.getMessage()).contains("different event");
+    assertThat(registry.get("test.numFragmentOpTimeMismatches").counter().count()).isEqualTo(1.0);
   }
   
   @Test
@@ -306,33 +310,37 @@ public class FragmentBufferTest {
   
   @Test
   public void testExceptionCleanup() throws FragmentProcessingException {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    FragmentBuffer buffer = new FragmentBuffer(new MetricsFactory("test", registry));
+
     String tokenA = "820000000000000000010000"; // Valid resume token hex
     String tokenB = "820000000000000100000000"; // Valid resume token hex with different timestamp
     
     // Start buffering event A
     BsonDocument a1 = createFragment(tokenA, 1, 3, "operationType", "insert");
-    assertTrue(this.buffer.processEvent(new RawBsonDocument(a1, CODEC)).isEmpty());
-    assertTrue(this.buffer.isBuffering());
-    assertEquals(1, this.buffer.getFragmentCount());
+    assertTrue(buffer.processEvent(new RawBsonDocument(a1, CODEC)).isEmpty());
+    assertTrue(buffer.isBuffering());
+    assertEquals(1, buffer.getFragmentCount());
     
     // Try to process fragment from different event B (should cause exception and cleanup)
     BsonDocument b1 = createFragment(tokenB, 1, 2, "operationType", "update");
     
     FragmentProcessingException e = Assert.assertThrows(
         FragmentProcessingException.class, 
-        () -> this.buffer.processEvent(new RawBsonDocument(b1, CODEC)));
+        () -> buffer.processEvent(new RawBsonDocument(b1, CODEC)));
     assertThat(e.getMessage()).contains("different event");
+    assertThat(registry.get("test.numFragmentOpTimeMismatches").counter().count()).isEqualTo(1.0);
     
     // Buffer should be cleared after exception
-    assertFalse(this.buffer.isBuffering());
-    assertThat(this.buffer.getCurrentEventOpTime()).isEmpty();
-    assertEquals(0, this.buffer.getFragmentCount());
-    assertEquals(0, this.buffer.getTotalFragments());
+    assertFalse(buffer.isBuffering());
+    assertThat(buffer.getCurrentEventOpTime()).isEmpty();
+    assertEquals(0, buffer.getFragmentCount());
+    assertEquals(0, buffer.getTotalFragments());
     
     // Should be able to start fresh after cleanup
     BsonDocument c1 = createFragment("820000000000000300000000", 1, 2, "operationType", "delete");
-    assertTrue(this.buffer.processEvent(new RawBsonDocument(c1, CODEC)).isEmpty());
-    assertTrue(this.buffer.isBuffering());
+    assertTrue(buffer.processEvent(new RawBsonDocument(c1, CODEC)).isEmpty());
+    assertTrue(buffer.isBuffering());
   }
 
   // Edge Case Tests

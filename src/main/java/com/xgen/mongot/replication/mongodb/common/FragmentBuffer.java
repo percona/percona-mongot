@@ -38,10 +38,12 @@ public class FragmentBuffer {
   private int totalFragments;
   private Optional<BsonTimestamp> currentEventOpTime = Optional.empty();
   private final Counter splitEventsCounter;
+  private final Counter fragmentOpTimeMismatchCounter;
 
   public FragmentBuffer(MetricsFactory metricsFactory) {
     // Fragment exceptions are tracked as process-level metrics in ReplicationIndexManager
     this.splitEventsCounter = metricsFactory.counter("numSplitEvents");
+    this.fragmentOpTimeMismatchCounter = metricsFactory.counter("numFragmentOpTimeMismatches");
   }
 
   /**
@@ -103,6 +105,7 @@ public class FragmentBuffer {
     } else {
       // Verify this fragment belongs to current event
       if (!isSameEvent(eventOpTime)) {
+        this.fragmentOpTimeMismatchCounter.increment();
         throw new FragmentProcessingException(
             "Received fragment from different event while already buffering fragments");
       }
