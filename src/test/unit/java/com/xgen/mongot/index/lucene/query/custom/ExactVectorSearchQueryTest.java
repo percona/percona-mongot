@@ -273,7 +273,7 @@ public class ExactVectorSearchQueryTest {
     LeafCollector leafCollector = collector.getLeafCollector(context);
 
     BulkScorer bulkScorer = weight.bulkScorer(context);
-    bulkScorer.score(leafCollector, null);
+    bulkScorer.score(leafCollector, null, 0, DocIdSetIterator.NO_MORE_DOCS);
 
     ScoreDoc[] scoreDocs = collector.topDocs().scoreDocs;
     Assert.assertEquals(2, scoreDocs.length);

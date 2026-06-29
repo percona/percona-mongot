@@ -1,7 +1,9 @@
 package com.xgen.mongot.index.lucene.merge;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.monitor.Gate;
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
@@ -37,6 +39,8 @@ public class PausableDirectory extends FilterDirectory {
   private static final Logger LOG = LoggerFactory.getLogger(PausableDirectory.class);
 
   private final Gate mergeGate;
+  private final Runnable guardedOnPause;
+  private final Runnable onResume;
 
   /**
    * How often to check if merges should be paused, in bytes written. Set to 256 KB to balance
@@ -46,26 +50,64 @@ public class PausableDirectory extends FilterDirectory {
   public static final long CHECK_PAUSE_INTERVAL_BYTES = 256 * 1024; // 256 KB
 
   /**
-   * Creates a new PausableDirectory that wraps the given directory.
+   * Creates a new PausableDirectory that wraps the given directory, with a no-op pause callback.
+   * Production code should use the 3-arg constructor to receive pause notifications.
    *
    * @param in the underlying directory to wrap
    * @param mergeGate the gate that controls whether merges should be paused
    */
+  @VisibleForTesting
   public PausableDirectory(Directory in, Gate mergeGate) {
+    this(in, mergeGate, () -> {});
+  }
+
+  /**
+   * Creates a new PausableDirectory that wraps the given directory and invokes {@code onPause} at
+   * most once per pause window observed by this directory instance.
+   *
+   * <p>Semantics: {@code onPause} is fired the first time any {@link PausableIndexOutput} created
+   * by this directory observes a closed gate. Subsequent writes (on the same or other outputs from
+   * this directory) that observe the gate still closed do not re-fire the callback. Once the gate
+   * is observed open again (via {@link Gate#awaitOpen()} returning normally, or its return via the
+   * interrupted/IOException path), the latch is reset, so a later distinct close-window will fire
+   * {@code onPause} again.
+   *
+   * <p>Because a new PausableDirectory is created per merge in {@code
+   * InstrumentedConcurrentMergeScheduler#wrapForMerge}, this effectively counts "this merge
+   * experienced at least one pause window" each time a pause window starts within a single merge.
+   * Multiple concurrent merges paused by the same global gate-close event will each fire their own
+   * {@code onPause}.
+   *
+   * @param in the underlying directory to wrap
+   * @param mergeGate the gate that controls whether merges should be paused
+   * @param onPause callback invoked at most once per pause window observed by this directory
+   */
+  public PausableDirectory(Directory in, Gate mergeGate, Runnable onPause) {
     super(in);
     this.mergeGate = mergeGate;
+    AtomicBoolean paused = new AtomicBoolean(false);
+    this.guardedOnPause = () -> {
+      if (paused.compareAndSet(false, true)) {
+        onPause.run();
+      }
+    };
+    this.onResume = () -> paused.set(false);
   }
 
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
-    return new PausableIndexOutput(super.createOutput(name, context), this.mergeGate);
+    return new PausableIndexOutput(
+        super.createOutput(name, context), this.mergeGate, this.guardedOnPause, this.onResume);
   }
 
   @Override
   public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
       throws IOException {
     return new PausableIndexOutput(
-        super.createTempOutput(prefix, suffix, context), this.mergeGate);
+        super.createTempOutput(prefix, suffix, context),
+        this.mergeGate,
+        this.guardedOnPause,
+        this.onResume);
   }
 
   /**
@@ -78,12 +120,17 @@ public class PausableDirectory extends FilterDirectory {
   static class PausableIndexOutput extends IndexOutput {
     private final IndexOutput delegate;
     private final Gate mergeGate;
+    private final Runnable onPause;
+    private final Runnable onResume;
     private long bytesWrittenSinceLastCheck = 0;
 
-    PausableIndexOutput(IndexOutput delegate, Gate mergeGate) {
+    PausableIndexOutput(
+        IndexOutput delegate, Gate mergeGate, Runnable onPause, Runnable onResume) {
       super("PausableIndexOutput(" + delegate.toString() + ")", delegate.getName());
       this.delegate = delegate;
       this.mergeGate = mergeGate;
+      this.onPause = onPause;
+      this.onResume = onResume;
     }
 
     /**
@@ -97,6 +144,7 @@ public class PausableDirectory extends FilterDirectory {
      */
     private void maybeWaitForDiskSpace() throws IOException {
       if (this.mergeGate.isClosed()) {
+        this.onPause.run();
         LOG.info(
             "Merge paused due to high disk usage, waiting for disk space... "
                 + "(file: {}, bytes written: {})",
@@ -107,6 +155,10 @@ public class PausableDirectory extends FilterDirectory {
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
           throw new IOException("Interrupted while waiting for disk space", e);
+        } finally {
+          // Reset the pause latch on every exit path (normal resume or interrupt) so the next
+          // distinct pause window can fire onPause again.
+          this.onResume.run();
         }
         LOG.info(
             "Disk usage dropped, resuming merge (file: {}, bytes written: {})",

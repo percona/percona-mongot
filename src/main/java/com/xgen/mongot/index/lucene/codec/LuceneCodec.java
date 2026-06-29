@@ -7,6 +7,7 @@ import com.google.common.flogger.FluentLogger;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.BinaryQuantizedFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.FlatBitVectorsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.Float32AndByteFlatVectorsFormat;
@@ -14,6 +15,7 @@ import com.xgen.mongot.index.lucene.codec.flat.ScalarQuantizedFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBinaryQuantizedVectorsFormat;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBitVectorsFormat;
+import com.xgen.mongot.index.lucene.vector.Lucene99NativeHnswVectorsFormat;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FieldPath;
 import java.util.HashMap;
@@ -21,12 +23,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.FilterCodec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.StoredFieldsFormat;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -45,9 +46,12 @@ import org.apache.lucene.store.Directory;
  * <h3>Postings</h3>
  *
  * <p>Delegates to {@link HybridPostingsFormat}, which dynamically selects between a {@link
- * BloomFilteringPostingsFormat} and the default Lucene99 format for the {@code _id} field based on
- * a runtime toggle. See {@link HybridPostingsFormat} for details on the per-segment format
- * selection, metrics, and rollback behavior.
+ * MongotBloomFilteringPostingsFormat} and the default Lucene99 format for the {@code _id} field
+ * based on a runtime toggle. Search and vector Lucene indexes both use {@link
+ * Factory#forIndexWithBloomFilter} so the same dynamic feature flag applies, except writers for
+ * auto-embedding indexes pass a supplier that is always {@code false}. See {@link
+ * HybridPostingsFormat} for details on the per-segment format selection, metrics, and rollback
+ * behavior.
  *
  * <h3>Codec name compatibility</h3>
  *
@@ -57,6 +61,13 @@ import org.apache.lucene.store.Directory;
  * is required to upgrade to the next major Lucene version.
  */
 public class LuceneCodec extends FilterCodec {
+
+  /**
+   * The Lucene major version used when creating new index segments. This is passed to {@link
+   * org.apache.lucene.index.IndexWriterConfig#setIndexCreatedVersionMajor} to decouple the codec
+   * upgrade lifecycle from the Lucene library upgrade lifecycle.
+   */
+  public static final int CODEC_VERSION_MAJOR = 9;
 
   private static final FluentLogger FLOGGER = FluentLogger.forEnclosingClass();
 
@@ -95,6 +106,7 @@ public class LuceneCodec extends FilterCodec {
     this(codecName, Map.of());
   }
 
+  @VisibleForTesting
   public LuceneCodec(Map<FieldPath, VectorFieldSpecification> fieldMap) {
     this(CODEC_NAME, fieldMap);
   }
@@ -155,8 +167,10 @@ public class LuceneCodec extends FilterCodec {
   private KnnVectorsFormat resolveHnswVectorFormat(
       String field, FieldName.TypeField typeField, VectorFieldSpecification.HnswOptions options) {
     return switch (typeField) {
-      case FieldName.TypeField.KNN_VECTOR, FieldName.TypeField.KNN_BYTE ->
+      case FieldName.TypeField.KNN_VECTOR ->
           new Lucene99HnswVectorsFormat(options.maxEdges(), options.numEdgeCandidates());
+      case FieldName.TypeField.KNN_BYTE ->
+          new Lucene99NativeHnswVectorsFormat(options.maxEdges(), options.numEdgeCandidates());
       case FieldName.TypeField.KNN_BIT ->
           new Mongot01042HnswBitVectorsFormat(options.maxEdges(), options.numEdgeCandidates());
       case FieldName.TypeField.KNN_F32_Q7 ->
@@ -181,6 +195,7 @@ public class LuceneCodec extends FilterCodec {
 
   private KnnVectorsFormat resolveFlatVectorFormat(String field, FieldName.TypeField typeField) {
     return switch (typeField) {
+      // TODO(CLOUDP-403218): extend native scoring support to flat indexes.
       case FieldName.TypeField.KNN_VECTOR, FieldName.TypeField.KNN_BYTE ->
           new Float32AndByteFlatVectorsFormat();
       case FieldName.TypeField.KNN_BIT -> new FlatBitVectorsFormat();
@@ -202,7 +217,7 @@ public class LuceneCodec extends FilterCodec {
 
   public static class Factory {
 
-    public static LuceneCodec forSearchIndexWithBloomFilter(
+    public static LuceneCodec forIndexWithBloomFilter(
         Map<FieldPath, VectorFieldSpecification> fieldMap,
         BooleanSupplier bloomFilterForIdFieldEnabled,
         Optional<IndexMetricsUpdater.IndexingMetricsUpdater> indexingMetricsUpdater) {

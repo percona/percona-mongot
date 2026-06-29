@@ -15,20 +15,20 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      KnnBetaOperatorTest.TestDeserialization.class,
-      KnnBetaOperatorTest.TestSerialization.class,
+      KnnBetaOperatorTest.DeserializationTest.class,
+      KnnBetaOperatorTest.SerializationTest.class,
     })
 public class KnnBetaOperatorTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "knnBeta-deserialization";
     private static final BsonDeserializationTestSuite<KnnBetaOperator> TEST_SUITE =
         fromDocument(DefinitionTests.RESOURCES_PATH, SUITE_NAME, KnnBetaOperator::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<KnnBetaOperator> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<KnnBetaOperator> testSpec) {
       this.testSpec = testSpec;
     }
@@ -78,14 +78,14 @@ public class KnnBetaOperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "knnBeta-serialization";
     public static final BsonSerializationTestSuite<KnnBetaOperator> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(DefinitionTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<KnnBetaOperator> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<KnnBetaOperator> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<KnnBetaOperator> testSpec) {
       this.testSpec = testSpec;
     }
 

@@ -27,6 +27,7 @@ import java.util.stream.LongStream;
 import org.bson.BsonDateTime;
 import org.bson.BsonDouble;
 import org.bson.BsonInt32;
+import org.bson.BsonNumber;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -454,6 +455,110 @@ public class FacetCollectorTest {
           () -> FacetCollector.fromBson(parser));
     }
 
+    /** When allow10k is false, number facet boundaries length 2000 throws BsonParseException. */
+    @Test
+    public void numericFacetBoundaries2000_fromBsonWithAllow10kFalse_throwsBsonParseException() {
+      var definition =
+          FacetDefinitionBuilder.numeric()
+              .boundaries(
+                  IntStream.range(0, 2000).mapToObj(BsonInt32::new).collect(Collectors.toList()))
+              .path("rating")
+              .build();
+
+      var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build();
+      TestUtils.assertThrows(
+          "size must be within bounds",
+          BsonParseException.class,
+          () -> FacetDefinition.fromBson(parser, false));
+    }
+
+    /** When allow10k is true, number facet boundaries length 2000 parses successfully. */
+    @Test
+    public void numericFacetBoundaries2000_fromBsonWithAllow10kTrue_succeeds()
+        throws BsonParseException {
+      var definition =
+          FacetDefinitionBuilder.numeric()
+              .boundaries(
+                  IntStream.range(0, 2000).mapToObj(BsonInt32::new).collect(Collectors.toList()))
+              .path("rating")
+              .build();
+
+      var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build();
+      FacetDefinition result = FacetDefinition.fromBson(parser, true);
+
+      assertThat(result).isInstanceOf(FacetDefinition.NumericFacetDefinition.class);
+      assertThat(((FacetDefinition.NumericFacetDefinition) result).boundaries()).hasSize(2000);
+    }
+
+    /** When allow10k is false, date facet boundaries length 2000 throws BsonParseException. */
+    @Test
+    public void dateFacetBoundaries2000_fromBsonWithAllow10kFalse_throwsBsonParseException() {
+      var definition =
+          FacetDefinitionBuilder.date()
+              .boundaries(
+                  LongStream.range(0, 2000)
+                      .mapToObj(v -> new BsonDateTime(new Date(v).getTime()))
+                      .collect(Collectors.toList()))
+              .path("eventDate")
+              .build();
+
+      var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build();
+      TestUtils.assertThrows(
+          "size must be within bounds",
+          BsonParseException.class,
+          () -> FacetDefinition.fromBson(parser, false));
+    }
+
+    /** When allow10k is true, date facet boundaries length 2000 parses successfully. */
+    @Test
+    public void dateFacetBoundaries2000_fromBsonWithAllow10kTrue_succeeds()
+        throws BsonParseException {
+      var definition =
+          FacetDefinitionBuilder.date()
+              .boundaries(
+                  LongStream.range(0, 2000)
+                      .mapToObj(v -> new BsonDateTime(new Date(v).getTime()))
+                      .collect(Collectors.toList()))
+              .path("eventDate")
+              .build();
+
+      var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build();
+      FacetDefinition result = FacetDefinition.fromBson(parser, true);
+
+      assertThat(result).isInstanceOf(FacetDefinition.DateFacetDefinition.class);
+      assertThat(((FacetDefinition.DateFacetDefinition) result).boundaries()).hasSize(2000);
+    }
+
+    /** FacetCollector.fromBson10kAllowed accepts number facet with 2000 boundaries. */
+    @Test
+    public void facetCollectorNumericBoundaries2000_fromBson10kAllowed_succeeds()
+        throws BsonParseException {
+      List<BsonNumber> boundaries =
+          IntStream.range(0, 2000)
+              .mapToObj(i -> (BsonNumber) new BsonInt32(i))
+              .collect(Collectors.toList());
+      var facetCollector =
+          CollectorBuilder.facet()
+              .operator(OperatorBuilder.text().path("review").query("good").build())
+              .facetDefinitions(
+                  Map.of(
+                      "ratingFacet",
+                      FacetDefinitionBuilder.numeric()
+                          .boundaries(boundaries)
+                          .path("rating")
+                          .build()))
+              .build();
+
+      var parser =
+          BsonDocumentParser.fromRoot(facetCollector.collectorToBson().asDocument()).build();
+      FacetCollector result = FacetCollector.fromBson10kAllowed(parser);
+
+      FacetDefinition.NumericFacetDefinition ratingFacet =
+          (FacetDefinition.NumericFacetDefinition) result.facetDefinitions().get("ratingFacet");
+      assertThat(ratingFacet).isNotNull();
+      assertThat(ratingFacet.boundaries()).hasSize(2000);
+    }
+
     /** FacetCollector.fromBson10kAllowed accepts numBuckets 2000. */
     @Test
     public void facetCollectorNumBuckets2000_fromBson10kAllowed_succeeds()
@@ -478,8 +583,7 @@ public class FacetCollectorTest {
     }
 
     @Test
-    public void getTotalRequestedStringFacetBuckets_sumsOnlyStringFacetNumBuckets() {
-      // One string facet: 100
+    public void getTotalRequestedFacetBuckets_sumsAllFacetTypes() {
       FacetCollector oneString =
           CollectorBuilder.facet()
               .operator(OperatorBuilder.text().path("q").query("x").build())
@@ -488,9 +592,23 @@ public class FacetCollectorTest {
                       "a",
                       FacetDefinitionBuilder.string().numBuckets(100).path("f1").build()))
               .build();
-      assertThat(oneString.getTotalRequestedStringFacetBuckets()).isEqualTo(100);
+      assertThat(oneString.getTotalRequestedFacetBuckets()).isEqualTo(100);
 
-      // String + numeric: only string counts
+      FacetCollector numericOnly =
+          CollectorBuilder.facet()
+              .operator(OperatorBuilder.text().path("q").query("x").build())
+              .facetDefinitions(
+                  Map.of(
+                      "n",
+                      FacetDefinitionBuilder.numeric()
+                          .boundaries(
+                              List.of(
+                                  new BsonInt32(1), new BsonInt32(2), new BsonInt32(3)))
+                          .path("f2")
+                          .build()))
+              .build();
+      assertThat(numericOnly.getTotalRequestedFacetBuckets()).isEqualTo(2);
+
       FacetCollector stringAndNumeric =
           CollectorBuilder.facet()
               .operator(OperatorBuilder.text().path("q").query("x").build())
@@ -504,22 +622,31 @@ public class FacetCollectorTest {
                           .path("f2")
                           .build()))
               .build();
-      assertThat(stringAndNumeric.getTotalRequestedStringFacetBuckets()).isEqualTo(50);
+      assertThat(stringAndNumeric.getTotalRequestedFacetBuckets()).isEqualTo(51);
 
-      // Multiple string facets: sum
-      FacetCollector multipleString =
+      FacetCollector mixed =
           CollectorBuilder.facet()
               .operator(OperatorBuilder.text().path("q").query("x").build())
               .facetDefinitions(
                   Map.of(
-                      "a",
+                      "s",
                       FacetDefinitionBuilder.string().numBuckets(10).path("f1").build(),
-                      "b",
-                      FacetDefinitionBuilder.string().numBuckets(20).path("f2").build(),
-                      "c",
-                      FacetDefinitionBuilder.string().numBuckets(5).path("f3").build()))
+                      "n",
+                      FacetDefinitionBuilder.numeric()
+                          .boundaries(List.of(new BsonInt32(1), new BsonInt32(2)))
+                          .path("f2")
+                          .build(),
+                      "d",
+                      FacetDefinitionBuilder.date()
+                          .boundaries(
+                              List.of(
+                                  new BsonDateTime(1L),
+                                  new BsonDateTime(2L),
+                                  new BsonDateTime(3L)))
+                          .path("f3")
+                          .build()))
               .build();
-      assertThat(multipleString.getTotalRequestedStringFacetBuckets()).isEqualTo(35);
+      assertThat(mixed.getTotalRequestedFacetBuckets()).isEqualTo(13);
     }
   }
 }

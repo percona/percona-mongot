@@ -144,7 +144,8 @@ public record IndexMetrics(
       int numFields,
       Map<FieldName.TypeField, Double> numFieldsPerDatatype,
       Optional<SerializableTimer> batchIndexingTimer,
-      Bytes requiredMemory)
+      Bytes requiredMemory,
+      int numNestedVectorFields)
       implements DocumentEncodable {
 
     private static class Fields {
@@ -206,6 +207,9 @@ public record IndexMetrics(
 
       private static final Field.WithDefault<Long> REQUIRED_MEMORY =
           Field.builder("requiredMemoryBytes").longField().optional().withDefault(0L);
+
+      private static final Field.WithDefault<Integer> NUM_NESTED_VECTOR_FIELDS =
+          Field.builder("numNestedVectorFields").intField().optional().withDefault(0);
     }
 
     static IndexingMetrics create(
@@ -223,7 +227,8 @@ public record IndexMetrics(
         int maxLuceneMaxDocs,
         long numMongoDbDocs,
         Timer batchIndexingTimer,
-        long requiredMemory) {
+        long requiredMemory,
+        int numNestedVectorFields) {
       return new IndexingMetrics(
           getCurrentStatsFromCounters(DocumentEvent.EventType.class, documentEventTypeCounterMap),
           initialSyncExceptionCounter.count(),
@@ -240,7 +245,8 @@ public record IndexMetrics(
           numFields,
           getCurrentStatsFromDouble(FieldName.TypeField.class, numFieldsPerDatatype),
           Optional.of(SerializableTimer.create(batchIndexingTimer)),
-          Bytes.ofBytes(requiredMemory));
+          Bytes.ofBytes(requiredMemory),
+          numNestedVectorFields);
     }
 
     @Override
@@ -264,6 +270,7 @@ public record IndexMetrics(
           .field(Fields.STEADY_STATE_EXCEPTION_COUNT, this.steadyStateExceptionCount)
           .field(Fields.BATCH_INDEXING_TIMER, this.batchIndexingTimer)
           .field(Fields.REQUIRED_MEMORY, this.requiredMemory.toBytes())
+          .field(Fields.NUM_NESTED_VECTOR_FIELDS, this.numNestedVectorFields)
           .build();
     }
 
@@ -287,7 +294,8 @@ public record IndexMetrics(
           bsonToStatsMap(
               parser.getField(Fields.NUM_FIELDS_PER_DATATYPE).unwrap(), FieldName.TypeField.class),
           parser.getField(Fields.BATCH_INDEXING_TIMER).unwrap(),
-          Bytes.ofBytes(parser.getField(Fields.REQUIRED_MEMORY).unwrap()));
+          Bytes.ofBytes(parser.getField(Fields.REQUIRED_MEMORY).unwrap()),
+          parser.getField(Fields.NUM_NESTED_VECTOR_FIELDS).unwrap());
     }
   }
 

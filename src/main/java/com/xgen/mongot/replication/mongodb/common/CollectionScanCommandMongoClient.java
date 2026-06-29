@@ -65,6 +65,7 @@ public abstract class CollectionScanCommandMongoClient<E extends Exception>
   final Function<Exception, E> exceptionWrapper;
   final NamespaceChangeCheck<E> namespaceChangeCheck;
   final Optional<InitialSyncMetrics> initialSyncMetricsUpdaterOpt;
+  private final Optional<Integer> collectionScanGetMoreBatchSize;
 
   OptionalLong cursorId;
   Optional<BsonTimestamp> operationTime;
@@ -79,7 +80,9 @@ public abstract class CollectionScanCommandMongoClient<E extends Exception>
       NamespaceChangeCheck<E> namespaceChangeCheck,
       FutureWrapper<E> futureWrapper,
       Function<Exception, E> exceptionWrapper,
-      Optional<InitialSyncMetrics> initialSyncMetricsUpdaterOpt) {
+      Optional<InitialSyncMetrics> initialSyncMetricsUpdaterOpt,
+      Optional<Integer> collectionScanGetMoreBatchSize) {
+    Check.argNotNull(collectionScanGetMoreBatchSize, "collectionScanGetMoreBatchSize");
     this.mongoClient = mongoClient;
     this.refreshingSession = refreshingSession;
     // TODO(CLOUDP-289914): Remove this getMoreTimer after switching to new one by
@@ -90,6 +93,7 @@ public abstract class CollectionScanCommandMongoClient<E extends Exception>
     this.futureWrapper = futureWrapper;
     this.exceptionWrapper = exceptionWrapper;
     this.initialSyncMetricsUpdaterOpt = initialSyncMetricsUpdaterOpt;
+    this.collectionScanGetMoreBatchSize = collectionScanGetMoreBatchSize;
     this.cursorId = OptionalLong.empty();
     this.operationTime = Optional.empty();
     this.postBatchResumeToken = Optional.empty();
@@ -173,7 +177,7 @@ public abstract class CollectionScanCommandMongoClient<E extends Exception>
         new GetMoreCommand(
             this.cursorId.getAsLong(),
             this.namespace.getCollectionName(),
-            Optional.empty(),
+            this.collectionScanGetMoreBatchSize,
             Optional.empty());
 
     Stopwatch timer = Stopwatch.createStarted();

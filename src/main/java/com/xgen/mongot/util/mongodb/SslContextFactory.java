@@ -66,23 +66,28 @@ public class SslContextFactory {
   /**
    * Creates a TLS 1.3 {@link SSLContext} for mutual TLS (x509 client authentication).
    *
-   * <p>Configures both a key manager from the client certificate/key file and a trust manager from
-   * the CA file, so the client can present its certificate and verify the server.
+   * <p>Configures a key manager from the client certificate/key file, and optionally a trust
+   * manager from the CA file. If {@code caFilePath} is empty, the JVM default trust store is used
+   * to verify the server.
    *
-   * @param caFilePath path to the CA file used to verify the server
+   * @param caFilePath optional path to the CA file used to verify the server; absent means JVM
+   *     default trust store
    * @param certKeyFilePath path to the combined PEM file (client private key and certificate(s))
    * @param certKeyFilePasswordPath optional path to the file containing the key passphrase
    * @return an initialized SSLContext for mTLS
    */
-  public static SSLContext getWithCaAndCertificateFile(
-      Path caFilePath, Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) {
+  public static SSLContext getWithCertKeyFile(
+      Optional<Path> caFilePath, Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) {
     try {
-      KeyManagerFactory kmf =
-          createKeyManagerFromCertKeyFile(certKeyFilePath, certKeyFilePasswordPath);
-      TrustManagerFactory tmf = createTrustManagerFromCaFile(caFilePath);
+      KeyManagerFactory kmf = createKmfFromCombinedPem(certKeyFilePath, certKeyFilePasswordPath);
 
       SSLContext sslContext = SSLContext.getInstance("TLSv1.3");
-      sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), new SecureRandom());
+      if (caFilePath.isPresent()) {
+        TrustManagerFactory tmf = createTrustManagerFromCaFile(caFilePath.get());
+        sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), new SecureRandom());
+      } else {
+        sslContext.init(kmf.getKeyManagers(), null, new SecureRandom());
+      }
 
       return sslContext;
     } catch (Exception e) {
@@ -125,6 +130,22 @@ public class SslContextFactory {
   }
 
   /**
+   * Builds a {@link KeyManagerFactory} from a combined PEM file for use with Netty's {@link
+   * SslContextBuilder#forServer(KeyManagerFactory)}.
+   *
+   * <p>Supports unencrypted and password-protected PEM key pairs (traditional OpenSSL and PKCS8
+   * formats). When the key is encrypted, {@code certKeyFilePasswordPath} must be present.
+   *
+   * @param certKeyFilePath path to the combined PEM file (private key and certificate(s))
+   * @param certKeyFilePasswordPath optional path to a file containing the key passphrase
+   * @return an initialized KeyManagerFactory
+   */
+  public static KeyManagerFactory buildKeyManagerFactory(
+      Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) throws Exception {
+    return createKmfFromCombinedPem(certKeyFilePath, certKeyFilePasswordPath);
+  }
+
+  /**
    * Builds a {@link KeyManagerFactory} from a combined PEM file containing a private key and X.509
    * certificate(s).
    *
@@ -135,7 +156,7 @@ public class SslContextFactory {
    * @param certKeyFilePasswordPath optional path to a file containing the key passphrase
    * @return an initialized KeyManagerFactory for use with TLS client authentication
    */
-  private static KeyManagerFactory createKeyManagerFromCertKeyFile(
+  private static KeyManagerFactory createKmfFromCombinedPem(
       Path certKeyFilePath, Optional<Path> certKeyFilePasswordPath) throws Exception {
     char[] password =
         certKeyFilePasswordPath
@@ -158,32 +179,33 @@ public class SslContextFactory {
     try (PEMParser parser = new PEMParser(new FileReader(certKeyFilePath.toFile()))) {
       @Var Object obj;
       while ((obj = parser.readObject()) != null) {
-        if (obj instanceof PEMEncryptedKeyPair) {
+        if (obj instanceof PEMEncryptedKeyPair encryptedKeyPair) {
           if (password.length == 0) {
             throw new IllegalArgumentException(
-                "tlsCertificateKeyFile is password-protected, "
-                    + "tlsCertificateKeyFilePasswordFile is required");
+                "The certificate key-file at "
+                    + certKeyFilePath
+                    + " is password-protected, a key-file-password is required");
           }
           PEMDecryptorProvider decProv = new JcePEMDecryptorProviderBuilder().build(password);
-          PEMKeyPair keyPair = ((PEMEncryptedKeyPair) obj).decryptKeyPair(decProv);
+          PEMKeyPair keyPair = encryptedKeyPair.decryptKeyPair(decProv);
           privateKey = Optional.of(keyConverter.getKeyPair(keyPair).getPrivate());
-        } else if (obj instanceof PKCS8EncryptedPrivateKeyInfo) {
+        } else if (obj instanceof PKCS8EncryptedPrivateKeyInfo encryptedPrivateKeyInfo) {
           if (password.length == 0) {
             throw new IllegalArgumentException(
-                "tlsCertificateKeyFile is password-protected,"
-                    + " tlsCertificateKeyFilePasswordFile is required");
+                "The certificate key-file at "
+                    + certKeyFilePath
+                    + " is password-protected, a key-file-password is required");
           }
           InputDecryptorProvider decProv =
               new JceOpenSSLPKCS8DecryptorProviderBuilder().build(password);
-          PrivateKeyInfo keyInfo =
-              ((PKCS8EncryptedPrivateKeyInfo) obj).decryptPrivateKeyInfo(decProv);
+          PrivateKeyInfo keyInfo = encryptedPrivateKeyInfo.decryptPrivateKeyInfo(decProv);
           privateKey = Optional.of(keyConverter.getPrivateKey(keyInfo));
-        } else if (obj instanceof PrivateKeyInfo) {
-          privateKey = Optional.of(keyConverter.getPrivateKey((PrivateKeyInfo) obj));
-        } else if (obj instanceof PEMKeyPair) {
-          privateKey = Optional.of(keyConverter.getKeyPair((PEMKeyPair) obj).getPrivate());
-        } else if (obj instanceof X509CertificateHolder) {
-          certList.add(certConverter.getCertificate((X509CertificateHolder) obj));
+        } else if (obj instanceof PrivateKeyInfo privateKeyInfo) {
+          privateKey = Optional.of(keyConverter.getPrivateKey(privateKeyInfo));
+        } else if (obj instanceof PEMKeyPair keyPair) {
+          privateKey = Optional.of(keyConverter.getKeyPair(keyPair).getPrivate());
+        } else if (obj instanceof X509CertificateHolder certificateHolder) {
+          certList.add(certConverter.getCertificate(certificateHolder));
         }
       }
     }

@@ -5,6 +5,7 @@ import com.xgen.mongot.cursor.batch.BatchSizeStrategy;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import java.io.IOException;
 import org.bson.BsonArray;
@@ -25,11 +26,12 @@ public class MeteredVectorIndexReader implements VectorIndexReader {
   }
 
   @Override
-  public BsonArray query(MaterializedVectorSearchQuery materializedQuery)
+  public BsonArray query(
+      MaterializedVectorSearchQuery materializedQuery, QueryExecutionContext context)
       throws ReaderClosedException, IOException, InvalidQueryException {
     this.metricsUpdater.getTotalQueryCounter().increment();
     try {
-      BsonArray result = this.indexReader.query(materializedQuery);
+      BsonArray result = this.indexReader.query(materializedQuery, context);
       this.queryMetricsRecorder.record(materializedQuery.vectorSearchQuery());
       return result;
     } catch (Exception e) {
@@ -42,6 +44,7 @@ public class MeteredVectorIndexReader implements VectorIndexReader {
   @Override
   public VectorProducerAndMetaResults query(
       MaterializedVectorSearchQuery query,
+      QueryExecutionContext context,
       QueryCursorOptions queryCursorOptions,
       BatchSizeStrategy batchSizeStrategy,
       QueryOptimizationFlags queryOptimizationFlags)
@@ -50,7 +53,7 @@ public class MeteredVectorIndexReader implements VectorIndexReader {
     try {
       VectorProducerAndMetaResults result =
           this.indexReader.query(
-              query, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
+              query, context, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
       this.queryMetricsRecorder.record(query.vectorSearchQuery());
       return result;
     } catch (Exception e) {

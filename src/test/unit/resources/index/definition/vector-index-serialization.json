@@ -389,6 +389,126 @@
       }
     },
     {
+      "description": "with stored fields document inclusion",
+      "bson": {
+        "type": "vectorSearch",
+        "indexID": {
+          "$oid": "507f191e810c19729de860ea"
+        },
+        "name": "myVectorIndex",
+        "database": "myDatabase",
+        "lastObservedCollectionName": "myCollection",
+        "collectionUUID": {
+          "$binary": {
+            "base64": "62xAyvJeR+i0jAKgW2Slqg==",
+            "subType": "04"
+          }
+        },
+        "numPartitions": 1,
+        "indexFeatureVersion": 3,
+        "fields": [
+          {
+            "type": "vector",
+            "path": "my.vector.field",
+            "numDimensions": 2048,
+            "similarity": "cosine"
+          }
+        ],
+        "storedSource": {
+          "include": [
+            "a",
+            "b.c",
+            "b.d"
+          ]
+        }
+      },
+      "json": {
+        "type": "vectorSearch",
+        "indexID": "507f191e810c19729de860ea",
+        "name": "myVectorIndex",
+        "database": "myDatabase",
+        "lastObservedCollectionName": "myCollection",
+        "collectionUUID": "eb6c40ca-f25e-47e8-b48c-02a05b64a5aa",
+        "numPartitions": 1,
+        "indexFeatureVersion": 3,
+        "fields": [
+          {
+            "type": "vector",
+            "path": "my.vector.field",
+            "numDimensions": 2048,
+            "similarity": "cosine"
+          }
+        ],
+        "storedSource": {
+          "include": [
+            "a",
+            "b.c",
+            "b.d"
+          ]
+        }
+      }
+    },
+    {
+      "description": "with stored fields document exclusion",
+      "bson": {
+        "type": "vectorSearch",
+        "indexID": {
+          "$oid": "507f191e810c19729de860ea"
+        },
+        "name": "myVectorIndex",
+        "database": "myDatabase",
+        "lastObservedCollectionName": "myCollection",
+        "collectionUUID": {
+          "$binary": {
+            "base64": "62xAyvJeR+i0jAKgW2Slqg==",
+            "subType": "04"
+          }
+        },
+        "numPartitions": 1,
+        "indexFeatureVersion": 3,
+        "fields": [
+          {
+            "type": "vector",
+            "path": "my.vector.field",
+            "numDimensions": 2048,
+            "similarity": "cosine"
+          }
+        ],
+        "storedSource": {
+          "exclude": [
+            "a",
+            "b.c",
+            "b.d"
+          ]
+        }
+      },
+      "json": {
+        "type": "vectorSearch",
+        "indexID": "507f191e810c19729de860ea",
+        "name": "myVectorIndex",
+        "database": "myDatabase",
+        "lastObservedCollectionName": "myCollection",
+        "collectionUUID": "eb6c40ca-f25e-47e8-b48c-02a05b64a5aa",
+        "numPartitions": 1,
+        "indexFeatureVersion": 3,
+        "fields": [
+          {
+            "type": "vector",
+            "path": "my.vector.field",
+            "numDimensions": 2048,
+            "similarity": "cosine"
+          }
+        ],
+        "storedSource": {
+          "exclude": [
+            "a",
+            "b.c",
+            "b.d"
+          ]
+        }
+      }
+    },
+    {
       "description": "text embedding",
       "bson": {
         "type": "vectorSearch",

@@ -51,11 +51,9 @@ public class StandardTokenizerDefinition extends TokenizerDefinition
       return true;
     }
 
-    if (!(other instanceof StandardTokenizerDefinition)) {
+    if (!(other instanceof StandardTokenizerDefinition otherDefinition)) {
       return false;
     }
-
-    StandardTokenizerDefinition otherDefinition = (StandardTokenizerDefinition) other;
     return Objects.equals(this.maxTokenLength, otherDefinition.maxTokenLength);
   }
 

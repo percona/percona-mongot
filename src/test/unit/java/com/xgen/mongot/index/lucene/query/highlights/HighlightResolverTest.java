@@ -41,6 +41,7 @@ import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
 import org.junit.After;
@@ -108,10 +109,11 @@ public class HighlightResolverTest {
 
   @Test
   public void resolveHighlight_wildcardMultiPath() throws Exception {
-    var docs = List.of(
-        stringFieldDocument("title", true, Optional.empty()),
-        stringFieldDocument("plot", true, Optional.empty()),
-        stringFieldDocument("director", true, Optional.empty()));
+    var docs =
+        List.of(
+            stringFieldDocument("title", true, Optional.empty()),
+            stringFieldDocument("plot", true, Optional.empty()),
+            stringFieldDocument("director", true, Optional.empty()));
     index(docs);
 
     IndexReader reader = DirectoryReader.open(writer);
@@ -140,8 +142,7 @@ public class HighlightResolverTest {
                 .build(),
             Optional.empty());
     Highlight expected =
-        HighlightBuilder
-            .builder()
+        HighlightBuilder.builder()
             .path("director")
             .storedPath("director")
             .path("title")
@@ -189,8 +190,8 @@ public class HighlightResolverTest {
                 .build(),
             Optional.empty());
     Highlight expected =
-        HighlightBuilder
-            .builder().path("alec")
+        HighlightBuilder.builder()
+            .path("alec")
             .path("bob")
             .storedPath("alec")
             .storedPath("bob")
@@ -200,11 +201,12 @@ public class HighlightResolverTest {
 
   @Test
   public void resolveHighlight_nonWildcardMultiPath() throws Exception {
-    var docs = List.of(
-        stringFieldDocument("title", true, Optional.empty()),
-        stringFieldDocument("plot", true, Optional.empty()),
-        stringFieldDocument("director", true, Optional.empty()),
-        stringFieldDocument("actor", true, Optional.empty()));
+    var docs =
+        List.of(
+            stringFieldDocument("title", true, Optional.empty()),
+            stringFieldDocument("plot", true, Optional.empty()),
+            stringFieldDocument("director", true, Optional.empty()),
+            stringFieldDocument("actor", true, Optional.empty()));
     index(docs);
 
     IndexReader reader = DirectoryReader.open(writer);
@@ -229,14 +231,10 @@ public class HighlightResolverTest {
         highlightResolver.resolveHighlight(
             unresolved,
             reader,
-            OperatorBuilder.text()
-                .path("title")
-                .query("unused")
-                .build(),
+            OperatorBuilder.text().path("title").query("unused").build(),
             Optional.empty());
     Highlight expected =
-        HighlightBuilder
-            .builder()
+        HighlightBuilder.builder()
             .multi("title", "french")
             .storedPath("title")
             .multi("plot", "spanish")
@@ -249,11 +247,12 @@ public class HighlightResolverTest {
 
   @Test
   public void resolveHighlight_WildcardAndNonWildcardMultiPath() throws Exception {
-    var docs = List.of(
-        stringFieldDocument("title", true, Optional.empty()),
-        stringFieldDocument("plot", true, Optional.empty()),
-        stringFieldDocument("director", true, Optional.empty()),
-        stringFieldDocument("actor", true, Optional.empty()));
+    var docs =
+        List.of(
+            stringFieldDocument("title", true, Optional.empty()),
+            stringFieldDocument("plot", true, Optional.empty()),
+            stringFieldDocument("director", true, Optional.empty()),
+            stringFieldDocument("actor", true, Optional.empty()));
     index(docs);
 
     IndexReader reader = DirectoryReader.open(writer);
@@ -280,14 +279,10 @@ public class HighlightResolverTest {
         highlightResolver.resolveHighlight(
             unresolved,
             reader,
-            OperatorBuilder.text()
-                .path("title")
-                .query("unused")
-                .build(),
+            OperatorBuilder.text().path("title").query("unused").build(),
             Optional.empty());
     Highlight expected =
-        HighlightBuilder
-            .builder()
+        HighlightBuilder.builder()
             .path("title")
             .storedPath("title")
             .multi("title", "french")
@@ -353,12 +348,9 @@ public class HighlightResolverTest {
     var mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(false)
-            .field(
-                "alec", stringField(true))
-            .field(
-                "alex", stringField(false))
-            .field(
-                "bob", stringField(true))
+            .field("alec", stringField(true))
+            .field("alex", stringField(false))
+            .field("bob", stringField(true))
             .build();
 
     StringPath alec = StringPathBuilder.fieldPath("alec");
@@ -438,7 +430,7 @@ public class HighlightResolverTest {
 
     Map<StringPath, String> actual =
         HighlightResolver.getPathsToLuceneFieldNamesMap(
-            mock(IndexReader.class),
+            mock(LeafReader.class),
             OperatorBuilder.autocomplete().path("alec").query("unused").build(),
             Optional.empty());
 
@@ -877,9 +869,9 @@ public class HighlightResolverTest {
     HighlightResolver highlightResolver =
         HighlightResolver.create(createFieldDefinitionResolver(mappings));
     Assert.assertEquals(
-        "$type:string/title",  highlightResolver.getStoredLuceneField("$type:string/title"));
+        "$type:string/title", highlightResolver.getStoredLuceneField("$type:string/title"));
     Assert.assertEquals(
-        "$type:string/plot",  highlightResolver.getStoredLuceneField("$type:string/plot"));
+        "$type:string/plot", highlightResolver.getStoredLuceneField("$type:string/plot"));
   }
 
   @Test
@@ -894,9 +886,9 @@ public class HighlightResolverTest {
     HighlightResolver highlightResolver =
         HighlightResolver.create(createFieldDefinitionResolver(mappings));
     Assert.assertEquals(
-        "$type:string/title",  highlightResolver.getStoredLuceneField("$multi/title.french"));
+        "$type:string/title", highlightResolver.getStoredLuceneField("$multi/title.french"));
     Assert.assertEquals(
-        "$type:string/plot",  highlightResolver.getStoredLuceneField("$multi/plot.spanish"));
+        "$type:string/plot", highlightResolver.getStoredLuceneField("$multi/plot.spanish"));
   }
 
   @Test
@@ -911,9 +903,9 @@ public class HighlightResolverTest {
     HighlightResolver highlightResolver =
         HighlightResolver.create(createFieldDefinitionResolver(mappings));
     Assert.assertEquals(
-        "$multi/title.french",  highlightResolver.getStoredLuceneField("$multi/title.french"));
+        "$multi/title.french", highlightResolver.getStoredLuceneField("$multi/title.french"));
     Assert.assertEquals(
-        "$multi/plot.spanish",  highlightResolver.getStoredLuceneField("$multi/plot.spanish"));
+        "$multi/plot.spanish", highlightResolver.getStoredLuceneField("$multi/plot.spanish"));
   }
 
   @Test
@@ -921,7 +913,8 @@ public class HighlightResolverTest {
     var mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(false)
-            .field("test",
+            .field(
+                "test",
                 FieldDefinitionBuilder.builder()
                     .embeddedDocuments(
                         EmbeddedDocumentsFieldDefinitionBuilder.builder()

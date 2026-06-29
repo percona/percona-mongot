@@ -8,16 +8,12 @@ import static org.junit.Assert.assertTrue;
 
 import com.google.common.base.CaseFormat;
 import com.xgen.mongot.util.Enums;
-import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.LongTaskTimer;
 import io.micrometer.core.instrument.Meter;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.search.MeterNotFoundException;
-import io.micrometer.prometheusmetrics.PrometheusConfig;
-import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -166,46 +162,6 @@ public class PerIndexMetricsFactoryTest {
   }
 
   @Test
-  public void histogram_auto_buckets() {
-    // Note: we use PrometheusMeterRegistry for both per-process and per-index registries here
-    // because the SimpleMeterRegistry does not populate histogramCounts() when auto-buckets is
-    // enabled by publishPercentileHistogram() - it only works if explicit SLO boundaries are set.
-    MeterRegistry meterRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
-    MeterAndFtdcRegistry meterAndFtdcRegistry =
-        new MeterAndFtdcRegistry(meterRegistry, meterRegistry);
-    PerIndexMetricsFactory perIndexMetricsFactory =
-        new PerIndexMetricsFactory("test", meterAndFtdcRegistry, INDEX_GENERATION_ID, INDEX_ID);
-
-    DistributionSummary histogram = perIndexMetricsFactory.histogram("histogram");
-
-    histogram.record(1);
-    Assert.assertEquals(1, (int) histogram.max());
-    Assert.assertEquals(1, (int) histogram.count());
-    Assert.assertEquals(1, (int) histogram.mean());
-
-    histogram.record(3);
-    Assert.assertEquals(3, (int) histogram.max());
-    Assert.assertEquals(2, (int) histogram.count());
-    Assert.assertEquals(2, (int) histogram.mean());
-
-    for (int i = 0; i < 100; i++) {
-      histogram.record(2);
-    }
-
-    var processHistogram = meterRegistry.get(name("histogram")).summary();
-    assertFalse(hasIndexGenerationId(processHistogram));
-    assertFalse(hasIndexId(processHistogram));
-    meterRegistry.get(name("histogram")).tags(INDEX_TAGS).summary();
-    meterRegistry.get(name("histogram")).tags(INDEX_IDS).summary();
-
-    var histogramCounts = histogram.takeSnapshot().histogramCounts();
-    Assert.assertEquals(276, histogramCounts.length);
-    Assert.assertEquals(1, (int) histogramCounts[0].count()); // 1 or less
-    Assert.assertEquals(101, (int) histogramCounts[1].count()); // 2 or less
-    Assert.assertEquals(102, (int) histogramCounts[2].count()); // 3 or less
-  }
-
-  @Test
   public void histogram_slo_buckets() {
     var meterRegistry = this.meterAndFtdcRegistry.meterRegistry();
     var ftdcRegistry = this.meterAndFtdcRegistry.ftdcRegistry();
@@ -233,6 +189,15 @@ public class PerIndexMetricsFactoryTest {
 
     Assert.assertEquals(100.0, histogramCounts[2].bucket(), 0.01);
     Assert.assertEquals(100, (int) histogramCounts[2].count());
+  }
+
+  @Test
+  public void histogram_emptyBuckets_throws() {
+    Assert.assertThrows(
+        IllegalArgumentException.class, () -> this.metricsFactory.histogram("histogram"));
+    Assert.assertThrows(
+        IllegalArgumentException.class,
+        () -> this.metricsFactory.histogram("histogram", Tags.empty()));
   }
 
   @Test

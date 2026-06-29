@@ -582,7 +582,8 @@ public class InvariantsTest {
               InvalidIndexDefinitionException.class,
               () -> Invariants.validateVectorNestedRootReferences(List.of(definition)));
       Assert.assertTrue(
-          exception.getMessage().contains("nestedRoot \"sections\" does not match any field path"));
+          exception.getMessage().contains("nestedRoot \"sections\" does not match "
+              + "any vector field path"));
     }
 
     @Test

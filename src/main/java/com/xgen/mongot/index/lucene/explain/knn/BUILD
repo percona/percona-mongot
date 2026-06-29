@@ -26,7 +26,6 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/lucene/query/custom",
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/mongot/util/functionalinterfaces",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_flogger_flogger",
         "@maven//:com_google_guava_guava",

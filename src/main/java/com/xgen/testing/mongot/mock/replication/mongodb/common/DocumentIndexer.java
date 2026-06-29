@@ -5,7 +5,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 
 import com.xgen.mongot.index.FieldExceededLimitsException;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import java.util.Optional;
 import org.mockito.Mockito;
 
@@ -20,9 +20,9 @@ public class DocumentIndexer {
 
   /** Creates an indexer that handles auto embedding. */
   public static com.xgen.mongot.replication.mongodb.common.DocumentIndexer
-      mockDocumentRequiresAutoEmbedding(VectorIndexDefinition vectorIndexDefinition) {
+      mockDocumentRequiresAutoEmbedding(IndexDefinition indexDefinition) {
     var mocked = mock();
-    doReturn(vectorIndexDefinition).when(mocked).getIndexDefinition();
+    doReturn(indexDefinition).when(mocked).getIndexDefinition();
     return mocked;
   }
 

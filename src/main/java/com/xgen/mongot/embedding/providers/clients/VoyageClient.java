@@ -22,6 +22,7 @@ import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.concurrent.OneShotSingleThreadExecutor;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.URI;
@@ -37,10 +38,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import javax.annotation.Nullable;
+import java.util.Set;
 import javax.net.ssl.SSLException;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +52,18 @@ import org.slf4j.LoggerFactory;
  */
 public class VoyageClient implements ClientInterface {
   private static final Logger LOG = LoggerFactory.getLogger(VoyageClient.class);
-  private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(60);
+
+  /**
+   * Per-request HTTP timeout for {@link EmbeddingServiceConfig.ServiceTier#QUERY} when not using
+   * Voyage flex tier.
+   */
+  private static final Duration VOYAGE_QUERY_HTTP_TIMEOUT = Duration.ofSeconds(30);
+
+  /**
+   * Per-request HTTP timeout for document workloads (change stream, collection scan) and whenever
+   * {@code useFlexTier} is true (including hypothetical QUERY + flex).
+   */
+  private static final Duration VOYAGE_DOCUMENT_OR_FLEX_HTTP_TIMEOUT = Duration.ofSeconds(310);
 
   /** Wall-clock interval after which the {@link HttpClient} is replaced to refresh connections. */
   private static final Duration HTTP_CLIENT_REFRESH_INTERVAL = Duration.ofMinutes(10);
@@ -66,6 +79,7 @@ public class VoyageClient implements ClientInterface {
   private final Counter invalidRequestCounter;
   private final Counter congestionEventCounter;
   private final Counter aimdSuccessCounter;
+  private final MetricsFactory metricsFactory;
   private @Nullable DynamicSemaphore congestionSemaphore;
 
   private boolean isDedicatedCluster;
@@ -87,12 +101,61 @@ public class VoyageClient implements ClientInterface {
 
   private final Optional<MongotMetadata> mongotMetadata;
 
+  /** Wall-clock timeout for each Voyage HTTP request (depends on workload tier / flex). */
+  private final Duration requestTimeout;
+
   @VisibleForTesting
   public static final String DEFAULT_ENDPOINT = "https://api.voyageai.com/v1/embeddings";
 
   private static final int MAX_INDEX_NAME_LENGTH = 256;
 
   @VisibleForTesting public static final String VOYAGE_API_FLEX_TIER = "flex";
+
+  /**
+   * Voyage models that support the flex API tier ({@value #VOYAGE_API_FLEX_TIER}). Other models use
+   * standard query/document tier routing even when flex is requested upstream.
+   */
+  private static final Set<String> VOYAGE_MODELS_SUPPORTING_FLEX_TIER =
+      Set.of("voyage-4", "voyage-4-lite", "voyage-4-large", "voyage-code-3");
+
+  /**
+   * Returns whether {@code modelId} may use Voyage flex tier ({@link #VOYAGE_API_FLEX_TIER}).
+   * Comparison is case-insensitive.
+   */
+  public static boolean supportsFlexTierForModel(String modelId) {
+    if (modelId == null) {
+      return false;
+    }
+    return VOYAGE_MODELS_SUPPORTING_FLEX_TIER.contains(modelId.toLowerCase(Locale.ROOT));
+  }
+
+  /**
+   * HTTP headers for Voyage Client API
+   */
+  @VisibleForTesting public static final String VOYAGE_HEADER_MODEL = "X-Voyage-Model";
+
+  @VisibleForTesting public static final String VOYAGE_HEADER_TIER = "X-Voyage-Tier";
+
+  /**
+   * Value for {@link #VOYAGE_HEADER_TIER} when {@link EmbeddingServiceConfig.ServiceTier#QUERY}.
+   */
+  private static final String VOYAGE_TIER_HEADER_QUERY = "query";
+
+  /** Value for {@link #VOYAGE_HEADER_TIER} for document workloads (non-query, non-flex). */
+  private static final String VOYAGE_TIER_HEADER_DOCUMENT = "document";
+
+  /**
+   * Long timeout for flex (any tier) or non-query workloads; short only for query without flex.
+   */
+  private static Duration resolveVoyageHttpTimeout(
+      EmbeddingServiceConfig.ServiceTier tier, boolean useFlexTier) {
+    if (useFlexTier) {
+      return VOYAGE_DOCUMENT_OR_FLEX_HTTP_TIMEOUT;
+    }
+    return tier == EmbeddingServiceConfig.ServiceTier.QUERY
+        ? VOYAGE_QUERY_HTTP_TIMEOUT
+        : VOYAGE_DOCUMENT_OR_FLEX_HTTP_TIMEOUT;
+  }
 
   VoyageClient(
       EmbeddingModelConfig embeddingModelConfig,
@@ -106,11 +169,19 @@ public class VoyageClient implements ClientInterface {
     // TODO(CLOUDP-370950): Support truncation parameter from configs or query time.
     // Enable truncation in indexing time only.
     this.truncation = tier != EmbeddingServiceConfig.ServiceTier.QUERY;
-    this.useFlexTier = useFlexTier;
-    this.serviceTierApiValue = useFlexTier ? Optional.of(VOYAGE_API_FLEX_TIER) : Optional.empty();
     this.modelId = embeddingModelConfig.name();
+    this.useFlexTier = useFlexTier && supportsFlexTierForModel(this.modelId);
+    if (useFlexTier && !this.useFlexTier) {
+      LOG.debug(
+          "Voyage flex tier not supported for model {}; using standard tier (service tier: {})",
+          this.modelId,
+          tier);
+    }
+    this.serviceTierApiValue =
+        this.useFlexTier ? Optional.of(VOYAGE_API_FLEX_TIER) : Optional.empty();
     this.serviceTier = tier;
-    if (useFlexTier) {
+    this.requestTimeout = resolveVoyageHttpTimeout(tier, this.useFlexTier);
+    if (this.useFlexTier) {
       LOG.debug(
           "Using Voyage flex tier for embedding model {} (service tier: {})", this.modelId, tier);
     }
@@ -119,6 +190,7 @@ public class VoyageClient implements ClientInterface {
     this.voyageHttpClientCreatedEpochMs = System.currentTimeMillis();
     this.mongotMetadata = metadata;
     this.attachBillingMetadata = attachBillingMetadata;
+    this.metricsFactory = metricsFactory;
     this.inputTokenDistribution = metricsFactory.summary("inputTokenDistribution");
     this.invalidRequestCounter = metricsFactory.counter("invalidRequestCounter");
     this.congestionEventCounter = metricsFactory.counter("aimdCongestionEvents");
@@ -143,7 +215,11 @@ public class VoyageClient implements ClientInterface {
           this.congestionSemaphore.acquire();
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
-          throw new EmbeddingProviderTransientException("Interrupted while acquiring semaphore");
+          recordProviderErrorMetric(
+              EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL);
+          throw new EmbeddingProviderTransientException(
+              "Interrupted while acquiring semaphore",
+              EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL);
         }
       }
 
@@ -177,7 +253,9 @@ public class VoyageClient implements ClientInterface {
         IllegalArgumentException cleanedException =
             new IllegalArgumentException(cleanedMessage, e.getCause());
         LOG.error("HTTP Request Error", cleanedException);
-        throw new EmbeddingProviderTransientException(cleanedException);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR);
+        throw new EmbeddingProviderTransientException(
+            cleanedException, EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR);
       }
       renewHttpClientIfStale();
       HttpClient clientForRequest = this.voyageHttpClient;
@@ -196,23 +274,35 @@ public class VoyageClient implements ClientInterface {
         if (e instanceof HttpConnectTimeoutException) {
           renewHttpClientAfterConnectionFailure(e, clientForRequest);
         }
-        LOG.error("Got timeout error when sending voyage API request", e);
+        LOG.error("Got timeout when sending voyage API request", e);
         isAck = false;
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT, Optional.of(408));
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT);
       } catch (EmbeddingProviderRateLimitException e) {
         LOG.error("Got rate-limit error when sending voyage API request", e);
         isAck = false;
-        throw new EmbeddingProviderTransientException(e);
+        // EmbeddingProviderRateLimitException is only thrown from the HTTP 429 branch in
+        // extractVectorsFromResponse, so the status code is always 429.
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED, Optional.of(429));
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         LOG.error("Got an error when sending voyage API request", e);
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED);
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED);
       } catch (IOException e) {
         if (indicatesConnectionLayerFailure(e)) {
           renewHttpClientAfterConnectionFailure(e, clientForRequest);
         }
         LOG.error("Got an error when sending voyage API request", e);
-        throw new EmbeddingProviderTransientException(e);
+        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION);
+        throw new EmbeddingProviderTransientException(
+            e, EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION);
       } catch (EmbeddingProviderTransientException e) {
         LOG.error("Got an error when processing voyage API response", e);
         throw e;
@@ -234,6 +324,33 @@ public class VoyageClient implements ClientInterface {
     }
   }
 
+  private void recordProviderErrorMetric(EmbeddingProviderTransientException.Reason reason) {
+    recordProviderErrorMetric(reason, Optional.empty());
+  }
+
+  /**
+   * Records a transient embedding-provider error. {@code httpStatusCode} carries the HTTP status
+   * when the failure is a Voyage HTTP error response (e.g. 408, 429, 500). When there is no HTTP
+   * error response — network errors, client-side request-build failures, or parse errors on
+   * otherwise-successful (2xx) responses — it is empty and the {@code errorCode} tag is set to
+   * {@code "none"}. Both server-side HTTP 408 and client-side request timeouts are tagged as
+   * {@code 408}.
+   */
+  private void recordProviderErrorMetric(
+      EmbeddingProviderTransientException.Reason reason, Optional<Integer> httpStatusCode) {
+    this.metricsFactory
+        .counter(
+            "embeddingProviderErrors",
+            Tags.of(
+                "exceptionType",
+                "EmbeddingProviderTransientException",
+                "reason",
+                reason.name().toLowerCase(Locale.ROOT),
+                "errorCode",
+                httpStatusCode.map(Object::toString).orElse("none")))
+        .increment();
+  }
+
   /**
    * Extract tenant ID from the database name if this is an MTM cluster. For dedicated clusters,
    * returns empty. For MTM clusters, extracts tenant ID from database string.
@@ -247,9 +364,9 @@ public class VoyageClient implements ClientInterface {
     // MTM cluster: extract tenant ID from database string
     // Database format: "tenant123_mydb" -> extract "tenant123"
     String database = context.database();
-    if (database.contains("_")) {
-      String tenantId = database.split("_", 2)[0];
-      return Optional.of(tenantId);
+    int tenantSeparatorIndex = database.indexOf('_');
+    if (tenantSeparatorIndex >= 0) {
+      return Optional.of(database.substring(0, tenantSeparatorIndex));
     }
     return Optional.empty();
   }
@@ -272,9 +389,12 @@ public class VoyageClient implements ClientInterface {
       // MTM cluster: tenant ID is required
       if (tenantId.isEmpty()) {
         LOG.error("Unable to extract tenant ID from database name for MTM cluster");
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
         throw new EmbeddingProviderTransientException(
             "Unable to extract tenant ID from database name for MTM cluster. "
-                + "Database name must be in format 'tenantId_dbName'.");
+                + "Database name must be in format 'tenantId_dbName'.",
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
       }
       String tenant = tenantId.get();
       String apiToken = this.tenantCredentials.get(tenant);
@@ -283,8 +403,11 @@ public class VoyageClient implements ClientInterface {
             "No credentials found for tenant: {}, available tenants: {}",
             tenant,
             this.tenantCredentials.keySet());
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
         throw new EmbeddingProviderTransientException(
-            String.format("Unable to find credentials for tenant: %s", tenant));
+            String.format("Unable to find credentials for tenant: %s", tenant),
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
       }
       LOG.debug(
           "Using tenant-specific credentials for tenant: {}, tokenLength={}",
@@ -516,7 +639,7 @@ public class VoyageClient implements ClientInterface {
     HttpRequest.Builder requestBuilder =
         HttpRequest.newBuilder()
             .uri(this.endpoint)
-            .timeout(DEFAULT_TIMEOUT)
+            .timeout(this.requestTimeout)
             .header("Authorization", "Bearer " + apiToken);
 
     String userAgent =
@@ -528,6 +651,8 @@ public class VoyageClient implements ClientInterface {
             .orElse("mongot/UNKNOWN (UNKNOWN)");
 
     requestBuilder.header("User-Agent", userAgent);
+    requestBuilder.header(VOYAGE_HEADER_MODEL, this.modelId);
+    requestBuilder.header(VOYAGE_HEADER_TIER, voyageTierHeaderValue());
 
     String outputDataType = getOutputDataType(context.autoEmbedQuantization());
     BsonDocument body =
@@ -546,6 +671,16 @@ public class VoyageClient implements ClientInterface {
             .toBson();
 
     return requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body.toJson())).build();
+  }
+
+  /** Returns the {@value #VOYAGE_HEADER_TIER} value: query, document, or flex. */
+  private String voyageTierHeaderValue() {
+    if (this.useFlexTier) {
+      return VOYAGE_API_FLEX_TIER;
+    }
+    return this.serviceTier == EmbeddingServiceConfig.ServiceTier.QUERY
+        ? VOYAGE_TIER_HEADER_QUERY
+        : VOYAGE_TIER_HEADER_DOCUMENT;
   }
 
   /**
@@ -597,8 +732,11 @@ public class VoyageClient implements ClientInterface {
           String.format("Timeout exception (HTTP 408). Response body: %s", response.body()));
     }
     if (statusCode > 400) {
+      recordProviderErrorMetric(
+          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS, Optional.of(statusCode));
       throw new EmbeddingProviderTransientException(
-          String.format("Got non OK status from response, status code: %s", statusCode));
+          String.format("Got non OK status from response, status code: %s", statusCode),
+          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS);
     }
     try {
       String outputDataType = getOutputDataType(context.autoEmbedQuantization());
@@ -620,7 +758,11 @@ public class VoyageClient implements ClientInterface {
       }
       return results;
     } catch (BsonParseException e) {
-      throw new EmbeddingProviderTransientException(e);
+      // The Voyage HTTP response itself succeeded; only the body failed to parse, so there is no
+      // meaningful error code to report.
+      recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR);
+      throw new EmbeddingProviderTransientException(
+          e, EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR);
     }
   }
 

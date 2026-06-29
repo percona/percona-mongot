@@ -121,7 +121,7 @@ public class LuceneIndexSearcherReference implements Closeable {
                                 CollectorTimingFeatureExplainer::new),
                             info.getFeatureExplainer(
                                 MetadataFeatureExplainer.class, MetadataFeatureExplainer::new)))
-            .orElse(initialSearcher);
+            .orElseGet(() -> LuceneIndexSearcher.create(initialSearcher));
     return new LuceneIndexSearcherReference(
         searcherManager, searcher, featureFlags, metricsUpdater);
   }

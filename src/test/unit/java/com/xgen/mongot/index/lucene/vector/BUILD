@@ -1,0 +1,20 @@
+load("//bazel/java:test.bzl", "java_test_suite")
+
+java_test_suite(
+    name = "vector",
+    srcs = [
+        "Lucene99NativeHnswVectorsFormatTest.java",
+        "Lucene99NativeMemorySegmentVectorScorerTest.java",
+        "Lucene99NativeTestCodec.java",
+        "SimilarityTest.java",
+    ],
+    javacopts = ["--enable-preview"],
+    tags = ["unit"],
+    deps = [
+        "//src/main/java/com/xgen/mongot/index/lucene/vector",
+        "@maven//:com_google_truth_truth",
+        "@maven//:junit_junit",
+        "@maven//:org_apache_lucene_lucene_core",
+        "@maven//:org_apache_lucene_lucene_test_framework",
+    ],
+)

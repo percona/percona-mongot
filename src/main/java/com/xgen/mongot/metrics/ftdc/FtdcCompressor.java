@@ -2,6 +2,7 @@ package com.xgen.mongot.metrics.ftdc;
 
 import static com.xgen.mongot.util.Check.checkState;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.bson.ByteUtils;
@@ -20,9 +21,10 @@ import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
 
 /** Serialize and compress metric chunks. */
-class FtdcCompressor {
+public class FtdcCompressor {
   /** Compresses an FTDC metric chunk to a bson document. */
-  static BsonDocument compressChunk(MetricChunk chunk) {
+  @VisibleForTesting
+  public static BsonDocument compressChunk(MetricChunk chunk) {
     byte[] uncompressed = encodeChunk(chunk.schema(), chunk.metrics());
 
     byte[] compressed = ZlibUtil.zlibCompress(uncompressed);

@@ -185,6 +185,20 @@ public class HeuristicChangeStreamModeSelector implements ChangeStreamModeSelect
         return Optional.of(ChangeStreamMode.ALL_FIELDS);
       }
 
+      // A $match stage before $sample forces a full collection scan because MongoDB cannot use
+      // the fast pseudo-random sampling path. Skip sampling and fall back to ALL_FIELDS.
+      if (context.definition
+          .getView()
+          .filter(view -> view.exists() && ViewPipeline.hasMatchStage(view))
+          .isPresent()) {
+        LOG.atInfo()
+            .addKeyValue("indexId", generationId.indexId)
+            .addKeyValue("generationId", generationId)
+            .addKeyValue("mode", ChangeStreamMode.ALL_FIELDS)
+            .log("Change stream mode is selected, sampling skipped for view with $match");
+        return Optional.of(ChangeStreamMode.ALL_FIELDS);
+      }
+
       var stats = this.statsClient.getStats(context.namespace);
 
       if (!isCollectionReadyForSampling(stats)) {

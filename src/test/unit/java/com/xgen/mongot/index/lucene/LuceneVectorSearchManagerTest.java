@@ -11,6 +11,8 @@ import com.xgen.mongot.index.lucene.codec.LuceneCodec;
 import com.xgen.mongot.index.lucene.extension.KnnFloatVectorField;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.query.custom.MongotKnnFloatQuery;
+import com.xgen.mongot.index.lucene.query.custom.WrappedKnnQuery;
+import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherFactory;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
@@ -26,6 +28,13 @@ import java.util.Arrays;
 import java.util.Optional;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.KnnFloatVectorQuery;
+import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.search.join.QueryBitSetProducer;
+import org.apache.lucene.search.join.ScoreMode;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.junit.Test;
 
@@ -99,7 +108,8 @@ public class LuceneVectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 VectorIndex.mockQueryMetricsUpdater()),
-            VectorIndex.mockMetricsFactory());
+            VectorIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -109,5 +119,146 @@ public class LuceneVectorSearchManagerTest {
 
     var initialScoreDocs = manager.initialSearch(searcherReference, 2).topDocs.scoreDocs;
     assertThat(Arrays.stream(initialScoreDocs).map(s -> s.doc)).containsExactly(3, 2).inOrder();
+  }
+
+  // Tests for extractKnnQuery covering all four flat query shapes it must handle.
+
+  @Test
+  public void extractKnnQuery_directKnn_returnsIt() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+
+    assertThat(LuceneVectorSearchManager.extractKnnQuery(knn)).isSameInstanceAs(knn);
+  }
+
+  @Test
+  public void extractKnnQuery_wrappedKnnAroundKnn_returnsKnn() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    WrappedKnnQuery wrappedKnn = new WrappedKnnQuery(knn);
+
+    assertThat(LuceneVectorSearchManager.extractKnnQuery(wrappedKnn)).isSameInstanceAs(knn);
+  }
+
+  @Test
+  public void extractKnnQuery_booleanQueryMustKnn_returnsKnn() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    TermQuery filter = new TermQuery(new Term("category", "A"));
+    BooleanQuery boolQuery =
+        new BooleanQuery.Builder()
+            .add(knn, BooleanClause.Occur.MUST)
+            .add(filter, BooleanClause.Occur.FILTER)
+            .build();
+
+    assertThat(LuceneVectorSearchManager.extractKnnQuery(boolQuery)).isSameInstanceAs(knn);
+  }
+
+  @Test
+  public void extractKnnQuery_wrappedKnnAroundBooleanQueryMustKnn_returnsKnn() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    TermQuery filter = new TermQuery(new Term("category", "A"));
+    BooleanQuery boolQuery =
+        new BooleanQuery.Builder()
+            .add(knn, BooleanClause.Occur.MUST)
+            .add(filter, BooleanClause.Occur.FILTER)
+            .build();
+    WrappedKnnQuery wrappedKnn = new WrappedKnnQuery(boolQuery);
+
+    assertThat(LuceneVectorSearchManager.extractKnnQuery(wrappedKnn)).isSameInstanceAs(knn);
+  }
+
+  // Tests for extractBlockJoinQuery covering all four query shapes it must handle.
+
+  @Test
+  public void extractBlockJoinQuery_directBlockJoin_returnsIt() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term("parent", "T")));
+    WrappedToParentBlockJoinQuery blockJoin =
+        new WrappedToParentBlockJoinQuery(knn, parentFilter, ScoreMode.Max);
+
+    Optional<WrappedToParentBlockJoinQuery> result =
+        LuceneVectorSearchManager.extractBlockJoinQuery(blockJoin);
+
+    assertThat(result).isPresent();
+    assertThat(result.get()).isSameInstanceAs(blockJoin);
+  }
+
+  @Test
+  public void extractBlockJoinQuery_booleanQueryContainingBlockJoin_returnsIt() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term("parent", "T")));
+    WrappedToParentBlockJoinQuery blockJoin =
+        new WrappedToParentBlockJoinQuery(knn, parentFilter, ScoreMode.Max);
+    TermQuery filter = new TermQuery(new Term("category", "A"));
+    BooleanQuery boolQuery =
+        new BooleanQuery.Builder()
+            .add(blockJoin, BooleanClause.Occur.MUST)
+            .add(filter, BooleanClause.Occur.FILTER)
+            .build();
+
+    Optional<WrappedToParentBlockJoinQuery> result =
+        LuceneVectorSearchManager.extractBlockJoinQuery(boolQuery);
+
+    assertThat(result).isPresent();
+    assertThat(result.get()).isSameInstanceAs(blockJoin);
+  }
+
+  @Test
+  public void extractBlockJoinQuery_wrappedKnnAroundBlockJoin_returnsBlockJoin() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term("parent", "T")));
+    WrappedToParentBlockJoinQuery blockJoin =
+        new WrappedToParentBlockJoinQuery(knn, parentFilter, ScoreMode.Max);
+    WrappedKnnQuery wrappedKnn = new WrappedKnnQuery(blockJoin);
+
+    Optional<WrappedToParentBlockJoinQuery> result =
+        LuceneVectorSearchManager.extractBlockJoinQuery(wrappedKnn);
+
+    assertThat(result).isPresent();
+    assertThat(result.get()).isSameInstanceAs(blockJoin);
+  }
+
+  @Test
+  public void extractBlockJoinQuery_wrappedKnnAroundBooleanQuery_returnsBlockJoin() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    QueryBitSetProducer parentFilter =
+        new QueryBitSetProducer(new TermQuery(new Term("parent", "T")));
+    WrappedToParentBlockJoinQuery blockJoin =
+        new WrappedToParentBlockJoinQuery(knn, parentFilter, ScoreMode.Max);
+    TermQuery filter = new TermQuery(new Term("category", "A"));
+    BooleanQuery boolQuery =
+        new BooleanQuery.Builder()
+            .add(blockJoin, BooleanClause.Occur.MUST)
+            .add(filter, BooleanClause.Occur.FILTER)
+            .build();
+    WrappedKnnQuery wrappedKnn = new WrappedKnnQuery(boolQuery);
+
+    Optional<WrappedToParentBlockJoinQuery> result =
+        LuceneVectorSearchManager.extractBlockJoinQuery(wrappedKnn);
+
+    assertThat(result).isPresent();
+    assertThat(result.get()).isSameInstanceAs(blockJoin);
+  }
+
+  @Test
+  public void extractBlockJoinQuery_flatKnnQuery_returnsEmpty() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+
+    Optional<WrappedToParentBlockJoinQuery> result =
+        LuceneVectorSearchManager.extractBlockJoinQuery(knn);
+
+    assertThat(result).isEmpty();
+  }
+
+  @Test
+  public void extractBlockJoinQuery_wrappedKnnAroundFlatKnnQuery_returnsEmpty() {
+    KnnFloatVectorQuery knn = new KnnFloatVectorQuery("v", new float[] {1f}, 10);
+    WrappedKnnQuery wrappedKnn = new WrappedKnnQuery(knn);
+
+    Optional<WrappedToParentBlockJoinQuery> result =
+        LuceneVectorSearchManager.extractBlockJoinQuery(wrappedKnn);
+
+    assertThat(result).isEmpty();
   }
 }

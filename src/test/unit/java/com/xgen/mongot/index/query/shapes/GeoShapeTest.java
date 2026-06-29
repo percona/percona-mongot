@@ -16,15 +16,15 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      GeoShapeTest.TestCircle.class,
-      GeoShapeTest.TestBox.class,
-      GeoShapeTest.TestGeometryShape.class
+      GeoShapeTest.CircleTest.class,
+      GeoShapeTest.BoxTest.class,
+      GeoShapeTest.GeometryShapeTest.class
     })
 public class GeoShapeTest {
   private static final String RESOURCES_PATH = "src/test/unit/resources/index/query/shapes/";
 
   @RunWith(Parameterized.class)
-  public static class TestCircle {
+  public static class CircleTest {
 
     private static final String SUITE_NAME = "geo-shape-circle";
     private static final BsonDeserializationTestSuite<Circle> TEST_SUITE =
@@ -32,7 +32,7 @@ public class GeoShapeTest {
 
     private final TestSpecWrapper<Circle> testSpec;
 
-    public TestCircle(TestSpecWrapper<Circle> testSpec) {
+    public CircleTest(TestSpecWrapper<Circle> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -61,7 +61,7 @@ public class GeoShapeTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestBox {
+  public static class BoxTest {
 
     private static final String SUITE_NAME = "geo-shape-box";
     private static final BsonDeserializationTestSuite<Box> TEST_SUITE =
@@ -69,7 +69,7 @@ public class GeoShapeTest {
 
     private final TestSpecWrapper<Box> testSpec;
 
-    public TestBox(TestSpecWrapper<Box> testSpec) {
+    public BoxTest(TestSpecWrapper<Box> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -90,7 +90,7 @@ public class GeoShapeTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestGeometryShape {
+  public static class GeometryShapeTest {
 
     private static final String SUITE_NAME = "geo-shape-geometry";
     private static final BsonDeserializationTestSuite<GeometryShape> TEST_SUITE =
@@ -98,7 +98,7 @@ public class GeoShapeTest {
 
     private final TestSpecWrapper<GeometryShape> testSpec;
 
-    public TestGeometryShape(TestSpecWrapper<GeometryShape> testSpec) {
+    public GeometryShapeTest(TestSpecWrapper<GeometryShape> testSpec) {
       this.testSpec = testSpec;
     }
 

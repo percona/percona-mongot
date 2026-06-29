@@ -67,11 +67,9 @@ public class IcuNormalizerTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof IcuNormalizerTokenFilterDefinition)) {
+    if (!(other instanceof IcuNormalizerTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    IcuNormalizerTokenFilterDefinition otherDefinition = (IcuNormalizerTokenFilterDefinition) other;
 
     return this.normalizationForm == otherDefinition.normalizationForm;
   }

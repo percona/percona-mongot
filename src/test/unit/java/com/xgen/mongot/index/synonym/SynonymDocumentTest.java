@@ -29,21 +29,21 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      SynonymDocumentTest.TestDeserialization.class,
-      SynonymDocumentTest.TestSerialization.class,
-      SynonymDocumentTest.TestIdStringFromBsonValue.class
+      SynonymDocumentTest.DeserializationTest.class,
+      SynonymDocumentTest.SerializationTest.class,
+      SynonymDocumentTest.IdStringFromBsonValueTest.class
     })
 public class SynonymDocumentTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "synonym-document-deserialization";
 
     private static final BsonDeserializationTestSuite<SynonymDocument> TEST_SUITE =
         BsonDeserializationTestSuite.fromValue(
             "src/test/unit/resources/index/synonym/",
             SUITE_NAME,
-            SynonymDocumentTest.TestDeserialization::fromBsonExceptionUnwrapped);
+            SynonymDocumentTest.DeserializationTest::fromBsonExceptionUnwrapped);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<SynonymDocument> testSpec;
 
@@ -75,7 +75,7 @@ public class SynonymDocumentTest {
       }
     }
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<SynonymDocument> testSpec) {
       this.testSpec = testSpec;
     }
@@ -154,14 +154,14 @@ public class SynonymDocumentTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "synonym-document-serialization";
     private static final BsonSerializationTestSuite<SynonymDocument> TEST_SUITE =
         fromEncodable("src/test/unit/resources/index/synonym/", SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<SynonymDocument> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<SynonymDocument> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<SynonymDocument> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -189,7 +189,7 @@ public class SynonymDocumentTest {
   }
 
   /** Tests for {@link SynonymDocument#idStringFromBsonValue(Optional)}. */
-  public static class TestIdStringFromBsonValue {
+  public static class IdStringFromBsonValueTest {
 
     @Test
     public void idStringFromBsonValue_withStandardUuid_returnsUuidString() {

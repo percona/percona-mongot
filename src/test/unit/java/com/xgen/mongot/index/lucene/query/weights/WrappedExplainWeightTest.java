@@ -17,6 +17,7 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.Weight;
 import org.junit.Assert;
@@ -160,8 +161,18 @@ public class WrappedExplainWeightTest {
     }
 
     @Override
-    public Scorer scorer(LeafReaderContext context) {
-      return this.scorer;
+    public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+      return new ScorerSupplier() {
+        @Override
+        public Scorer get(long leadCost) throws IOException {
+          return MockWeight.this.scorer;
+        }
+
+        @Override
+        public long cost() {
+          return 0;
+        }
+      };
     }
 
     @Override

@@ -1,5 +1,5 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
-load("//bazel/java:netty_tcnative.bzl", "NETTY_TCNATIVE_X86_64_AL2023_TARGET", "NETTY_TCNATIVE_X86_64_AL2_TARGET")
+load("//bazel/java:netty_tcnative.bzl", "NETTY_TCNATIVE_AARCH64_TARGET", "NETTY_TCNATIVE_X86_64_AL2023_TARGET", "NETTY_TCNATIVE_X86_64_AL2_TARGET")
 load("//bazel/java:package.bzl", "java_binary_stamped_manifest")
 load("//deploy:def.bzl", "extracted_libraries")
 
@@ -73,7 +73,7 @@ extracted_libraries({
                 "linux_aarch64": "META-INF/native/libnetty_tcnative_linux_aarch_64.so",
             },
         },
-        "src": "//bazel/java:netty-tcnative",
+        "src": NETTY_TCNATIVE_AARCH64_TARGET,
     },
     "tcnative-x86_64-al2": {
         "outputs": {
@@ -113,6 +113,12 @@ filegroup(
     name = "test-results",
     srcs = glob(["bazel-testlogs/**/test.xml"]),
     visibility = ["//scripts/tests:__pkg__"],
+)
+
+# Make the comment in .github/CODEOWNERS point to the right rule.
+alias(
+    name = "codeowners",
+    actual = "//bazel/python:codeowners",
 )
 
 # Gazelle magic for dependency resolution
@@ -170,7 +176,7 @@ filegroup(
 
 exports_files([
     "BUILD",
-    "WORKSPACE",
+    "MODULE.bazel",
     "scripts/runfiles_helper.sh",
 ])
 

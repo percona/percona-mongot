@@ -29,7 +29,7 @@ import com.xgen.testing.mongot.index.query.operators.OperatorBuilder;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.util.List;
 import java.util.function.Function;
-import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.AutomatonQuery;
 import org.apache.lucene.search.BooleanClause;
@@ -343,7 +343,7 @@ public class AutocompleteQueryFactoryTest {
       throws InvalidQueryException {
     var actual =
         factory.fromCompletion(
-            operator, SingleQueryContext.createQueryRoot(mock(IndexReader.class)));
+            operator, SingleQueryContext.createQueryRoot(mock(LeafReader.class)));
 
     Assert.assertEquals("Autocomplete lucene query: ", expected, actual);
   }
@@ -358,7 +358,7 @@ public class AutocompleteQueryFactoryTest {
             InvalidQueryException.class,
             () ->
                 factory.fromCompletion(
-                    operator, SingleQueryContext.createQueryRoot(mock(IndexReader.class))));
+                    operator, SingleQueryContext.createQueryRoot(mock(LeafReader.class))));
 
     Assert.assertTrue(
         "exception message should mention stop word filters",
@@ -380,7 +380,7 @@ public class AutocompleteQueryFactoryTest {
             InvalidQueryException.class,
             () ->
                 factory.fromCompletion(
-                    operator, SingleQueryContext.createQueryRoot(mock(IndexReader.class))));
+                    operator, SingleQueryContext.createQueryRoot(mock(LeafReader.class))));
 
     Assert.assertTrue(
         "exception message should mention stop word filters",
@@ -394,7 +394,7 @@ public class AutocompleteQueryFactoryTest {
 
     var actual =
         factory.fromCompletion(
-            operator, SingleQueryContext.createQueryRoot(mock(IndexReader.class)));
+            operator, SingleQueryContext.createQueryRoot(mock(LeafReader.class)));
 
     Assert.assertNotNull("query should be produced when some tokens survive analysis", actual);
   }
@@ -436,19 +436,16 @@ public class AutocompleteQueryFactoryTest {
     String analyzerName = "custom_stopwords";
     CustomAnalyzerDefinition customAnalyzerDef =
         CustomAnalyzerDefinitionBuilder.builder(
-                analyzerName,
-                TokenizerDefinitionBuilder.StandardTokenizer.builder().build())
+                analyzerName, TokenizerDefinitionBuilder.StandardTokenizer.builder().build())
             .tokenFilter(TokenFilterDefinitionBuilder.LowercaseTokenFilter.builder().build())
-            .tokenFilter(
-                TokenFilterDefinitionBuilder.AsciiFoldingTokenFilter.builder().build())
+            .tokenFilter(TokenFilterDefinitionBuilder.AsciiFoldingTokenFilter.builder().build())
             .tokenFilter(
                 TokenFilterDefinitionBuilder.StopwordTokenFilter.builder()
                     .tokens(stopwords)
                     .build())
             .build();
 
-    AnalyzerRegistry registry =
-        AnalyzerRegistry.factory().create(List.of(customAnalyzerDef), true);
+    AnalyzerRegistry registry = AnalyzerRegistry.factory().create(List.of(customAnalyzerDef), true);
 
     var indexDefinition =
         SearchIndexDefinitionBuilder.builder()

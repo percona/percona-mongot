@@ -125,7 +125,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -176,7 +177,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -262,7 +264,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -316,7 +319,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -375,7 +379,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
     var searcherReference =
         LuceneIndexSearcherReference.create(
             searcherManager,
@@ -426,7 +431,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(
@@ -494,7 +500,8 @@ public class LuceneFacetCollectorSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
 
     var searcherReference =
         LuceneIndexSearcherReference.create(

@@ -4,7 +4,6 @@ import com.xgen.mongot.index.lucene.explain.timing.ExplainTimings;
 import com.xgen.mongot.util.Check;
 import java.io.IOException;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.BulkScorer;
 import org.apache.lucene.search.Explanation;
@@ -12,6 +11,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 public class ProfileWeight extends Weight {
 
@@ -27,17 +27,6 @@ public class ProfileWeight extends Weight {
   @Override
   public Explanation explain(LeafReaderContext context, int doc) throws IOException {
     return this.subQueryWeight.explain(context, doc);
-  }
-
-  /** A scorer for ProfileWeight. May return null. */
-  @Override
-  @Nullable
-  public Scorer scorer(LeafReaderContext context) throws IOException {
-    Optional<ScorerSupplier> supplier = optionalScorerSupplier(context);
-    if (supplier.isEmpty()) {
-      return null;
-    }
-    return supplier.get().get(Long.MAX_VALUE);
   }
 
   /** Get a ScorerSupplier. May be null. */
@@ -75,9 +64,18 @@ public class ProfileWeight extends Weight {
           @Override
           public Scorer get(long leadCost) throws IOException {
             try (var ignored = weight.timings.split(ExplainTimings.Type.CREATE_SCORER)) {
-              return new ProfileScorer(
-                  weight, subqueryScorerSupplier.get(leadCost), weight.timings);
+              return new ProfileScorer(subqueryScorerSupplier.get(leadCost), weight.timings);
             }
+          }
+
+          @Override
+          public BulkScorer bulkScorer() throws IOException {
+            return subqueryScorerSupplier.bulkScorer();
+          }
+
+          @Override
+          public void setTopLevelScoringClause() throws IOException {
+            subqueryScorerSupplier.setTopLevelScoringClause();
           }
 
           @Override
@@ -87,26 +85,6 @@ public class ProfileWeight extends Weight {
             }
           }
         });
-  }
-
-  @Override
-  @Nullable
-  public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
-    var bulkScorer = super.bulkScorer(context);
-    if (bulkScorer != null) {
-      return bulkScorer;
-    }
-
-    // Lucene's DrillSidewaysQuery does not implement scorer()/scorerSupplier(), so
-    // Weight#bulkScorer() returns null. In this case, we must explicitly
-    // delegate to the subQueryWeight's bulkScorer for scoring to proceed.
-    if (this.parentQuery
-        .getClass()
-        .getName()
-        .equals("org.apache.lucene.facet.DrillSidewaysQuery")) {
-      return this.subQueryWeight.bulkScorer(context);
-    }
-    return null;
   }
 
   @Override

@@ -133,11 +133,9 @@ public class Bytes implements Comparable<Bytes> {
       return true;
     }
 
-    if (!(obj instanceof Bytes)) {
+    if (!(obj instanceof Bytes other)) {
       return false;
     }
-
-    Bytes other = (Bytes) obj;
     return this.bytes == other.bytes;
   }
 

@@ -91,7 +91,8 @@ public class LuceneFacetGenericDrillSidewaysSearchManagerTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
 
     this.searcherReference =
         LuceneIndexSearcherReference.create(

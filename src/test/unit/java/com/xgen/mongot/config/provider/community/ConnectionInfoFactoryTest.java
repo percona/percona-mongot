@@ -7,6 +7,8 @@ import com.google.common.net.HostAndPort;
 import com.mongodb.ConnectionString;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadPreference;
+import com.mongodb.Tag;
+import com.mongodb.TagSet;
 import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.Databases;
 import java.io.IOException;
@@ -22,47 +24,40 @@ public class ConnectionInfoFactoryTest {
   private static final List<HostAndPort> HOSTS =
       List.of(HostAndPort.fromParts("localhost", 27017), HostAndPort.fromParts("localhost", 27018));
 
+  private static final ReadPreference SECONDARY_PREFERRED_RP = ReadPreference.secondaryPreferred();
+  private static final ReadPreference PRIMARY_RP = ReadPreference.primary();
+
+  private static final TlsConfig TLS_DISABLED =
+      new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
+  private static final TlsConfig TLS_ENABLED =
+      new TlsConfig(true, Optional.empty(), Optional.empty(), Optional.empty());
+
   private static ReplicaSetConfig replicaSetConfig(
-      Optional<String> username,
-      Optional<Path> passwordFile,
-      Optional<X509Config> x509,
-      boolean tls) {
-    return new ReplicaSetConfig(
-        HOSTS,
-        username,
-        passwordFile,
-        Databases.ADMIN,
-        tls,
-        MongoReadPreferenceName.SECONDARY_PREFERRED,
-        x509);
+      String username, Path passwordFile, TlsConfig tls) {
+    return replicaSetConfig(HOSTS, username, passwordFile, tls);
   }
 
   private static ReplicaSetConfig replicaSetConfig(
-      List<HostAndPort> hosts,
-      Optional<String> username,
-      Optional<Path> passwordFile,
-      Optional<X509Config> x509,
-      boolean tls) {
+      List<HostAndPort> hosts, String username, Path passwordFile, TlsConfig tls) {
     return new ReplicaSetConfig(
         hosts,
-        username,
-        passwordFile,
-        Databases.ADMIN,
-        tls,
-        MongoReadPreferenceName.SECONDARY_PREFERRED,
-        x509);
+        Optional.empty(),
+        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)));
   }
 
-  private static RouterConfig routerConfig(
-      Optional<String> username, Optional<Path> passwordFile, Optional<X509Config> x509) {
+  private static ReplicaSetConfig replicaSetConfig(X509Config x509) {
+    return new ReplicaSetConfig(HOSTS, Optional.of(x509), Optional.empty());
+  }
+
+  private static ReplicaSetConfig replicaSetConfig(ScramConfig scramConfig) {
+    return new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.of(scramConfig));
+  }
+
+  private static RouterConfig routerConfig(String username, Path passwordFile, TlsConfig tls) {
     return new RouterConfig(
         HOSTS,
-        username,
-        passwordFile,
-        Databases.ADMIN,
-        false,
-        MongoReadPreferenceName.PRIMARY,
-        x509);
+        Optional.empty(),
+        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)));
   }
 
   private static Path createPasswordFile(String password) throws IOException {
@@ -77,16 +72,14 @@ public class ConnectionInfoFactoryTest {
   }
 
   @Test
-  public void getConnectionInfo_replicaSet_usernamePassword_parsesAsExpectedClusterUri()
+  public void getClusterConnectionInfo_replicaSet_usernamePassword_parsesAsExpectedClusterUri()
       throws IOException {
     Path passwordFile = createPasswordFile("secret"); // kingfisher:ignore
     try {
-      ReplicaSetConfig config =
-          replicaSetConfig(
-              Optional.of("testuser"), Optional.of(passwordFile), Optional.empty(), false);
+      ReplicaSetConfig config = replicaSetConfig("testuser", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), false);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("localhost:27017", "localhost:27018");
@@ -106,14 +99,13 @@ public class ConnectionInfoFactoryTest {
   }
 
   @Test
-  public void getConnectionInfo_replicaSet_tlsTrue_uriContainsTlsTrue() throws IOException {
+  public void getClusterConnectionInfo_replicaSet_tlsTrue_uriContainsTlsTrue() throws IOException {
     Path passwordFile = createPasswordFile("pass"); // kingfisher:ignore
     try {
-      ReplicaSetConfig config =
-          replicaSetConfig(Optional.of("u"), Optional.of(passwordFile), Optional.empty(), true);
+      ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_ENABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), false);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getReadConcern()).isEqualTo(ReadConcern.MAJORITY);
@@ -124,14 +116,13 @@ public class ConnectionInfoFactoryTest {
   }
 
   @Test
-  public void getConnectionInfo_router_primaryReadPreference() throws IOException {
+  public void getClusterConnectionInfo_router_primaryReadPreference() throws IOException {
     Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
     try {
-      RouterConfig config =
-          routerConfig(Optional.of("u"), Optional.of(passwordFile), Optional.empty());
+      RouterConfig config = routerConfig("u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), false);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, PRIMARY_RP);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getReadPreference()).isEqualTo(ReadPreference.primary());
@@ -142,17 +133,16 @@ public class ConnectionInfoFactoryTest {
   }
 
   @Test
-  public void getConnectionInfo_router_directConnect_singleHostInUri() throws IOException {
+  public void getSingleHostConnectionInfo_router_singleHostInUri() throws IOException {
     Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
     try {
-      RouterConfig config =
-          routerConfig(Optional.of("u"), Optional.of(passwordFile), Optional.empty());
+      RouterConfig config = routerConfig("u", passwordFile, TLS_DISABLED);
 
-      ConnectionInfo info = ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), true);
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
-      assertThat(cs.getHosts()).hasSize(1);
-      assertThat(cs.getHosts().get(0)).isAnyOf("localhost:27017", "localhost:27018");
+      assertThat(cs.getHosts()).containsExactly("localhost:27017");
       assertThat(info.uri().getConnectionString()).contains("directConnection=true");
       assertThat(info.uri().getConnectionString()).doesNotContain("readPreference");
     } finally {
@@ -161,53 +151,80 @@ public class ConnectionInfoFactoryTest {
   }
 
   @Test
-  public void getConnectionInfo_X509ConfigWithoutCaFile_ThrowsIllegalArgumentException() {
-    X509Config x509Config = new X509Config(Path.of("/etc/certs/client.pem"), Optional.empty());
-    ReplicaSetConfig config =
-        replicaSetConfig(Optional.empty(), Optional.empty(), Optional.of(x509Config), true);
+  public void getClusterConnectionInfo_noAuthConfig_throwsAssertionError() {
+    ReplicaSetConfig config = new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.empty());
+
+    assertThrows(
+        AssertionError.class,
+        () -> ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP));
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_noAuthConfig_throwsAssertionError() {
+    ReplicaSetConfig config = new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.empty());
+
+    assertThrows(
+        AssertionError.class,
+        () -> ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0)));
+  }
+
+  @Test
+  public void getClusterConnectionInfo_X509ConfigWithoutCaFile_ThrowsIllegalArgumentException() {
+    TlsConfig tlsConfig =
+        new TlsConfig(
+            true,
+            Optional.of(Path.of("/etc/certs/client.pem")),
+            Optional.empty(),
+            Optional.empty());
+    X509Config x509Config = new X509Config(tlsConfig);
+    ReplicaSetConfig config = replicaSetConfig(x509Config);
 
     IllegalArgumentException e =
         assertThrows(
             IllegalArgumentException.class,
-            () -> ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), false));
+            () ->
+                ConnectionInfoFactory.getClusterConnectionInfo(
+                    config, SECONDARY_PREFERRED_RP));
 
-    assertThat(e).hasMessageThat().contains("caFile must be present with x509");
+    assertThat(e).hasMessageThat().contains("caFile must be set within x509 config");
   }
 
   @Test
-  public void getConnectionInfo_directConnect_multiHost_singleHostChosenByRandom()
+  public void getSingleHostConnectionInfo_usernamePassword_parsesAsExpectedUri()
       throws IOException {
-    Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
+    Path passwordFile = createPasswordFile("secret"); // kingfisher:ignore
     try {
-      ReplicaSetConfig config =
-          replicaSetConfig(Optional.of("u"), Optional.of(passwordFile), Optional.empty(), false);
+      ReplicaSetConfig config = replicaSetConfig("testuser", passwordFile, TLS_DISABLED);
 
-      ConnectionInfo info = ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), true);
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
 
-      // Host is selected with ThreadLocalRandom; only one of the configured hosts appears.
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).hasSize(1);
-      assertThat(cs.getHosts().get(0)).isAnyOf("localhost:27017", "localhost:27018");
+      assertThat(cs.getCredential()).isNotNull();
+      assertThat(cs.getCredential().getUserName()).isEqualTo("testuser");
+      assertThat(cs.getCredential().getSource()).isEqualTo("admin");
+      assertThat(cs.getReadConcern()).isEqualTo(ReadConcern.MAJORITY);
       String uri = info.uri().getConnectionString();
+      assertThat(uri).contains("tls=false");
       assertThat(uri).contains("directConnection=true");
-      assertThat(uri).doesNotContain("readPreference");
-      assertThat(uri).doesNotContain("27017,localhost");
+      assertThat(uri).contains("readConcernLevel=majority");
+      assertThat(info.sslContext()).isEmpty();
     } finally {
       Files.deleteIfExists(passwordFile);
     }
   }
 
   @Test
-  public void getConnectionInfo_directConnect_singleReplicaHost_uriHasOnlyThatHost()
+  public void getSingleHostConnectionInfo_singleReplicaHost_uriHasOnlyThatHost()
       throws IOException {
     Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
     try {
       List<HostAndPort> oneHost = List.of(HostAndPort.fromParts("sync.example", 27019));
-      ReplicaSetConfig config =
-          replicaSetConfig(
-              oneHost, Optional.of("u"), Optional.of(passwordFile), Optional.empty(), false);
+      ReplicaSetConfig config = replicaSetConfig(oneHost, "u", passwordFile, TLS_DISABLED);
 
-      ConnectionInfo info = ConnectionInfoFactory.getConnectionInfo(config, Optional.empty(), true);
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, oneHost.get(0));
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("sync.example:27019");
@@ -216,4 +233,150 @@ public class ConnectionInfoFactoryTest {
       Files.deleteIfExists(passwordFile);
     }
   }
+
+  @Test
+  public void
+      getSingleHostConnectionInfo_withReadPreference_uriHasReadPreferenceAndNoDirectConnect()
+          throws IOException {
+    Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
+    try {
+      ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_DISABLED);
+
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(
+              config, HOSTS.get(0), ReadPreference.secondary());
+
+      String uri = info.uri().getConnectionString();
+      assertThat(uri).contains("readPreference=secondary");
+      assertThat(uri).doesNotContain("directConnection");
+      assertThat(new ConnectionString(uri).getHosts()).containsExactly("localhost:27017");
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_withReadPreferenceAndTagSets_uriHasTagSets()
+      throws IOException {
+    Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
+    try {
+      ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_DISABLED);
+      ReadPreference rpWithTags =
+          ReadPreference.secondary(List.of(new TagSet(List.of(new Tag("dc", "east")))));
+
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), rpWithTags);
+
+      String uri = info.uri().getConnectionString();
+      assertThat(uri).contains("readPreference=secondary");
+      assertThat(uri).contains("readPreferenceTags=dc:east");
+      assertThat(uri).doesNotContain("directConnection");
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
+  @Test
+  public void getClusterConnectionInfo_withTagSets_encodedAsReadPreferenceTags()
+      throws IOException {
+    Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
+    try {
+      ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_DISABLED);
+      ReadPreference rpWithTags =
+          ReadPreference.nearest(
+              List.of(
+                  new TagSet(List.of(new Tag("dc", "east"), new Tag("rack", "1"))),
+                  new TagSet(List.of(new Tag("dc", "west")))));
+
+      ConnectionInfo info =
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithTags);
+
+      String uri = info.uri().getConnectionString();
+      assertThat(uri).contains("readPreference=nearest");
+      assertThat(uri).contains("readPreferenceTags=dc:east,rack:1");
+      assertThat(uri).contains("readPreferenceTags=dc:west");
+      assertThat(new ConnectionString(uri).getReadPreference()).isEqualTo(rpWithTags);
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
+  @Test
+  public void getClusterConnectionInfo_tagValueSpecialCharacters_urlEncodedAsUri()
+      throws IOException {
+    Path passwordFile = createPasswordFile("p"); // kingfisher:ignore
+    try {
+      ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_DISABLED);
+      ReadPreference rpWithSpace =
+          ReadPreference.nearest(List.of(new TagSet(List.of(new Tag("dc", "east coast")))));
+
+      ConnectionInfo infoWithSpace =
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithSpace);
+      assertThat(infoWithSpace.uri().getConnectionString())
+          .contains("readPreferenceTags=dc:east+coast");
+
+      ReadPreference rpWithPlus =
+          ReadPreference.nearest(List.of(new TagSet(List.of(new Tag("key+name", "value")))));
+
+      ConnectionInfo infoWithPlus =
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithPlus);
+
+      assertThat(infoWithPlus.uri().getConnectionString())
+          .contains("readPreferenceTags=key%2Bname:value");
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_scramConfig_buildsScramConnectionString()
+      throws IOException {
+    Path passwordFile = createPasswordFile("secret"); // kingfisher:ignore
+    try {
+      TlsConfig tls = new TlsConfig(true, Optional.empty(), Optional.empty(), Optional.empty());
+      ScramConfig scram = new ScramConfig("dummy", "__system", passwordFile, tls);
+      ReplicaSetConfig config = replicaSetConfig(scram);
+
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
+
+      ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
+      assertThat(cs.getCredential()).isNotNull();
+      assertThat(cs.getCredential().getUserName()).isEqualTo("__system");
+      assertThat(cs.getCredential().getSource()).isEqualTo("dummy");
+      assertThat(new String(cs.getCredential().getPassword())).isEqualTo("secret");
+
+      String uri = info.uri().getConnectionString();
+      assertThat(uri).contains("tls=true");
+      assertThat(uri).contains("readConcernLevel=majority");
+      assertThat(uri).contains("directConnection=true");
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_scramWithoutCertificateKeyFile_sslContextIsEmpty()
+      throws IOException {
+    Path passwordFile = createPasswordFile("hunter2"); // kingfisher:ignore
+    try {
+      TlsConfig tls = new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
+      ScramConfig scram = new ScramConfig(Databases.ADMIN, "__system", passwordFile, tls);
+      ReplicaSetConfig config = replicaSetConfig(scram);
+
+      ConnectionInfo info =
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
+
+      ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
+      assertThat(cs.getCredential()).isNotNull();
+      assertThat(cs.getCredential().getUserName()).isEqualTo("__system");
+      assertThat(cs.getCredential().getSource()).isEqualTo("admin");
+      assertThat(new String(cs.getCredential().getPassword())).isEqualTo("hunter2");
+
+      assertThat(info.sslContext()).isEmpty();
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
 }

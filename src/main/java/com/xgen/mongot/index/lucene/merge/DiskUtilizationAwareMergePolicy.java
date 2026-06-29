@@ -12,12 +12,12 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.IOException;
 import java.util.Map;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.FilterMergePolicy;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.MergeTrigger;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Wrapper for <code>MergePolicy</code> that blocks merges according to the disk usage.

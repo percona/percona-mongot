@@ -143,7 +143,11 @@ public record FacetCollector(
         .build();
   }
 
-  /** Deserializes collector from BSON, allowing string facet numBuckets 1–10_000 (DFF on). */
+  /**
+   * Deserializes collector from BSON with 10k limits when {@link
+   * com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags#ENABLE_10K_BUCKET_LIMIT} is on
+   * (string {@code numBuckets} and number/date {@code boundaries}).
+   */
   public static FacetCollector fromBson10kAllowed(DocumentParser parser) throws BsonParseException {
     return FacetCollector.create(
         parser.getField(Fields.OPERATOR).unwrap(), parser.getField(Fields.FACETS_10K).unwrap());
@@ -155,24 +159,32 @@ public record FacetCollector(
   }
 
   /**
-   * Returns the sum of {@code numBuckets} across all string facets (e.g. for tests and callers that
-   * need the value in-process).
+   * Returns total requested facet buckets across all facets in this collector (for {@code
+   * totalFacetBucketsPerQuery} metrics): string {@code numBuckets} plus {@code boundaries.size() -
+   * 1} for each number/date facet.
    *
-   * <p>Emitting {@code totalFacetBucketsPerQuery} is gated by {@link
-   * com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags#ENABLE_TOTAL_STRING_FACET_BUCKETS}
-   * (wired through {@link com.xgen.mongot.index.MeteredSearchIndexReader} into {@link
+   * <p>Emitting the metric is gated by {@link
+   * com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags#ENABLE_TOTAL_FACET_BUCKETS} (wired
+   * through {@link com.xgen.mongot.index.MeteredSearchIndexReader} into {@link
    * com.xgen.mongot.index.IndexMetricsUpdater.QueryingMetricsUpdater
-   * #recordTotalStringFacetBucketsIfApplicable}, which records {@code totalFacetBucketsPerQuery}
-   * when this sum is positive (numeric-only facet queries are omitted from the histogram).
+   * #recordTotalFacetBucketsIfApplicable}, which records {@code totalFacetBucketsPerQuery} when
+   * this sum is positive).
    */
-  public int getTotalRequestedStringFacetBuckets() {
+  public int getTotalRequestedFacetBuckets() {
     @Var int total = 0;
     for (FacetDefinition def : this.facetDefinitions.values()) {
-      if (def instanceof FacetDefinition.StringFacetDefinition stringFacet) {
-        total += stringFacet.numBuckets();
-      }
+      total += requestedBucketCount(def);
     }
     return total;
+  }
+
+  private static int requestedBucketCount(FacetDefinition def) {
+    return switch (def) {
+      case FacetDefinition.StringFacetDefinition stringFacet -> stringFacet.numBuckets();
+      case FacetDefinition.NumericFacetDefinition numericFacet ->
+          numericFacet.boundaries().size() - 1;
+      case FacetDefinition.DateFacetDefinition dateFacet -> dateFacet.boundaries().size() - 1;
+    };
   }
 
   /** Returns facet definitions of the given type. */

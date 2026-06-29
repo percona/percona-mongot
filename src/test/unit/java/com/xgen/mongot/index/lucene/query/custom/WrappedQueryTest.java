@@ -71,7 +71,8 @@ public class WrappedQueryTest {
     PrefixQuery prefixQuery = new PrefixQuery(new Term("a", "hello"));
     WrappedQuery wrappedQuery = new WrappedQuery(prefixQuery);
 
-    Query result = wrappedQuery.rewrite(new IndexSearcher(reader));
+    var searcher = new IndexSearcher(reader);
+    Query result = wrappedQuery.rewrite(searcher);
     Assert.assertNotEquals(
         "wrapped PrefixQuery should be rewritten into a different query", wrappedQuery, result);
 
@@ -79,7 +80,7 @@ public class WrappedQueryTest {
     WrappedQuery expected =
         new WrappedQuery(
             MultiTermQuery.CONSTANT_SCORE_BLENDED_REWRITE.rewrite(
-                reader, new PrefixQuery(new Term("a", "hello"))));
+                searcher, new PrefixQuery(new Term("a", "hello"))));
 
     Assert.assertEquals(
         "wrapped PrefixQuery has been rewritten into the expected query", expected, result);
@@ -144,6 +145,14 @@ public class WrappedQueryTest {
   public void testEquals() {
     TestUtils.assertEqualityGroups(
         () -> new WrappedQuery(termQuery("hello")), () -> new WrappedQuery(termQuery("world")));
+  }
+
+  @Test
+  public void testAsWrapped() {
+    WrappedQuery wrappedQuery = new WrappedQuery(termQuery("hello"));
+
+    Assert.assertEquals(Optional.of(wrappedQuery), WrappedQuery.asWrapped(wrappedQuery));
+    Assert.assertEquals(Optional.empty(), WrappedQuery.asWrapped(termQuery("hello")));
   }
 
   private static Query termQuery(String value) {

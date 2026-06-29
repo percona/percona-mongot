@@ -6,7 +6,7 @@ import com.xgen.mongot.util.LoggableException;
 import com.xgen.mongot.util.UserFacingException;
 import java.util.Objects;
 import java.util.Optional;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 public class BsonParseException extends LoggableException implements UserFacingException {
 

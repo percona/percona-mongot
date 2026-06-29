@@ -18,6 +18,7 @@
         "indexSizeBytes": 2,
         "vectorFieldSizeBytes": 0,
         "requiredMemoryBytes": 500000000,
+        "numNestedVectorFields": 0,
         "numFields": 30,
         "numFieldsPerDatatype": {
           "autocomplete": 0.0,
@@ -101,6 +102,7 @@
         "requiredMemoryBytes": {
           "$numberLong": "500000000"
         },
+        "numNestedVectorFields": 0,
         "numFields": 30,
         "numFieldsPerDatatype": {
           "autocomplete": 0.0,

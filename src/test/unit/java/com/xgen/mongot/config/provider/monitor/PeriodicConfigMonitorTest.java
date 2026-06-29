@@ -5,10 +5,12 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import com.xgen.mongot.config.updater.ConfigUpdater;
+import com.xgen.mongot.config.updater.RetriableConfigUpdateException;
 import com.xgen.mongot.util.Condition;
 import com.xgen.mongot.util.Crash;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -19,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 public class PeriodicConfigMonitorTest {
 
@@ -112,7 +115,7 @@ public class PeriodicConfigMonitorTest {
 
   @Test
   @Crash.TestOnlyHaltHandler
-  public void testExceptionInUpdateCausesHalt() throws InterruptedException {
+  public void testExceptionInUpdateCausesHalt() throws Exception {
     CountDownLatch haltCalled = new CountDownLatch(1);
     AtomicInteger capturedExitCode = new AtomicInteger(-1);
 
@@ -148,7 +151,7 @@ public class PeriodicConfigMonitorTest {
 
   @Test
   @Crash.TestOnlyHaltHandler
-  public void testErrorInUpdateCausesHalt() throws InterruptedException {
+  public void testErrorInUpdateCausesHalt() throws Exception {
     CountDownLatch haltCalled = new CountDownLatch(1);
     AtomicInteger capturedExitCode = new AtomicInteger(-1);
 
@@ -180,5 +183,60 @@ public class PeriodicConfigMonitorTest {
         "halt() should be called when update() throws Error",
         haltCalled.await(5, TimeUnit.SECONDS));
     assertEquals(1, capturedExitCode.get());
+  }
+
+  @Test
+  public void testRetriableExceptionDoesNotHaltAndRescheduling() throws Exception {
+    // First few calls throw; later calls succeed. The monitor must keep rescheduling across
+    // retriable failures rather than halting.
+    AtomicInteger callCount = new AtomicInteger(0);
+    doAnswer(
+            invocation -> {
+              if (callCount.incrementAndGet() <= 2) {
+                throw new RetriableConfigUpdateException(
+                    "conf call failed", new RuntimeException());
+              }
+              return null;
+            })
+        .when(this.mockUpdater)
+        .update();
+
+    this.monitor =
+        PeriodicConfigMonitor.create(
+            this.mockUpdater, Duration.ofMillis(10), new SimpleMeterRegistry());
+
+    this.monitor.start();
+
+    // After at least one success the monitor returns to normal cadence, so callCount keeps growing.
+    Condition.await().atMost(Duration.ofSeconds(5)).until(() -> callCount.get() >= 5);
+
+    verify(this.mockUpdater, atLeast(5)).update();
+  }
+
+  @Test
+  public void testStopDropsPendingBackoffAttemptInsteadOfWaiting() throws Exception {
+    // With a one-hour period, the first failure schedules the next attempt ~one hour out. stop()
+    // must drop that pending delayed task rather than block until it would have fired, so it should
+    // return in well under the backoff delay.
+    doThrow(new RetriableConfigUpdateException("boom", new RuntimeException()))
+        .when(this.mockUpdater)
+        .update();
+
+    this.monitor =
+        PeriodicConfigMonitor.create(
+            this.mockUpdater, Duration.ofHours(1), new SimpleMeterRegistry());
+
+    this.monitor.start();
+    // Let the first failure happen so a far-out backoff attempt is queued.
+    Condition.await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() -> Mockito.mockingDetails(this.mockUpdater).getInvocations().size() >= 1);
+
+    long beforeStop = System.nanoTime();
+    this.monitor.stop();
+    long elapsedMs = (System.nanoTime() - beforeStop) / 1_000_000L;
+
+    assertTrue("stop() unexpectedly took " + elapsedMs + "ms", elapsedMs < 2_000L);
+    verify(this.mockUpdater).close();
   }
 }

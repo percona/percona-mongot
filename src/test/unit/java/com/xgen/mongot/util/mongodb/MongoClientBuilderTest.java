@@ -250,13 +250,72 @@ public class MongoClientBuilderTest {
   }
 
   @Test
+  public void testServerSelectionTimeoutDefaultsTo10Seconds() {
+    var connectionString =
+        new ConnectionString("mongodb://localhost:11111/?serverSelectionTimeoutMS=12345678");
+    var settings =
+        MongoClientBuilder.builder(connectionString, new SimpleMeterRegistry())
+            .buildSettings(false);
+
+    Assert.assertEquals(
+        10_000, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+  }
+
+  @Test
+  public void testServerSelectionTimeoutIsConfigurable() {
+    var connectionString = new ConnectionString("mongodb://localhost:11111/");
+    var settings =
+        MongoClientBuilder.builder(connectionString, new SimpleMeterRegistry())
+            .serverSelectionTimeoutMs(5_000)
+            .buildSettings(false);
+
+    Assert.assertEquals(
+        5_000, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+  }
+
+  @Test
+  public void testHeartbeatFrequencySettings() {
+    var connectionString = new ConnectionString("mongodb://localhost:11111/");
+    var settings =
+        MongoClientBuilder.builder(connectionString, new SimpleMeterRegistry())
+            .heartbeatFrequencyMs(5_000)
+            .minHeartbeatFrequencyMs(500)
+            .buildSettings(false);
+
+    Assert.assertEquals(
+        5_000, settings.getServerSettings().getHeartbeatFrequency(TimeUnit.MILLISECONDS));
+    Assert.assertEquals(
+        500, settings.getServerSettings().getMinHeartbeatFrequency(TimeUnit.MILLISECONDS));
+  }
+
+  @Test
+  public void testLocalThresholdSetting() {
+    var connectionString = new ConnectionString("mongodb://localhost:11111/");
+    var settings =
+        MongoClientBuilder.builder(connectionString, new SimpleMeterRegistry())
+            .localThresholdMs(100)
+            .buildSettings(false);
+
+    Assert.assertEquals(
+        100, settings.getClusterSettings().getLocalThreshold(TimeUnit.MILLISECONDS));
+  }
+
+  @Test
   public void testBuildNonReplicationPreferringMongos() throws Exception {
     var syncSource =
-        new SyncSourceConfig(
-            ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"),
-            ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"),
-            Optional.of(ConnectionStringUtil.toConnectionInfo("mongodb://mongos:11111")),
-            Optional.empty());
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongod:11111"))
+            .mongosSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongos:11111"))
+            .mongosClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://mongos:11111"))
+            .isSharded(true)
+            .build();
     String applicationName = "testApp";
     MongoClient client =
         MongoClientBuilder.buildNonReplicationPreferringMongos(

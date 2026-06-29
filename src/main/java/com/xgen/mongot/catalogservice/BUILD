@@ -5,6 +5,7 @@ java_library(
     srcs = [
         "AuthoritativeIndexCatalog.java",
         "AuthoritativeIndexKey.java",
+        "CatalogAccessGuard.java",
         "DefaultAuthoritativeIndexCatalog.java",
         "DefaultIndexStats.java",
         "DefaultMetadataService.java",
@@ -16,8 +17,10 @@ java_library(
         "MetadataClient.java",
         "MetadataService.java",
         "MetadataServiceException.java",
+        "MongodTopologyMonitor.java",
         "ServerState.java",
         "ServerStateEntry.java",
+        "TopologyMismatchException.java",
     ],
     visibility = ["//visibility:public"],
     exports = [
@@ -33,6 +36,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/replication/mongodb/common",
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/mongot/util/bson/parser",
+        "//src/main/java/com/xgen/mongot/util/concurrent",
         "//src/main/java/com/xgen/mongot/util/mongodb",
         "@maven//:com_google_guava_guava",
         "@maven//:io_micrometer_micrometer_core",

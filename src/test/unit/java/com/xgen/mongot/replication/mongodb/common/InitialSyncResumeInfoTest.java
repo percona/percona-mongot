@@ -20,13 +20,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      InitialSyncResumeInfoTest.TestDeserialization.class,
-      InitialSyncResumeInfoTest.TestSerialization.class,
+      InitialSyncResumeInfoTest.DeserializationTest.class,
+      InitialSyncResumeInfoTest.SerializationTest.class,
     })
 public class InitialSyncResumeInfoTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "resume-info-deserialization";
     private static final String SUITE_PATH = "src/test/unit/resources/replication/mongodb/common";
     private static final BsonDeserializationTestSuite<Optional<InitialSyncResumeInfo>> TEST_SUITE =
@@ -35,7 +35,7 @@ public class InitialSyncResumeInfoTest {
 
     private final TestSpecWrapper<Optional<InitialSyncResumeInfo>> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<Optional<InitialSyncResumeInfo>> testSpec) {
+    public DeserializationTest(TestSpecWrapper<Optional<InitialSyncResumeInfo>> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -106,7 +106,7 @@ public class InitialSyncResumeInfoTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "resume-info-serialization";
     private static final String SUITE_PATH = "src/test/unit/resources/replication/mongodb/common";
     private static final BsonSerializationTestSuite<InitialSyncResumeInfo> TEST_SUITE =
@@ -114,7 +114,7 @@ public class InitialSyncResumeInfoTest {
 
     private final BsonSerializationTestSuite.TestSpec<InitialSyncResumeInfo> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<InitialSyncResumeInfo> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<InitialSyncResumeInfo> testSpec) {
       this.testSpec = testSpec;
     }
 

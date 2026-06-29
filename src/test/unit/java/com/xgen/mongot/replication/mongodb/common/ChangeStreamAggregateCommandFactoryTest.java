@@ -24,6 +24,7 @@ public class ChangeStreamAggregateCommandFactoryTest {
             MOCK_INDEX_DEFINITION,
             new MongoNamespace(databaseName, collectionName),
             excludedFields,
+            false,
             false);
     ChangeStreamAggregateCommand command =
         factory.unpinned(
@@ -57,7 +58,8 @@ public class ChangeStreamAggregateCommandFactoryTest {
             MOCK_INDEX_DEFINITION,
             new MongoNamespace(databaseName, collectionName),
             List.of(),
-            true);
+            true,
+            false);
     ChangeStreamAggregateCommand command =
         factory.unpinned(
             MOCK_INDEX_DEFINITION.getIndexId(),
@@ -78,5 +80,67 @@ public class ChangeStreamAggregateCommandFactoryTest {
                 .asBoolean()
                 .getValue())
         .isTrue();
+  }
+
+  @Test
+  public void testSplitLargeEventStageEnabled() {
+    String databaseName = "testDatabase";
+    String collectionName = "testSplitLargeEventEnabled";
+
+    // Create a ChangeStreamAggregateCommandFactory with split large event enabled
+    ChangeStreamAggregateCommandFactory factory =
+            new ChangeStreamAggregateCommandFactory(
+                    MOCK_INDEX_DEFINITION,
+                    new MongoNamespace(databaseName, collectionName),
+                    List.of(),
+                    false,
+                    true);
+    ChangeStreamAggregateCommand command =
+            factory.unpinned(
+                    MOCK_INDEX_DEFINITION.getIndexId(),
+                    ChangeStreamModeSelector.ChangeStreamMode.getDefault());
+
+    // Check the pipeline
+    List<BsonDocument> pipeline =
+            command.toProxy().toBsonDocument().getArray("pipeline").getValues().stream()
+                    .map(BsonValue::asDocument)
+                    .toList();
+    assertThat(pipeline).isNotEmpty();
+
+    // The $changeStreamSplitLargeEvent stage should be the last one
+    assertTrue(
+            "Expected last stage to be $changeStreamSplitLargeEvent",
+            pipeline.getLast().containsKey("$changeStreamSplitLargeEvent"));
+  }
+
+  @Test
+  public void testSplitLargeEventStageDisabled() {
+    String databaseName = "testDatabase";
+    String collectionName = "testSplitLargeEventDisabled";
+
+    // Create a ChangeStreamAggregateCommandFactory with split large event disabled
+    ChangeStreamAggregateCommandFactory factory =
+            new ChangeStreamAggregateCommandFactory(
+                    MOCK_INDEX_DEFINITION,
+                    new MongoNamespace(databaseName, collectionName),
+                    List.of(),
+                    false,
+                    false);
+    ChangeStreamAggregateCommand command =
+            factory.unpinned(
+                    MOCK_INDEX_DEFINITION.getIndexId(),
+                    ChangeStreamModeSelector.ChangeStreamMode.getDefault());
+
+    // Check the pipeline
+    List<BsonDocument> pipeline =
+            command.toProxy().toBsonDocument().getArray("pipeline").getValues().stream()
+                    .map(BsonValue::asDocument)
+                    .toList();
+    assertThat(pipeline).isNotEmpty();
+
+    // The $changeStreamSplitLargeEvent stage should not be present
+    assertTrue(
+            "Expected no $changeStreamSplitLargeEvent stage",
+            pipeline.stream().noneMatch(s -> s.containsKey("$changeStreamSplitLargeEvent")));
   }
 }

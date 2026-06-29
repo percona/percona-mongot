@@ -8,6 +8,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/config/updater",
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/mongot/util/concurrent",
+        "//src/main/java/com/xgen/mongot/util/retry",
         "@maven//:io_micrometer_micrometer_core",
         "@maven//:org_slf4j_slf4j_api",
     ],

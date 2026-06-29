@@ -5,7 +5,6 @@ import com.xgen.mongot.util.FieldPath;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.Optional;
-import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
@@ -44,7 +43,9 @@ public class WrappedQuery extends Query {
    * optional.
    */
   public static Optional<WrappedQuery> asWrapped(Query query) {
-    return (query instanceof WrappedQuery) ? Optional.of((WrappedQuery) query) : Optional.empty();
+    return query instanceof WrappedQuery wrappedQuery
+        ? Optional.of(wrappedQuery)
+        : Optional.empty();
   }
 
   @Override
@@ -59,8 +60,8 @@ public class WrappedQuery extends Query {
   }
 
   @Override
-  public Query rewrite(IndexReader reader) throws IOException {
-    Query rewrittenQuery = this.query.rewrite(reader);
+  public Query rewrite(IndexSearcher searcher) throws IOException {
+    Query rewrittenQuery = this.query.rewrite(searcher);
     if (!Objects.equals(this.query, rewrittenQuery)) {
       return new WrappedQuery(rewrittenQuery, this.operatorPath);
     }

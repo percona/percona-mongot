@@ -7,7 +7,6 @@ import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.when;
 
@@ -69,14 +68,15 @@ public class PeriodicIndexCommitterTest {
     var latch = new CountDownLatch(3);
     doAnswer(countDown(latch)).when(indexer).commit();
 
-    new PeriodicIndexCommitter(
-        index,
-        indexer,
-        Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry()),
-        Duration.ofMillis(50));
-
-    assertTrue(latch.await(500, TimeUnit.MILLISECONDS));
-    Mockito.verify(indexer, atLeast(3)).commit();
+    var executor = Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry());
+    var committer = PeriodicIndexCommitter.create(index, indexer, executor, Duration.ofMillis(50));
+    try {
+      assertTrue(latch.await(500, TimeUnit.MILLISECONDS));
+      Mockito.verify(indexer, atLeast(3)).commit();
+    } finally {
+      committer.close();
+      executor.shutdownNow();
+    }
   }
 
   @Theory
@@ -89,14 +89,15 @@ public class PeriodicIndexCommitterTest {
     var latch = new CountDownLatch(1);
     doAnswer(countDown(latch)).when(indexer).commit();
 
-    new PeriodicIndexCommitter(
-        index,
-        indexer,
-        Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry()),
-        Duration.ofMillis(50));
-
-    Assert.assertFalse(latch.await(200, TimeUnit.MILLISECONDS));
-    Mockito.verify(indexer, never()).commit();
+    var executor = Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry());
+    var committer = PeriodicIndexCommitter.create(index, indexer, executor, Duration.ofMillis(50));
+    try {
+      Assert.assertFalse(latch.await(200, TimeUnit.MILLISECONDS));
+      Mockito.verify(indexer, never()).commit();
+    } finally {
+      committer.close();
+      executor.shutdownNow();
+    }
   }
 
   @Theory
@@ -110,23 +111,25 @@ public class PeriodicIndexCommitterTest {
 
     var latch = new CountDownLatch(1);
 
-    spy(
-        new PeriodicIndexCommitter(
-            index,
-            indexer,
-            Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry()),
-            Duration.ofMillis(50)) {
+    var committer =
+        new PeriodicIndexCommitter(index, indexer) {
           @Override
           protected void crashWithException(Exception e) {
             latch.countDown();
           }
-        });
-
-    // We call indexer.commit, so the IndexerClosedException is thrown
-    // we should give some time for the executor to schedule the commit call async
-    Mockito.verify(indexer, timeout(50).atLeast(1)).commit();
-    // The countdown latch never goes to 0, so crashWithException is never called
-    Assert.assertFalse(latch.await(200, TimeUnit.MILLISECONDS));
+        };
+    var executor = Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry());
+    try {
+      committer.start(executor, Duration.ofMillis(50));
+      // We call indexer.commit, so the IndexerClosedException is thrown
+      // we should give some time for the executor to schedule the commit call async
+      Mockito.verify(indexer, timeout(500).atLeast(1)).commit();
+      // The countdown latch never goes to 0, so crashWithException is never called
+      Assert.assertFalse(latch.await(200, TimeUnit.MILLISECONDS));
+    } finally {
+      committer.close();
+      executor.shutdownNow();
+    }
   }
 
   @Theory
@@ -139,21 +142,23 @@ public class PeriodicIndexCommitterTest {
     doThrow(new IOException("Unexpected exception")).when(indexer).commit();
     var latch = new CountDownLatch(1);
 
-    spy(
-        new PeriodicIndexCommitter(
-            index,
-            indexer,
-            Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry()),
-            Duration.ofMillis(50)) {
+    var committer =
+        new PeriodicIndexCommitter(index, indexer) {
           @Override
           protected void crashWithException(Exception e) {
             latch.countDown();
           }
-        });
-
-    // If the latch.await returns true, crashWithException has been called
-    Assert.assertTrue(latch.await(200, TimeUnit.MILLISECONDS));
-    Mockito.verify(indexer, atLeast(1)).commit();
+        };
+    var executor = Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry());
+    try {
+      committer.start(executor, Duration.ofMillis(50));
+      // If the latch.await returns true, crashWithException has been called
+      Assert.assertTrue(latch.await(200, TimeUnit.MILLISECONDS));
+      Mockito.verify(indexer, atLeast(1)).commit();
+    } finally {
+      committer.close();
+      executor.shutdownNow();
+    }
   }
 
   @Theory
@@ -167,14 +172,17 @@ public class PeriodicIndexCommitterTest {
     doAnswer(countDown(latch)).when(indexer).commit();
 
     var executor = new ScheduledThreadPoolExecutor(1);
-    PeriodicIndexCommitter periodicIndexCommitter =
-        new PeriodicIndexCommitter(index, indexer, executor, Duration.ofMillis(50));
-
-    assertTrue(latch.await(500, TimeUnit.MILLISECONDS));
-    Mockito.verify(indexer, atLeast(3)).commit();
-    periodicIndexCommitter.close();
-    Thread.sleep(500);
-    assertTrue(executor.getQueue().isEmpty());
+    var periodicIndexCommitter =
+        PeriodicIndexCommitter.create(index, indexer, executor, Duration.ofMillis(50));
+    try {
+      assertTrue(latch.await(500, TimeUnit.MILLISECONDS));
+      Mockito.verify(indexer, atLeast(3)).commit();
+      periodicIndexCommitter.close();
+      Thread.sleep(500);
+      assertTrue(executor.getQueue().isEmpty());
+    } finally {
+      executor.shutdownNow();
+    }
   }
 
   @Test
@@ -185,19 +193,33 @@ public class PeriodicIndexCommitterTest {
     when(index.getStatus()).thenReturn(new IndexStatus(ACTIONABLE_STATUSES.iterator().next()));
     doAnswer(awaitBarrier(barrier)).when(indexer).commit();
 
+    var executor = Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry());
     var periodicCommitter =
-        new PeriodicIndexCommitter(
-            index,
-            indexer,
-            Executors.singleThreadScheduledExecutor("test", new SimpleMeterRegistry()),
-            Duration.ofMillis(100));
+        PeriodicIndexCommitter.create(index, indexer, executor, Duration.ofMillis(100));
+    try {
+      barrier.await(500, TimeUnit.MILLISECONDS);
+      periodicCommitter.close();
+      barrier.reset();
+      Assert.assertThrows(TimeoutException.class, () -> barrier.await(500, TimeUnit.MILLISECONDS));
+    } finally {
+      executor.shutdownNow();
+    }
+  }
 
-    barrier.await(500, TimeUnit.MILLISECONDS);
+  @Theory
+  public void testNotStartedNeverCommits(@FromDataPoints("actionableStatuses") IndexStatus status)
+      throws InterruptedException, IOException {
+    var indexer = Mockito.mock(DocumentIndexer.class);
+    var index = Mockito.mock(Index.class);
+    when(index.getStatus()).thenReturn(status);
 
-    periodicCommitter.close();
-    barrier.reset();
+    var committer = new PeriodicIndexCommitter(index, indexer);
 
-    Assert.assertThrows(TimeoutException.class, () -> barrier.await(500, TimeUnit.MILLISECONDS));
+    Thread.sleep(200);
+    Mockito.verify(indexer, never()).commit();
+
+    committer.close(); // idempotent — must not throw
+    Mockito.verify(indexer, never()).commit();
   }
 
   private Answer<Void> countDown(CountDownLatch latch) {

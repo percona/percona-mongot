@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.IntFunction;
 import org.apache.lucene.document.Document;
+import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.IndexableField;
@@ -76,6 +77,7 @@ public class FakeStoredFields extends StoredFields {
         type.storeTermVectorPayloads(),
         type.indexOptions(),
         type.docValuesType(),
+        DocValuesSkipIndexType.NONE,
         type.docValuesType() == DocValuesType.NONE ? -1 : 1,
         new HashMap<>(),
         type.pointDimensionCount(),

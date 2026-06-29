@@ -36,14 +36,14 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      SequenceTokenTest.TestClass.class,
-      SequenceTokenTest.TestSerialization.class,
-      SequenceTokenTest.TestDeserialization.class
+      SequenceTokenTest.ClassTest.class,
+      SequenceTokenTest.SerializationTest.class,
+      SequenceTokenTest.DeserializationTest.class
     })
 public class SequenceTokenTest {
 
   @RunWith(Theories.class)
-  public static class TestClass {
+  public static class ClassTest {
 
     @Test
     public void invalidToken() {
@@ -137,7 +137,7 @@ public class SequenceTokenTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
 
     private static final String SUITE_NAME = "sequence-token-deserialization";
     private static final BsonDeserializationTestSuite<SequenceToken> TEST_SUITE =
@@ -145,7 +145,7 @@ public class SequenceTokenTest {
 
     private final TestSpecWrapper<SequenceToken> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<SequenceToken> testSpec) {
+    public DeserializationTest(TestSpecWrapper<SequenceToken> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -211,7 +211,7 @@ public class SequenceTokenTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "sequence-token-serialization";
     private static final BsonSerializationTestSuite<SequenceToken> TEST_SUITE =
@@ -219,7 +219,7 @@ public class SequenceTokenTest {
 
     private final BsonSerializationTestSuite.TestSpec<SequenceToken> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<SequenceToken> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<SequenceToken> testSpec) {
       this.testSpec = testSpec;
     }
 

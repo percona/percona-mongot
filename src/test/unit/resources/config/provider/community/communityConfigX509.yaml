@@ -4,10 +4,7 @@ syncSource:
     x509:
       tlsCertificateKeyFile: "/etc/mongot/tls/client-combined.pem"
       tlsCertificateKeyFilePasswordFile: "/etc/mongot/secrets/cert-key-pass"
-    authSource: admin
-    tls: true
-    readPreference: primaryPreferred
-  caFile: /etc/mongot/tls/ca.pem
+      caFile: "/etc/mongot/tls/ca.pem"
 storage:
   dataPath: "/var/lib/mongot"
 server:

@@ -23,7 +23,7 @@ import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
-import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.queries.spans.SpanTermQuery;
 import org.apache.lucene.search.BooleanQuery;
@@ -38,7 +38,7 @@ import org.junit.Test;
 public class LuceneQueryScorerTest {
 
   private static final SingleQueryContext MOCK_SINGLE_QUERY_CONTEXT =
-      SingleQueryContext.createQueryRoot(mock(IndexReader.class));
+      SingleQueryContext.createQueryRoot(mock(LeafReader.class));
 
   @Test
   public void testTermQueryScored() throws Exception {

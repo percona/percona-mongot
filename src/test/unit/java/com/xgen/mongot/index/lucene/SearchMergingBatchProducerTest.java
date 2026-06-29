@@ -1,6 +1,8 @@
 package com.xgen.mongot.index.lucene;
 
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.Var;
@@ -41,6 +43,7 @@ import java.util.Optional;
 import java.util.function.IntFunction;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
@@ -50,6 +53,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.BsonValue;
 import org.junit.Assert;
+import org.junit.Test;
 import org.junit.experimental.theories.DataPoints;
 import org.junit.experimental.theories.Theories;
 import org.junit.experimental.theories.Theory;
@@ -101,6 +105,20 @@ public class SearchMergingBatchProducerTest {
       Assert.assertEquals(1, searchManager.initialSearchCount);
       Assert.assertEquals(0, searchManager.getMoreCount);
     }
+  }
+
+  @Test
+  public void testCloseClosesAllProducersWhenOneThrows() throws Exception {
+    // Each producer holds a searcher reference; close() must release all of them even when an
+    // earlier producer fails to close, otherwise the remaining searcher references leak.
+    LuceneSearchBatchProducer first = mock(LuceneSearchBatchProducer.class);
+    LuceneSearchBatchProducer second = mock(LuceneSearchBatchProducer.class);
+    doThrow(new IOException("simulated close failure")).when(first).close();
+
+    var producer = new SearchMergingBatchProducer(Arrays.asList(first, second));
+
+    Assert.assertThrows(IOException.class, producer::close);
+    verify(second).close();
   }
 
   @Theory
@@ -465,7 +483,7 @@ public class SearchMergingBatchProducerTest {
         };
 
     StoredFields mockStoredFields = new FakeStoredFields(docGenerator);
-    IndexReader mockReader = mock(IndexReader.class);
+    IndexReader mockReader = mock(LeafReader.class);
     when(mockReader.storedFields()).thenReturn(mockStoredFields);
 
     LuceneIndexSearcherReference ref = mock(LuceneIndexSearcherReference.class);

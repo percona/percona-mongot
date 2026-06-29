@@ -260,8 +260,8 @@ class TextQueryFactory {
     return booleanQuery.clauses().stream()
         .map(
             booleanClause -> {
-              if (booleanClause.getQuery() instanceof BooleanQuery) {
-                var clauses = ((BooleanQuery) booleanClause.getQuery()).clauses();
+              if (booleanClause.query() instanceof BooleanQuery) {
+                var clauses = ((BooleanQuery) booleanClause.query()).clauses();
                 // normalize scores of queries by taking the dismax of the matching synonym query to
                 // ensure that the synonym score does not overwhelm the score of
                 // non-synonym terms
@@ -275,9 +275,9 @@ class TextQueryFactory {
                 // higher, since only the highest score of "fast" and "quick" are applied.
                 return new BooleanClause(
                     new DisjunctionMaxQuery(
-                        clauses.stream().map(BooleanClause::getQuery).collect(Collectors.toList()),
+                        clauses.stream().map(BooleanClause::query).collect(Collectors.toList()),
                         SYNONYMS_DISMAX_TIEBREAKER_VALUE),
-                    booleanClause.getOccur());
+                    booleanClause.occur());
               }
               return booleanClause;
             })

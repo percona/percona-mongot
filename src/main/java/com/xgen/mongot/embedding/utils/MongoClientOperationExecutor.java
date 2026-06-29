@@ -9,6 +9,7 @@ import com.mongodb.MongoSocketException;
 import com.mongodb.MongoTimeoutException;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
 import io.micrometer.core.instrument.Counter;
@@ -16,6 +17,7 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import net.jodah.failsafe.Failsafe;
 import net.jodah.failsafe.RetryPolicy;
 import net.jodah.failsafe.function.CheckedRunnable;
@@ -36,11 +38,14 @@ public class MongoClientOperationExecutor {
   private final RetryPolicy<Object> retryPolicy;
   private final MetricsFactory metricsFactory;
   private final String requestLatencyMetricName;
+  private final String perAttemptLatencyMetricName;
   private final String failedRequestsMetricName;
   private final String successfulRequestsMetricName;
   private final ConcurrentHashMap<String, Timer> timerCache = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Timer> perAttemptTimerCache = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Counter> successCounterCache = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Counter> failureCounterCache = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Counter> retriedAttemptsCache = new ConcurrentHashMap<>();
   private final Counter mongodDiskFullErrors;
   private final Counter mongodUserWritesBlockedErrors;
   private final Counter mongodSystemOverloadErrors;
@@ -52,26 +57,59 @@ public class MongoClientOperationExecutor {
    * @param resourceName the mongoDB resource name. This will be used as the prefix for all metrics.
    */
   public MongoClientOperationExecutor(MetricsFactory metricsFactory, String resourceName) {
-    this.metricsFactory = metricsFactory;
-
-    this.retryPolicy =
+    this(
+        metricsFactory,
+        resourceName,
         ExponentialBackoffPolicy.builder()
             .initialDelay(Duration.ofMillis(500))
             .backoffFactor(2)
             .maxDelay(Duration.ofMillis(5000))
             .maxRetries(5)
             .jitter(0.1)
-            .build()
-            .applyParameters(
-                new RetryPolicy<>()
-                    .handleIf(MongoClientOperationExecutor::isRetryable)
-                    .onRetry(
-                        ex ->
-                            LOG.warn(
-                                "Operation failed. Attempt count {}",
-                                ex.getAttemptCount(),
-                                ex.getLastFailure())));
+            .build(),
+        () -> false);
+  }
+
+  /**
+   * Creates a new MongoClientOperationExecutor with a custom backoff policy and abort condition.
+   *
+   * @param shouldAbortRetry supplier that returns true to stop retries immediately (e.g., when the
+   *     owning resource is closed). When true, the current exception propagates without further
+   *     retry attempts.
+   */
+  public MongoClientOperationExecutor(
+      MetricsFactory metricsFactory,
+      String resourceName,
+      ExponentialBackoffPolicy backoffPolicy,
+      BooleanSupplier shouldAbortRetry) {
+    this.metricsFactory = metricsFactory;
+
+    String retriedAttemptsMetricName = resourceName + ".retriedAttempts";
+    this.retryPolicy =
+        backoffPolicy.applyParameters(
+            new RetryPolicy<>()
+                .handleIf(e -> !shouldAbortRetry.getAsBoolean() && isRetryable(e))
+                .onRetry(
+                    ex -> {
+                      String errorReason = classifyError(ex.getLastFailure());
+                      this.retriedAttemptsCache
+                          .computeIfAbsent(
+                              errorReason,
+                              k ->
+                                  metricsFactory.counter(
+                                      retriedAttemptsMetricName,
+                                      Tags.of("errorReason", k)))
+                          .increment();
+                    })
+                .onFailure(
+                    ex ->
+                        LOG.warn(
+                            "Operation failed after {} attempts ({} elapsed).",
+                            ex.getAttemptCount(),
+                            ex.getElapsedTime(),
+                            ex.getFailure())));
     this.requestLatencyMetricName = resourceName + ".requestLatency";
+    this.perAttemptLatencyMetricName = resourceName + ".perAttemptLatency";
     this.failedRequestsMetricName = resourceName + ".failedRequests";
     this.successfulRequestsMetricName = resourceName + ".successfulRequests";
     this.mongodDiskFullErrors = metricsFactory.counter("mongodDiskFullErrors");
@@ -95,6 +133,12 @@ public class MongoClientOperationExecutor {
             k ->
                 this.metricsFactory.timer(
                     this.requestLatencyMetricName, metricTags, 0.5, 0.75, 0.9, 0.99));
+    Timer perAttemptTimer =
+        this.perAttemptTimerCache.computeIfAbsent(
+            operationName,
+            k ->
+                this.metricsFactory.timer(
+                    this.perAttemptLatencyMetricName, metricTags, 0.5, 0.75, 0.9, 0.99));
     Counter successCounter =
         this.successCounterCache.computeIfAbsent(
             operationName,
@@ -104,10 +148,21 @@ public class MongoClientOperationExecutor {
             operationName,
             k -> this.metricsFactory.counter(this.failedRequestsMetricName, metricTags));
 
+    // Wrap operation to time each individual attempt (excluding backoff wait time).
+    CheckedSupplier<T> timedOperation =
+        () -> {
+          Timer.Sample attemptSample = Timer.start();
+          try {
+            return operation.get();
+          } finally {
+            attemptSample.stop(perAttemptTimer);
+          }
+        };
+
     // The latency metric here includes retries and is recorded for both success and failure.
     Timer.Sample sample = Timer.start();
     try {
-      T result = Failsafe.with(this.retryPolicy).get(operation);
+      T result = Failsafe.with(this.retryPolicy).get(timedOperation);
       successCounter.increment();
       return result;
 
@@ -117,15 +172,18 @@ public class MongoClientOperationExecutor {
       // as transient so the upper retry loop can back off and retry.
       if (isDiskFull(e)) {
         this.mongodDiskFullErrors.increment();
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            e, MaterializedViewTransientException.Reason.EXCEEDED_DISK_LIMIT);
       }
       if (isUserWritesBlocked(e)) {
         this.mongodUserWritesBlockedErrors.increment();
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            e, MaterializedViewTransientException.Reason.USER_WRITES_BLOCKED);
       }
       if (isSystemOverloaded(e)) {
         this.mongodSystemOverloadErrors.increment();
-        throw new MaterializedViewTransientException(e);
+        throw new MaterializedViewTransientException(
+            e, MaterializedViewTransientException.Reason.SYSTEM_OVERLOADED);
       }
       if (e instanceof MongoBulkWriteException bulkEx) {
         boolean hasDiskFull =
@@ -147,7 +205,16 @@ public class MongoClientOperationExecutor {
           this.mongodSystemOverloadErrors.increment();
         }
         if (hasDiskFull || hasUserWritesBlocked || hasSystemOverload) {
-          throw new MaterializedViewTransientException(e);
+          // Priority: disk-full > writes-blocked > system-overloaded.
+          // A bulk write can contain errors from multiple categories; we
+          // pick the most specific reason for the metric tag.
+          MaterializedViewTransientException.Reason reason =
+              hasDiskFull
+                  ? MaterializedViewTransientException.Reason.EXCEEDED_DISK_LIMIT
+                  : hasUserWritesBlocked
+                      ? MaterializedViewTransientException.Reason.USER_WRITES_BLOCKED
+                      : MaterializedViewTransientException.Reason.SYSTEM_OVERLOADED;
+          throw new MaterializedViewTransientException(e, reason);
         }
       }
       failureCounter.increment();
@@ -168,30 +235,63 @@ public class MongoClientOperationExecutor {
   }
 
   private static boolean isDiskFull(Throwable e) {
-    return e instanceof MongoException me && me.getCode() == Errors.EXCEEDED_DISK_LIMIT.code;
+    Throwable cause = unwrapCheckedMongoException(e);
+    return cause instanceof MongoException me && me.getCode() == Errors.EXCEEDED_DISK_LIMIT.code;
   }
 
   private static boolean isUserWritesBlocked(Throwable e) {
-    return e instanceof MongoException me && me.getCode() == Errors.USER_WRITES_BLOCKED.code;
+    Throwable cause = unwrapCheckedMongoException(e);
+    return cause instanceof MongoException me && me.getCode() == Errors.USER_WRITES_BLOCKED.code;
   }
 
   private static boolean isSystemOverloaded(Throwable e) {
-    return e instanceof MongoException me
+    Throwable cause = unwrapCheckedMongoException(e);
+    return cause instanceof MongoException me
         && Errors.SYSTEM_OVERLOADED_ERROR_CODES.contains(me.getCode());
   }
 
+  private static String classifyError(Throwable e) {
+    Throwable cause = unwrapCheckedMongoException(e);
+    if (cause instanceof MongoSocketException) {
+      return "socket_error";
+    }
+    if (cause instanceof MongoTimeoutException) {
+      return "timeout";
+    }
+    if (cause instanceof MongoNotPrimaryException) {
+      return "not_primary";
+    }
+    if (cause instanceof MongoNodeIsRecoveringException) {
+      return "node_recovering";
+    }
+    if (cause instanceof MongoCursorNotFoundException) {
+      return "cursor_not_found";
+    }
+    if (cause instanceof MongoException mongoException) {
+      return "mongo_error_" + mongoException.getCode();
+    }
+    if (cause instanceof IllegalStateException) {
+      return "client_closed";
+    }
+    if (cause instanceof MaterializedViewTransientException) {
+      return "mv_transient";
+    }
+    return "unknown";
+  }
+
   private static boolean isRetryable(Throwable e) {
-    if (e instanceof IllegalStateException) {
+    Throwable cause = unwrapCheckedMongoException(e);
+    if (cause instanceof IllegalStateException) {
       // When MongoClient is closed during sync source update, it will throw IllegalStateException.
       // This is not an ideal exception type check as MongoClient throws IllegalStateException when
       // it is closed instead of MongoException.
       return true;
     }
-    if (e instanceof MaterializedViewTransientException) {
+    if (cause instanceof MaterializedViewTransientException) {
       // MaterializedViewTransientException may be thrown when sync source is missing.
       return true;
     }
-    if (!(e instanceof MongoException mongoException)) {
+    if (!(cause instanceof MongoException mongoException)) {
       return false;
     }
     if (mongoException instanceof MongoSocketException
@@ -202,5 +302,20 @@ public class MongoClientOperationExecutor {
       return true;
     }
     return Errors.RETRYABLE_ERROR_CODES.contains(mongoException.getCode());
+  }
+
+  /**
+   * {@link CheckedMongoException} is a thin wrapper around {@link MongoException} used by helpers
+   * like {@link com.xgen.mongot.util.mongodb.MongoDbDatabase#getCollectionInfos}. Returns the
+   * underlying cause so retryability classification, error tagging and transient-condition
+   * detection (disk-full / writes-blocked / overloaded) treat the wrapped exception the same as
+   * a directly-thrown one. Returns the input unchanged when not a {@link CheckedMongoException}
+   * or when the cause is null.
+   */
+  private static Throwable unwrapCheckedMongoException(Throwable e) {
+    if (e instanceof CheckedMongoException && e.getCause() != null) {
+      return e.getCause();
+    }
+    return e;
   }
 }

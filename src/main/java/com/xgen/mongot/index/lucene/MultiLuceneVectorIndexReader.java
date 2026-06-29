@@ -12,8 +12,10 @@ import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.VectorIndexReader;
 import com.xgen.mongot.index.VectorSearchResult;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
+import com.xgen.mongot.index.query.DeadlineExceededException;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.CheckedStream;
@@ -58,12 +60,16 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
   // If this is slow, we can explore querying each underlying LuceneVectorIndexReader with a
   // lowered limit.
   @Override
-  public BsonArray query(MaterializedVectorSearchQuery query)
+  public BsonArray query(MaterializedVectorSearchQuery query, QueryExecutionContext context)
       throws ReaderClosedException, IOException, InvalidQueryException {
     List<Iterator<VectorSearchResult>> vectorSearchResultIterators =
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
 
     if (query.concurrent() && this.taskExecutor.isPresent()) {
+      // Each partition reader also enforces the deadline on its own IndexSearcher and will throw if
+      // it elapses mid-query, this check avoids submitting any partition work once it has passed.
+      DeadlineQueryTimeout.throwIfExceeded(
+          DeadlineQueryTimeout.fromDeadline(context.deadlineTimestampMs()));
       Context parentContext = Context.current();
       Queue<Exception> exceptions = new ConcurrentLinkedQueue<>();
       List<Callable<Void>> tasks =
@@ -72,7 +78,8 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
                   i ->
                       () -> {
                         try (Scope ignored = parentContext.makeCurrent()) {
-                          executeVectorQueryOnPartition(i, query, vectorSearchResultIterators);
+                          executeVectorQueryOnPartition(
+                              i, query, context, vectorSearchResultIterators);
                         } catch (Exception e) {
                           exceptions.add(e);
                         }
@@ -89,8 +96,13 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
         rethrowException(first);
       }
     } else {
+      // Each partition reader sets the timeout on its IndexSearcher internally; this check throws
+      // before starting a new partition query once the deadline has passed, so we surface a timeout
+      // to the user instead of silently returning a partial merge of the partitions queried so far.
+      var timeout = DeadlineQueryTimeout.fromDeadline(context.deadlineTimestampMs());
       for (int i = 0; i < this.readers.size(); i++) {
-        executeVectorQueryOnPartition(i, query, vectorSearchResultIterators);
+        DeadlineQueryTimeout.throwIfExceeded(timeout);
+        executeVectorQueryOnPartition(i, query, context, vectorSearchResultIterators);
       }
     }
 
@@ -103,17 +115,23 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
   @Override
   public VectorProducerAndMetaResults query(
       MaterializedVectorSearchQuery materializedVectorSearchQuery,
+      QueryExecutionContext context,
       QueryCursorOptions queryCursorOptions,
       BatchSizeStrategy batchSizeStrategy,
       QueryOptimizationFlags queryOptimizationFlags)
       throws InvalidQueryException, IOException, InterruptedException, ReaderClosedException {
     List<Iterator<VectorSearchResult>> vectorSearchResultIterators =
         new ArrayList<>(this.readers.size());
+    // Each partition reader sets the timeout on its IndexSearcher internally; this check throws
+    // before starting a new partition query once the deadline has passed, so we surface a timeout
+    // to the user instead of silently returning a partial merge of the partitions queried so far.
+    var timeout = DeadlineQueryTimeout.fromDeadline(context.deadlineTimestampMs());
     for (int i = 0; i < this.readers.size(); i++) {
+      DeadlineQueryTimeout.throwIfExceeded(timeout);
       try (var indexPartitionResourceManager = Explain.maybeEnterIndexPartitionQueryContext(i)) {
         var reader = this.readers.get(i);
         vectorSearchResultIterators.add(
-            reader.queryResults(materializedVectorSearchQuery).iterator());
+            reader.queryResults(materializedVectorSearchQuery, context).iterator());
       }
     }
 
@@ -173,11 +191,12 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
   private void executeVectorQueryOnPartition(
       int i,
       MaterializedVectorSearchQuery query,
+      QueryExecutionContext context,
       List<Iterator<VectorSearchResult>> vectorSearchResultIterators)
       throws ReaderClosedException, IOException, InvalidQueryException {
     try (var indexPartitionResourceManager = Explain.maybeEnterIndexPartitionQueryContext(i)) {
       var reader = this.readers.get(i);
-      vectorSearchResultIterators.add(reader.queryResults(query).iterator());
+      vectorSearchResultIterators.add(reader.queryResults(query, context).iterator());
     }
   }
 
@@ -187,6 +206,8 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
       case IOException ioException -> throw ioException;
       case ReaderClosedException readerClosedException -> throw readerClosedException;
       case InvalidQueryException invalidQueryException -> throw invalidQueryException;
+      // Preserve the user-facing timeout type/message instead of wrapping it in a RuntimeException.
+      case DeadlineExceededException deadlineExceededException -> throw deadlineExceededException;
       default -> throw new RuntimeException(e);
     }
   }

@@ -6,11 +6,14 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd",
-            "authSource": "admin",
-            "tls": false,
-            "readPreference": "secondaryPreferred"
+            "scramAuth": {
+              "authSource": "admin",
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd",
+              "tls": {
+                "enabled": false
+              }
+            }
           }
         },
         "storage": {
@@ -38,22 +41,34 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          },
+          "diskMonitor": {
+            "pauseReplicationThreshold": 0.9,
+            "resumeReplicationThreshold": 0.85,
+            "crashThreshold": 0.95,
+            "pauseInitialSyncThreshold": 0.85,
+            "resumeInitialSyncThreshold": 0.8
+          }
         }
       },
       "bson": {
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd",
-            "authSource": "admin",
-            "tls": false,
-            "readPreference": "secondaryPreferred"
+            "scramAuth": {
+              "authSource": "admin",
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd",
+              "tls": {
+                "enabled": false
+              }
+            }
           }
         },
         "storage": {
@@ -81,11 +96,20 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          },
+          "diskMonitor": {
+            "pauseReplicationThreshold": 0.9,
+            "resumeReplicationThreshold": 0.85,
+            "crashThreshold": 0.95,
+            "pauseInitialSyncThreshold": 0.85,
+            "resumeInitialSyncThreshold": 0.8
+          }
         }
       }
     }

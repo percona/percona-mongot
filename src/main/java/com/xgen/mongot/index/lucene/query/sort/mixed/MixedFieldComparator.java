@@ -7,7 +7,6 @@ import com.xgen.mongot.util.FieldPath;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.function.Function;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SortedDocValues;
@@ -18,6 +17,7 @@ import org.apache.lucene.search.SortedSetSelector;
 import org.apache.lucene.util.BytesRef;
 import org.bson.BsonType;
 import org.bson.BsonValue;
+import org.jetbrains.annotations.Nullable;
 
 public class MixedFieldComparator {
 

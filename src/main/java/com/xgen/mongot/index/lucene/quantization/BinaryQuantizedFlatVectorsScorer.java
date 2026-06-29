@@ -25,11 +25,12 @@ package com.xgen.mongot.index.lucene.quantization;
 
 import java.io.IOException;
 import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
+import org.apache.lucene.index.ByteVectorValues;
+import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
-import org.apache.lucene.util.hnsw.RandomAccessVectorValues;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
-import org.apache.lucene.util.quantization.RandomAccessQuantizedByteVectorValues;
+import org.apache.lucene.util.quantization.QuantizedByteVectorValues;
 import org.apache.lucene.util.quantization.ScalarQuantizer;
 
 /** A vector scorer for scoring auto-quantized binary vectors stored in densely packed bytes. */
@@ -44,11 +45,11 @@ public class BinaryQuantizedFlatVectorsScorer implements FlatVectorsScorer {
 
   @Override
   public RandomVectorScorerSupplier getRandomVectorScorerSupplier(
-      VectorSimilarityFunction similarityFunction, RandomAccessVectorValues vectorValues)
+      VectorSimilarityFunction similarityFunction, KnnVectorValues vectorValues)
       throws IOException {
     // [Changed from Lucene] Commented out this incorrect assertion from dead Lucene code.
     //    assert vectorValues instanceof RandomAccessVectorValues.Bytes;
-    if (vectorValues instanceof RandomAccessVectorValues.Bytes byteVectorValues) {
+    if (vectorValues instanceof ByteVectorValues byteVectorValues) {
       return new BitRandomVectorScorerSupplier(byteVectorValues);
     }
     // [Changed from Lucene] Changed throw IllegalArgumentException here to return a supplier.
@@ -60,10 +61,10 @@ public class BinaryQuantizedFlatVectorsScorer implements FlatVectorsScorer {
   @Override
   public RandomVectorScorer getRandomVectorScorer(
       VectorSimilarityFunction similarityFunction,
-      RandomAccessVectorValues vectorValues,
+      KnnVectorValues vectorValues,
       float[] query)
       throws IOException {
-    if (vectorValues instanceof RandomAccessQuantizedByteVectorValues quantizedByteVectorValues) {
+    if (vectorValues instanceof QuantizedByteVectorValues quantizedByteVectorValues) {
       ScalarQuantizer scalarQuantizer = quantizedByteVectorValues.getScalarQuantizer();
       assert scalarQuantizer != null && scalarQuantizer.getBits() == 1;
 
@@ -81,7 +82,7 @@ public class BinaryQuantizedFlatVectorsScorer implements FlatVectorsScorer {
   @Override
   public RandomVectorScorer getRandomVectorScorer(
       VectorSimilarityFunction similarityFunction,
-      RandomAccessVectorValues vectorValues,
+      KnnVectorValues vectorValues,
       byte[] target)
       throws IOException {
     return nonQuantizedDelegate.getRandomVectorScorer(similarityFunction, vectorValues, target);

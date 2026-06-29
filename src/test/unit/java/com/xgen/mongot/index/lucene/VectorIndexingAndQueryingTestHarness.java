@@ -11,7 +11,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.FieldExceededLimitsException;
@@ -30,6 +32,7 @@ import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.status.IndexStatus;
@@ -263,6 +266,12 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             vectorIndexDefinitionGeneration.generation().indexFormatVersion,
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             metricsFactory);
+    FeatureFlags featureFlags =
+        enableConcurrentPartitionSearch
+            ? FeatureFlags.withDefaults()
+                .enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH)
+                .build()
+            : FeatureFlags.getDefault();
     InitializedVectorIndex initializedIndex =
         InitializedLuceneVectorIndex.create(
             this.index,
@@ -270,7 +279,9 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             directoryFactory,
             mock(IndexDirectoryHelper.class),
             Optional.empty(),
-            FeatureFlags.getDefault());
+            featureFlags,
+            DynamicFeatureFlagRegistry.empty(),
+            () -> false);
     this.indexWriter = initializedIndex.getWriter();
     this.indexReader = initializedIndex.getReader();
   }
@@ -302,7 +313,8 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
     this.index.setStatus(IndexStatus.steady());
     var vectorQuery = getQuery(queryVector, exact);
     return this.indexReader.query(
-        new MaterializedVectorSearchQuery(vectorQuery, vectorQuery.criteria().queryVector().get()));
+        new MaterializedVectorSearchQuery(vectorQuery, vectorQuery.criteria().queryVector().get()),
+        QueryExecutionContext.empty());
   }
 
   private VectorSearchQuery getQuery(Vector queryVector, boolean exact) {

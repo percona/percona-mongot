@@ -14,6 +14,7 @@ import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManagerOpsCommands;
 import com.xgen.mongot.embedding.mongodb.leasing.StaticLeaderLeaseManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexFactory;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
@@ -74,7 +75,31 @@ public class CommonUtils {
             .log("Disk usage exceeded pause threshold, pausing replication on initialization.");
       }
 
+      boolean missingReplicationUris =
+          syncConfig.isPresent() && !syncConfig.get().hasReplicationUrisAvailable();
+
+      if (missingReplicationUris) {
+        LOG.atInfo()
+            .addKeyValue(
+                "mongodSingleHostReplicationUri",
+                syncConfig
+                    .get()
+                    .mongodSingleHostReplicationUri
+                    .map(info -> info.uri().getHosts())
+                    .orElse(null))
+            .addKeyValue(
+                "mongosSingleHostReplicationUri",
+                syncConfig
+                    .get()
+                    .mongosSingleHostReplicationUri
+                    .map(info -> info.uri().getHosts())
+                    .orElse(null))
+            .addKeyValue("sharded", syncConfig.get().isSharded)
+            .log("Single host URIs not set, initializing with MongoDbNoOpReplicationManager.");
+      }
+
       if (syncConfig.isEmpty()
+          || missingReplicationUris
           || replicationMode.equals(DefaultConfigManager.ReplicationMode.DISABLE)
           || pauseReplication) {
 
@@ -112,7 +137,8 @@ public class CommonUtils {
       Optional<? extends BlobstoreSnapshotterManager> snapshotterManager,
       AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMatViewManagerFactory,
       MeterRegistry meterRegistry,
-      Gate replicationGate) {
+      Gate replicationGate,
+      FeatureFlags featureFlags) {
     return new DefaultLifecycleManager(
         factory,
         syncConfig,
@@ -122,7 +148,8 @@ public class CommonUtils {
         autoEmbeddingMatViewManagerFactory,
         meterRegistry,
         replicationGate,
-        lifecycleConfig);
+        lifecycleConfig,
+        featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS));
   }
 
   /**
@@ -178,8 +205,9 @@ public class CommonUtils {
               autoEmbeddingMongoClient);
       syncSourceConfig.ifPresent(
           syncSource -> {
-            matViewManager.updateSyncSource(syncSource);
-            matViewManager.setIsReplicationEnabled(true);
+            if (matViewManager.updateSyncSource(syncSource)) {
+              matViewManager.setIsReplicationEnabled(true);
+            }
           });
       return Optional.of(matViewManager);
     };
@@ -201,8 +229,7 @@ public class CommonUtils {
         leaseManager,
         collectionResolver,
         dbResolver,
-        materializedViewConfig.getMvWriteRateLimitRps(),
-        materializedViewConfig.matViewWriterMaxConnections);
+        materializedViewConfig.getMvWriteRateLimitRps());
   }
 
   /**
@@ -239,13 +266,15 @@ public class CommonUtils {
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MaterializedViewCollectionMetadataCatalog metadataCatalog,
       LeaseManager leaseManager,
-      AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
+      AutoEmbeddingMaterializedViewConfig materializedViewConfig,
+      MeterRegistry meterRegistry) {
     return MaterializedViewCollectionResolver.create(
         dbResolver,
         autoEmbeddingMongoClient,
         metadataCatalog,
         leaseManager,
-        materializedViewConfig);
+        materializedViewConfig,
+        meterRegistry);
   }
 
   /**
@@ -269,8 +298,7 @@ public class CommonUtils {
       String hostname,
       MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
       LeaseManagerOpsCommands opsCommands) {
-    LOG.info(
-        "Creating DynamicLeaderLeaseManager for dynamic per-index leader election");
+    LOG.info("Creating DynamicLeaderLeaseManager for dynamic per-index leader election");
     return DynamicLeaderLeaseManager.create(
         autoEmbeddingMongoClient,
         meterAndFtdcRegistry,

@@ -4,7 +4,6 @@ import static com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFa
 
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
-import com.xgen.mongot.index.definition.VectorIndexDefinitionGeneration;
 
 /** Composite IndexGeneration for Materialized View based AutoEmbedding index */
 public class AutoEmbeddingIndexGeneration extends IndexGeneration {
@@ -29,9 +28,8 @@ public class AutoEmbeddingIndexGeneration extends IndexGeneration {
    */
   public AutoEmbeddingIndexGeneration(
       AutoEmbeddingCompositeIndex compositeIndex,
-      VectorIndexDefinitionGeneration rawDefinitionGeneration,
-      VectorIndexDefinitionGeneration derivedIndexDefinitionGeneration
-  ) {
+      IndexDefinitionGeneration rawDefinitionGeneration,
+      IndexDefinitionGeneration derivedIndexDefinitionGeneration) {
     // Keep rawDefinitionGeneration in AutoEmbeddingIndexGeneration for ConfigState to use. this is
     // also used by ConfigManager, so AutoEmbeddingIndexGeneration needs to return
     // raw definition and raw generation id.
@@ -41,7 +39,7 @@ public class AutoEmbeddingIndexGeneration extends IndexGeneration {
             compositeIndex.matViewIndex,
             createMaterializedViewIndexDefinitionGeneration(rawDefinitionGeneration));
     this.derivedIndexGeneration =
-        new IndexGeneration(compositeIndex.vectorIndex, derivedIndexDefinitionGeneration);
+        new IndexGeneration(compositeIndex.derivedIndex, derivedIndexDefinitionGeneration);
   }
 
   /** Returns derived indexGeneration that contains Lucene index and Lucene index definition */

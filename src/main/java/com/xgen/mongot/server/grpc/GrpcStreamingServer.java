@@ -4,11 +4,13 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.util.TlsMode;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.mongot.server.auth.SecurityConfig;
 import com.xgen.mongot.server.command.registry.CommandRegistry;
@@ -19,6 +21,8 @@ import com.xgen.mongot.server.message.MessageMessage;
 import com.xgen.mongot.server.util.NettyUtil;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Crash;
+import com.xgen.mongot.util.mongodb.SslContextFactory;
+import io.grpc.Context;
 import io.grpc.Server;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.Status;
@@ -39,6 +43,7 @@ import java.net.SocketAddress;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.KeyManagerFactory;
 import org.bson.RawBsonDocument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,6 +71,7 @@ public class GrpcStreamingServer implements CommandServer {
       Bytes bsonSizeSoftLimit,
       Bytes inboundMessageSizeLimit,
       MetadataService metadataService,
+      CatalogAccessGuard catalogAccessGuard,
       boolean internalListAllIndexesForTesting,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier) {
     CommandRegistry commandRegistry =
@@ -84,6 +90,7 @@ public class GrpcStreamingServer implements CommandServer {
         commandRegistry,
         metadataService,
         configManager,
+        catalogAccessGuard,
         internalListAllIndexesForTesting);
 
     return create(
@@ -96,7 +103,15 @@ public class GrpcStreamingServer implements CommandServer {
         inboundMessageSizeLimit);
   }
 
-  /** GRPC Streaming server class for mms. Used for testing, too. */
+  /**
+   * Test-only convenience overload that defaults feature flags to {@link
+   * FeatureFlags#getDefault()}.
+   *
+   * <p>Production callers (e.g. {@code MmsMongotBootstrapper}) must go through the overload below
+   * that takes an explicit {@link FeatureFlags}, so that flags enabled by mms are honored on the
+   * gRPC path.
+   */
+  @VisibleForTesting
   public static GrpcStreamingServer create(
       SocketAddress address,
       Optional<SecurityConfig> securityConfig,
@@ -110,6 +125,37 @@ public class GrpcStreamingServer implements CommandServer {
       Bytes bsonSizeSoftLimit,
       Bytes inboundMessageSizeLimit,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier) {
+    return create(
+        address,
+        securityConfig,
+        cursorManager,
+        configManager,
+        meterRegistry,
+        executorManager,
+        indexCatalog,
+        initializedIndexCatalog,
+        metadata,
+        bsonSizeSoftLimit,
+        inboundMessageSizeLimit,
+        embeddingServiceManagerSupplier,
+        FeatureFlags.getDefault());
+  }
+
+  /** GRPC Streaming server class for mms with explicit feature flags. */
+  public static GrpcStreamingServer create(
+      SocketAddress address,
+      Optional<SecurityConfig> securityConfig,
+      MongotCursorManager cursorManager,
+      ConfigManager configManager,
+      MeterRegistry meterRegistry,
+      ExecutorManager executorManager,
+      IndexCatalog indexCatalog,
+      InitializedIndexCatalog initializedIndexCatalog,
+      SearchCommandsRegister.BootstrapperMetadata metadata,
+      Bytes bsonSizeSoftLimit,
+      Bytes inboundMessageSizeLimit,
+      Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
+      FeatureFlags featureFlags) {
     CommandRegistry commandRegistry =
         registerCommands(
             meterRegistry,
@@ -121,8 +167,6 @@ public class GrpcStreamingServer implements CommandServer {
             bsonSizeSoftLimit,
             embeddingServiceManagerSupplier);
 
-    // Initialize the `HealthStatusManager`. It will mark the state as serving after the
-    // `configManager` is initialized.
     HealthManager healthManager = new HealthManager(configManager, meterRegistry);
     return create(
         address,
@@ -131,7 +175,8 @@ public class GrpcStreamingServer implements CommandServer {
         executorManager,
         commandRegistry,
         healthManager,
-        inboundMessageSizeLimit);
+        inboundMessageSizeLimit,
+        featureFlags);
   }
 
   /** Create a gRPC Streaming server class according to the {@link CommandRegistry}. */
@@ -144,6 +189,28 @@ public class GrpcStreamingServer implements CommandServer {
       CommandRegistry commandRegistry,
       HealthManager healthManager,
       Bytes inboundMessageSizeLimit) {
+    return create(
+        address,
+        securityConfigOpt,
+        cursorManager,
+        executorManager,
+        commandRegistry,
+        healthManager,
+        inboundMessageSizeLimit,
+        FeatureFlags.getDefault());
+  }
+
+  /** Create a gRPC Streaming server class according to the {@link CommandRegistry}. */
+  @VisibleForTesting
+  public static GrpcStreamingServer create(
+      SocketAddress address,
+      Optional<SecurityConfig> securityConfigOpt,
+      MongotCursorManager cursorManager,
+      ExecutorManager executorManager,
+      CommandRegistry commandRegistry,
+      HealthManager healthManager,
+      Bytes inboundMessageSizeLimit,
+      FeatureFlags featureFlags) {
     NettyUtil.SocketType socketType = NettyUtil.getSocketType(address);
 
     var wireMessageCallHandler =
@@ -154,11 +221,19 @@ public class GrpcStreamingServer implements CommandServer {
               if (!healthManager.isHealthy()) {
                 throw new StatusRuntimeException(Status.UNAVAILABLE);
               }
+              // Fetch per-stream gRPC context values once here so that the handler does not
+              // re-resolve them for each command in the stream. SearchEnvoyMetadataInterceptor
+              // always populates ENVOY_ATTEMPT_COUNT_KEY (with a fallback of 1 on missing/
+              // malformed headers), so .get() returns a non-null Integer on the gRPC ingress
+              // path.
+              Context context = Context.current();
               return new WireMessageCallHandler(
                   commandRegistry,
                   executorManager.commandExecutor,
                   cursorManager,
-                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(),
+                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(context),
+                  GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get(context),
+                  featureFlags,
                   responseStream);
             });
 
@@ -168,11 +243,14 @@ public class GrpcStreamingServer implements CommandServer {
               if (!healthManager.isHealthy()) {
                 throw new StatusRuntimeException(Status.UNAVAILABLE);
               }
+              Context context = Context.current();
               return new BsonMessageCallHandler(
                   commandRegistry,
                   executorManager.commandExecutor,
                   cursorManager,
-                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(),
+                  GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(context),
+                  GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get(context),
+                  featureFlags,
                   responseStream);
             });
 
@@ -232,16 +310,23 @@ public class GrpcStreamingServer implements CommandServer {
       throw new IllegalArgumentException("TLS mode is disabled, should not create SSL context");
     }
     Optional<Path> certKeyFilePath = securityConfig.certKeyFilePath();
-    var sslContextBuilder =
-        SslContextBuilder.forServer(getCertFile(certKeyFilePath), getCertFile(certKeyFilePath))
-            .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
-            .applicationProtocolConfig(
-                new ApplicationProtocolConfig(
-                    ApplicationProtocolConfig.Protocol.ALPN,
-                    ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
-                    ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
-                    ApplicationProtocolNames.HTTP_2,
-                    ApplicationProtocolNames.HTTP_1_1));
+    Optional<Path> certKeyFilePasswordFilePath = securityConfig.certKeyFilePasswordFilePath();
+    KeyManagerFactory kmf =
+        Crash.because("Failed to initialize SSL key manager")
+            .ifThrowsExceptionOrError(
+                () ->
+                    SslContextFactory.buildKeyManagerFactory(
+                        certKeyFilePath.orElseThrow(), certKeyFilePasswordFilePath));
+    SslContextBuilder sslContextBuilder = SslContextBuilder.forServer(kmf);
+    sslContextBuilder
+        .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+        .applicationProtocolConfig(
+            new ApplicationProtocolConfig(
+                ApplicationProtocolConfig.Protocol.ALPN,
+                ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
+                ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
+                ApplicationProtocolNames.HTTP_2,
+                ApplicationProtocolNames.HTTP_1_1));
     if (securityConfig.tlsMode() == TlsMode.MTLS) {
       Optional<Path> caFilePath = securityConfig.certAuthFilePath();
       sslContextBuilder.trustManager(getCertFile(caFilePath)).clientAuth(ClientAuth.REQUIRE);
@@ -298,6 +383,7 @@ public class GrpcStreamingServer implements CommandServer {
   @Override
   public void close() {
     LOG.info("Shutting down gRPC server.");
+    this.status = ServerStatus.NOT_STARTED;
     this.healthManager.enterTerminalState();
     Crash.because("failed to shut down gRPC server")
         .ifThrows(

@@ -3,6 +3,7 @@ package com.xgen.mongot.index.lucene.query.sort.mixed;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import java.io.IOException;
 import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.bson.BsonDateTime;
 import org.bson.BsonType;
 import org.bson.BsonValue;
@@ -61,5 +62,14 @@ class MixedDateLeafComparator implements MixedLeafFieldComparator {
   @Override
   public void notifyNewBottom(BsonValue bottom) {
     this.bottom = bottom.asDateTime().getValue();
+  }
+
+  @Override
+  public int nextDoc() throws IOException {
+    int doc = this.dv.nextDoc();
+    if (doc != DocIdSetIterator.NO_MORE_DOCS) {
+      this.curr = this.dv.longValue();
+    }
+    return doc;
   }
 }

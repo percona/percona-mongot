@@ -29,7 +29,7 @@ java_library(
         artifact("com.google.errorprone:error_prone_core"),
         artifact("com.google.guava:guava"),
         "@maven//:com_google_auto_service_auto_service_annotations",
-        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:org_jetbrains_annotations",
     ],
 )
 

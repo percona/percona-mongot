@@ -50,11 +50,9 @@ public class UaxUrlEmailTokenizerDefinition extends TokenizerDefinition
       return true;
     }
 
-    if (!(other instanceof UaxUrlEmailTokenizerDefinition)) {
+    if (!(other instanceof UaxUrlEmailTokenizerDefinition otherDefinition)) {
       return false;
     }
-
-    UaxUrlEmailTokenizerDefinition otherDefinition = (UaxUrlEmailTokenizerDefinition) other;
     return Objects.equals(this.maxTokenLength, otherDefinition.maxTokenLength);
   }
 

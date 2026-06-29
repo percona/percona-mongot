@@ -1,18 +1,26 @@
 package com.xgen.mongot.config.provider.community;
 
-import com.xgen.mongot.config.provider.community.parser.PathField;
+import com.mongodb.ReadPreference;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
 import com.xgen.mongot.util.bson.parser.Field;
-import java.nio.file.Path;
 import java.util.Optional;
 import org.bson.BsonDocument;
 
 public record SyncSourceConfig(
-    ReplicaSetConfig replicaSet, Optional<RouterConfig> router, Optional<Path> caFile)
+    ReplicaSetConfig replicaSet,
+    Optional<RouterConfig> router,
+    Optional<ReadPreferenceConfig> replicationReader)
     implements DocumentEncodable {
+
+  public ReadPreference getReplicationReaderReadPreference() {
+    return this.replicationReader
+        .map(rp -> rp.readPreference().asReadPreference(rp.tagSets()))
+        .orElse(ReadPreference.secondaryPreferred());
+  }
+
   private static class Fields {
     public static final Field.Required<ReplicaSetConfig> REPLICA_SET =
         Field.builder("replicaSet")
@@ -27,23 +35,26 @@ public record SyncSourceConfig(
             .optional()
             .noDefault();
 
-    public static final Field.Optional<Path> CA_FILE =
-        Field.builder("caFile")
-            .classField(PathField.PARSER, PathField.ENCODER)
+    public static final Field.Optional<ReadPreferenceConfig> REPLICATION_READER =
+        Field.builder("replicationReader")
+            .classField(ReadPreferenceConfig::fromBson)
+            .disallowUnknownFields()
             .optional()
             .noDefault();
   }
 
   public static SyncSourceConfig fromBson(DocumentParser parser) throws BsonParseException {
-    SyncSourceConfig syncSourceConfig =
-        new SyncSourceConfig(
-            parser.getField(Fields.REPLICA_SET).unwrap(),
-            parser.getField(Fields.ROUTER).unwrap(),
-            parser.getField(Fields.CA_FILE).unwrap());
+    ReplicaSetConfig replicaSet = parser.getField(Fields.REPLICA_SET).unwrap();
+    Optional<RouterConfig> router = parser.getField(Fields.ROUTER).unwrap();
+    Optional<ReadPreferenceConfig> replicationReader =
+        parser.getField(Fields.REPLICATION_READER).unwrap();
 
-    syncSourceConfig.replicaSet.validate(parser, syncSourceConfig.caFile);
+    SyncSourceConfig syncSourceConfig =
+        new SyncSourceConfig(replicaSet, router, replicationReader);
+
+    syncSourceConfig.replicaSet.validate(parser);
     if (syncSourceConfig.router.isPresent()) {
-      syncSourceConfig.router.get().validate(parser, syncSourceConfig.caFile);
+      syncSourceConfig.router.get().validate(parser);
     }
     return syncSourceConfig;
   }
@@ -53,7 +64,7 @@ public record SyncSourceConfig(
     return BsonDocumentBuilder.builder()
         .field(Fields.REPLICA_SET, this.replicaSet)
         .field(Fields.ROUTER, this.router)
-        .field(Fields.CA_FILE, this.caFile)
+        .field(Fields.REPLICATION_READER, this.replicationReader)
         .build();
   }
 }

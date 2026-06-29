@@ -12,7 +12,7 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.facet.FacetResult;
-import org.apache.lucene.facet.FacetsCollector;
+import org.apache.lucene.facet.FacetsCollectorManager;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
@@ -119,10 +119,12 @@ public class TokenFacetOrdinalMapMismatchTest {
         IndexSearcher searcher = new IndexSearcher(reader);
 
         // Step 2: Collect hits for the "hit" term
-        var collector = new FacetsCollector();
+        var fcm = new FacetsCollectorManager();
         var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-        var topDocs = FacetsCollector.search(searcher, query, 1000, collector);
-        assertThat(topDocs.totalHits.value).isEqualTo(100);
+        var result = FacetsCollectorManager.search(searcher, query, 1000, fcm);
+        var topDocs = result.topDocs();
+        var collector = result.facetsCollector();
+        assertThat(topDocs.totalHits.value()).isEqualTo(100);
 
         // Step 3: Run facets
         var state = TokenSsdvFacetState.create(searcher.getIndexReader(), FACET_FIELD,
@@ -168,15 +170,17 @@ public class TokenFacetOrdinalMapMismatchTest {
   }
 
   private static FacetingOutput runFacet(IndexSearcher searcher, int topN) throws Exception {
-    var collector = new FacetsCollector();
+    var fcm = new FacetsCollectorManager();
     var query = new TermQuery(new Term(GROUP_FIELD, "hit"));
-    var topDocs = FacetsCollector.search(searcher, query, topN, collector);
+    var result = FacetsCollectorManager.search(searcher, query, topN, fcm);
+    var topDocs = result.topDocs();
+    var collector = result.facetsCollector();
     var state = TokenSsdvFacetState.create(searcher.getIndexReader(), FACET_FIELD,
         Optional.empty());
     assertThat(state).isPresent();
 
     var facets = new SortedSetDocValuesFacetCounts(state.get(), collector);
-    return new FacetingOutput(topDocs.totalHits.value, facets.getTopChildren(10, FACET_FIELD));
+    return new FacetingOutput(topDocs.totalHits.value(), facets.getTopChildren(10, FACET_FIELD));
   }
 
   private static void seedHighCardinalityWithManyHits(

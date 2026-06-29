@@ -3,14 +3,19 @@ package com.xgen.mongot.config.provider.community;
 import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.flogger.FluentLogger;
+import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.mongodb.MongoNamespace;
+import com.mongodb.ServerAddress;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.provider.mongod.ConfigUpdaterUtils;
 import com.xgen.mongot.config.updater.ConfigUpdater;
+import com.xgen.mongot.config.updater.RetriableConfigUpdateException;
 import com.xgen.mongot.config.util.ViewValidator;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -21,7 +26,9 @@ import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
+import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.MongoDbMetadataClient;
+import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfos;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,10 +45,26 @@ public class CommunityConfigUpdater implements ConfigUpdater {
   private static final Logger LOG = LoggerFactory.getLogger(CommunityConfigUpdater.class);
   private static final FluentLogger FLOGGER = FluentLogger.forEnclosingClass();
 
+  // Number of consecutive update() cycles in which the host was absent from the SDAM topology.
+  // A stale URI is retained until this exceeds MISS_THRESHOLD, preventing a single transient
+  // heartbeat gap from installing a NoOp manager.
+  private static final int MISS_THRESHOLD = 5;
+
   private final AuthoritativeIndexCatalog authoritativeIndexCatalog;
   private final MongoDbMetadataClient mongoDbMetadataClient;
   private final ConfigManager configManager;
   private final FeatureFlags featureFlags;
+  private final InitialSyncHostProvider initialSyncHostProvider;
+  private final CatalogAccessGuard catalogAccessGuard;
+
+  @GuardedBy("this")
+  private SyncSourceConfig syncSourceConfig;
+
+  @GuardedBy("this")
+  private int mongodHostMissCount;
+
+  @GuardedBy("this")
+  private int mongosHostMissCount;
 
   @GuardedBy("this")
   private volatile boolean closed;
@@ -50,25 +73,53 @@ public class CommunityConfigUpdater implements ConfigUpdater {
       AuthoritativeIndexCatalog authoritativeIndexCatalog,
       MongoDbMetadataClient mongoDbMetadataClient,
       ConfigManager configManager,
-      FeatureFlags featureFlags) {
+      FeatureFlags featureFlags,
+      SyncSourceConfig initialSyncSourceConfig,
+      InitialSyncHostProvider initialSyncHostProvider,
+      CatalogAccessGuard catalogAccessGuard) {
     this.authoritativeIndexCatalog = authoritativeIndexCatalog;
     this.mongoDbMetadataClient = mongoDbMetadataClient;
     this.configManager = configManager;
     this.featureFlags = featureFlags;
+    this.syncSourceConfig = initialSyncSourceConfig;
+    this.initialSyncHostProvider = initialSyncHostProvider;
+    this.catalogAccessGuard = catalogAccessGuard;
 
+    this.mongodHostMissCount = 0;
+    this.mongosHostMissCount = 0;
     this.closed = false;
   }
 
   @Override
-  public synchronized void update() {
+  public synchronized void update() throws RetriableConfigUpdateException {
     checkState(!this.closed, "cannot call update() after close()");
 
-    // First try updating all our live indexes with views. This may fail, if the catalog is
+    // Refresh the single-host replication URIs via SDAM health checks, then propagate any changes
+    // to the metadata client and config manager.
+    this.syncSourceConfig = getRefreshedSyncSourceConfig();
+    this.mongoDbMetadataClient.maybeUpdateSyncSource(this.syncSourceConfig);
+    this.configManager.handleReplicationAndSyncSourceUpdate(this.syncSourceConfig);
+
+    // Refresh the cached topology state and bail out if the configured syncSource.router does not
+    // match the actual cluster topology. Doing this fresh check before reading the AIC avoids
+    // deleting indexes when, e.g., the catalog database was moved to a different shard and we are
+    // connected to mongod without router config.
+    try {
+      this.catalogAccessGuard.requireTopologyMatch();
+    } catch (TopologyMismatchException e) {
+      LOG.error("Skipping config updater due to cluster topology mismatch.", e);
+      return;
+    } catch (CheckedMongoException e) {
+      LOG.warn("Skipping; unable to determine cluster topology.", e);
+      return;
+    }
+
+    // Then try updating all our live indexes with views. This may fail, if the catalog is
     // concurrently modified by another mongot, or for some other transient reason.
     try {
       updateIndexesWithViews();
     } catch (CheckedMongoException | BsonParseException | MetadataServiceException e) {
-      FLOGGER.atSevere().atMostEvery(5, TimeUnit.MINUTES).withCause(e).log(
+      FLOGGER.atWarning().atMostEvery(5, TimeUnit.MINUTES).withCause(e).log(
           "Unexpected error when updating view definitions, skipping");
     }
 
@@ -104,6 +155,46 @@ public class CommunityConfigUpdater implements ConfigUpdater {
         indexesByType.searchIndexes,
         List.of(),
         directMongodCollectionSet);
+  }
+
+  @GuardedBy("this")
+  private SyncSourceConfig getRefreshedSyncSourceConfig() {
+    @Var Optional<ConnectionInfo> mongodHost = this.syncSourceConfig.mongodSingleHostReplicationUri;
+    if (mongodHost.isEmpty()
+        || !this.initialSyncHostProvider.isMongodHostStillValid(
+            new ServerAddress(mongodHost.get().uri().getHosts().getFirst()))) {
+      Optional<ConnectionInfo> freshMongodHost =
+          this.initialSyncHostProvider.getMongodInitialSyncConnection();
+      if (mongodHost.isEmpty()) {
+        mongodHost = freshMongodHost;
+        this.mongodHostMissCount = 0;
+      } else if (++this.mongodHostMissCount >= MISS_THRESHOLD) {
+        mongodHost = freshMongodHost;
+        this.mongodHostMissCount = 0;
+      }
+    } else {
+      this.mongodHostMissCount = 0;
+    }
+
+    @Var Optional<ConnectionInfo> mongosHost = this.syncSourceConfig.mongosSingleHostReplicationUri;
+    if (this.syncSourceConfig.isSharded
+        && (mongosHost.isEmpty()
+            || !this.initialSyncHostProvider.isMongosHostStillValid(
+                new ServerAddress(mongosHost.get().uri().getHosts().getFirst())))) {
+      Optional<ConnectionInfo> freshMongosHost =
+          this.initialSyncHostProvider.getMongosInitialSyncConnection();
+      if (mongosHost.isEmpty()) {
+        mongosHost = freshMongosHost;
+        this.mongosHostMissCount = 0;
+      } else if (++this.mongosHostMissCount >= MISS_THRESHOLD) {
+        mongosHost = freshMongosHost;
+        this.mongosHostMissCount = 0;
+      }
+    } else if (this.syncSourceConfig.isSharded) {
+      this.mongosHostMissCount = 0;
+    }
+
+    return this.syncSourceConfig.copyWithUpdatedReplicationUris(mongodHost, mongosHost);
   }
 
   @GuardedBy("this")

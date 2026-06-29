@@ -51,7 +51,7 @@ public class IndexMetricsUpdater implements Closeable {
   };
 
   /**
-   * Upper bounds for {@code totalFacetBucketsPerQuery} (string facet bucket demand per query).
+   * Upper bounds for {@code totalFacetBucketsPerQuery} (facet bucket demand per query).
    *
    * <p>Kept coarse (vs finer histograms) to limit Prometheus series: tail-focused bands around the
    * 10k bucket-limit context; use {@code sum}/{@code count} on export for mean demand.
@@ -172,11 +172,28 @@ public class IndexMetricsUpdater implements Closeable {
    * @return a record of metrics and values for this index
    */
   public IndexMetrics getMetrics() {
+    IndexDefinition indexDefinition = getIndexDefinition();
     return IndexMetrics.create(
-        getIndexDefinition(),
+        indexDefinition,
         this.indexMetricValuesSupplier.getIndexStatus(),
-        getIndexingMetricsUpdater().getMetrics(this.indexMetricValuesSupplier),
+        getIndexingMetricsUpdater()
+            .getMetrics(this.indexMetricValuesSupplier,
+                computeNumNestedVectorFields(indexDefinition)),
         getQueryingMetricsUpdater().getMetrics());
+  }
+
+  private int computeNumNestedVectorFields(IndexDefinition indexDefinition) {
+    if (indexDefinition.getType() != IndexDefinition.Type.VECTOR_SEARCH) {
+      return 0;
+    }
+    var vectorDef = indexDefinition.asVectorDefinition();
+    if (vectorDef.getNestedRoot().isEmpty()) {
+      return 0;
+    }
+    var nestedRoot = vectorDef.getNestedRoot().get();
+    return (int) vectorDef.getFields().stream()
+        .filter(field -> field.isVectorField() && field.getPath().isChildOf(nestedRoot))
+        .count();
   }
 
   /** De-registers all metrics for the index. */
@@ -391,7 +408,8 @@ public class IndexMetricsUpdater implements Closeable {
     }
 
     @VisibleForTesting
-    IndexMetrics.IndexingMetrics getMetrics(IndexMetricValuesSupplier indexMetricValuesSupplier) {
+    IndexMetrics.IndexingMetrics getMetrics(
+        IndexMetricValuesSupplier indexMetricValuesSupplier, int numNestedVectorFields) {
       DocCounts docCounts = indexMetricValuesSupplier.getDocCounts();
       return IndexMetrics.IndexingMetrics.create(
           this.documentEventTypeCounterMap,
@@ -409,7 +427,8 @@ public class IndexMetricsUpdater implements Closeable {
           docCounts.maxLuceneMaxDocs,
           docCounts.numMongoDbDocs,
           getBatchIndexingTimer(),
-          indexMetricValuesSupplier.getRequiredMemoryForVectorData());
+          indexMetricValuesSupplier.getRequiredMemoryForVectorData(),
+          numNestedVectorFields);
     }
 
     @Override
@@ -759,15 +778,16 @@ public class IndexMetricsUpdater implements Closeable {
     }
 
     /**
-     * Records total requested string facet buckets for facet queries when {@code enabled} returns
-     * true and the query has positive string bucket demand (numeric-only facet queries are
-     * skipped). Called from the search execution path after a successful query (e.g. {@link
-     * MeteredSearchIndexReader}), consistent with other query-time distribution metrics.
+     * Records total requested facet buckets for facet queries when {@code enabled} returns true
+     * and the query has positive bucket demand (string {@code numBuckets} plus number/date
+     * boundary-derived buckets). Called from the search execution path after a successful query
+     * (e.g. {@link MeteredSearchIndexReader}), consistent with other query-time distribution
+     * metrics.
      *
      * <p>{@code enabled} is consulted only for {@link CollectorQuery} with a {@link FacetCollector}
      * so dynamic flag evaluation stays off the hot path for non-facet queries.
      */
-    public void recordTotalStringFacetBucketsIfApplicable(Query query, BooleanSupplier enabled) {
+    public void recordTotalFacetBucketsIfApplicable(Query query, BooleanSupplier enabled) {
       if (!(query instanceof CollectorQuery collectorQuery)
           || !(collectorQuery.collector() instanceof FacetCollector facetCollector)) {
         return;
@@ -775,9 +795,9 @@ public class IndexMetricsUpdater implements Closeable {
       if (!enabled.getAsBoolean()) {
         return;
       }
-      int totalStringBuckets = facetCollector.getTotalRequestedStringFacetBuckets();
-      if (totalStringBuckets > 0) {
-        this.totalFacetBucketsPerQuery.record(totalStringBuckets);
+      int totalFacetBuckets = facetCollector.getTotalRequestedFacetBuckets();
+      if (totalFacetBuckets > 0) {
+        this.totalFacetBucketsPerQuery.record(totalFacetBuckets);
       }
     }
 
@@ -1318,6 +1338,7 @@ public class IndexMetricsUpdater implements Closeable {
       static final String TOTAL_APPLICABLE_BYTES = "totalApplicableBytes";
 
       private final PerIndexMetricsFactory metricsFactory;
+      private final Tags tags;
       private final DistributionSummary collScanBatchTotalApplicableDocuments;
       private final DistributionSummary collScanBatchTotalApplicableBytes;
       private final DistributionSummary changeStreamBatchTotalApplicableDocuments;
@@ -1328,6 +1349,7 @@ public class IndexMetricsUpdater implements Closeable {
 
       InitialSyncMetrics(PerIndexMetricsFactory metricsFactory, Tags tags) {
         this.metricsFactory = metricsFactory;
+        this.tags = tags;
         this.collScanBatchTotalApplicableDocuments =
             this.metricsFactory.summary(
                 COLL_SCAN_BATCH_TOTAL_APPLICABLE_DOCUMENTS,
@@ -1389,6 +1411,10 @@ public class IndexMetricsUpdater implements Closeable {
         return this.totalApplicableBytes;
       }
 
+      public void reportIdKeyFieldType(String idFieldTypeName) {
+        reportIdKeyFieldTypeGauge(this.metricsFactory, this, idFieldTypeName, this.tags);
+      }
+
       @Override
       public void close() {
         this.metricsFactory.close();
@@ -1403,6 +1429,7 @@ public class IndexMetricsUpdater implements Closeable {
       static final String BATCH_DECODING_TIMER = "decodingBatchDurations";
 
       private final PerIndexMetricsFactory metricsFactory;
+      private final Tags tags;
       private final DistributionSummary batchTotalApplicableDocuments;
       private final DistributionSummary batchTotalApplicableBytes;
       private final Timer batchGetMoreTimer;
@@ -1410,6 +1437,7 @@ public class IndexMetricsUpdater implements Closeable {
 
       SteadyStateMetrics(PerIndexMetricsFactory metricsFactory, Tags tags) {
         this.metricsFactory = metricsFactory;
+        this.tags = tags;
         this.batchTotalApplicableDocuments =
             this.metricsFactory.summary(
                 BATCH_TOTAL_APPLICABLE_DOCUMENTS,
@@ -1442,10 +1470,25 @@ public class IndexMetricsUpdater implements Closeable {
         return this.batchDecodingTimer;
       }
 
+      public void reportIdKeyFieldType(String idFieldTypeName) {
+        reportIdKeyFieldTypeGauge(this.metricsFactory, this, idFieldTypeName, this.tags);
+      }
+
       @Override
       public void close() {
         this.metricsFactory.close();
       }
+    }
+
+    /**
+     * Records the BSON type name of the collection's {@code _id} field as an info gauge fixed at
+     * 1.0, with the type encoded in the {@code bsonType} tag. Safe to call more than once —
+     * Micrometer returns the same gauge on repeated calls with identical tags.
+     */
+    private static void reportIdKeyFieldTypeGauge(
+        PerIndexMetricsFactory metricsFactory, Object owner, String idFieldTypeName, Tags tags) {
+      metricsFactory.perIndexObjectValueGauge(
+          "idFieldType", owner, ignored -> 1.0, tags.and("bsonType", idFieldTypeName));
     }
 
     private static Tags extractTagsFromIndexDefinition(IndexDefinition indexDefinition) {

@@ -4,6 +4,7 @@ java_library(
     name = "autoembedding",
     srcs = [
         "AutoEmbeddingCompositeIndex.java",
+        "AutoEmbeddingFailureMessages.java",
         "AutoEmbeddingIndexGeneration.java",
         "AutoEmbeddingIndexGenerationFactory.java",
         "InitializedMaterializedViewIndex.java",

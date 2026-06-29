@@ -14,11 +14,11 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {CountTest.TestDeserialization.class, CountTest.TestSerialization.class})
+    value = {CountTest.DeserializationTest.class, CountTest.SerializationTest.class})
 public class CountTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
 
     private static final String SUITE_NAME = "count-deserialization";
     private static final BsonDeserializationTestSuite<Count> TEST_SUITE =
@@ -26,7 +26,7 @@ public class CountTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Count> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Count> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Count> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -78,14 +78,14 @@ public class CountTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "count-serialization";
     private static final BsonSerializationTestSuite<Count> TEST_SUITE =
         fromEncodable("src/test/unit/resources/index/query/counts", SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<Count> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Count> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Count> testSpec) {
       this.testSpec = testSpec;
     }
 

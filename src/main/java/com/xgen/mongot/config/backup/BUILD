@@ -22,8 +22,8 @@ java_library(
         "//src/main/java/com/xgen/mongot/util",
         "//src/main/java/com/xgen/mongot/util/bson",
         "//src/main/java/com/xgen/mongot/util/bson/parser",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
+        "@maven//:org_jetbrains_annotations",
         "@maven//:org_mongodb_bson",
     ],
 )

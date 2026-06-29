@@ -13,6 +13,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.MeteredIndexWriter;
@@ -37,6 +38,7 @@ import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.lucene.writer.SingleLuceneIndexWriter;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.util.AtomicDirectoryRemover;
@@ -68,7 +70,6 @@ import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FilterLeafReader;
-import org.apache.lucene.index.FilterVectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
@@ -119,7 +120,7 @@ public class LuceneVectorIndexReaderTest {
           }
 
           @Override
-          public byte[] vectorValue() {
+          public byte[] vectorValue(int ord) {
             return new byte[dimension];
           }
 
@@ -129,28 +130,24 @@ public class LuceneVectorIndexReaderTest {
           }
 
           @Override
-          public int docID() {
-            return 0;
+          public ByteVectorValues copy() {
+            return this;
           }
 
           @Override
-          public int nextDoc() {
-            return 0;
-          }
-
-          @Override
-          public int advance(int target) {
-            return 0;
+          public DocIndexIterator iterator() {
+            return createDenseIterator();
           }
         };
       }
 
       @Override
       public FloatVectorValues getFloatVectorValues(String field) throws IOException {
-        return new FilterVectorValues(this.in.getFloatVectorValues(field)) {
+        FloatVectorValues delegate = this.in.getFloatVectorValues(field);
+        return new FloatVectorValues() {
           @Override
           public VectorScorer scorer(float[] query) throws IOException {
-            return super.in.scorer(query);
+            return delegate.scorer(query);
           }
 
           @Override
@@ -161,6 +158,21 @@ public class LuceneVectorIndexReaderTest {
           @Override
           public int dimension() {
             return dimension;
+          }
+
+          @Override
+          public float[] vectorValue(int ord) throws IOException {
+            return delegate.vectorValue(ord);
+          }
+
+          @Override
+          public FloatVectorValues copy() throws IOException {
+            return this;
+          }
+
+          @Override
+          public DocIndexIterator iterator() {
+            return delegate.iterator();
           }
         };
       }
@@ -254,7 +266,9 @@ public class LuceneVectorIndexReaderTest {
               directoryFactory,
               mock(IndexDirectoryHelper.class),
               Optional.empty(),
-              FeatureFlags.getDefault());
+              FeatureFlags.getDefault(),
+              DynamicFeatureFlagRegistry.empty(),
+              () -> false);
       var context =
           new VectorQueryFactoryContext(
               VectorIndex.MOCK_INDEX_DEFINITION_GENERATION_ALL_QUANTIZATION.getIndexDefinition(),
@@ -279,7 +293,7 @@ public class LuceneVectorIndexReaderTest {
                   VectorIndex.mockQueryMetricsUpdater()));
       LuceneSearcherManager searcherManager =
           LuceneSearcherManager.create(
-              this.writer, this.searcherFactory, SearchIndex.mockMetricsFactory());
+              this.writer, this.searcherFactory, mockMetricsFactory(), () -> false);
 
       var indexDefinition =
           VectorIndex.MOCK_INDEX_DEFINITION_GENERATION_ALL_QUANTIZATION.getIndexDefinition();
@@ -349,7 +363,7 @@ public class LuceneVectorIndexReaderTest {
       ConcurrencyTestUtils.assertCanBeInvokedConcurrently(
           this.queryFactory,
           factory -> factory.createQuery(any(), any()),
-          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY));
+          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty()));
     }
 
     @Test
@@ -360,7 +374,7 @@ public class LuceneVectorIndexReaderTest {
           f -> f.createQuery(any(), any()),
           () -> {
             try {
-              this.reader.query(q);
+              this.reader.query(q, QueryExecutionContext.empty());
             } catch (Exception e) {
               // ignored - don't cause assertCanBeInvokedConcurrently to fail
             }
@@ -384,7 +398,9 @@ public class LuceneVectorIndexReaderTest {
       var reader = getInternalReader();
       // one reference for management
       Assert.assertEquals(1, reader.getRefCount());
-      Assert.assertThrows(InvalidQueryException.class, () -> this.reader.query(getInvalidQuery()));
+      Assert.assertThrows(
+          InvalidQueryException.class,
+          () -> this.reader.query(getInvalidQuery(), QueryExecutionContext.empty()));
       // the post-query ref count the same
       Assert.assertEquals(1, reader.getRefCount());
     }
@@ -396,7 +412,7 @@ public class LuceneVectorIndexReaderTest {
       ConcurrencyTestUtils.assertCannotBeInvokedConcurrently(
           this.queryFactory,
           factory -> factory.createQuery(any(), any()),
-          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY),
+          () -> this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty()),
           this.reader::close);
     }
 
@@ -418,7 +434,7 @@ public class LuceneVectorIndexReaderTest {
       Assert.assertEquals(0, binaryQuantizedMetric.count());
       Assert.assertEquals(0, limitMetric.count());
 
-      this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY);
+      this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty());
 
       Assert.assertEquals(
           IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH.tagValue,
@@ -441,7 +457,7 @@ public class LuceneVectorIndexReaderTest {
       Assert.assertEquals(0, scalarQuantizedMetric.count());
       Assert.assertEquals(0, binaryQuantizedMetric.count());
 
-      this.reader.query(SCALAR_QUANTIZED_MATERIALIZED_QUERY);
+      this.reader.query(SCALAR_QUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty());
       Assert.assertEquals(1, unquantizedMetric.count());
       Assert.assertEquals(10, unquantizedMetric.mean(), 0.01);
 
@@ -455,7 +471,7 @@ public class LuceneVectorIndexReaderTest {
     }
 
     private BsonArray query() throws IOException, InvalidQueryException, ReaderClosedException {
-      return this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY);
+      return this.reader.query(UNQUANTIZED_MATERIALIZED_QUERY, QueryExecutionContext.empty());
     }
 
     private IndexReader getInternalReader() throws IOException {
@@ -910,7 +926,9 @@ public class LuceneVectorIndexReaderTest {
               directoryFactory,
               mock(IndexDirectoryHelper.class),
               Optional.empty(),
-              FeatureFlags.getDefault());
+              FeatureFlags.getDefault(),
+              DynamicFeatureFlagRegistry.empty(),
+              () -> false);
       this.writer =
           ((SingleLuceneIndexWriter)
                   ((MeteredIndexWriter) this.initializedIndex.getWriter()).getWrapped())

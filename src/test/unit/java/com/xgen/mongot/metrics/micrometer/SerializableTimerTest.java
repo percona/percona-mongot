@@ -20,13 +20,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      SerializableTimerTest.TestDeserialization.class,
-      SerializableTimerTest.TestSerialization.class,
+      SerializableTimerTest.DeserializationTest.class,
+      SerializableTimerTest.SerializationTest.class,
     })
 public class SerializableTimerTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "serializable-timer-deserialization";
     private static final BsonDeserializationTestSuite<SerializableTimer> TEST_SUITE =
         fromDocument(
@@ -34,7 +34,7 @@ public class SerializableTimerTest {
 
     private final TestSpecWrapper<SerializableTimer> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<SerializableTimer> testSpec) {
+    public DeserializationTest(TestSpecWrapper<SerializableTimer> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -70,7 +70,7 @@ public class SerializableTimerTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "serializable-timer-serialization";
     private static final BsonSerializationTestSuite<SerializableTimer> TEST_SUITE =
@@ -78,7 +78,7 @@ public class SerializableTimerTest {
 
     private final BsonSerializationTestSuite.TestSpec<SerializableTimer> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<SerializableTimer> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<SerializableTimer> testSpec) {
       this.testSpec = testSpec;
     }
 

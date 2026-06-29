@@ -6,6 +6,8 @@ java_test_suite(
         "ChangeStreamIndexManagerTest.java",
         "ChangeStreamManagerTest.java",
         "ChangeStreamMongoCursorClientExceptionHandlingTest.java",
+        "DualBlockingQueueTest.java",
+        "PrioritizedTaskTest.java",
         "SyncChangeStreamDispatcherTest.java",
         "SyncChangeStreamManagerTest.java",
         "SyncModeAwareChangeStreamClientTest.java",

@@ -75,7 +75,9 @@ public class AtomicDirectoryRemoverTest {
     remover(trash).deleteFilesInDirectory(dir);
     assertExists(dir);
 
-    Assert.assertTrue(Files.walk(dir).allMatch(path -> path.toFile().isDirectory()));
+    try (var directoryEntries = Files.walk(dir)) {
+      Assert.assertTrue(directoryEntries.allMatch(path -> path.toFile().isDirectory()));
+    }
     Assert.assertTrue(dir.resolve("nested").toFile().exists());
     assertDirEmpty(trash);
   }

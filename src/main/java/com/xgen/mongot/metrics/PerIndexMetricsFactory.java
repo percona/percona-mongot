@@ -378,55 +378,7 @@ public class PerIndexMetricsFactory {
   }
 
   /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * automatic buckets.
-   *
-   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
-   * compute accurate percentiles aggregated across all instances.
-   *
-   * <p>Warning: This method uses automatic buckets, which may produce many wide or unused buckets
-   * and significant increase the number of exported time series. Please consider using
-   * {@link #histogram(String, double...)} or {@link #histogram(String, Tags, double...)} with
-   * explicit bucket buckets to avoid cardinality explosion.
-   *
-   * <p>NB: to limit prometheus metric growth this method will record both per-index and per-process
-   * distribution summaries, but only the latter will be exported.
-   *
-   * @param name name of the variable to export
-   * @return a {@link DistributionSummary} that can be used to record samples.
-   */
-  public DistributionSummary histogram(String name) {
-    return histogram(name, Tags.empty());
-  }
-
-  /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * automatic buckets.
-   *
-   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
-   * compute accurate percentiles aggregated across all instances.
-   *
-   * <p>Warning: This method uses automatic buckets, which may produce many wide or unused buckets
-   * and significant increase the number of exported time series. Please consider using
-   * {@link #histogram(String, double...)} or {@link #histogram(String, Tags, double...)} with
-   * explicit bucket buckets to avoid cardinality explosion.
-   *
-   * <p>NB: to limit prometheus metric growth this method will record both per-index and per-process
-   * distribution summaries, but only the latter will be exported.
-   *
-   * @param name name of the variable to export
-   * @param meterTags additional tags to add to the exported histogram variables.
-   * @return a {@link DistributionSummary} that can be used to record samples.
-   */
-  public DistributionSummary histogram(String name, Tags meterTags) {
-    return new PerProcessAndIndexDistributionSummary(
-        this.perIndexFtdcFactory.histogram(name, meterTags),
-        this.perProcessFactory.histogram(name, meterTags));
-  }
-
-  /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * buckets defined by the {@code buckets} passed to this method.
+   * Export distribution summary with histogram buckets defined by {@code buckets}.
    *
    * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
    * compute accurate percentiles aggregated across all instances.
@@ -435,16 +387,16 @@ public class PerIndexMetricsFactory {
    * distribution summaries, but only the latter will be exported.
    *
    * @param name name of the variable to export
-   * @param buckets the upper-bound cutoffs for histogram buckets (must be strictly increasing).
+   * @param buckets upper-bound cutoffs for histogram buckets (strictly increasing, non-empty).
    * @return a {@link DistributionSummary} that can be used to record samples.
+   * @throws IllegalArgumentException if {@code buckets} is empty.
    */
   public DistributionSummary histogram(String name, double... buckets) {
     return histogram(name, Tags.empty(), buckets);
   }
 
   /**
-   * Export distribution summary with percentile histogram under name: counter, max, sum, and
-   * buckets defined by the {@code buckets} passed to this method.
+   * Export distribution summary with histogram buckets defined by {@code buckets}.
    *
    * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
    * compute accurate percentiles aggregated across all instances.
@@ -454,10 +406,12 @@ public class PerIndexMetricsFactory {
    *
    * @param name name of the variable to export
    * @param meterTags additional tags to add to the exported histogram variables.
-   * @param buckets the upper-bound cutoffs for histogram buckets (must be strictly increasing).
+   * @param buckets upper-bound cutoffs for histogram buckets (strictly increasing, non-empty).
    * @return a {@link DistributionSummary} that can be used to record samples.
+   * @throws IllegalArgumentException if {@code buckets} is empty.
    */
   public DistributionSummary histogram(String name, Tags meterTags, double... buckets) {
+    checkArg(buckets.length > 0, "histogram requires at least one explicit bucket boundary");
     return new PerProcessAndIndexDistributionSummary(
         this.perIndexFtdcFactory.histogram(name, meterTags, buckets),
         this.perProcessFactory.histogram(name, meterTags, buckets));

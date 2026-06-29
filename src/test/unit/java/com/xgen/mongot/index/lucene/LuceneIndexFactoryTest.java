@@ -473,7 +473,8 @@ public class LuceneIndexFactoryTest {
             Optional.empty(),
             AnalyzerRegistry.factory(),
             new NoOpDiskMonitor(),
-            systemInfo)) {
+            systemInfo,
+            false)) {
 
       assertThat(factory.isCacheWarmerEnabled()).isFalse();
       assertThat(factory.isCacheWarmerEnabled()).isFalse();
@@ -502,7 +503,8 @@ public class LuceneIndexFactoryTest {
             Optional.empty(),
             AnalyzerRegistry.factory(),
             new NoOpDiskMonitor(),
-            systemInfo)) {
+            systemInfo,
+            false)) {
 
       assertThat(factory.isCacheWarmerEnabled()).isTrue();
       assertThat(factory.isCacheWarmerEnabled()).isTrue();

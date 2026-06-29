@@ -16,6 +16,8 @@
     <suppress files="mongot[/\\]index[/\\]lucene[/\\]quantization[/\\]BinaryQuantizedFlatVectorsScorer\.java" checks=".*"/>
     <suppress files="mongot[/\\]index[/\\]lucene[/\\]quantization[/\\]FlatBitVectorsScorer\.java" checks=".*"/>
     <suppress files="mongot[/\\]index[/\\]lucene[/\\]quantization[/\\]Mongot01042HnswBitVectorsFormat\.java" checks=".*"/>
+    <suppress files="mongot[/\\]index[/\\]lucene[/\\]query[/\\]sort[/\\]comparator[/\\]MongotNumericComparator\.java" checks=".*"/>
+    <suppress files="mongot[/\\]index[/\\]lucene[/\\]codec[/\\]bloom[/\\]MongotBloomFilteringPostingsFormat\.java" checks=".*"/>
     <!-- Suppress all checks for jextract-generated FFM bindings (regenerate with: make regenerate-vectorlite-ffm) -->
     <suppress files="vectorlite[/\\]ffm[/\\]" checks=".*"/>
     <!-- Ignore ONLY MissingJavadocMethod in test sources -->

@@ -85,7 +85,11 @@ public class ConfigStateMocks {
 
   private static SyncSourceConfig createMockSyncSourceConfig() {
     ConnectionInfo mongod = ConnectionStringUtil.toConnectionInfoUnchecked(DEFAULT_MDB_URI);
-    return new SyncSourceConfig(mongod, mongod, mongod, Optional.empty(), Optional.empty());
+    return SyncSourceConfig.builder()
+        .mongodSingleHostReplicationUri(mongod)
+        .mongodClusterReplicationUri(mongod)
+        .mongodClusterReadWriteUri(mongod)
+        .build();
   }
 
   public static final LifecycleConfig DEFAULT_LIFECYCLE_CONFIG = LifecycleConfig.getDefault();
@@ -268,7 +272,8 @@ public class ConfigStateMocks {
                 (syncSourceConfig) -> Optional.empty(),
                 new SimpleMeterRegistry(),
                 replicationGate,
-                DEFAULT_LIFECYCLE_CONFIG));
+                DEFAULT_LIFECYCLE_CONFIG,
+                false));
 
     return new ConfigStateMocks(
         indexCatalog,

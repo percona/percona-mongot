@@ -132,11 +132,14 @@ public class MessageUtilsTest {
 
     BsonDocument result =
         MessageUtils.createErrorBodyWithLabels(
-            "server at capacity", labels, Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED);
+            "server at capacity", labels, Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD);
 
     assertEquals(0, result.getInt32("ok").getValue());
-    assertEquals(462, result.getInt32("code").getValue());
-    assertEquals("IngressRequestRateLimitExceeded", result.getString("codeName").getValue());
+    assertEquals(
+        Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code, result.getInt32("code").getValue());
+    assertEquals(
+        Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.name,
+        result.getString("codeName").getValue());
     assertEquals("server at capacity", result.getString("errmsg").getValue());
     assertTrue(result.containsKey("errorLabels"));
 

@@ -1,6 +1,8 @@
 package com.xgen.mongot.index.lucene.query;
 
 import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.lucene.field.FieldName.TypeField;
 import com.xgen.mongot.index.lucene.field.FieldValue;
 import com.xgen.mongot.index.lucene.query.context.QueryFactoryContext;
@@ -38,9 +40,12 @@ import org.bson.types.ObjectId;
 class InQueryFactory {
 
   private final QueryFactoryContext factoryContext;
+  private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
 
-  InQueryFactory(QueryFactoryContext factoryContext) {
+  InQueryFactory(
+      QueryFactoryContext factoryContext, DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     this.factoryContext = factoryContext;
+    this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
   }
 
   public Query fromValues(
@@ -55,11 +60,10 @@ class InQueryFactory {
       case NUMBER -> numericQuery(mapValues(values, NonNullValue::asNumber), paths, queryContext);
       case STRING -> stringQuery(mapValues(values, NonNullValue::asString), paths, queryContext);
       case BOOLEAN ->
-          booleanQuery(mapValues(values, value -> value.asBoolean().value()), paths,
-              queryContext);
+          booleanQuery(mapValues(values, value -> value.asBoolean().value()), paths, queryContext);
       case OBJECT_ID ->
-          objectIdQuery(mapValues(values, value -> value.asObjectId().value()), paths,
-              queryContext);
+          objectIdQuery(
+              mapValues(values, value -> value.asObjectId().value()), paths, queryContext);
       case UUID -> uuidQuery(mapValues(values, NonNullValue::asUuid), paths, queryContext);
     };
   }
@@ -116,17 +120,28 @@ class InQueryFactory {
       List<DateValue> dateValues, List<FieldPath> paths, SingleQueryContext singleQueryContext) {
     // Convert all date values to milliseconds
     long[] dates = dateValues.stream().mapToLong(date -> date.point().value().getTime()).toArray();
+    boolean numericV2Enabled =
+        this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.NUMERIC_V2_SEMANTICS);
+    boolean useV2 =
+        this.factoryContext.getIndexCapabilities().supportsEmbeddedNumericAndDateV2()
+            && numericV2Enabled;
     // Build all per-path queries (no inner ConstantScoreQuery)
     List<Query> queries =
         paths.stream()
             .flatMap(
                 path -> {
+                  if (useV2) {
+                    var dateV2Field =
+                        TypeField.DATE_V2.getLuceneFieldName(
+                            path, singleQueryContext.getEmbeddedRoot());
+                    return Stream.of(LongField.newSetQuery(dateV2Field, dates));
+                  }
                   var dateField =
                       TypeField.DATE.getLuceneFieldName(path, singleQueryContext.getEmbeddedRoot());
                   var dateMultipleField =
                       TypeField.DATE_MULTIPLE.getLuceneFieldName(
                           path, singleQueryContext.getEmbeddedRoot());
-
                   Query singleValueQuery = LongPoint.newSetQuery(dateField, dates);
                   Query multiValueQuery = LongPoint.newSetQuery(dateMultipleField, dates);
 
@@ -153,8 +168,9 @@ class InQueryFactory {
             .flatMap(
                 path -> {
                   Query numberInt64Query =
-                      this.factoryContext.getFeatureFlags().isEnabled(
-                              Feature.INDEX_OR_DOC_VALUES_QUERY_FOR_IN_OPERATOR)
+                      this.factoryContext
+                              .getFeatureFlags()
+                              .isEnabled(Feature.INDEX_OR_DOC_VALUES_QUERY_FOR_IN_OPERATOR)
                           ? LongField.newSetQuery(
                               TypeField.NUMBER_INT64.getLuceneFieldName(path, embeddedRoot), longs)
                           : LongPoint.newSetQuery(
@@ -166,8 +182,9 @@ class InQueryFactory {
                           longs);
 
                   Query numberDoubleQuery =
-                      this.factoryContext.getFeatureFlags().isEnabled(
-                              Feature.INDEX_OR_DOC_VALUES_QUERY_FOR_IN_OPERATOR)
+                      this.factoryContext
+                              .getFeatureFlags()
+                              .isEnabled(Feature.INDEX_OR_DOC_VALUES_QUERY_FOR_IN_OPERATOR)
                           ? LongField.newSetQuery(
                               TypeField.NUMBER_DOUBLE.getLuceneFieldName(path, embeddedRoot),
                               doubles)

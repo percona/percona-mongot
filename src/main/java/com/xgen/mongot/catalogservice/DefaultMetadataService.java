@@ -47,6 +47,15 @@ public class DefaultMetadataService implements MetadataService {
     this.mongoClient.close();
   }
 
+  @VisibleForTesting
+  public static MetadataService createForTesting(MongoClient client, String databaseName) {
+    return new DefaultMetadataService(
+        client,
+        DefaultAuthoritativeIndexCatalog.createForTesting(client, databaseName),
+        DefaultIndexStats.createForTesting(client, databaseName),
+        DefaultServerState.createForTesting(client, databaseName));
+  }
+
   public static MetadataService create(
       SyncSourceConfig syncSourceConfig, MeterRegistry meterRegistry) {
 

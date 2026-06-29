@@ -4,11 +4,11 @@ import com.xgen.mongot.index.lucene.explain.timing.ExplainTimings;
 import com.xgen.mongot.index.lucene.explain.timing.ExplainTimings.Type;
 import java.io.IOException;
 import java.util.Collection;
-import javax.annotation.Nullable;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TwoPhaseIterator;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Instruments a {@link Scorer} to profile methods related to scoring. Responsible for populating
@@ -24,8 +24,7 @@ class ProfileScorer extends Scorer {
   private final ExplainTimings timings;
 
   /** Constructs a ProfileScorer. */
-  protected ProfileScorer(Weight weight, Scorer scorer, ExplainTimings timings) {
-    super(weight);
+  protected ProfileScorer(Scorer scorer, ExplainTimings timings) {
     this.scorer = scorer;
     this.timings = timings;
   }
@@ -93,11 +92,6 @@ class ProfileScorer extends Scorer {
   @Override
   public int docID() {
     return this.scorer.docID();
-  }
-
-  @Override
-  public Weight getWeight() {
-    return this.weight;
   }
 
   @Override

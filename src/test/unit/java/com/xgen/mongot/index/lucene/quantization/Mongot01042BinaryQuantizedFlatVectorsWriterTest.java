@@ -157,9 +157,10 @@ public class Mongot01042BinaryQuantizedFlatVectorsWriterTest {
 
       QuantizedByteVectorValues vectorValues =
           VectorTestUtils.getQuantizedReader(leafReader, field);
+      var iter = vectorValues.iterator();
       for (int i = 0; i < vectorValues.size(); ++i) {
-        vectorValues.nextDoc();
-        byte[] copy = vectorValues.vectorValue().clone();
+        iter.nextDoc();
+        byte[] copy = vectorValues.vectorValue(iter.index()).clone();
         result.add(new BytesRef(copy));
       }
     }

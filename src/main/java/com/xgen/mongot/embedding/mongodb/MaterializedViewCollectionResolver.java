@@ -11,32 +11,45 @@ import com.google.common.hash.Hashing;
 import com.google.common.io.BaseEncoding;
 import com.mongodb.MongoCommandException;
 import com.mongodb.client.MongoClient;
+import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient;
 import com.xgen.mongot.embedding.mongodb.common.InternalDatabaseResolver;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
+import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
+import com.xgen.mongot.embedding.utils.MongoClientOperationExecutor;
+import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
-import com.xgen.mongot.index.definition.VectorIndexDefinition;
-import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
+import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
+import com.xgen.mongot.index.definition.VectorTextFieldSpecification;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FieldPath;
-import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
+import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implements the logic to determine which materialized view collection to use for a given index
  * definition. Responsible for discovering existing collections and creating new ones as needed.
  */
 public class MaterializedViewCollectionResolver {
+
+  private static final Logger LOG =
+      LoggerFactory.getLogger(MaterializedViewCollectionResolver.class);
 
   public static final String MV_COLLECTION_SCHEMA_NAMESPACE = "_autoEmbed";
   private static final String DELIM = "-";
@@ -48,29 +61,68 @@ public class MaterializedViewCollectionResolver {
   // (95 bytes).
   private static final int DEFINITION_HASH_BYTES = 16;
 
+  /**
+   * Parent metrics namespace; combined with {@link #METRICS_RESOURCE_NAME} this produces metric
+   * names of the form {@code embedding.materializedView.collectionResolver.requestLatency} etc.
+   * Mirrors the namespace used by other auto-embed components such as
+   * {@link com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory}.
+   */
+  private static final String METRICS_NAMESPACE = "embedding.materializedView";
+
+  /** Per-resource metric name under {@link #METRICS_NAMESPACE}. */
+  private static final String METRICS_RESOURCE_NAME = "collectionResolver";
+
   private final MaterializedViewCollectionMetadataCatalog metadataCatalog;
 
-  @SuppressWarnings("UnusedVariable") // will be used later for schema mapping and GC logic
   private final LeaseManager leaseManager;
 
-  @SuppressWarnings("UnusedVariable") // will be used later for schema mapping and GC logic
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
 
   private final InternalDatabaseResolver dbResolver;
 
   private final AutoEmbeddingMongoClient autoEmbeddingMongoClient;
 
+  /**
+   * Wraps the resolver's direct MongoDB calls (listCollections, createCollection) with retries on
+   * transient errors. Lease operations called from this class are already retried by the lease
+   * manager's own executor; this executor covers the remaining DB operations on the index init
+   * path. See {@link com.xgen.mongot.embedding.utils.MongoClientOperationExecutor} for the set of
+   * exceptions classified as retryable (e.g. MongoTimeoutException, MongoSocketException).
+   */
+  private final MongoClientOperationExecutor operationExecutor;
+
+  /** Constructs the resolver. Use {@link #create} from production code. */
   public MaterializedViewCollectionResolver(
       InternalDatabaseResolver dbResolver,
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MaterializedViewCollectionMetadataCatalog metadataCatalog,
       AutoEmbeddingMaterializedViewConfig materializedViewConfig,
-      LeaseManager leaseManager) {
+      LeaseManager leaseManager,
+      MeterRegistry meterRegistry) {
     this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;
     this.metadataCatalog = metadataCatalog;
     this.materializedViewConfig = materializedViewConfig;
     this.leaseManager = leaseManager;
     this.dbResolver = dbResolver;
+    // Tight retry budget: 2 retries (3 attempts total). Each attempt absorbs the driver's 10s
+    // server-selection timeout; combined with backoff this gives a ~31s in-place budget which
+    // covers the typical mongod unreachability window during a maintenance restart. Longer
+    // outages fall through to the async retry path via IndexRecoveryStager rather than
+    // blocking journal-restore / conf-call processing on this thread further. The retry loop
+    // aborts immediately if the underlying mongo client is closed (mongot shutdown) so we don't
+    // delay shutdown by the retry budget.
+    this.operationExecutor =
+        new MongoClientOperationExecutor(
+            new MetricsFactory(METRICS_NAMESPACE, meterRegistry),
+            METRICS_RESOURCE_NAME,
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofMillis(500))
+                .backoffFactor(2)
+                .maxDelay(Duration.ofMillis(1000))
+                .maxRetries(2)
+                .jitter(0.1)
+                .build(),
+            autoEmbeddingMongoClient::isClosed);
   }
 
   public static MaterializedViewCollectionResolver create(
@@ -78,14 +130,16 @@ public class MaterializedViewCollectionResolver {
       AutoEmbeddingMongoClient autoEmbeddingMongoClient,
       MaterializedViewCollectionMetadataCatalog metadataCatalog,
       LeaseManager leaseManager,
-      AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
+      AutoEmbeddingMaterializedViewConfig materializedViewConfig,
+      MeterRegistry meterRegistry) {
     // TODO(CLOUDP-360542): Support sync source change.
     return new MaterializedViewCollectionResolver(
         dbResolver,
         autoEmbeddingMongoClient,
         metadataCatalog,
         materializedViewConfig,
-        leaseManager);
+        leaseManager,
+        meterRegistry);
   }
 
   /**
@@ -101,20 +155,23 @@ public class MaterializedViewCollectionResolver {
   public MaterializedViewCollectionMetadata getOrCreateMaterializedViewForIndex(
       MaterializedViewIndexDefinitionGeneration indexDefinitionGeneration)
       throws MaterializedViewTransientException {
-    var mongoClientOpt = this.autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient();
-    if (mongoClientOpt.isEmpty()) {
+    // Fail fast if no client has been registered yet. Each retried operation below additionally
+    // re-fetches via requireResolverClient() so a sync-source rotation mid-call (which closes
+    // and replaces the resolver client) doesn't leave us retrying against a torn-down reference;
+    // mirrors how DynamicLeaderLeaseManager re-fetches getLeaseManagerMongoClient() per call.
+    if (this.autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient().isEmpty()) {
       throw new MaterializedViewTransientException(
           "Missing materialized view collection client",
           MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE);
     }
-    var mongoClient = mongoClientOpt.get();
     String matViewDb =
         this.dbResolver.resolve(indexDefinitionGeneration.getIndexDefinition().getDatabase());
     try {
-      var collectionName =
-          getOrCreateCollectionName(indexDefinitionGeneration, mongoClient, matViewDb);
+      var collectionName = getOrCreateCollectionName(indexDefinitionGeneration, matViewDb);
       MongoDbCollectionInfo collectionInfo =
-          getCollectionInfo(mongoClient, matViewDb, collectionName);
+          this.operationExecutor.execute(
+              "getCollectionInfo",
+              () -> getCollectionInfo(requireResolverClient(), matViewDb, collectionName));
 
       MaterializedViewCollectionMetadata materializedViewCollectionMetadata =
           this.leaseManager.initializeLease(
@@ -124,29 +181,69 @@ public class MaterializedViewCollectionResolver {
                   Check.instanceOf(collectionInfo, MongoDbCollectionInfo.Collection.class)
                       .info()
                       .uuid(),
-                  indexDefinitionGeneration.getIndexDefinition().asVectorDefinition(),
+                  indexDefinitionGeneration.getIndexDefinition(),
                   this.materializedViewConfig.materializedViewSchemaVersion.orElse(
                       CURRENT_MAT_VIEW_SCHEMA_VERSION)));
+      try {
+        this.leaseManager.executeOpsCommandsAfterInitializeLease(
+            materializedViewCollectionMetadata.collectionName());
+      } catch (RuntimeException e) {
+        LOG.atError()
+            .setCause(e)
+            .addKeyValue("collectionName", materializedViewCollectionMetadata.collectionName())
+            .log("Ops hook failed during MV initialization; continuing catalog registration");
+      }
       this.metadataCatalog.addMetadata(
           indexDefinitionGeneration.getGenerationId(), materializedViewCollectionMetadata);
-      this.metadataCatalog.addDatabaseName(
-          indexDefinitionGeneration.getGenerationId(), matViewDb);
+      this.metadataCatalog.addDatabaseName(indexDefinitionGeneration.getGenerationId(), matViewDb);
+      LOG.atInfo()
+          .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("Registered materialized view metadata and database name");
       return materializedViewCollectionMetadata;
+    } catch (MaterializedViewTransientException e) {
+      // Preserve the executor / lease manager's classified reason (e.g. EXCEEDED_DISK_LIMIT,
+      // USER_WRITES_BLOCKED, SYSTEM_OVERLOADED, LEASE_OPERATION_FAILED) instead of collapsing
+      // every transient failure into COLLECTION_RESOLUTION_FAILED.
+      LOG.atWarn()
+          .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
+          .addKeyValue("database", matViewDb)
+          .addKeyValue("reason", e.getReason())
+          .setCause(e)
+          .log("Failed to resolve materialized view collection");
+      throw e;
     } catch (Exception e) {
-      throw new MaterializedViewTransientException(e);
+      LOG.atWarn()
+          .addKeyValue("generationId", indexDefinitionGeneration.getGenerationId())
+          .addKeyValue("database", matViewDb)
+          .setCause(e)
+          .log("Failed to resolve materialized view collection");
+      throw new MaterializedViewTransientException(
+          String.valueOf(e.getMessage()),
+          e,
+          MaterializedViewTransientException.Reason.COLLECTION_RESOLUTION_FAILED);
     }
   }
 
+  /**
+   * Returns the current resolver mongo client from the {@link AutoEmbeddingMongoClient}'s atomic
+   * reference, throwing {@link MaterializedViewTransientException} (retryable) if absent. Called
+   * fresh per-attempt inside retried suppliers so a sync-source rotation during retry picks up
+   * the new client rather than continuing against a closed one.
+   */
+  private MongoClient requireResolverClient() throws MaterializedViewTransientException {
+    return this.autoEmbeddingMongoClient
+        .getMaterializedViewResolverMongoClient()
+        .orElseThrow(
+            () ->
+                new MaterializedViewTransientException(
+                    "Missing materialized view collection client",
+                    MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE));
+  }
+
   private String getOrCreateCollectionName(
-      IndexDefinitionGeneration indexDefinitionGeneration,
-      MongoClient mongoClient,
-      String matViewDb)
-      throws CheckedMongoException {
-    // TODO(CLOUDP-384821): Update index catalog service for community to set
-    // MaterializedViewNameFormatVersion for new indexes.
-    // MMS should set fallback defaultMaterializedViewNameFormatVersion >= 1, community currectly
-    // sets it to 0 for backward compatibility, new indexes should use per-index name format
-    // version.
+      IndexDefinitionGeneration indexDefinitionGeneration, String matViewDb) throws Exception {
     long matViewNameFormatVersion =
         indexDefinitionGeneration
             .getIndexDefinition()
@@ -171,10 +268,7 @@ public class MaterializedViewCollectionResolver {
     } else {
       var hash =
           computeHash(
-              indexDefinitionGeneration
-                  .asMaterializedView()
-                  .getIndexDefinition()
-                  .asVectorDefinition());
+              indexDefinitionGeneration.asMaterializedView().getIndexDefinition());
       collectionName =
           uniqueIndexId
               + DELIM
@@ -184,11 +278,27 @@ public class MaterializedViewCollectionResolver {
               + DELIM
               + autoEmbeddingDefinitionVersion;
     }
-    if (getCollectionInfos(mongoClient, matViewDb)
-        .getCollectionInfo(matViewDb, collectionName)
-        .isEmpty()) {
+    String resolvedName = collectionName;
+    boolean collectionExists =
+        this.operationExecutor
+            .execute(
+                "getCollectionInfos",
+                () ->
+                    getCollectionInfos(requireResolverClient(), matViewDb)
+                        .getCollectionInfo(matViewDb, resolvedName))
+            .isPresent();
+    if (!collectionExists) {
       // Create new mat view collection when it's not found.
-      createCollection(mongoClient, matViewDb, collectionName);
+      createCollection(matViewDb, collectionName);
+      LOG.atInfo()
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("Created new materialized view collection");
+    } else {
+      LOG.atInfo()
+          .addKeyValue("collectionName", collectionName)
+          .addKeyValue("database", matViewDb)
+          .log("Reusing existing materialized view collection");
     }
     return collectionName;
   }
@@ -196,15 +306,15 @@ public class MaterializedViewCollectionResolver {
   private MaterializedViewCollectionMetadata createProposedMetadata(
       String collectionName,
       UUID uuid,
-      VectorIndexDefinition indexDefinition,
+      IndexDefinition indexDefinition,
       int mvSchemaVersion) {
     if (mvSchemaVersion == 0) {
       return new MaterializedViewCollectionMetadata(VERSION_ZERO, uuid, collectionName);
     } else if (mvSchemaVersion == 1) {
+      AutoEmbedFieldMapping mapping =
+          AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDefinition);
       ImmutableMap<FieldPath, FieldPath> schemaFieldsMapping =
-          indexDefinition.getMappings().fieldMap().entrySet().stream()
-              .filter(
-                  entry -> entry.getValue().getType() == VectorIndexFieldDefinition.Type.AUTO_EMBED)
+          mapping.embedFields().entrySet().stream()
               .collect(
                   toImmutableMap(
                       Map.Entry::getKey,
@@ -227,49 +337,78 @@ public class MaterializedViewCollectionResolver {
    * Creates a new materialized view collection with the given name while gracefully handling the
    * case where the collection already exists.
    */
-  private void createCollection(MongoClient mongoClient, String matViewDb, String collectionName) {
-    try {
-      mongoClient.getDatabase(matViewDb).createCollection(collectionName);
-    } catch (MongoCommandException e) {
-      if (e.getErrorCode() != NAMESPACE_EXISTS_ERROR_CODE) {
-        throw new MaterializedViewTransientException(e);
-      }
-      // Ignore if the collection already exists.
-    }
+  private void createCollection(String matViewDb, String collectionName) throws Exception {
+    this.operationExecutor.execute(
+        "createCollection",
+        () -> {
+          try {
+            requireResolverClient().getDatabase(matViewDb).createCollection(collectionName);
+          } catch (MongoCommandException e) {
+            if (e.getErrorCode() != NAMESPACE_EXISTS_ERROR_CODE) {
+              throw e;
+            }
+            // Collection already exists — another instance created it concurrently. Treated as a
+            // success so the executor's failedRequests counter doesn't tick on the (common) case
+            // where we re-resolve a previously-created MV collection.
+            LOG.atInfo()
+                .addKeyValue("collectionName", collectionName)
+                .addKeyValue("database", matViewDb)
+                .log("MatView collection already exists, skipping creation");
+          }
+          return null;
+        });
   }
 
   /**
-   * Computes a hash of the index definition. The hash is used to determine if the index definition
-   * has changed in a way that requires a new materialized view collection.
+   * Computes a hash of the auto-embed fields in an index definition. Convenience overload that
+   * extracts auto-embed fields before delegating to {@link #computeHash(AutoEmbedFieldMapping)}.
    */
-  public static String computeHash(VectorIndexDefinition indexDefinition) {
-    var autoEmbedFields =
-        indexDefinition.getFields().stream()
-            .filter(field -> field.getType() == VectorIndexFieldDefinition.Type.AUTO_EMBED)
-            .map(VectorIndexFieldDefinition::asVectorAutoEmbedField)
+  public static String computeHash(IndexDefinition indexDefinition) {
+    return computeHash(AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDefinition));
+  }
+
+  /**
+   * Computes a hash of the auto-embed field mapping. The hash is used to determine if the index
+   * definition has changed in a way that requires a new materialized view collection.
+   *
+   * <p>The hash includes path, model name, modality, num dimensions, and auto-embed quantization
+   * for each AUTO_EMBED field. Legacy TEXT fields are not valid inputs.
+   */
+  public static String computeHash(AutoEmbedFieldMapping mapping) {
+    List<Map.Entry<FieldPath, AutoEmbedFieldMapping.AutoEmbedField.EmbedField>> sortedEntries =
+        mapping.embedFields().entrySet().stream()
+            .sorted(Comparator.comparing(e -> e.getKey().toString()))
             .toList();
 
-    // Order-independent: sort so same set of fields always hashes the same
-    var sortedFields =
-        autoEmbedFields.stream()
-            .sorted(
-                Comparator.comparing(
-                    VectorIndexFieldDefinition::getPath, Comparator.comparing(FieldPath::toString)))
-            .toList();
+    for (var entry : sortedEntries) {
+      switch (entry.getValue().specification()) {
+        case VectorAutoEmbedFieldSpecification ignored -> {
+          // do nothing, this is what we want here
+        }
+        case VectorTextFieldSpecification ignored ->
+            throw new IllegalArgumentException(
+                "Legacy TEXT field specification is not supported for materialized view hash"
+                    + " computation: "
+                    + entry.getKey());
+      }
+    }
 
     StringBuilder sb = new StringBuilder();
-    for (var field : sortedFields) {
+    for (var entry : sortedEntries) {
+      FieldPath path = entry.getKey();
+      VectorAutoEmbedFieldSpecification spec =
+          (VectorAutoEmbedFieldSpecification) entry.getValue().specification();
       // Include path, model name, modality, num dimensions, and quantization in hash as those
       // fields impact the embeddings generated or how they are stored.
-      sb.append(field.getPath().toString())
+      sb.append(path.toString())
           .append(HASH_STRING_DELIM)
-          .append(field.specification().modelName())
+          .append(spec.modelName())
           .append(HASH_STRING_DELIM)
-          .append(field.specification().modality())
+          .append(spec.modality())
           .append(HASH_STRING_DELIM)
-          .append(field.specification().numDimensions())
+          .append(spec.numDimensions())
           .append(HASH_STRING_DELIM)
-          .append(field.specification().autoEmbedQuantization());
+          .append(spec.autoEmbedQuantization());
       // For future reference: Include additional field params conditionally for newer hash versions
       // as needed. Note that default values need careful handling to ensure that simply bumping the
       // hash version doesn't change the hash value for all indexes.

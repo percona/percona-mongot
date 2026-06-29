@@ -16,6 +16,7 @@ java_library(
     deps = [
         "//src/main/java/com/xgen/mongot/cursor",
         "//src/main/java/com/xgen/mongot/embedding/config",
+        "//src/main/java/com/xgen/mongot/embedding/exceptions",
         "//src/main/java/com/xgen/mongot/embedding/mongodb/common",
         "//src/main/java/com/xgen/mongot/embedding/mongodb/leasing",
         "//src/main/java/com/xgen/mongot/embedding/providers",
@@ -39,6 +40,9 @@ java_library(
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_guava_guava",
         "@maven//:io_micrometer_micrometer_core",
+        "@maven//:org_jetbrains_annotations",
+        "@maven//:org_mongodb_bson",
+        "@maven//:org_mongodb_mongodb_driver_core",
         "@maven//:org_slf4j_slf4j_api",
     ],
 )

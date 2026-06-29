@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene.codec.flat;
 
 import com.google.auto.service.AutoService;
+import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import java.io.IOException;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.KnnVectorsReader;
@@ -45,5 +46,12 @@ public class Float32AndByteFlatVectorsFormat extends KnnVectorsFormat {
   @Override
   public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
     return new FullScanFlatVectorsReaderDecorator(this.format.fieldsReader(state));
+  }
+
+  @Override
+  public int getMaxDimensions(String fieldName) {
+    // [Changed from Lucene]
+    // Changed the max allowed vector dimensions.
+    return VectorFieldSpecification.MAX_DIMENSIONS;
   }
 }

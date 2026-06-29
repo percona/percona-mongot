@@ -2,7 +2,6 @@ package com.xgen.mongot.index.lucene.query.custom;
 
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.QueryTimeout;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -12,6 +11,7 @@ import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.knn.KnnCollectorManager;
 import org.apache.lucene.util.Bits;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A specialized implementation of Lucene's KnnByteVectorQuery to integrate with Mongot's metrics
@@ -62,17 +62,17 @@ public class MongotKnnByteQuery extends KnnByteVectorQuery {
         super.approximateSearch(context, acceptDocs, visitedLimit, knnCollectorManager);
 
     var searchMode =
-        result.totalHits.relation == TotalHits.Relation.EQUAL_TO
+        result.totalHits.relation() == TotalHits.Relation.EQUAL_TO
             ? IndexMetricsUpdater.KnnSearchMode.APPROXIMATE
             : IndexMetricsUpdater.KnnSearchMode.FALLBACK_TO_EXACT;
     this.metrics.incrementKnnSearchMode(searchMode);
 
     // Record visited nodes - totalHits.value equals visited nodes right after approximate search
     this.metrics.recordVectorSearchVisitedNodes(
-        result.totalHits.value, this.hasFilter, IndexMetricsUpdater.KnnSearchMode.APPROXIMATE);
+        result.totalHits.value(), this.hasFilter, IndexMetricsUpdater.KnnSearchMode.APPROXIMATE);
     // Record visited nodes per segment (for both approximate and fallback-to-exact)
     this.metrics.recordVectorSearchVisitedNodesPerSegment(
-        result.totalHits.value, this.hasFilter, searchMode);
+        result.totalHits.value(), this.hasFilter, searchMode);
 
     return result;
   }
@@ -85,7 +85,7 @@ public class MongotKnnByteQuery extends KnnByteVectorQuery {
 
     // Record visited nodes - totalHits.value equals visited nodes right after exact search
     this.metrics.recordVectorSearchVisitedNodes(
-        result.totalHits.value, this.hasFilter, IndexMetricsUpdater.KnnSearchMode.EXACT);
+        result.totalHits.value(), this.hasFilter, IndexMetricsUpdater.KnnSearchMode.EXACT);
 
     return result;
   }

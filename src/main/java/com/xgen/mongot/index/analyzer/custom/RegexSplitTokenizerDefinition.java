@@ -55,11 +55,9 @@ public class RegexSplitTokenizerDefinition extends TokenizerDefinition
       return true;
     }
 
-    if (!(other instanceof RegexSplitTokenizerDefinition)) {
+    if (!(other instanceof RegexSplitTokenizerDefinition otherDefinition)) {
       return false;
     }
-
-    RegexSplitTokenizerDefinition otherDefinition = (RegexSplitTokenizerDefinition) other;
 
     // Pattern::equals() currently only tests identity - compare underlying string instead
     return Objects.equals(this.pattern.pattern(), otherDefinition.pattern.pattern());

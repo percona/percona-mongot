@@ -6,6 +6,7 @@ java_test_suite(
         "EmbeddingModelConfigTest.java",
         "EmbeddingServiceConfigTest.java",
         "VoyageApiSchemaTest.java",
+        "VoyageModelConfigTest.java",
     ],
     data = [
         "//src/test/unit/resources/embedding/providers/config:srcs",

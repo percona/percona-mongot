@@ -12,7 +12,7 @@ import com.xgen.mongot.index.version.IndexCapabilities;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.Vector;
 import java.util.Optional;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Similar to {@link VectorEmbeddedDocumentBuilder}, except not at the root of a document block.

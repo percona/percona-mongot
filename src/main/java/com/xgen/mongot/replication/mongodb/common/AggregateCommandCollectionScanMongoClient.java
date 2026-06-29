@@ -33,7 +33,8 @@ public class AggregateCommandCollectionScanMongoClient<E extends Exception>
       NamespaceChangeCheck<E> namespaceChangeCheck,
       FutureWrapper<E> futureWrapper,
       Function<Exception, E> exceptionWrapper,
-      Optional<InitialSyncMetrics> initialSyncMetricsUpdaterOpt) {
+      Optional<InitialSyncMetrics> initialSyncMetricsUpdaterOpt,
+      Optional<Integer> collectionScanGetMoreBatchSize) {
     super(
         mongoClient,
         sessionRefresher,
@@ -42,7 +43,8 @@ public class AggregateCommandCollectionScanMongoClient<E extends Exception>
         namespaceChangeCheck,
         futureWrapper,
         exceptionWrapper,
-        initialSyncMetricsUpdaterOpt);
+        initialSyncMetricsUpdaterOpt,
+        collectionScanGetMoreBatchSize);
     this.command = command;
     this.openScanTimer = metricsFactory.timer("openScanDurations");
   }

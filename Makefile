@@ -74,6 +74,15 @@ tools.buildifier.check:
 tools.buildifier.fix:
 	@$(call BAZEL) run //bazel:buildifier-fix
 
+# Refresh use_repo lists in MODULE.bazel fragments after adding/removing an
+# extension, then re-normalize formatting. `bazel mod tidy` inserts blank lines
+# between consecutive include() calls that buildifier wants compact; running
+# buildifier-fix afterwards converges on the canonical form.
+.PHONY: tools.bazel.tidy
+tools.bazel.tidy:
+	@$(call BAZEL) mod tidy
+	@$(call BAZEL) run //bazel:buildifier-fix
+
 .PHONY: tools.buf.lint
 tools.buf.lint:
 	@$(call BAZEL) test --build_tests_only $(shell $(call BAZEL) query 'kind(buf_lint_test, //...)')
@@ -106,7 +115,7 @@ tools.jdk.fetch:
 
 .PHONY: tools.jdk.path
 tools.jdk.path: tools.jdk.fetch
-	@echo $(shell $(BAZELISK) info output_base)/external/adoptium_jdk_macos_aarch64/Contents/Home
+	@echo $(shell $(BAZELISK) info output_base)/external/+java_repos+adoptium_jdk_macos_aarch64/Contents/Home
 
 .PHONY: tools.precommit.enabled
 tools.precommit.enabled:
@@ -125,6 +134,7 @@ tools.precommit.enabled:
 # dependency rules
 .PHONY: deps.update
 deps.update:
+	@CARGO_BAZEL_REPIN=1 $(call BAZEL) build //src/main/rust/...
 	@$(DIR)/scripts/java/update-dependencies.sh
 	@$(call BAZEL) run //bazel/python:requirements.update
 
@@ -132,13 +142,28 @@ deps.update:
 deps.outdated:
 	@$(call BAZEL) run @maven//:outdated
 
+.PHONY: deps.pin.community
+deps.pin.community:
+	@$(DIR)/scripts/java/pin-community-maven.sh
+
 .PHONY: test.unit
 test.unit:
-	@echo 'Running unit tests'
-	@$(call BAZEL) test \
-	               --test_tag_filters='unit' \
-	               --test_output=errors \
-	               //src/...
+	@echo 'Running unit tests for files affected by this PR'
+	@if python3 $(DIR)/scripts/ci/affected_tests.py \
+			--base-branch "$${branch_name:-master}" \
+			--bazel "$(BAZEL)" \
+			--tag "unit" \
+			--output-file "test_filter.targets"; then \
+		$(BAZEL) test \
+			--test_output=errors \
+			--target_pattern_file=test_filter.targets; \
+	else \
+		echo 'Running all unit tests'; \
+		$(BAZEL) test \
+			--test_tag_filters='unit' \
+			--test_output=errors \
+			//src/...; \
+	fi
 
 .PHONY: test.unit.coverage
 test.unit.coverage:

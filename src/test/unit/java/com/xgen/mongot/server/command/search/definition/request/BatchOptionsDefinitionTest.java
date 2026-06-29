@@ -16,13 +16,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      BatchOptionsDefinitionTest.TestDeserialization.class,
-      BatchOptionsDefinitionTest.TestSerialization.class,
+      BatchOptionsDefinitionTest.DeserializationTest.class,
+      BatchOptionsDefinitionTest.SerializationTest.class,
     })
 public class BatchOptionsDefinitionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "batch-cursor-options-deserialization";
     private static final BsonDeserializationTestSuite<BatchOptionsDefinition> TEST_SUITE =
         fromDocument(
@@ -32,7 +32,7 @@ public class BatchOptionsDefinitionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<BatchOptionsDefinition> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<BatchOptionsDefinition> testSpec) {
       this.testSpec = testSpec;
     }
@@ -69,7 +69,7 @@ public class BatchOptionsDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "batch-cursor-options-serialization";
     private static final BsonSerializationTestSuite<BatchOptionsDefinition> TEST_SUITE =
         fromEncodable(
@@ -77,7 +77,7 @@ public class BatchOptionsDefinitionTest {
 
     private final BsonSerializationTestSuite.TestSpec<BatchOptionsDefinition> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<BatchOptionsDefinition> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<BatchOptionsDefinition> testSpec) {
       this.testSpec = testSpec;
     }
 

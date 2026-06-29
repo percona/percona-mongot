@@ -4,7 +4,7 @@ import com.xgen.mongot.index.definition.SynonymMappingDefinition;
 import com.xgen.mongot.index.status.SynonymStatus;
 import java.util.Map;
 import java.util.Optional;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A {@link SynonymRegistry} stores {@link SynonymMapping} entries for an index. Each {@link

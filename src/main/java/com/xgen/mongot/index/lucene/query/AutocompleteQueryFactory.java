@@ -27,6 +27,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.automaton.LevenshteinAutomata;
+import org.apache.lucene.util.automaton.Operations;
 
 class AutocompleteQueryFactory {
   // Setting this to true allows the levenshtein automata to count transpositions as an edit, which
@@ -205,7 +206,11 @@ class AutocompleteQueryFactory {
         new LevenshteinAutomata(suffix, FUZZY_WITH_TRANSPOSITIONS);
     return new AutomatonQuery(
         new Term(luceneFieldPath, normalizedQueryString),
-        distanceAutomaton.toAutomaton(fuzzyOption.maxEdits(), exactMatchPrefix));
+        // this should be a no-op, Levenshtein Automaton should already be determinized, but
+        // wrapping for safety
+        Operations.determinize(
+            distanceAutomaton.toAutomaton(fuzzyOption.maxEdits(), exactMatchPrefix),
+            Operations.DEFAULT_DETERMINIZE_WORK_LIMIT));
   }
 
   /** Create a boolean query with should clauses matching text-indexed tokens. */

@@ -2,7 +2,10 @@ load("//bazel/java:package.bzl", "java_library")
 
 java_library(
     name = "security",
-    srcs = ["Security.java"],
+    srcs = [
+        "AesGcmCipher.java",
+        "Security.java",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/java/com/xgen/mongot/util",

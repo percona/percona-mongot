@@ -47,11 +47,9 @@ public class AsciiFoldingTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof AsciiFoldingTokenFilterDefinition)) {
+    if (!(other instanceof AsciiFoldingTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    AsciiFoldingTokenFilterDefinition otherDefinition = (AsciiFoldingTokenFilterDefinition) other;
 
     return (this.outputOption == otherDefinition.outputOption);
   }

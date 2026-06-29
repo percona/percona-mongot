@@ -18,21 +18,24 @@ public class ChangeStreamAggregateCommandFactory {
   private final MongoNamespace namespace;
   private final List<String> excludedFields;
   private final boolean matchCollectionUuidForUpdateLookup;
+  private final boolean splitLargeChangeStreamEvents;
 
   public ChangeStreamAggregateCommandFactory(
       IndexDefinition indexDefinition,
       MongoNamespace namespace,
       List<String> excludedFields,
-      boolean matchCollectionUuidForUpdateLookup) {
+      boolean matchCollectionUuidForUpdateLookup,
+      boolean splitLargeChangeStreamEvents) {
     this.indexDefinition = indexDefinition;
     this.namespace = namespace;
     this.excludedFields = excludedFields;
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
+    this.splitLargeChangeStreamEvents = splitLargeChangeStreamEvents;
   }
 
   public ChangeStreamAggregateCommandFactory(
       IndexDefinition indexDefinition, MongoNamespace namespace) {
-    this(indexDefinition, namespace, List.of(), false);
+    this(indexDefinition, namespace, List.of(), false, false);
   }
 
   /**
@@ -62,7 +65,8 @@ public class ChangeStreamAggregateCommandFactory {
             .fullDocument(ChangeStreamAggregateCommand.FullDocument.UPDATE_LOOKUP)
             .metadataAddFieldsStage(MetadataNamespace.forChangeStream(indexId))
             .showMigrationEvents(true)
-            .matchCollectionUuidForUpdateLookup(this.matchCollectionUuidForUpdateLookup);
+            .matchCollectionUuidForUpdateLookup(this.matchCollectionUuidForUpdateLookup)
+            .splitLargeEvent(this.splitLargeChangeStreamEvents);
 
     if (mode == ChangeStreamMode.INDEXED_FIELDS) {
       Projection.forChangeStream(this.indexDefinition)

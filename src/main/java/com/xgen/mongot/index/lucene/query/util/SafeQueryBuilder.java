@@ -53,7 +53,7 @@ public class SafeQueryBuilder {
                 switch (value) {
                   case BooleanQuery booleanQuery ->
                       booleanQuery.clauses().stream()
-                          .anyMatch(clause -> containsPhraseQuery(Optional.of(clause.getQuery())));
+                          .anyMatch(clause -> containsPhraseQuery(Optional.of(clause.query())));
                   case PhraseQuery phraseQuery -> true;
                   case MultiPhraseQuery multiPhraseQuery -> true;
                   case DisjunctionMaxQuery disjunctionMaxQuery ->

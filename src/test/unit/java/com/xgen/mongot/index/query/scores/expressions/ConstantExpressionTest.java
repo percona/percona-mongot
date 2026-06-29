@@ -14,12 +14,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      ConstantExpressionTest.TestDeserialization.class,
-      ConstantExpressionTest.TestSerialization.class,
+      ConstantExpressionTest.DeserializationTest.class,
+      ConstantExpressionTest.SerializationTest.class,
     })
 public class ConstantExpressionTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "constant-expression-deserialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -28,7 +28,7 @@ public class ConstantExpressionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<ConstantExpression> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<ConstantExpression> testSpec) {
       this.testSpec = testSpec;
     }
@@ -68,7 +68,7 @@ public class ConstantExpressionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "constant-expression-serialization";
     private static final String RESOURCES_PATH =
         "src/test/unit/resources/index/query/scores/expressions/";
@@ -77,7 +77,7 @@ public class ConstantExpressionTest {
 
     private final BsonSerializationTestSuite.TestSpec<ConstantExpression> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<ConstantExpression> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<ConstantExpression> testSpec) {
       this.testSpec = testSpec;
     }
 

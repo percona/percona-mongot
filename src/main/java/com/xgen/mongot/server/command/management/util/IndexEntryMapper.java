@@ -148,9 +148,18 @@ public class IndexEntryMapper {
                 .flatMap(IndexDefinition::getDefinitionVersion)
                 .orElse(DEFAULT_INDEX_VERSION),
             latestVersion);
+    boolean isStagedIndexLatestVersion =
+        entry
+            .stagedIndex()
+            .map(
+                staged ->
+                    Objects.equals(
+                        staged.definition().getDefinitionVersion().orElse(DEFAULT_INDEX_VERSION),
+                        latestVersion))
+            .orElse(false);
 
     return IndexMapper.calculateStatus(
-        mainIndexStatus, stagedIndexStatus, isMainIndexLatestVersion);
+        mainIndexStatus, stagedIndexStatus, isMainIndexLatestVersion, isStagedIndexLatestVersion);
   }
 
   /**

@@ -14,6 +14,7 @@ import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.IndexWriter;
 import com.xgen.mongot.index.InitializedSearchIndex;
@@ -40,6 +41,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.Directory;
@@ -86,7 +88,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       IndexDirectoryHelper indexDirectoryHelper,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry)
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
@@ -94,8 +97,15 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
         .log("Initializing index");
 
     try {
-      var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags,
-          dynamicFeatureFlagRegistry);
+      var ret =
+          create(
+              index,
+              generationId,
+              directoryFactory,
+              luceneIndexSnapshotter,
+              featureFlags,
+              dynamicFeatureFlagRegistry,
+              useIdBloomFilter);
       LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
@@ -112,8 +122,15 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
         throw e;
       }
     }
-    var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags,
-        dynamicFeatureFlagRegistry);
+    var ret =
+        create(
+            index,
+            generationId,
+            directoryFactory,
+            luceneIndexSnapshotter,
+            featureFlags,
+            dynamicFeatureFlagRegistry,
+            useIdBloomFilter);
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
@@ -127,7 +144,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       IndexDirectoryFactory directoryFactory,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry)
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
     var definition = index.getDefinition();
     var searchIndexProperties = index.getSearchIndexProperties();
@@ -158,7 +176,10 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                         generationId,
                         indexPartitionId,
                         definition.getNumPartitions(),
-                        featureFlags.isEnabled(Feature.CANCEL_MERGE)),
+                        featureFlags.isEnabled(Feature.CANCEL_MERGE),
+                        useIdBloomFilter,
+                        IndexTypeData.getIndexTypeTag(definition).tagValue,
+                        directory),
                     searchIndexProperties.mergePolicy,
                     searchIndexProperties.ramBufferSizeMb,
                     searchIndexProperties.fieldLimit,
@@ -170,12 +191,13 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                     luceneIndexSnapshotter.map(
                         snapshotter -> snapshotter.getSnapshotDeletionPolicy(indexPartitionId)),
                     featureFlags,
-                    dynamicFeatureFlagRegistry),
+                    useIdBloomFilter),
             luceneIndexWriter ->
                 LuceneSearcherManager.create(
                     luceneIndexWriter.getLuceneWriter(),
                     searcherFactory,
-                    searchIndexProperties.metricsFactory));
+                    searchIndexProperties.metricsFactory,
+                    useIdBloomFilter));
 
     List<LuceneSearchIndexReader> searchIndexReaders =
         new ArrayList<>(indexResources.luceneSearcherManagers.size());
@@ -233,7 +255,7 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
             indexMetricsUpdater.getQueryingMetricsUpdater(),
             () ->
                 dynamicFeatureFlagRegistry.evaluateClusterInvariant(
-                    DynamicFeatureFlags.ENABLE_TOTAL_STRING_FACET_BUCKETS));
+                    DynamicFeatureFlags.ENABLE_TOTAL_FACET_BUCKETS));
 
     IndexWriter writer =
         new MeteredIndexWriter(

@@ -67,6 +67,10 @@ public class ServerStatusDataExtractor {
     return ProcessMeterData.create(this.meterRegistry);
   }
 
+  public LoadSheddingMeterData createLoadSheddingMeterData() {
+    return LoadSheddingMeterData.create(this.meterRegistry);
+  }
+
   public static class JvmMeterData {
     static final String MAX_MEMORY_KEY = "jvm.memory.max";
     static final String USED_MEMORY_KEY = "jvm.memory.used";
@@ -167,6 +171,7 @@ public class ServerStatusDataExtractor {
     public static final String SEGMENT_MERGE_TIME_KEY = "mergeTime";
     public static final String MERGE_CANCELLATION_TIME_KEY = "mergeCancellationTime";
     public static final String NUM_MERGES_ABORTED_KEY = "numMergesAborted";
+    public static final String MERGE_PAUSE_EVENTS_KEY = "numMergePauseEvents";
 
     public final double numMerges;
     public final double numSegmentsMerged;
@@ -176,6 +181,7 @@ public class ServerStatusDataExtractor {
     public final SerializableTimer segmentMerge;
     public final SerializableTimer mergeCancellationTime;
     public final double numMergesAborted;
+    public final double numMergePauseEvents;
 
     @VisibleForTesting
     public LuceneMeterData(
@@ -186,7 +192,8 @@ public class ServerStatusDataExtractor {
         SerializableDistributionSummary mergedDocs,
         SerializableTimer segmentMerge,
         SerializableTimer mergeCancellationTime,
-        double numMergesAborted) {
+        double numMergesAborted,
+        double numMergePauseEvents) {
       this.numMerges = numMerges;
       this.numSegmentsMerged = numSegmentsMerged;
       this.mergeSize = mergeSize;
@@ -195,6 +202,7 @@ public class ServerStatusDataExtractor {
       this.segmentMerge = segmentMerge;
       this.mergeCancellationTime = mergeCancellationTime;
       this.numMergesAborted = numMergesAborted;
+      this.numMergePauseEvents = numMergePauseEvents;
     }
 
     private static LuceneMeterData create(MeterExtractorFactory meterExtractorFactory) {
@@ -218,6 +226,8 @@ public class ServerStatusDataExtractor {
               meterExtractorFactory.create(MERGE_CANCELLATION_TIME_KEY).getSingleMeter());
       var numMergesAborted =
           getMeterCount(meterExtractorFactory.create(NUM_MERGES_ABORTED_KEY).getSingleMeter());
+      var numMergePauseEvents =
+          getMeterCount(meterExtractorFactory.create(MERGE_PAUSE_EVENTS_KEY).getSingleMeter());
 
       return new LuceneMeterData(
           numMerges,
@@ -227,7 +237,8 @@ public class ServerStatusDataExtractor {
           mergedDocs,
           segmentMergeTimer,
           mergeCancellationTimer,
-          numMergesAborted);
+          numMergesAborted,
+          numMergePauseEvents);
     }
   }
 
@@ -466,6 +477,35 @@ public class ServerStatusDataExtractor {
       return new ProcessMeterData(
           getMeterValue(meterRegistry, MAJOR_PAGE_FAULTS),
           getMeterValue(meterRegistry, MINOR_PAGE_FAULTS));
+    }
+  }
+
+  public static class LoadSheddingMeterData {
+    // Admission-control variant 1 (FIXED_POOL_UNBOUNDED_QUEUE): query is still admitted but the
+    // virtual queue capacity was exceeded.
+    public static final String WOULD_HAVE_REJECTED = "loadShedding.wouldHaveRejected";
+    // Admission-control variant 2 (FIXED_POOL_BOUNDED_QUEUE): query is rejected outright.
+    // A given executor only ever registers one of the two counters, so at most one is non-zero.
+    public static final String REJECTED = "loadShedding.rejected";
+
+    public final double wouldHaveRejectedTotal;
+    public final double rejectedTotal;
+
+    @VisibleForTesting
+    public LoadSheddingMeterData(double wouldHaveRejectedTotal, double rejectedTotal) {
+      this.wouldHaveRejectedTotal = wouldHaveRejectedTotal;
+      this.rejectedTotal = rejectedTotal;
+    }
+
+    private static double getMeterValue(MeterRegistry meterRegistry, String meterName) {
+      Meter meter = meterRegistry.find(meterName).meter();
+      return meter != null ? getMeterCount(meter) : 0;
+    }
+
+    public static LoadSheddingMeterData create(MeterRegistry meterRegistry) {
+      return new LoadSheddingMeterData(
+          getMeterValue(meterRegistry, WOULD_HAVE_REJECTED),
+          getMeterValue(meterRegistry, REJECTED));
     }
   }
 

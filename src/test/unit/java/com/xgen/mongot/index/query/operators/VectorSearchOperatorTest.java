@@ -18,19 +18,19 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      VectorSearchOperatorTest.TestDeserialization.class,
-      VectorSearchOperatorTest.TestSerialization.class,
+      VectorSearchOperatorTest.DeserializationTest.class,
+      VectorSearchOperatorTest.SerializationTest.class,
     })
 public class VectorSearchOperatorTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "vectorSearch-deserialization";
     private static final BsonDeserializationTestSuite<VectorSearchOperator> TEST_SUITE =
         fromDocument(DefinitionTests.RESOURCES_PATH, SUITE_NAME, VectorSearchOperator::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<VectorSearchOperator> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<VectorSearchOperator> testSpec) {
       this.testSpec = testSpec;
     }
@@ -102,14 +102,14 @@ public class VectorSearchOperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "vectorSearch-serialization";
     public static final BsonSerializationTestSuite<VectorSearchOperator> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(DefinitionTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<VectorSearchOperator> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<VectorSearchOperator> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<VectorSearchOperator> testSpec) {
       this.testSpec = testSpec;
     }
 

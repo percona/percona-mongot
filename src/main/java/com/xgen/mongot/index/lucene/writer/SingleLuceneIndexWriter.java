@@ -6,8 +6,6 @@ import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.DocsExceededLimitsException;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.EncodedUserData;
@@ -48,6 +46,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.lucene.analysis.Analyzer;
@@ -179,7 +178,8 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
       IndexCapabilities indexCapabilities,
       IndexMetricsUpdater.IndexingMetricsUpdater indexingMetricsUpdater,
       Optional<IndexDeletionPolicy> indexDeletionPolicy,
-      FeatureFlags featureFlags)
+      FeatureFlags featureFlags,
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
 
     Map<FieldPath, VectorFieldSpecification> vectorFields =
@@ -187,7 +187,11 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
 
     IndexWriterConfig indexWriterConfig =
         new org.apache.lucene.index.IndexWriterConfig()
-            .setCodec(new LuceneCodec(vectorFields))
+            .setCodec(
+                LuceneCodec.Factory.forIndexWithBloomFilter(
+                    vectorFields, useIdBloomFilter, Optional.of(indexingMetricsUpdater)))
+            // This is needed to separate lucene codec upgrade from code upgrade.
+            .setIndexCreatedVersionMajor(LuceneCodec.CODEC_VERSION_MAJOR)
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)
             .setMergeScheduler(mergeScheduler)
@@ -244,7 +248,7 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
       IndexMetricsUpdater.IndexingMetricsUpdater indexingMetricsUpdater,
       Optional<IndexDeletionPolicy> indexDeletionPolicy,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry)
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
 
     Similarity similarity = LuceneSimilarity.from(resolver.indexDefinition);
@@ -255,12 +259,10 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
     IndexWriterConfig indexWriterConfig =
         new org.apache.lucene.index.IndexWriterConfig(indexAnalyzer)
             .setCodec(
-                LuceneCodec.Factory.forSearchIndexWithBloomFilter(
-                    pathToField,
-                    () ->
-                        dynamicFeatureFlagRegistry.evaluateClusterInvariant(
-                            DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD),
-                    Optional.of(indexingMetricsUpdater)))
+                LuceneCodec.Factory.forIndexWithBloomFilter(
+                    pathToField, useIdBloomFilter, Optional.of(indexingMetricsUpdater)))
+            // This is needed to separate lucene codec upgrade from code upgrade.
+            .setIndexCreatedVersionMajor(LuceneCodec.CODEC_VERSION_MAJOR)
             .setSimilarity(similarity)
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)

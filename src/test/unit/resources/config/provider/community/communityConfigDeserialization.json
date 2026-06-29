@@ -6,8 +6,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -29,11 +31,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -46,24 +50,28 @@
               "mongod1:27017",
               "mongod2:27017"
             ],
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd",
-            "authSource": "local",
-            "tls": true,
-            "readPreference": "primaryPreferred"
+            "scramAuth": {
+              "authSource": "local",
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd",
+              "tls": {
+                "enabled": true,
+                "tlsCertificateKeyFile": "/etc/mongot/tls/client-combined.pem",
+                "caFile": "/etc/mongot/ca.pem"
+              }
+            }
           },
           "router": {
             "hostAndPort": [
               "mongos1:27017",
               "mongos2:27017"
             ],
-            "username": "user",
-            "passwordFile": "/etc/mongot/router.passwd",
-            "authSource": "local",
-            "tls": false,
-            "readPreference": "primaryPreferred"
-          },
-          "caFile": "/etc/mongot/ca.pem"
+            "scramAuth": {
+              "authSource": "local",
+              "username": "user",
+              "passwordFile": "/etc/mongot/router.passwd"
+            }
+          }
         },
         "storage": {
           "dataPath": "data/mongot"
@@ -90,11 +98,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": false,
-          "directorySizeMb": 200,
-          "fileSizeMb": 20,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": false,
+            "directorySizeMb": 200,
+            "fileSizeMb": 20,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -105,12 +115,10 @@
           "replicaSet": {
             "hostAndPort": "mongod:27017",
             "x509": {
-              "tlsCertificateKeyFile": "/etc/mongot/tls/client-combined.pem"
-            },
-            "authSource": "admin",
-            "tls": true
-          },
-          "caFile": "/etc/mongot/ca.pem"
+              "tlsCertificateKeyFile": "/etc/mongot/tls/client-combined.pem",
+              "caFile": "/etc/mongot/ca.pem"
+            }
+          }
         },
         "storage": {
           "dataPath": "data/mongot"
@@ -131,11 +139,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -145,8 +155,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -167,11 +179,13 @@
         "logging": {
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -181,8 +195,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -207,11 +223,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -221,8 +239,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -248,11 +268,59 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
+        }
+      }
+    },
+    {
+      "description": "grpcTlsWithPassword",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028",
+            "tls": {
+              "mode": "TLS",
+              "certificateKeyFile": "/etc/ssl/common-cert.pem",
+              "certificateKeyFilePasswordFile": "/etc/ssl/common-cert.pass"
+            }
+          }
+        },
+        "metrics": {
           "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG",
+          "logPath": "/var/log/mongot"
+        },
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -262,8 +330,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -290,11 +360,13 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -304,8 +376,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -330,22 +404,26 @@
         "embedding": {
           "providerEndpoint": "https://custom-api.example.com/v1/embeddings"
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
     {
-      "description": "with embedding mv write rate limit rps",
+      "description": "with materialized view write rate limit rps",
       "value": {
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -368,14 +446,20 @@
           "logPath": "/var/log/mongot"
         },
         "embedding": {
-          "mvWriteRateLimitRps": 50,
           "isAutoEmbeddingViewWriter": true
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 1000
+        "advancedConfigs": {
+          "autoEmbedding": {
+            "materializedView": {
+              "mvWriteRateLimitRps": 50
+            }
+          },
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
         }
       }
     },
@@ -385,8 +469,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -408,21 +494,244 @@
           "verbosity": "DEBUG",
           "logPath": "/var/log/mongot"
         },
-        "ftdc": {
-          "enabled": false,
-          "directorySizeMb": 200,
-          "fileSizeMb": 20,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": false,
+            "directorySizeMb": 200,
+            "fileSizeMb": 20,
+            "collectionPeriodMillis": 3000
+          }
+        }
+      }
+    },
+    {
+      "description": "with replicationReader",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          },
+          "replicationReader": {
+            "readPreference": "nearest"
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG",
+          "logPath": "/var/log/mongot"
+        },
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
+        }
+      }
+    },
+    {
+      "description": "scramTlsWithCertKeyPasswordAndCa",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd",
+              "tls": {
+                "enabled": true,
+                "tlsCertificateKeyFile": "/etc/mongot/tls/client-combined.pem",
+                "tlsCertificateKeyFilePasswordFile": "/etc/mongot/secrets/cert-key-pass",
+                "caFile": "/etc/mongot/ca.pem"
+              }
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG",
+          "logPath": "/var/log/mongot"
+        },
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
+        }
+      }
+    },
+    {
+      "description": "with replicationReader tagSets",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          },
+          "replicationReader": {
+            "readPreference": "nearest",
+            "tagSets": [
+              [
+                {
+                  "name": "dc",
+                  "value": "east"
+                }
+              ],
+              [
+                {
+                  "name": "dc",
+                  "value": "west"
+                }
+              ]
+            ]
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG",
+          "logPath": "/var/log/mongot"
+        },
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
+        }
+      }
+    },
+    {
+      "description": "with diskMonitor",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "advancedConfigs": {
+          "diskMonitor": {
+            "pauseReplicationThreshold": 0.92,
+            "resumeReplicationThreshold": 0.87,
+            "crashThreshold": 0.97,
+            "pauseInitialSyncThreshold": 0.82,
+            "resumeInitialSyncThreshold": 0.77
+          }
         }
       }
     }
   ],
   "invalid": [
     {
-      "description": "missing sync source replicaSet",
+      "description": "replicaSet legacy",
       "value": {
         "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "username": "user",
+            "passwordFile": "/etc/mongot/router.passwd",
+            "authSource": "admin",
+            "tls": true
+          }
         },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG",
+          "logPath": "/var/log/mongot"
+        },
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 1000
+          }
+        }
+      },
+      "errorMessageContains": "unrecognized"
+    },
+    {
+      "description": "missing sync source replicaSet",
+      "value": {
+        "syncSource": {},
         "storage": {
           "dataPath": "data/mongot"
         },
@@ -439,8 +748,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -472,16 +783,17 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
           "dataPath": "data/mongot"
         },
         "server": {
-          "grpc": {
-          }
+          "grpc": {}
         },
         "metrics": {
           "enabled": true,
@@ -498,8 +810,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -528,8 +842,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -559,8 +875,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -571,11 +889,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 9,
-          "fileSizeMb": 2,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 9,
+            "fileSizeMb": 2,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -585,8 +905,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -597,11 +919,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 0,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 0,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -611,8 +935,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -623,11 +949,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 100,
-          "collectionPeriodMillis": 3000
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 100,
+            "collectionPeriodMillis": 3000
+          }
         }
       }
     },
@@ -637,8 +965,10 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -649,11 +979,13 @@
             "address": "localhost:27028"
           }
         },
-        "ftdc": {
-          "enabled": true,
-          "directorySizeMb": 100,
-          "fileSizeMb": 10,
-          "collectionPeriodMillis": 99
+        "advancedConfigs": {
+          "ftdc": {
+            "enabled": true,
+            "directorySizeMb": 100,
+            "fileSizeMb": 10,
+            "collectionPeriodMillis": 99
+          }
         }
       }
     },
@@ -663,10 +995,13 @@
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd",
             "x509": {
-              "tlsCertificateKeyFile": "/etc/mongot/tls/client.pem"
+              "tlsCertificateKeyFile": "/etc/mongot/tls/client.pem",
+              "caFile": "/etc/mongot/ca.pem"
+            },
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
             }
           }
         },
@@ -689,7 +1024,7 @@
           "verbosity": "DEBUG"
         }
       },
-      "errorMessageContains": "x509 and username/passwordFile"
+      "errorMessageContains": "Exactly one authentication mechanism must be used (x509 or scram)"
     },
     {
       "description": "replicaSet neither auth",
@@ -718,15 +1053,17 @@
           "verbosity": "DEBUG"
         }
       },
-      "errorMessageContains": "username"
+      "errorMessageContains": "Exactly one authentication mechanism must be used (x509 or scram)"
     },
     {
-      "description": "replicaSet username without passwordFile",
+      "description": "replicaSet scram without passwordFile",
       "value": {
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user"
+            "scramAuth": {
+              "username": "user"
+            }
           }
         },
         "storage": {
@@ -751,12 +1088,14 @@
       "errorMessageContains": "passwordFile"
     },
     {
-      "description": "replicaSet passwordFile without username",
+      "description": "replicaSet scram without username",
       "value": {
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           }
         },
         "storage": {
@@ -781,23 +1120,27 @@
       "errorMessageContains": "username"
     },
     {
-      "description": "router both x509 and username password",
+      "description": "router both x509 and scram",
       "value": {
         "syncSource": {
           "replicaSet": {
             "hostAndPort": "mongod:27017",
-            "username": "user",
-            "passwordFile": "/etc/mongot/replicaSet.passwd"
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
           },
           "router": {
             "hostAndPort": "mongos:27017",
-            "username": "routerUser",
-            "passwordFile": "/etc/mongot/router.passwd",
+            "scramAuth": {
+              "username": "routerUser",
+              "passwordFile": "/etc/mongot/router.passwd"
+            },
             "x509": {
-              "tlsCertificateKeyFile": "/etc/mongot/tls/router-client.pem"
+              "tlsCertificateKeyFile": "/etc/mongot/tls/router-client.pem",
+              "caFile": "/etc/mongot/ca.pem"
             }
-          },
-          "caFile": "/etc/mongot/ca.pem"
+          }
         },
         "storage": {
           "dataPath": "data/mongot"
@@ -818,7 +1161,177 @@
           "verbosity": "DEBUG"
         }
       },
-      "errorMessageContains": "x509 and username/passwordFile"
+      "errorMessageContains": "Exactly one authentication mechanism must be used (x509 or scram)"
+    },
+    {
+      "description": "replicaSet x509 without caFile",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "x509": {
+              "tlsCertificateKeyFile": "/etc/mongot/tls/client.pem"
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
+      "errorMessageContains": "caFile must be set within x509 config"
+    },
+    {
+      "description": "replicaSet scram tls certKeyFile with tls disabled",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "__system",
+              "passwordFile": "/etc/mongot/keyfile",
+              "tls": {
+                "enabled": false,
+                "tlsCertificateKeyFile": "/etc/tls/client.pem"
+              }
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
+      "errorMessageContains": "tls must be enabled when tlsCertificateKeyFile is configured"
+    },
+    {
+      "description": "replicaSet scram tls passwordFile without certKeyFile",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "__system",
+              "passwordFile": "/etc/mongot/keyfile",
+              "tls": {
+                "enabled": true,
+                "tlsCertificateKeyFilePasswordFile": "/etc/tls/cert-pass",
+                "caFile": "/etc/mongot/ca.pem"
+              }
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "metrics": {
+          "enabled": true,
+          "address": "localhost:9946"
+        },
+        "healthCheck": {
+          "address": "localhost:8080"
+        },
+        "logging": {
+          "verbosity": "DEBUG"
+        }
+      },
+      "errorMessageContains": "tlsCertificateKeyFile is required when tlsCertificateKeyFilePasswordFile is provided"
+    },
+    {
+      "description": "replicationReader PRIMARY with tagSets",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          },
+          "replicationReader": {
+            "readPreference": "primary",
+            "tagSets": [
+              [
+                {
+                  "name": "dc",
+                  "value": "east"
+                }
+              ]
+            ]
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        }
+      },
+      "errorMessageContains": "tagSets must be empty or null when readPreference is PRIMARY"
+    },
+    {
+      "description": "diskMonitor pauseReplicationThreshold below resumeReplicationThreshold",
+      "value": {
+        "syncSource": {
+          "replicaSet": {
+            "hostAndPort": "mongod:27017",
+            "scramAuth": {
+              "username": "user",
+              "passwordFile": "/etc/mongot/replicaSet.passwd"
+            }
+          }
+        },
+        "storage": {
+          "dataPath": "data/mongot"
+        },
+        "server": {
+          "grpc": {
+            "address": "localhost:27028"
+          }
+        },
+        "advancedConfigs": {
+          "diskMonitor": {
+            "pauseReplicationThreshold": 0.85,
+            "resumeReplicationThreshold": 0.90
+          }
+        }
+      },
+      "errorMessageContains": "pauseReplicationThreshold must be greater than or equal to resumeReplicationThreshold"
     }
   ]
 }

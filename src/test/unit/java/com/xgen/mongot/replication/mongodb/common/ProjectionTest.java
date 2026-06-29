@@ -974,6 +974,35 @@ public class ProjectionTest {
   }
 
   @Test
+  public void testChangeStreamInclusionProjectionIncludesRenameDestinationNamespace() {
+    var mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "a",
+                FieldDefinitionBuilder.builder()
+                    .string(StringFieldDefinitionBuilder.builder().build())
+                    .build())
+            .build();
+
+    var storedSource =
+        StoredSourceDefinition.create(StoredSourceDefinition.Mode.INCLUSION, List.of("a"));
+
+    var definition =
+        SearchIndexDefinitionBuilder.from(MOCK_INDEX_DEFINITION)
+            .mappings(mappings)
+            .storedSource(storedSource)
+            .build();
+
+    var changeStreamProjection = Projection.forChangeStream(definition);
+    assertProjection(
+        ProjectionType.INCLUDE,
+        changeStreamProjection,
+        getDefaultChangeStreamPaths(definition),
+        "fullDocument.a");
+  }
+
+  @Test
   public void testPartiallyIncludedStoredSource() {
 
     var mappings =
@@ -1838,6 +1867,31 @@ public class ProjectionTest {
   }
 
   @Test
+  public void testVectorStoredSourceExclusionOfFilterField() {
+    var ssd =
+        StoredSourceDefinition.create(StoredSourceDefinition.Mode.EXCLUSION, List.of("a", "e"));
+
+    var definition =
+        VectorIndexDefinitionBuilder.builder()
+            .withFilterPath("a")
+            .withFilterPath("d")
+            .withCosineVectorField("b", 3)
+            .storedSource(ssd)
+            .build();
+
+    var findQueryProjection = Projection.forRegularQuery(definition);
+    assertProjection(
+        ProjectionType.EXCLUDE, findQueryProjection, getDefaultFindQueryPaths(definition), "e");
+
+    var changeStreamProjection = Projection.forChangeStream(definition);
+    assertProjection(
+        ProjectionType.EXCLUDE,
+        changeStreamProjection,
+        getDefaultChangeStreamPaths(definition),
+        "fullDocument.e");
+  }
+
+  @Test
   public void testVectorStoredSourceInclusionWithChildVectorField() {
     var ssd =
         StoredSourceDefinition.create(StoredSourceDefinition.Mode.INCLUSION, List.of("a", "b"));
@@ -1939,6 +1993,7 @@ public class ProjectionTest {
         "ns",
         "documentKey",
         "clusterTime",
-        "updateDescription");
+        "updateDescription",
+        "to");
   }
 }

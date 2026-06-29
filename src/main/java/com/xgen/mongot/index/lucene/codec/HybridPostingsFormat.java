@@ -1,12 +1,12 @@
 package com.xgen.mongot.index.lucene.codec;
 
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.PostingsFormat;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 
 /**
@@ -16,9 +16,9 @@ import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
  * <p>For {@link FieldName.MetaField#ID}, {@link #getPostingsFormatForField(String)} returns either:
  *
  * <ul>
- *   <li>{@link BloomFilteringPostingsFormat}, wrapping the same Lucene99 delegate postings format
- *       that {@link Lucene99Codec#getPostingsFormatForField(String)} uses for {@code _id}, when the
- *       supplier returns {@code true}; or
+ *   <li>{@link MongotBloomFilteringPostingsFormat}, wrapping the same Lucene99 delegate postings
+ *       format that {@link Lucene99Codec#getPostingsFormatForField(String)} uses for {@code _id},
+ *       when the supplier returns {@code true}; or
  *   <li>that delegate format directly when the supplier returns {@code false}.
  * </ul>
  *
@@ -49,7 +49,7 @@ class HybridPostingsFormat extends PerFieldPostingsFormat {
     this.bloomFilterForIdFieldEnabledSupplier = bloomFilterForIdFieldEnabledSupplier;
     this.indexingMetricsUpdater = indexingMetricsUpdater;
     this.defaultIdPostingsFormat = defaultIdPostingsFormat;
-    this.bloomIdPostingsFormat = new BloomFilteringPostingsFormat(defaultIdPostingsFormat);
+    this.bloomIdPostingsFormat = new MongotBloomFilteringPostingsFormat(defaultIdPostingsFormat);
     this.delegateCodec = delegateCodec;
   }
 

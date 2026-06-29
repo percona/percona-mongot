@@ -58,7 +58,7 @@ abstract class AbstractSortedSetDocValuesFacetCounts extends Facets {
 
     topN = Math.min(topN, (int) this.dv.getValueCount());
     @Var TopOrdAndIntQueue q = null;
-    @Var TopOrdAndIntQueue.OrdAndValue reuse = null;
+    @Var TopOrdAndIntQueue.OrdAndInt reuse = null;
     @Var int bottomCount = 0;
     @Var int bottomOrd = Integer.MAX_VALUE;
     @Var int childCount = 0; // total number of labels with non-zero count
@@ -76,13 +76,13 @@ abstract class AbstractSortedSetDocValuesFacetCounts extends Facets {
             q = new TopOrdAndIntQueue(topN);
           }
           if (reuse == null) {
-            reuse = new TopOrdAndIntQueue.OrdAndValue();
+            reuse = new TopOrdAndIntQueue.OrdAndInt();
           }
           reuse.ord = ord;
           reuse.value = count;
-          reuse = q.insertWithOverflow(reuse);
+          reuse = (TopOrdAndIntQueue.OrdAndInt) q.insertWithOverflow(reuse);
           if (q.size() == topN) {
-            bottomCount = q.top().value;
+            bottomCount = ((TopOrdAndIntQueue.OrdAndInt) q.top()).value;
             bottomOrd = q.top().ord;
           }
         }
@@ -93,9 +93,9 @@ abstract class AbstractSortedSetDocValuesFacetCounts extends Facets {
     LabelAndValue[] labelValues = new LabelAndValue[resultCount];
     if (q != null) {
       for (int i = labelValues.length - 1; i >= 0; i--) {
-        TopOrdAndIntQueue.OrdAndValue ordAndValue = q.pop();
-        BytesRef term = this.dv.lookupOrd(ordAndValue.ord);
-        labelValues[i] = new LabelAndValue(term.utf8ToString(), ordAndValue.value);
+        TopOrdAndIntQueue.OrdAndInt ordAndInt = (TopOrdAndIntQueue.OrdAndInt) q.pop();
+        BytesRef term = this.dv.lookupOrd(ordAndInt.ord);
+        labelValues[i] = new LabelAndValue(term.utf8ToString(), ordAndInt.value);
       }
     }
 

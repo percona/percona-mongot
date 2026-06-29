@@ -20,6 +20,7 @@ import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.lucene.blobstore.LuceneIndexSnapshotter;
 import com.xgen.mongot.index.lucene.blobstore.LuceneIndexSnapshotterManager;
+import com.xgen.mongot.index.lucene.codec.bloom.BloomCodecPolicy;
 import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.directory.ByteReadCollector;
 import com.xgen.mongot.index.lucene.directory.EnvironmentVariantPerfConfig;
@@ -33,6 +34,7 @@ import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.DiskMonitor;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.util.AtomicDirectoryRemover;
@@ -50,6 +52,7 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import org.apache.lucene.index.MergePolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -82,7 +85,8 @@ public class LuceneIndexFactory implements IndexFactory {
         throws IOException {
       var meterRegistry = meterAndFtdcRegistry.meterRegistry();
 
-      var mergeScheduler = getInstrumentedConcurrentMergeScheduler(config, meterRegistry);
+      var mergeScheduler =
+          getInstrumentedConcurrentMergeScheduler(config, featureFlags, meterRegistry);
 
       Gate mergeGate = DiskUtilizationAwareMergePolicy.createMergeGate(config, diskMonitor);
       // Pass the merge gate to the scheduler for disk-based pause/resume support
@@ -127,6 +131,13 @@ public class LuceneIndexFactory implements IndexFactory {
                       meterRegistry))
               : Optional.empty();
 
+      if (featureFlags.isEnabled(Feature.QUERY_MEMORY_ATTRIBUTION_METRICS)) {
+        ThreadPoolResourceMetrics resourceMetrics = ThreadPoolResourceMetrics.create("query");
+        concurrentSearchExecutor.ifPresent(e -> resourceMetrics.register(e, meterRegistry));
+        concurrentVectorRescoringExecutor.ifPresent(
+            e -> resourceMetrics.register(e, meterRegistry));
+      }
+
       var metricsFactory = new MetricsFactory("indexFactory", meterRegistry);
       var indexDirectoryHelper = IndexDirectoryHelper.create(config.dataPath(), metricsFactory);
 
@@ -145,7 +156,7 @@ public class LuceneIndexFactory implements IndexFactory {
     }
 
     private static InstrumentedConcurrentMergeScheduler getInstrumentedConcurrentMergeScheduler(
-        LuceneConfig config, MeterRegistry meterRegistry) {
+        LuceneConfig config, FeatureFlags featureFlags, MeterRegistry meterRegistry) {
       long cancelMergeTimeout =
           config
               .cancelMergePerThreadTimeoutMs()
@@ -159,7 +170,10 @@ public class LuceneIndexFactory implements IndexFactory {
                       .DEFAULT_CANCEL_ALL_MERGES_PER_THREAD_TIMEOUT_MS);
       var mergeScheduler =
           new InstrumentedConcurrentMergeScheduler(
-              meterRegistry, cancelMergeTimeout, cancelAllMergesTimeout);
+              meterRegistry,
+              cancelMergeTimeout,
+              cancelAllMergesTimeout,
+              featureFlags.isEnabled(Feature.MERGE_ATTRIBUTION_METRICS));
       mergeScheduler.setMaxMergesAndThreads(config.numMaxMerges(), config.numMaxMergeThreads());
       return mergeScheduler;
     }
@@ -183,8 +197,9 @@ public class LuceneIndexFactory implements IndexFactory {
   private final MetricsFactory metricsFactory;
   protected final IndexDirectoryHelper indexDirectoryHelper;
   protected final FeatureFlags featureFlags;
-  private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
+  protected final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
   private final EnvironmentVariantPerfConfig environmentVariantPerfConfig;
+  protected final boolean enableNaturalOrderScan;
   private final Optional<SystemInfo> systemInfo;
   private final AtomicLong cacheWarmerTotalMilliseconds;
   private volatile boolean cacheWarmerAlreadyDisabled;
@@ -209,7 +224,8 @@ public class LuceneIndexFactory implements IndexFactory {
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
       EnvironmentVariantPerfConfig environmentVariantPerfConfig,
-      Optional<SystemInfo> systemInfo) {
+      Optional<SystemInfo> systemInfo,
+      boolean enableNaturalOrderScan) {
     this.config = config;
     this.indexRemover = indexRemover;
     this.analyzerRegistryFactory = analyzerRegistryFactory;
@@ -228,6 +244,7 @@ public class LuceneIndexFactory implements IndexFactory {
     this.featureFlags = featureFlags;
     this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
     this.environmentVariantPerfConfig = environmentVariantPerfConfig;
+    this.enableNaturalOrderScan = enableNaturalOrderScan;
     if (this.environmentVariantPerfConfig.isByteReadInstrumentationEnabled()) {
       this.byteReadCollector = Optional.of(new ByteReadCollector(metricsFactory));
     } else {
@@ -278,7 +295,8 @@ public class LuceneIndexFactory implements IndexFactory {
         featureFlags,
         dynamicFeatureFlagRegistry,
         environmentVariantPerfConfig,
-        LuceneIndexFactory.tryNewSystemInfo());
+        LuceneIndexFactory.tryNewSystemInfo(),
+        false);
   }
 
   @VisibleForTesting
@@ -291,7 +309,8 @@ public class LuceneIndexFactory implements IndexFactory {
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
       EnvironmentVariantPerfConfig environmentVariantPerfConfig,
-      Optional<SystemInfo> systemInfo) {
+      Optional<SystemInfo> systemInfo,
+      boolean enableNaturalOrderScan) {
     this(
         config,
         ctx.indexRemover(),
@@ -311,7 +330,8 @@ public class LuceneIndexFactory implements IndexFactory {
         featureFlags,
         dynamicFeatureFlagRegistry,
         environmentVariantPerfConfig,
-        systemInfo);
+        systemInfo,
+        enableNaturalOrderScan);
   }
 
   /**
@@ -341,7 +361,8 @@ public class LuceneIndexFactory implements IndexFactory {
       Optional<LuceneIndexSnapshotterManager> snapshotterManager,
       AnalyzerRegistryFactory analyzerRegistryFactory,
       DiskMonitor diskMonitor,
-      Optional<SystemInfo> systemInfo)
+      Optional<SystemInfo> systemInfo,
+      boolean enableNaturalOrderScan)
       throws IOException {
     var ctx =
         IndexFactoryContext.create(
@@ -357,10 +378,12 @@ public class LuceneIndexFactory implements IndexFactory {
         featureFlags,
         dynamicFeatureFlagRegistry,
         environmentVariantPerfConfig,
-        systemInfo);
+        systemInfo,
+        enableNaturalOrderScan);
   }
 
   /** Creates LuceneIndexFactory. */
+  @VisibleForTesting
   public static LuceneIndexFactory fromConfig(
       LuceneConfig config,
       FeatureFlags featureFlags,
@@ -380,7 +403,38 @@ public class LuceneIndexFactory implements IndexFactory {
         snapshotterManager,
         analyzerRegistryFactory,
         diskMonitor,
-        LuceneIndexFactory.tryNewSystemInfo());
+        LuceneIndexFactory.tryNewSystemInfo(),
+        false);
+  }
+
+  /**
+   * Same as {@link #fromConfig(LuceneConfig, FeatureFlags, DynamicFeatureFlagRegistry,
+   * EnvironmentVariantPerfConfig, MeterAndFtdcRegistry, Optional, AnalyzerRegistryFactory,
+   * DiskMonitor, Optional, boolean)} with {@link #tryNewSystemInfo()} and the given natural-order
+   * scan setting.
+   */
+  public static LuceneIndexFactory fromConfig(
+      LuceneConfig config,
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      EnvironmentVariantPerfConfig environmentVariantPerfConfig,
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      Optional<LuceneIndexSnapshotterManager> snapshotterManager,
+      AnalyzerRegistryFactory analyzerRegistryFactory,
+      DiskMonitor diskMonitor,
+      boolean enableNaturalOrderScan)
+      throws IOException {
+    return LuceneIndexFactory.fromConfig(
+        config,
+        featureFlags,
+        dynamicFeatureFlagRegistry,
+        environmentVariantPerfConfig,
+        meterAndFtdcRegistry,
+        snapshotterManager,
+        analyzerRegistryFactory,
+        diskMonitor,
+        LuceneIndexFactory.tryNewSystemInfo(),
+        enableNaturalOrderScan);
   }
 
   protected static Optional<SystemInfo> tryNewSystemInfo() {
@@ -532,6 +586,12 @@ public class LuceneIndexFactory implements IndexFactory {
             Optional.of(this.cacheWarmerTotalMilliseconds));
     GenerationId generationId = definitionGeneration.getGenerationId();
 
+    BooleanSupplier useIdBloomFilter = BloomCodecPolicy.getBloomFilterEnabledForIdField(
+        this.dynamicFeatureFlagRegistry,
+        this.enableNaturalOrderScan,
+        definitionGeneration.getIndexDefinition(),
+        index::getStatus);
+    
     if (definitionGeneration.getType() == Type.VECTOR) {
       VectorIndexDefinition vectorDef =
           definitionGeneration.getIndexDefinition().asVectorDefinition();
@@ -545,7 +605,9 @@ public class LuceneIndexFactory implements IndexFactory {
           directoryFactory,
           this.indexDirectoryHelper,
           luceneIndexSnapshotter,
-          this.featureFlags);
+          this.featureFlags,
+          this.dynamicFeatureFlagRegistry,
+          useIdBloomFilter);
     } else {
       var luceneSearchIndex = Check.instanceOf(index, LuceneSearchIndex.class);
       return InitializedLuceneSearchIndex.create(
@@ -555,7 +617,8 @@ public class LuceneIndexFactory implements IndexFactory {
           this.indexDirectoryHelper,
           luceneIndexSnapshotter,
           this.featureFlags,
-          this.dynamicFeatureFlagRegistry);
+          this.dynamicFeatureFlagRegistry,
+          useIdBloomFilter);
     }
   }
 

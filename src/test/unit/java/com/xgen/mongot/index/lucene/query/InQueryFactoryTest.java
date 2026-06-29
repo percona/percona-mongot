@@ -4,6 +4,7 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.definition.DocumentFieldDefinition;
 import com.xgen.mongot.index.lucene.util.AnalyzedText;
 import com.xgen.mongot.index.lucene.util.LuceneDoubleConversionUtils;
@@ -199,6 +200,21 @@ public class InQueryFactoryTest {
                 .build());
 
     LuceneSearchTranslation.get().assertTranslatedTo(operator, expected);
+  }
+
+  @Test
+  public void testDateV2() throws Exception {
+    var dates = List.of(new Date(1), new Date(2), new Date(3));
+    long[] translatedDates = dates.stream().mapToLong(Date::getTime).toArray();
+    var operator = OperatorBuilder.in().path("a").dates(dates).build();
+    var expected =
+        new ConstantScoreQuery(
+            new BooleanQuery.Builder()
+                .add(LongField.newSetQuery("$type:dateV2/a", translatedDates), Occur.SHOULD)
+                .build());
+
+    LuceneSearchTranslation.gatedWithDynamicFeatureFlags(DynamicFeatureFlags.NUMERIC_V2_SEMANTICS)
+        .assertTranslatedTo(operator, expected);
   }
 
   @Test

@@ -34,6 +34,7 @@ java_test_suite(
         "SynonymMappingDefinitionTest.java",
         "TokenFieldDefinitionTest.java",
         "TypeSetDefinitionTest.java",
+        "VectorAutoEmbedFieldSpecificationTest.java",
         "VectorDataFieldDefinitionTest.java",
         "VectorEmbeddedDocumentsFieldDefinitionTest.java",
         "VectorFieldDefinitionResolverTest.java",
@@ -63,6 +64,8 @@ java_test_suite(
         "//src/main/java/com/xgen/testing/mongot/index/definition",
         "//src/main/java/com/xgen/testing/mongot/index/path/string",
         "//src/main/java/com/xgen/testing/mongot/index/query/sort",
+        "@maven//:ch_qos_logback_logback_classic",
+        "@maven//:ch_qos_logback_logback_core",
         "@maven//:com_google_guava_guava",
         "@maven//:com_google_guava_guava_testlib",
         "@maven//:com_google_truth_truth",
@@ -71,5 +74,6 @@ java_test_suite(
         "@maven//:org_apache_commons_commons_lang3",
         "@maven//:org_mongodb_bson",
         "@maven//:org_mongodb_mongodb_driver_core",
+        "@maven//:org_slf4j_slf4j_api",
     ],
 )

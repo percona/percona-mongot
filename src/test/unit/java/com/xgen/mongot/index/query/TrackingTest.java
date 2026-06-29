@@ -13,18 +13,18 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {TrackingTest.TestDeserialization.class, TrackingTest.TestSerialization.class})
+    value = {TrackingTest.DeserializationTest.class, TrackingTest.SerializationTest.class})
 public class TrackingTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "tracking-deserialization";
     private static final BsonDeserializationTestSuite<Tracking> TEST_SUITE =
         fromDocument("src/test/unit/resources/index/query/", SUITE_NAME, Tracking::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Tracking> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Tracking> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Tracking> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -52,14 +52,14 @@ public class TrackingTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "tracking-serialization";
     private static final BsonSerializationTestSuite<Tracking> TEST_SUITE =
         fromEncodable("src/test/unit/resources/index/query/", SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<Tracking> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Tracking> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Tracking> testSpec) {
       this.testSpec = testSpec;
     }
 

@@ -37,15 +37,15 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses({
-  ManagementCommandDefinitionTest.TestDeserialization.class,
-  ManagementCommandDefinitionTest.TestSerialization.class
+  ManagementCommandDefinitionTest.DeserializationTest.class,
+  ManagementCommandDefinitionTest.SerializationTest.class
 })
 public class ManagementCommandDefinitionTest {
   static final String RESOURCES_PATH =
       "src/test/unit/resources/server/command/management/definition/";
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "management-deserialization";
     private static final BsonDeserializationTestSuite<ManageSearchIndexCommandDefinition>
         TEST_SUITE =
@@ -53,7 +53,7 @@ public class ManagementCommandDefinitionTest {
 
     private final TestSpecWrapper<ManageSearchIndexCommandDefinition> testSpec;
 
-    public TestDeserialization(TestSpecWrapper<ManageSearchIndexCommandDefinition> testSpec) {
+    public DeserializationTest(TestSpecWrapper<ManageSearchIndexCommandDefinition> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -259,14 +259,14 @@ public class ManagementCommandDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "management-serialization";
     private static final BsonSerializationTestSuite<ManageSearchIndexCommandDefinition> TEST_SUITE =
         fromEncodable(RESOURCES_PATH, SUITE_NAME);
 
     private final TestSpec<ManageSearchIndexCommandDefinition> testSpec;
 
-    public TestSerialization(TestSpec<ManageSearchIndexCommandDefinition> testSpec) {
+    public SerializationTest(TestSpec<ManageSearchIndexCommandDefinition> testSpec) {
       this.testSpec = testSpec;
     }
 

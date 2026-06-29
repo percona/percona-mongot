@@ -1,5 +1,6 @@
 package com.xgen.mongot.index.lucene.query;
 
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.VectorSimilarity;
@@ -70,13 +71,20 @@ class VectorSearchQueryFactory {
     // Check if this is an embedded vector field
     Optional<FieldPath> embeddedRoot = determineEmbeddedRoot(path, queryContext);
 
+    if (embeddedRoot.isPresent()
+        && !this.factoryContext.getFeatureFlags().isEnabled(Feature.NESTED_VECTOR)) {
+      throw new InvalidQueryException(
+          "Nested vector search is not supported on this cluster");
+    }
+
     // nestedOptions is optional for embedded vector fields; defaults to scoreMode=max
     if (embeddedRoot.isEmpty() && criteria.embeddedOptions().isPresent()) {
       throw new InvalidQueryException(
           String.format(
-              "nestedOptions can only be specified for embedded vector fields, "
-                  + "but '%s' is not embedded",
-              path));
+              "\"nestedOptions\" requires a vector path within the index's nested root, but '%s'"
+                  + " is outside it. Specify a path under the index's \"nestedRoot\" field, or"
+                  + " remove \"nestedOptions\" to query '%s' as a standard vector field.",
+              path, path));
     }
 
     this.factoryContext

@@ -74,6 +74,15 @@ public class WrappedKnnQueryTest {
         wrappedRewritten.getQuery().getClass().getName());
   }
 
+  @Test
+  public void testAsWrapped() {
+    Query query = knnQuery(DEFAULT_TARGET, DEFAULT_K);
+    WrappedKnnQuery wrappedKnnQuery = new WrappedKnnQuery(query);
+
+    Assert.assertEquals(Optional.of(wrappedKnnQuery), WrappedKnnQuery.asWrapped(wrappedKnnQuery));
+    Assert.assertEquals(Optional.empty(), WrappedKnnQuery.asWrapped(query));
+  }
+
   private static Query knnQuery(float[] target, int k) {
     return new MongotKnnFloatQuery(
         metrics, FeatureFlags.getDefault(), DEFAULT_PATH, target, k, null);

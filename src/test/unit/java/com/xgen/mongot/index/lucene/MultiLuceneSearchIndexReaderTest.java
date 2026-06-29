@@ -270,7 +270,8 @@ public class MultiLuceneSearchIndexReaderTest {
         mock(IndexDirectoryHelper.class),
         Optional.empty(),
         featureFlags,
-        drillSidewaysEnabledRegistry());
+        drillSidewaysEnabledRegistry(),
+        () -> false);
   }
 
   private static void assertStringBucket(

@@ -24,7 +24,7 @@ import com.xgen.testing.mongot.index.lucene.synonym.SynonymRegistryBuilder;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.util.Optional;
 import java.util.UUID;
-import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.search.Query;
 import org.bson.types.ObjectId;
 import org.junit.Test;
@@ -114,7 +114,7 @@ public class QueryStringParserTest {
             FeatureFlags.getDefault());
 
     SingleQueryContext singleQueryContext =
-        SingleQueryContext.createQueryRoot(mock(IndexReader.class));
+        SingleQueryContext.createQueryRoot(mock(LeafReader.class));
 
     AllDocsQueryFactory allDocsQueryFactory = new AllDocsQueryFactory(queryFactoryContext);
 

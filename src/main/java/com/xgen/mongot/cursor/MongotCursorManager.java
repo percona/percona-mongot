@@ -6,7 +6,6 @@ import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.lucene.explain.tracing.ExplainQueryState;
 import com.xgen.mongot.index.query.InvalidQueryException;
-import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
 import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.SearchQuery;
@@ -43,31 +42,6 @@ public interface MongotCursorManager {
         collectionUuid,
         viewName,
         new CursorQuery.Search(query),
-        queryCursorOptions,
-        queryOptimizationFlags,
-        searchEnvoyMetadata);
-  }
-
-  default SearchCursorInfo newCursor(
-      String databaseName,
-      String collectionName,
-      UUID collectionUuid,
-      Optional<String> viewName,
-      MaterializedVectorSearchQuery query,
-      QueryCursorOptions queryCursorOptions,
-      QueryOptimizationFlags queryOptimizationFlags,
-      Optional<SearchEnvoyMetadata> searchEnvoyMetadata)
-      throws IOException,
-          InvalidQueryException,
-          IndexUnavailableException,
-          InterruptedException,
-          ReaderClosedException {
-    return newCursor(
-        databaseName,
-        collectionName,
-        collectionUuid,
-        viewName,
-        new CursorQuery.Vector(query),
         queryCursorOptions,
         queryOptimizationFlags,
         searchEnvoyMetadata);

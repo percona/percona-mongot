@@ -28,19 +28,19 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      CollectorQueryTest.TestDeserialization.class,
-      CollectorQueryTest.TestSerialization.class
+      CollectorQueryTest.DeserializationTest.class,
+      CollectorQueryTest.SerializationTest.class
     })
 public class CollectorQueryTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "collector-query-deserialization";
     private static final BsonDeserializationTestSuite<Query> TEST_SUITE =
         fromRootDocument("src/test/unit/resources/index/query/", SUITE_NAME, SearchQuery::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Query> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Query> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Query> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -245,14 +245,14 @@ public class CollectorQueryTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "collector-query-serialization";
     private static final BsonSerializationTestSuite<Query> TEST_SUITE =
         fromEncodable("src/test/unit/resources/index/query/", SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<Query> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Query> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Query> testSpec) {
       this.testSpec = testSpec;
     }
 

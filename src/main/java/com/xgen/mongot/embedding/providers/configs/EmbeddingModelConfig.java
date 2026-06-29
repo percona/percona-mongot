@@ -227,7 +227,10 @@ public record EmbeddingModelConfig(
             : baseModelConfig.modality,
         overrideModelConfig.quantization.isPresent()
             ? overrideModelConfig.quantization
-            : baseModelConfig.quantization);
+            : baseModelConfig.quantization,
+        overrideModelConfig.similarityByQuantization.isPresent()
+            ? overrideModelConfig.similarityByQuantization
+            : baseModelConfig.similarityByQuantization);
   }
 
   @Override

@@ -6,11 +6,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.ListCollectionsIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCursor;
@@ -21,6 +23,7 @@ import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient;
 import com.xgen.mongot.embedding.mongodb.common.DefaultInternalDatabaseResolver;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
+import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.version.Generation;
@@ -150,7 +153,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -158,6 +162,8 @@ public class MaterializedViewCollectionResolverTest {
     assertThat(metadata.collectionName()).startsWith(indexId.toHexString());
     assertThat(metadata.collectionName()).contains("-");
     assertThat(metadata.collectionUuid()).isNotNull();
+
+    verify(this.leaseManager).executeOpsCommandsAfterInitializeLease(eq(metadata.collectionName()));
 
     ArgumentCaptor<String> createCollectionCaptor = ArgumentCaptor.forClass(String.class);
     verify(this.mongoDatabase).createCollection(createCollectionCaptor.capture());
@@ -188,7 +194,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -218,7 +225,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata first =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -255,7 +263,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata1 =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -295,7 +304,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataA =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenA);
@@ -340,7 +350,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataA =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenA);
@@ -392,7 +403,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewTransientException thrown =
         assertThrows(
@@ -404,8 +416,7 @@ public class MaterializedViewCollectionResolverTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_schemaVersion0_returnsVersionZeroMetadata() {
+  public void getOrCreateMaterializedViewForIndex_schemaVersion0_returnsVersionZeroMetadata() {
     ObjectId indexId = new ObjectId();
     VectorIndexDefinition definition =
         VectorIndexDefinitionBuilder.builder()
@@ -440,6 +451,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -448,7 +460,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -456,14 +469,12 @@ public class MaterializedViewCollectionResolverTest {
     assertThat(metadata.schemaMetadata().materializedViewSchemaVersion()).isEqualTo(0L);
     assertThat(metadata.schemaMetadata().autoEmbeddingFieldsMapping()).isEmpty();
     assertThat(metadata.schemaMetadata())
-        .isEqualTo(
-            MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata.VERSION_ZERO);
+        .isEqualTo(MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata.VERSION_ZERO);
   }
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_schemaVersion1_returnsAutoEmbedFieldMapping() {
+  public void getOrCreateMaterializedViewForIndex_schemaVersion1_returnsAutoEmbedFieldMapping() {
     ObjectId indexId = new ObjectId();
     VectorIndexDefinition definition =
         VectorIndexDefinitionBuilder.builder()
@@ -499,6 +510,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -507,7 +519,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV1,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -527,8 +540,7 @@ public class MaterializedViewCollectionResolverTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_defaultNameFormatVersion0_usesIndexIdOnly() {
+  public void getOrCreateMaterializedViewForIndex_defaultNameFormatVersion0_usesIndexIdOnly() {
     ObjectId indexId = new ObjectId();
     VectorIndexDefinition definition =
         VectorIndexDefinitionBuilder.builder()
@@ -563,6 +575,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -571,7 +584,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -591,8 +605,7 @@ public class MaterializedViewCollectionResolverTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_defaultNameFormatVersion1_usesHashFormat() {
+  public void getOrCreateMaterializedViewForIndex_defaultNameFormatVersion1_usesHashFormat() {
     ObjectId indexId = new ObjectId();
     VectorIndexDefinition definition =
         VectorIndexDefinitionBuilder.builder()
@@ -628,6 +641,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -636,7 +650,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV1,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -654,8 +669,7 @@ public class MaterializedViewCollectionResolverTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_defaultConfig_usesHashFormat() {
+  public void getOrCreateMaterializedViewForIndex_defaultConfig_usesHashFormat() {
     // Default config (getDefault()) should use version 1 (hash format)
     ObjectId indexId = new ObjectId();
     VectorIndexDefinition definition =
@@ -672,7 +686,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -725,6 +740,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -733,7 +749,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV1,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -785,6 +802,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -793,7 +811,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -823,7 +842,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -858,7 +878,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataV1 =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenV1);
@@ -897,7 +918,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadataNoVersion =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenNoVersion);
@@ -905,15 +927,13 @@ public class MaterializedViewCollectionResolverTest {
         resolver.getOrCreateMaterializedViewForIndex(indexDefGenExplicitZero);
 
     // Both should produce the same collection name since default is 0.
-    assertThat(metadataNoVersion.collectionName())
-        .isEqualTo(metadataExplicitZero.collectionName());
+    assertThat(metadataNoVersion.collectionName()).isEqualTo(metadataExplicitZero.collectionName());
     assertThat(metadataNoVersion.collectionName()).endsWith("-1-0");
   }
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_indexIdAtCreationTimeOverridesIndexId_v0() {
+  public void getOrCreateMaterializedViewForIndex_indexIdAtCreationTimeOverridesIndexId_v0() {
     // When indexIDAtCreationTime is set, it should be used as the collection name prefix
     // instead of the current indexId, for both v0 and v1 name formats.
     ObjectId indexId = new ObjectId();
@@ -953,6 +973,7 @@ public class MaterializedViewCollectionResolverTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MaterializedViewCollectionResolver resolver =
@@ -961,7 +982,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             configV0,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -974,8 +996,7 @@ public class MaterializedViewCollectionResolverTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void
-      getOrCreateMaterializedViewForIndex_indexIdAtCreationTimeOverridesIndexId_v1() {
+  public void getOrCreateMaterializedViewForIndex_indexIdAtCreationTimeOverridesIndexId_v1() {
     ObjectId indexId = new ObjectId();
     ObjectId indexIdAtCreation = new ObjectId();
     VectorIndexDefinition definition =
@@ -993,7 +1014,8 @@ public class MaterializedViewCollectionResolverTest {
             this.autoEmbeddingMongoClient,
             this.metadataCatalog,
             this.materializedViewConfig,
-            this.leaseManager);
+            this.leaseManager,
+            new SimpleMeterRegistry());
 
     MaterializedViewCollectionMetadata metadata =
         resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
@@ -1003,5 +1025,101 @@ public class MaterializedViewCollectionResolverTest {
     assertThat(metadata.collectionName().startsWith(indexId.toHexString())).isFalse();
     assertThat(metadata.collectionName()).contains("-");
     assertThat(metadata.collectionName()).endsWith("-1-0");
+  }
+
+  @Test
+  public void computeHash_legacyTextFieldSpecification_throwsIllegalArgumentException() {
+    VectorIndexDefinition definition =
+        VectorIndexDefinitionBuilder.builder().withTextField("legacyTextField").build();
+
+    IllegalArgumentException thrown =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                MaterializedViewCollectionResolver.computeHash(
+                    AutoEmbedFieldMappingCreator.createAutoEmbedMapping(definition)));
+
+    assertThat(thrown.getMessage()).contains("Legacy TEXT field specification");
+  }
+
+  /**
+   * CLOUDP-401173: A transient {@link MongoTimeoutException} from the source mongod (e.g. while it
+   * is still booting after a maintenance restart) on the resolver's listCollections call should be
+   * retried in-place rather than propagated as a fatal error. Verifies that the resolver can absorb
+   * a single transient failure and still succeed without falling through to
+   * UnresolvedAutoEmbeddingIndex.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void getOrCreateMaterializedViewForIndex_transientListCollectionsError_retriesAndSucceeds()
+      throws Exception {
+    ObjectId indexId = new ObjectId();
+    VectorIndexDefinition definition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withAutoEmbedField("embeddingField")
+            .build();
+    var indexDefGen = createIndexDefinitionGeneration(definition);
+
+    // First listCollections call throws a retryable exception, subsequent calls return the iterable
+    // populated by createCollection. The MongoClientOperationExecutor inside the resolver should
+    // retry past the first failure.
+    when(this.mongoDatabase.listCollections(BsonDocument.class))
+        .thenThrow(new MongoTimeoutException("simulated server selection timeout"))
+        .thenReturn(this.listCollectionsIterable);
+
+    MaterializedViewCollectionResolver resolver =
+        new MaterializedViewCollectionResolver(
+            new DefaultInternalDatabaseResolver(MV_DATABASE_NAME),
+            this.autoEmbeddingMongoClient,
+            this.metadataCatalog,
+            this.materializedViewConfig,
+            this.leaseManager,
+            new SimpleMeterRegistry());
+
+    MaterializedViewCollectionMetadata metadata =
+        resolver.getOrCreateMaterializedViewForIndex(indexDefGen);
+
+    // Resolver must have retried - listCollections invoked at least twice (1 failure + 1+ success)
+    verify(this.mongoDatabase, atLeast(2)).listCollections(BsonDocument.class);
+    // And the final outcome is a fully-resolved metadata, not a thrown transient exception.
+    assertThat(metadata.collectionName()).startsWith(indexId.toHexString());
+    assertThat(this.metadataCatalog.getMetadata(indexDefGen.getGenerationId())).isEqualTo(metadata);
+  }
+
+  /**
+   * CLOUDP-401173: When transient errors persist beyond the retry budget, the resolver should
+   * surface a {@link MaterializedViewTransientException} so the upper retry loop
+   * (IndexRecoveryStager) can take over. Verifies that retries are bounded and the failure mode is
+   * preserved when the budget is exhausted.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void getOrCreateMaterializedViewForIndex_persistentListCollectionsError_propagates() {
+    ObjectId indexId = new ObjectId();
+    VectorIndexDefinition definition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withAutoEmbedField("embeddingField")
+            .build();
+    var indexDefGen = createIndexDefinitionGeneration(definition);
+
+    when(this.mongoDatabase.listCollections(BsonDocument.class))
+        .thenThrow(new MongoTimeoutException("simulated persistent timeout"));
+
+    MaterializedViewCollectionResolver resolver =
+        new MaterializedViewCollectionResolver(
+            new DefaultInternalDatabaseResolver(MV_DATABASE_NAME),
+            this.autoEmbeddingMongoClient,
+            this.metadataCatalog,
+            this.materializedViewConfig,
+            this.leaseManager,
+            new SimpleMeterRegistry());
+
+    assertThrows(
+        MaterializedViewTransientException.class,
+        () -> resolver.getOrCreateMaterializedViewForIndex(indexDefGen));
+    // Retries were attempted (more than 1 invocation).
+    verify(this.mongoDatabase, atLeast(2)).listCollections(BsonDocument.class);
   }
 }

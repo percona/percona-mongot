@@ -196,7 +196,8 @@ public class LuceneSearchIndexReaderTest {
             featureFlags,
             new DynamicFeatureFlagRegistry(
                 Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty()));
+                Optional.empty(), Optional.empty()),
+            () -> false);
     this.writer =
         ((SingleLuceneIndexWriter) ((MeteredIndexWriter) initializedIndex.getWriter()).getWrapped())
             .getLuceneWriter();
@@ -215,7 +216,7 @@ public class LuceneSearchIndexReaderTest {
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)));
     LuceneSearcherManager searcherManager =
         LuceneSearcherManager.create(
-            this.writer, this.searcherFactory, SearchIndex.mockMetricsFactory());
+            this.writer, this.searcherFactory, SearchIndex.mockMetricsFactory(), () -> false);
     Analyzer analyzer =
         LuceneAnalyzer.indexAnalyzer(MOCK_INDEX_DEFINITION, AnalyzerRegistryBuilder.empty());
     LuceneHighlighterContext highlighterContext =
@@ -840,7 +841,8 @@ public class LuceneSearchIndexReaderTest {
         LuceneSearcherManager.create(
             this.writer,
             searcherFactory != null ? searcherFactory : this.searcherFactory,
-            SearchIndex.mockMetricsFactory());
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
 
     Analyzer analyzer =
         LuceneAnalyzer.indexAnalyzer(

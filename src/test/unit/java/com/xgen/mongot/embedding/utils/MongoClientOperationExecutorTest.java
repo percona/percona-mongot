@@ -3,11 +3,14 @@ package com.xgen.mongot.embedding.utils;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoCommandException;
+import com.mongodb.MongoSocketReadException;
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.MongoWriteException;
 import com.mongodb.ServerAddress;
 import com.mongodb.WriteError;
@@ -15,9 +18,14 @@ import com.mongodb.bulk.BulkWriteError;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.mongodb.Errors;
+import com.xgen.mongot.util.retry.ExponentialBackoffPolicy;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
@@ -343,5 +351,214 @@ public class MongoClientOperationExecutorTest {
                 () -> {
                   throw commandException(2, "bad value");
                 }));
+  }
+
+  // --- Retryable errors are retried and can succeed ---
+
+  @Test
+  public void retryableError_succeedsAfterRetry() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+    AtomicInteger attempts = new AtomicInteger(0);
+
+    String result =
+        executor.execute(
+            "bulkWrite",
+            () -> {
+              if (attempts.incrementAndGet() == 1) {
+                throw new MongoTimeoutException("timeout");
+              }
+              return "success";
+            });
+
+    assertEquals("success", result);
+    assertEquals(2, attempts.get());
+  }
+
+  // --- shouldAbortRetry stops retries when closed ---
+
+  @Test
+  public void shouldAbortRetry_stopsRetryWhenTrue() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    AtomicBoolean closed = new AtomicBoolean(false);
+    MongoClientOperationExecutor executor =
+        new MongoClientOperationExecutor(
+            new MetricsFactory(PREFIX, registry),
+            "resource",
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofMillis(10))
+                .backoffFactor(2)
+                .maxDelay(Duration.ofMillis(100))
+                .maxRetries(5)
+                .jitter(0)
+                .build(),
+            closed::get);
+    AtomicInteger attempts = new AtomicInteger(0);
+
+    assertThrows(
+        MongoTimeoutException.class,
+        () ->
+            executor.execute(
+                "bulkWrite",
+                () -> {
+                  attempts.incrementAndGet();
+                  closed.set(true);
+                  throw new MongoTimeoutException("timeout");
+                }));
+
+    assertEquals(1, attempts.get());
+  }
+
+  @Test
+  public void shouldAbortRetry_retriesWhenFalse() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor =
+        new MongoClientOperationExecutor(
+            new MetricsFactory(PREFIX, registry),
+            "resource",
+            ExponentialBackoffPolicy.builder()
+                .initialDelay(Duration.ofMillis(10))
+                .backoffFactor(2)
+                .maxDelay(Duration.ofMillis(100))
+                .maxRetries(5)
+                .jitter(0)
+                .build(),
+            () -> false);
+    AtomicInteger attempts = new AtomicInteger(0);
+
+    String result =
+        executor.execute(
+            "bulkWrite",
+            () -> {
+              if (attempts.incrementAndGet() == 1) {
+                throw new MongoTimeoutException("timeout");
+              }
+              return "success";
+            });
+
+    assertEquals("success", result);
+    assertEquals(2, attempts.get());
+  }
+
+  // --- Per-attempt retry metrics ---
+
+  @Test
+  public void retryAttempts_socketError_recordsErrorReason() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+
+    AtomicInteger attempts = new AtomicInteger(0);
+    executor.execute(
+        "bulkWrite",
+        () -> {
+          if (attempts.getAndIncrement() < 2) {
+            throw new MongoSocketReadException(
+                "connection reset", new ServerAddress());
+          }
+          return "ok";
+        });
+
+    Counter retryCounter =
+        registry.find(PREFIX + ".resource.retriedAttempts")
+            .tag("errorReason", "socket_error").counter();
+    assertNotNull("Retry counter should exist", retryCounter);
+    assertEquals(2.0, retryCounter.count(), 0.0);
+  }
+
+  @Test
+  public void retryAttempts_timeout_recordsErrorReason() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+
+    AtomicInteger attempts = new AtomicInteger(0);
+    executor.execute(
+        "readCheckpoint",
+        () -> {
+          if (attempts.getAndIncrement() < 1) {
+            throw new MongoTimeoutException("timed out");
+          }
+          return "ok";
+        });
+
+    Counter retryCounter =
+        registry.find(PREFIX + ".resource.retriedAttempts")
+            .tag("errorReason", "timeout").counter();
+    assertNotNull("Retry counter should exist", retryCounter);
+    assertEquals(1.0, retryCounter.count(), 0.0);
+  }
+
+  @Test
+  public void retryAttempts_mongoErrorCode_recordsCode() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+
+    AtomicInteger attempts = new AtomicInteger(0);
+    // Error code 91 is in RETRYABLE_ERROR_CODES
+    executor.execute(
+        "findOne",
+        () -> {
+          if (attempts.getAndIncrement() < 1) {
+            throw commandException(91, "shutdown in progress");
+          }
+          return "ok";
+        });
+
+    Counter retryCounter =
+        registry.find(PREFIX + ".resource.retriedAttempts")
+            .tag("errorReason", "mongo_error_91").counter();
+    assertNotNull("Retry counter should exist", retryCounter);
+    assertEquals(1.0, retryCounter.count(), 0.0);
+  }
+
+  @Test
+  public void retryAttempts_noRetries_noCounter() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+
+    executor.execute("readCheckpoint", () -> "ok");
+
+    assertTrue(
+        "No retry counters should exist when operation succeeds first try",
+        registry.find(PREFIX + ".resource.retriedAttempts").counters().isEmpty());
+  }
+
+  // --- Per-attempt latency timer ---
+
+  @Test
+  public void perAttemptLatency_recordsEachAttempt() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+
+    AtomicInteger attempts = new AtomicInteger(0);
+    executor.execute(
+        "bulkWrite",
+        () -> {
+          if (attempts.getAndIncrement() < 2) {
+            throw new MongoSocketReadException(
+                "connection reset", new ServerAddress());
+          }
+          return "ok";
+        });
+
+    Timer perAttemptTimer =
+        registry.find(PREFIX + ".resource.perAttemptLatency")
+            .tag("operation", "bulkWrite").timer();
+    assertNotNull("Per-attempt timer should exist", perAttemptTimer);
+    // 3 attempts: 2 failures + 1 success
+    assertEquals(3, perAttemptTimer.count());
+  }
+
+  @Test
+  public void perAttemptLatency_singleAttempt_recordsOnce() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MongoClientOperationExecutor executor = newExecutor(registry);
+
+    executor.execute("readCheckpoint", () -> "ok");
+
+    Timer perAttemptTimer =
+        registry.find(PREFIX + ".resource.perAttemptLatency")
+            .tag("operation", "readCheckpoint").timer();
+    assertNotNull("Per-attempt timer should exist", perAttemptTimer);
+    assertEquals(1, perAttemptTimer.count());
   }
 }

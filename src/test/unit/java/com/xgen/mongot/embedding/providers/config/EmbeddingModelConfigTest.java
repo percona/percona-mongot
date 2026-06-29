@@ -12,6 +12,7 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.Worklo
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
+import java.util.Map;
 import java.util.Optional;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
@@ -38,7 +39,8 @@ public class EmbeddingModelConfigTest {
           Optional.of(1000),
           Optional.of(100_000),
           Optional.of("text"),
-          Optional.of(VectorAutoEmbedQuantization.SCALAR));
+          Optional.of(VectorAutoEmbedQuantization.SCALAR),
+          Optional.empty());
 
   private static final EmbeddingServiceConfig.ErrorHandlingConfig BASE_ERROR_CONFIG =
       new EmbeddingServiceConfig.ErrorHandlingConfig(10, 200L, 50L, 0.1);
@@ -115,6 +117,49 @@ public class EmbeddingModelConfigTest {
     assertEquals(BASE_MODEL_CONFIG.truncation, actual.truncation);
     assertEquals(Optional.of(2000), actual.batchSize);
     assertEquals(BASE_MODEL_CONFIG.batchTokenLimit, actual.batchTokenLimit);
+  }
+
+  @Test
+  public void testConsolidateWorkloadParams_modelOverride_preservesSimilarityByQuantization() {
+    VoyageModelConfig baseWithSimilarity =
+        new VoyageModelConfig(
+            Optional.of(512),
+            Optional.of(EmbeddingServiceConfig.TruncationOption.NONE),
+            Optional.of(1000),
+            Optional.of(100_000),
+            Optional.of("text"),
+            Optional.of(VectorAutoEmbedQuantization.SCALAR),
+            Optional.of(Map.of("scalar", "cosine")));
+
+    // Override carries only a batchSize; it has no similarity map of its own.
+    VoyageModelConfig override =
+        new VoyageModelConfig(
+            Optional.empty(), Optional.empty(), Optional.of(2000), Optional.empty());
+
+    WorkloadParams overrideParams =
+        new WorkloadParams(
+            Optional.of(override), Optional.empty(), Optional.empty(), Optional.empty());
+
+    EmbeddingModelConfig result =
+        EmbeddingModelConfig.create(
+            "voyage-3.5-lite",
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            new EmbeddingServiceConfig.EmbeddingConfig(
+                Optional.empty(),
+                baseWithSimilarity,
+                BASE_ERROR_CONFIG,
+                BASE_CREDENTIALS,
+                Optional.empty(),
+                Optional.of(overrideParams),
+                Optional.empty(),
+                Optional.empty(),
+                true,
+                Optional.empty(),
+                false,
+                Optional.empty()));
+
+    VoyageModelConfig actual = (VoyageModelConfig) result.collectionScan().modelConfig();
+    assertEquals(Optional.of(Map.of("scalar", "cosine")), actual.similarityByQuantization);
   }
 
   @Test
@@ -196,6 +241,7 @@ public class EmbeddingModelConfigTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     WorkloadParams overrideParams =
@@ -238,7 +284,8 @@ public class EmbeddingModelConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
-              Optional.of(quantization));
+              Optional.of(quantization),
+              Optional.empty());
       BsonDocument encoded = original.toBson();
       BsonDocument root = new BsonDocument();
       encoded.keySet().forEach(k -> root.put(k, encoded.get(k)));
@@ -278,7 +325,8 @@ public class EmbeddingModelConfigTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of("text"),
-            Optional.of(VectorAutoEmbedQuantization.SCALAR));
+            Optional.of(VectorAutoEmbedQuantization.SCALAR),
+            Optional.of(Map.of("scalar", "cosine")));
     BsonDocument root = new BsonDocument();
     BsonDocument encoded = original.toBson();
     encoded.keySet().forEach(k -> root.put(k, encoded.get(k)));

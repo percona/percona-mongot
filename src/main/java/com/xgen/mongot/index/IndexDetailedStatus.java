@@ -5,6 +5,7 @@ import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.synonym.SynonymDetailedStatus;
+import com.xgen.mongot.index.version.GenerationId;
 import java.util.Map;
 import java.util.Optional;
 
@@ -14,12 +15,14 @@ public sealed interface IndexDetailedStatus
       Map<String, SynonymDetailedStatus> synonymStatusMap,
       SearchIndexDefinition definition,
       IndexStatus indexStatus,
+      GenerationId generationId,
       Optional<AggregatedIndexMetrics> indexMetrics)
       implements IndexDetailedStatus {}
 
   record Vector(
       VectorIndexDefinition definition,
       IndexStatus indexStatus,
+      GenerationId generationId,
       Optional<AggregatedIndexMetrics> indexMetrics)
       implements IndexDetailedStatus {}
 
@@ -28,4 +31,6 @@ public sealed interface IndexDetailedStatus
   IndexDefinition definition();
 
   Optional<AggregatedIndexMetrics> indexMetrics();
+
+  GenerationId generationId();
 }

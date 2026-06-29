@@ -19,19 +19,19 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {ClauseTest.TestDeserialization.class, ClauseTest.TestSerialization.class})
+    value = {ClauseTest.DeserializationTest.class, ClauseTest.SerializationTest.class})
 public class ClauseTest {
   static final String DEFAULT_PATH = "path";
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "clause-deserialization";
     private static final BsonDeserializationTestSuite<Clause> TEST_SUITE =
         fromValue(ClauseTests.RESOURCES_PATH, SUITE_NAME, Clause::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Clause> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Clause> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Clause> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -624,14 +624,14 @@ public class ClauseTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "clause-serialization";
     private static final BsonSerializationTestSuite<Clause> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(ClauseTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<Clause> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Clause> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Clause> testSpec) {
       this.testSpec = testSpec;
     }
 

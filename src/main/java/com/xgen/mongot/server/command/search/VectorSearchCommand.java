@@ -26,6 +26,7 @@ import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.DynamicFeatureFlagsMetricsRecorder;
 import com.xgen.mongot.index.EmptyExplainInformation;
 import com.xgen.mongot.index.IndexGeneration;
@@ -34,6 +35,7 @@ import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.Variables;
+import com.xgen.mongot.index.VectorIndexReader;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
 import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
@@ -48,9 +50,11 @@ import com.xgen.mongot.index.lucene.explain.explainers.MetadataFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
 import com.xgen.mongot.index.lucene.explain.tracing.ExplainQueryState;
 import com.xgen.mongot.index.lucene.explain.tracing.ExplainTooLargeException;
+import com.xgen.mongot.index.query.DeadlineExceededException;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
 import com.xgen.mongot.index.query.Query;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
@@ -74,6 +78,7 @@ import com.xgen.mongot.util.bson.FloatVector;
 import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
+import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.mongot.util.mongodb.MongoDbVersion;
 import com.xgen.mongot.util.retry.ActionRetry;
 import io.micrometer.core.instrument.Counter;
@@ -85,6 +90,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -101,9 +107,9 @@ public class VectorSearchCommand implements Command {
   private static final Logger LOG = LoggerFactory.getLogger(VectorSearchCommand.class);
 
   /**
-   * Bundles the resolved embedding model name together with the raw (source) auto-embedding
-   * index definition. The source definition carries the original user-facing database name
-   * which is needed by {@link EmbeddingRequestContext} for multi-tenant credential lookup.
+   * Bundles the resolved embedding model name together with the raw (source) auto-embedding index
+   * definition. The source definition carries the original user-facing database name which is
+   * needed by {@link EmbeddingRequestContext} for multi-tenant credential lookup.
    */
   @VisibleForTesting
   record EmbedRequestInfo(Optional<String> modelName, IndexDefinition sourceDefinition) {}
@@ -217,8 +223,7 @@ public class VectorSearchCommand implements Command {
     StoredSourceDefinition storedSourceDefinition = indexDefinition.getStoredSource();
 
     if (storedSourceDefinition.isAllExcluded()) { // storedSource: false
-      throw new InvalidQueryException(
-          "Before using returnStoredSource, index must be created with storedSource defined.");
+      throw new InvalidQueryException("storedSource is not configured for this index.");
       // Vector Stored Source requested by user but not defined.
     }
 
@@ -234,6 +239,10 @@ public class VectorSearchCommand implements Command {
     @Var Optional<VectorSearchCriteria.Type> queryTypeOptional = Optional.empty();
     try {
       this.metrics.totalCount.increment();
+      this.definition
+          .deadlineTimestampMs()
+          .ifPresent(ignored -> this.metrics.queriesWithDeadline.increment());
+
       var query = this.definition.getQuery();
       if (query.userReturnStoredSource()) {
         this.metrics.vectorStoredSourceQueries.increment();
@@ -279,6 +288,10 @@ public class VectorSearchCommand implements Command {
 
     } catch (BsonParseException | InvalidQueryException e) {
       return handleInvalidQueryException(e);
+    } catch (DeadlineExceededException e) {
+      this.metrics.vectorQueriesTimedOut.increment();
+      return MessageUtils.createError(
+          Errors.MAX_TIME_MS_EXPIRED, Objects.requireNonNull(e.getMessage()));
     } catch (Exception e) {
       // Unwrap RuntimeExceptions to check if they mask a user-facing InvalidQueryException.
       if (e instanceof RuntimeException && e.getCause() instanceof InvalidQueryException) {
@@ -308,6 +321,7 @@ public class VectorSearchCommand implements Command {
         FLOGGER.atWarning().atMostEvery(1, TimeUnit.MINUTES).withCause(e).log(
             "Failed to process a vectorSearchCommand.");
       }
+
       return MessageUtils.createErrorBody(e);
     } catch (Throwable e) {
       this.metricsFactory
@@ -435,12 +449,15 @@ public class VectorSearchCommand implements Command {
         Tracing.simpleSpanGuard("VectorSearchCommand.getSearchResults", Tracing.TOGGLE_OFF)) {
       var timer = Timer.start();
       var commandTimer = Timer.start();
-      var materializedQuery = maybeEmbed(
+      var materializedQuery =
+          maybeEmbed(
               vectorSearchQuery,
               findEmbedRequestInfo(optionalIndex.get().getDefinition(), vectorSearchQuery));
+      var context = buildQueryExecutionContext();
       if (vectorSearchQuery.returnStoredSource()) {
         return getBatch(
             materializedQuery,
+            context,
             queryCursorOptions,
             optionalIndex.get(),
             timer,
@@ -449,7 +466,7 @@ public class VectorSearchCommand implements Command {
       } else {
         // TODO(CLOUDP-383074): consider using vector cursors even without stored source
         return getExhaustedBatch(
-            materializedQuery, optionalIndex.get(), timer, commandTimer, isNested);
+            materializedQuery, context, optionalIndex.get(), timer, commandTimer, isNested);
       }
     }
   }
@@ -457,6 +474,7 @@ public class VectorSearchCommand implements Command {
   /* getBatch() uses cursors (but getExhaustedBatch() does not) */
   private BsonDocument getBatch(
       MaterializedVectorSearchQuery materializedQuery,
+      QueryExecutionContext context,
       QueryCursorOptions queryCursorOptions,
       InitializedIndex index,
       Timer.Sample timer,
@@ -485,7 +503,7 @@ public class VectorSearchCommand implements Command {
               this.definition.collectionName(),
               this.definition.collectionUuid(),
               this.definition.viewName(),
-              new CursorQuery.Vector(materializedQuery),
+              new CursorQuery.Vector(materializedQuery, context),
               queryCursorOptions,
               QueryOptimizationFlags.DEFAULT_OPTIONS,
               this.searchEnvoyMetadata);
@@ -544,19 +562,25 @@ public class VectorSearchCommand implements Command {
   /* getExhaustedBatch() does NOT use cursors (see getBatch() for cursor support) */
   private BsonDocument getExhaustedBatch(
       MaterializedVectorSearchQuery materializedQuery,
+      QueryExecutionContext context,
       InitializedIndex index,
       Timer.Sample timer,
       Timer.Sample commandTimer,
       boolean isNested)
       throws IOException, InvalidQueryException, ReaderClosedException {
-    if (!(index instanceof InitializedVectorIndex vectorIndex)) {
+    VectorIndexReader reader;
+    if (index instanceof InitializedVectorIndex vectorIndex) {
+      reader = vectorIndex.getReader();
+    } else if (index instanceof InitializedMaterializedViewIndex matViewIndex) {
+      // TODO(CLOUDP-353553): split when MV can hold a SearchIndexDefinition.
+      reader = matViewIndex.getReader();
+    } else {
       throw new InvalidQueryException(
           "Cannot execute $vectorSearch over search index '%s'"
               .formatted(materializedQuery.vectorSearchQuery().index()),
           InvalidQueryException.Type.STRICT);
     }
-    var reader = vectorIndex.getReader();
-    var results = reader.query(materializedQuery);
+    var results = reader.query(materializedQuery, context);
     var serializedBatch = createExhaustedCursorBatch(results).toBson();
 
     var metrics = index.getMetricsUpdater().getQueryingMetricsUpdater();
@@ -617,8 +641,12 @@ public class VectorSearchCommand implements Command {
       }
     }
     var fieldPath = vectorSearchQuery.criteria().path();
-    Optional<String> indexModel =
-        Optional.ofNullable(vectorIndexDef.getModelNamePerPath().get(fieldPath));
+    if (!vectorIndexDef.getModelNamePerPath().containsKey(fieldPath)) {
+      throw new InvalidQueryException(
+          "Path '%s' is not defined in Automated Embedding index '%s'"
+              .formatted(fieldPath, vectorSearchQuery.index()));
+    }
+    String indexModelName = vectorIndexDef.getModelNamePerPath().get(fieldPath);
 
     Optional<String> queryModel =
         vectorSearchQuery.criteria().query().flatMap(VectorSearchQueryInput::getModel);
@@ -626,10 +654,10 @@ public class VectorSearchCommand implements Command {
     // If the user didn't specify a model, use the indexing model.
     if (queryModel.isEmpty()) {
       LOG.atDebug()
-          .addKeyValue("indexModel", indexModel.orElse("none"))
+          .addKeyValue("indexModel", indexModelName)
           .addKeyValue("fieldPath", fieldPath.toString())
           .log("Using indexing model for embedding query (no query model specified)");
-      return Optional.of(new EmbedRequestInfo(indexModel, vectorIndexDef));
+      return Optional.of(new EmbedRequestInfo(Optional.of(indexModelName), vectorIndexDef));
     }
 
     // Check if the query model is allowed
@@ -641,23 +669,17 @@ public class VectorSearchCommand implements Command {
     }
 
     // Then, check if the query model is compatible with the index's model
-    if (indexModel.isEmpty()) {
-      throw new InvalidQueryException(
-          String.format(
-              "cannot specify query model '%s' for an index without an embedding model",
-              queryModel.get()));
-    }
     Set<String> compatibleIndexModels =
         EmbeddingModelCatalog.getCompatibleIndexModels(queryModel.get());
-    if (!compatibleIndexModels.contains(indexModel.get())) {
+    if (!compatibleIndexModels.contains(indexModelName)) {
       throw new InvalidQueryException(
           String.format(
               "query model '%s' is not compatible with the index model '%s'",
-              queryModel.get(), indexModel.get()));
+              queryModel.get(), indexModelName));
     }
     LOG.atDebug()
         .addKeyValue("queryModel", queryModel.get())
-        .addKeyValue("indexModel", indexModel.get())
+        .addKeyValue("indexModel", indexModelName)
         .addKeyValue("fieldPath", fieldPath.toString())
         .log("Using user-specified model for embedding (compatible with indexing model)");
     return Optional.of(new EmbedRequestInfo(queryModel, vectorIndexDef));
@@ -756,6 +778,16 @@ public class VectorSearchCommand implements Command {
     }
   }
 
+  private QueryExecutionContext buildQueryExecutionContext() {
+    Optional<Long> deadlineTimestampMs =
+        this.metadata
+                .dynamicFeatureFlagRegistry()
+                .evaluateClusterInvariant(DynamicFeatureFlags.VECTOR_SEARCH_QUERY_TIMEOUT)
+            ? this.definition.deadlineTimestampMs()
+            : Optional.empty();
+    return QueryExecutionContext.withDeadline(deadlineTimestampMs);
+  }
+
   private MaterializedVectorSearchQuery maybeEmbed(
       VectorSearchQuery vectorSearchQuery, Optional<EmbedRequestInfo> embedRequestInfo)
       throws InvalidQueryException,
@@ -763,27 +795,35 @@ public class VectorSearchCommand implements Command {
           EmbeddingProviderNonTransientException {
     VectorSearchCriteria criteria = vectorSearchQuery.criteria();
     Optional<String> textToEmbed = criteria.query().flatMap(VectorSearchQueryInput::getText);
-    if (textToEmbed.isEmpty()) {
-      // If query field was present but text is empty, throw a descriptive error
-      if (criteria.query().isPresent()) {
-        throw new InvalidQueryException(
-            "'query' field cannot be empty for auto-embedding vector search");
+
+    // No auto-embedding source from findEmbedRequestInfo: BYOV or plain vector (other teams: this
+    // gate). Anything else needs queryVector, including empty `query` on a regular vector index.
+    if (embedRequestInfo.filter(info -> info.sourceDefinition().isAutoEmbeddingIndex()).isEmpty()) {
+      if (criteria.queryVector().isPresent()) {
+        return new MaterializedVectorSearchQuery(
+            vectorSearchQuery,
+            criteria.queryVector().get(),
+            findAutoEmbeddingFieldsMapping(vectorSearchQuery));
       }
-      // No text to embed, but still can be a vector query on AutoEmbedding index, user can use
-      // queryVector to query it.
-      return new MaterializedVectorSearchQuery(
-          vectorSearchQuery,
-          Check.isPresent(criteria.queryVector(), "queryVector"),
-          findAutoEmbeddingFieldsMapping(vectorSearchQuery));
+      throw new InvalidQueryException("queryVector must be present");
     }
-    Optional<String> canonicalModel =
-        embedRequestInfo.flatMap(EmbedRequestInfo::modelName);
+
+    // Text query path: requires a valid text query.
+    if (criteria.query().isPresent() && textToEmbed.isEmpty()) {
+      throw new InvalidQueryException(
+          "'query' field cannot be empty when querying Automated Embedding index");
+    }
+
+    // Text query path: requires an auto-embedding-capable index and a resolvable model.
+    Optional<String> canonicalModel = embedRequestInfo.flatMap(EmbedRequestInfo::modelName);
     if (canonicalModel.isEmpty()) {
       throw new InvalidQueryException(
-          "Vector index for this text based query is invalid due to missing model");
+          "Automated Embedding index query is invalid due to missing model");
     }
     if (this.embeddingServiceManagerSupplier.get() == null) {
-      throw new EmbeddingProviderTransientException("Embedding service not initialized.");
+      throw new EmbeddingProviderTransientException(
+          "Embedding service not initialized.",
+          EmbeddingProviderTransientException.Reason.SERVICE_NOT_INITIALIZED);
     }
 
     // Use the raw (source) auto-embedding index definition for the embedding context.
@@ -858,8 +898,9 @@ public class VectorSearchCommand implements Command {
             .orElseThrow(
                 () ->
                     new InvalidQueryException(
-                        "Vector index for this text based query is invalid: "
-                            + "no embedding field for path '%s'".formatted(sourcePath)));
+                        ("Error when preparing embedding request context: path '%s' is not defined "
+                                + "in Automated Embedding index")
+                            .formatted(sourcePath)));
 
     return new EmbeddingRequestContext(
         sourceIndexDefinition.getDatabase(),
@@ -1016,7 +1057,7 @@ public class VectorSearchCommand implements Command {
             Tag.of("hasParentFilter", hasParentFilter),
             Tag.of("scoreMode", scoreMode));
 
-    this.metrics.metricsFactory.counter("nestedVectorSearchQueries", tags).increment();
+    this.metrics.metricsFactory.counter("nestedVectorSearchQueryTags", tags).increment();
   }
 
   /**
@@ -1157,6 +1198,8 @@ public class VectorSearchCommand implements Command {
     private final Counter bsonBitVectorQueries;
     private final Counter vectorStoredSourceQueries;
     private final Counter nestedVectorSearchQueries;
+    private final Counter queriesWithDeadline;
+    private final Counter vectorQueriesTimedOut;
     private final AtomicLong concurrentExactQueries;
     private final AtomicLong concurrentApproximateQueries;
     private final AtomicLong concurrentAutoEmbeddingQueries;
@@ -1187,6 +1230,8 @@ public class VectorSearchCommand implements Command {
       this.bsonBitVectorQueries = metricsFactory.counter("bsonBitVectorQueries");
       this.vectorStoredSourceQueries = metricsFactory.counter("vectorStoredSourceQueries");
       this.nestedVectorSearchQueries = metricsFactory.counter("nestedVectorSearchQueries");
+      this.queriesWithDeadline = metricsFactory.counter("vectorQueriesWithDeadline");
+      this.vectorQueriesTimedOut = metricsFactory.counter("vectorQueriesTimedOut");
       this.concurrentExactQueries = metricsFactory.numGauge("concurrentExactQueries");
       this.concurrentApproximateQueries = metricsFactory.numGauge("concurrentApproximateQueries");
       this.concurrentAutoEmbeddingQueries =

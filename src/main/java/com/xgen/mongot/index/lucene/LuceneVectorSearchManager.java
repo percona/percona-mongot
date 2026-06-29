@@ -7,6 +7,7 @@ import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.index.lucene.quantization.BinaryQuantizedVectorRescorer;
 import com.xgen.mongot.index.lucene.query.NestedAvgVectorRescorer;
 import com.xgen.mongot.index.lucene.query.custom.WrappedKnnQuery;
+import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.mongot.index.lucene.searcher.LuceneIndexSearcher;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.query.operators.ApproximateVectorSearchCriteria;
@@ -14,12 +15,15 @@ import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.util.Check;
 import java.io.IOException;
 import java.util.Optional;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.KnnFloatVectorQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TopScoreDocCollectorManager;
 import org.apache.lucene.search.TotalHits;
+import org.apache.lucene.search.join.BitSetProducer;
 
 /**
  * Version of {@link LuceneOperatorSearchManager} which overrides the batchSize with {@link
@@ -85,20 +89,72 @@ public class LuceneVectorSearchManager implements LuceneSearchManager<QueryInfo>
       throws IOException {
     TopDocs topCandidates = indexSearcher.search(this.luceneQuery, collectorManager);
 
+    // Surface a timeout to the user if the deadline is exceeded
+    DeadlineQueryTimeout.throwIfExceeded(Optional.ofNullable(indexSearcher.getTimeout()));
+
     if (this.rescorer.isEmpty()) {
       return topCandidates;
     }
 
-    Query unwrapped =
-        (this.luceneQuery instanceof WrappedKnnQuery wrappedKnnQuery)
-            ? wrappedKnnQuery.getQuery()
-            : this.luceneQuery;
+    Optional<WrappedToParentBlockJoinQuery> blockJoinQuery =
+        extractBlockJoinQuery(this.luceneQuery);
 
-    return this.rescorer.get().rescore(
-        indexSearcher,
-        topCandidates,
-        (ApproximateVectorSearchCriteria) this.criteria,
-        Check.instanceOf(unwrapped, KnnFloatVectorQuery.class));
+    KnnFloatVectorQuery knnQuery;
+    Optional<BitSetProducer> parentFilter;
+
+    if (blockJoinQuery.isPresent()) {
+      Query childQuery = blockJoinQuery.get().getChildQuery();
+      knnQuery =
+          (childQuery instanceof WrappedKnnQuery wkq)
+              ? Check.instanceOf(wkq.getQuery(), KnnFloatVectorQuery.class)
+              : Check.instanceOf(childQuery, KnnFloatVectorQuery.class);
+      parentFilter = Optional.of(blockJoinQuery.get().getParentsFilter());
+    } else {
+      knnQuery = extractKnnQuery(this.luceneQuery);
+      parentFilter = Optional.empty();
+    }
+
+    return this.rescorer
+        .get()
+        .rescore(
+            indexSearcher,
+            topCandidates,
+            (ApproximateVectorSearchCriteria) this.criteria,
+            knnQuery,
+            parentFilter);
+  }
+
+  @VisibleForTesting
+  static KnnFloatVectorQuery extractKnnQuery(Query query) {
+    Query unwrapped = (query instanceof WrappedKnnQuery wkq) ? wkq.getQuery() : query;
+    if (unwrapped instanceof KnnFloatVectorQuery knn) {
+      return knn;
+    }
+    if (unwrapped instanceof BooleanQuery bq) {
+      for (BooleanClause clause : bq.clauses()) {
+        if (clause.occur() == BooleanClause.Occur.MUST
+            && clause.query() instanceof KnnFloatVectorQuery knn) {
+          return knn;
+        }
+      }
+    }
+    return Check.unreachable("Unrecognized flat vector query shape — expected KnnFloatVectorQuery");
+  }
+
+  @VisibleForTesting
+  static Optional<WrappedToParentBlockJoinQuery> extractBlockJoinQuery(Query query) {
+    Query unwrapped = (query instanceof WrappedKnnQuery wkq) ? wkq.getQuery() : query;
+    if (unwrapped instanceof WrappedToParentBlockJoinQuery bjq) {
+      return Optional.of(bjq);
+    }
+    if (unwrapped instanceof BooleanQuery bq) {
+      for (BooleanClause clause : bq.clauses()) {
+        if (clause.query() instanceof WrappedToParentBlockJoinQuery bjq) {
+          return Optional.of(bjq);
+        }
+      }
+    }
+    return Optional.empty();
   }
 
   @Override

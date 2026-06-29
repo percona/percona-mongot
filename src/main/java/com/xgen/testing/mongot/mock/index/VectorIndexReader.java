@@ -8,6 +8,7 @@ import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.VectorSearchResult;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
@@ -30,7 +31,9 @@ public class VectorIndexReader {
 
     try {
       lenient()
-          .when(indexReader.query(any(MaterializedVectorSearchQuery.class)))
+          .when(
+              indexReader.query(
+                  any(MaterializedVectorSearchQuery.class), any(QueryExecutionContext.class)))
           .thenAnswer(ignored -> generateResults(numResults));
     } catch (IOException | InvalidQueryException | ReaderClosedException e) {
       throw new RuntimeException(e);

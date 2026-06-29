@@ -14,11 +14,11 @@ import org.junit.runners.Parameterized;
 import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
-@Suite.SuiteClasses(value = {MongoDbCollectionInfoTest.TestDeserialization.class})
+@Suite.SuiteClasses(value = {MongoDbCollectionInfoTest.DeserializationTest.class})
 public class MongoDbCollectionInfoTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
 
     private static final String SUITE_NAME = "collection-info-deserialization";
     private static final BsonDeserializationTestSuite<Optional<MongoDbCollectionInfo>> TEST_SUITE =
@@ -30,7 +30,7 @@ public class MongoDbCollectionInfoTest {
     private final BsonDeserializationTestSuite.TestSpecWrapper<Optional<MongoDbCollectionInfo>>
         testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<Optional<MongoDbCollectionInfo>> testSpec) {
       this.testSpec = testSpec;
     }

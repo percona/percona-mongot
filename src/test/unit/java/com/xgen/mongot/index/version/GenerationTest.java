@@ -17,14 +17,14 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      GenerationTest.TestDeserialization.class,
-      GenerationTest.TestSerialization.class,
-      GenerationTest.TestClass.class,
+      GenerationTest.DeserializationTest.class,
+      GenerationTest.SerializationTest.class,
+      GenerationTest.ClassTest.class,
     })
 public class GenerationTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
 
     private static final String SUITE_NAME = "index-generation-deserialization";
     private static final BsonDeserializationTestSuite<Generation> TEST_SUITE =
@@ -32,7 +32,7 @@ public class GenerationTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Generation> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Generation> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Generation> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -57,7 +57,7 @@ public class GenerationTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "index-generation-serialization";
     private static final BsonSerializationTestSuite<Generation> TEST_SUITE =
@@ -65,7 +65,7 @@ public class GenerationTest {
 
     private final BsonSerializationTestSuite.TestSpec<Generation> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Generation> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Generation> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -90,7 +90,7 @@ public class GenerationTest {
     }
   }
 
-  public static class TestClass {
+  public static class ClassTest {
     @Test
     public void testIncrement() {
       var value = generation(1, 2, 1);

@@ -29,8 +29,10 @@ import org.bson.codecs.DecoderContext;
 
 public class FtdcDecoder {
 
-  @SuppressWarnings("checkstyle:MissingJavadocMethod")
-  public static List<BsonDocument> readDocs(Path ftdcDir, FtdcFileType fileTypes) throws Exception {
+  /**
+   * Returns FTDC file paths under {@code ftdcDir} that match the requested file type.
+   */
+  public static List<Path> getFilePaths(Path ftdcDir, FtdcFileType fileTypes) {
     File root = ftdcDir.toFile();
 
     Predicate<String> fileFilter = switch (fileTypes) {
@@ -39,14 +41,20 @@ public class FtdcDecoder {
       case ALL     -> fileName -> true;
     };
 
-    var files =
-        Arrays.stream(Optional.ofNullable(root.list()).orElse(new String[0]))
-            .filter(fileFilter)
-            .sorted()
-            .map(fileName -> root.toPath().resolve(fileName))
-            .collect(Collectors.toList());
+    return Arrays.stream(Optional.ofNullable(root.list()).orElse(new String[0]))
+        .filter(fileFilter)
+        .sorted()
+        .map(fileName -> root.toPath().resolve(fileName))
+        .collect(Collectors.toList());
+  }
 
-    return CheckedStream.from(files).mapAndCollectChecked(FtdcDecoder::readDocsFromFile).stream()
+  /**
+   * Reads all FTDC documents from files matching the requested type under {@code ftdcDir}.
+   */
+  public static List<BsonDocument> readDocs(Path ftdcDir, FtdcFileType fileTypes) throws Exception {
+    return CheckedStream.from(getFilePaths(ftdcDir, fileTypes))
+        .mapAndCollectChecked(FtdcDecoder::readDocsFromFile)
+        .stream()
         .flatMap(Collection::stream)
         .collect(Collectors.toList());
   }
@@ -108,9 +116,8 @@ public class FtdcDecoder {
         .collect(Collectors.toList());
   }
 
-  static List<BsonDocument> readDocsFromFile(Path filePath) throws IOException {
+  public static List<BsonDocument> readDocsFromFile(Path filePath) throws IOException {
     var docsInFile = new ArrayList<BsonDocument>();
-    // read consecutive bson documents from each file
     var bytes = Files.readAllBytes(filePath);
     var buf = ByteBuffer.wrap(bytes);
     while (buf.hasRemaining()) {

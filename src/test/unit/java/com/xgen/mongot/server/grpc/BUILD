@@ -15,11 +15,13 @@ java_test_suite(
     deps = [
         "//src/main/java/com/xgen/mongot/config/manager",
         "//src/main/java/com/xgen/mongot/cursor",
+        "//src/main/java/com/xgen/mongot/featureflag",
         "//src/main/java/com/xgen/mongot/server/command",
         "//src/main/java/com/xgen/mongot/server/command/registry",
         "//src/main/java/com/xgen/mongot/server/executors",
         "//src/main/java/com/xgen/mongot/server/grpc",
         "//src/main/java/com/xgen/mongot/server/message",
+        "//src/main/java/com/xgen/mongot/util/mongodb",
         "//src/proto/searchenvoy:searchenvoy_java_proto",
         "@io_grpc_grpc_java//api",
         "@io_grpc_grpc_java//stub",

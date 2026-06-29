@@ -66,11 +66,9 @@ public class LengthTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof LengthTokenFilterDefinition)) {
+    if (!(other instanceof LengthTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    LengthTokenFilterDefinition otherDefinition = (LengthTokenFilterDefinition) other;
     return (this.min == otherDefinition.min) && (this.max == otherDefinition.max);
   }
 

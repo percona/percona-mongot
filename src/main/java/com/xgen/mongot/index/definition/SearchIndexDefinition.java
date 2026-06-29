@@ -604,13 +604,11 @@ public final class SearchIndexDefinition implements IndexDefinition {
   private static ImmutableMap<FieldPath, String> calculateModelNamePerPath(
       DocumentFieldDefinition mappings) {
     ImmutableMap.Builder<FieldPath, String> builder = ImmutableMap.builder();
-    for (Map.Entry<String, FieldDefinition> entry : mappings.fields().entrySet()) {
-      entry
-          .getValue()
+    for (FieldDefinition fieldDefinition : mappings.fields().values()) {
+      fieldDefinition
           .searchAutoEmbedFieldDefinition()
           .ifPresent(
-              autoEmbed ->
-                  builder.put(FieldPath.parse(entry.getKey()), autoEmbed.modelName()));
+              autoEmbed -> builder.put(autoEmbed.sourceField(), autoEmbed.modelName()));
     }
     return builder.build();
   }

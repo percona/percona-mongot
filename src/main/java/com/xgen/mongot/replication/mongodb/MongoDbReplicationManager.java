@@ -12,13 +12,14 @@ import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.replication.ReplicationManager;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
@@ -28,7 +29,6 @@ import com.xgen.mongot.replication.mongodb.common.DefaultDocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.DefaultSessionRefresher;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
 import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
-import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
 import com.xgen.mongot.replication.mongodb.common.ReplicationOptimeUpdater;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
@@ -37,6 +37,7 @@ import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
 import com.xgen.mongot.replication.mongodb.steadystate.changestream.SteadyStateReplicationConfig;
 import com.xgen.mongot.replication.mongodb.synonyms.SynonymManager;
 import com.xgen.mongot.util.FutureUtils;
+import com.xgen.mongot.util.Optionals;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
@@ -123,7 +124,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
   /** A mapping of existing IndexLifecycleManagers. */
   @GuardedBy("this")
-  private final Map<GenerationId, ReplicationIndexManager> indexManagers;
+  private final Map<GenerationId, IndexManager> indexManagers;
 
   private final NamedScheduledExecutorService commitExecutor;
 
@@ -165,7 +166,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       Optional<? extends SessionRefresher> synonymsSessionRefresher,
       ReplicationIndexManagerFactory replicationIndexManagerFactory,
       MeterRegistry meterRegistry,
-      Map<GenerationId, ReplicationIndexManager> indexManagers,
+      Map<GenerationId, IndexManager> indexManagers,
       NamedScheduledExecutorService commitExecutor,
       ReplicationOptimeUpdater replicationOptimeUpdater,
       InitializedIndexCatalog initializedIndexCatalog,
@@ -217,7 +218,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       Optional<? extends SessionRefresher> synonymsSessionRefresher,
       ReplicationIndexManagerFactory replicationIndexManagerFactory,
       MeterRegistry meterRegistry,
-      Map<GenerationId, ReplicationIndexManager> indexManagers,
+      Map<GenerationId, IndexManager> indexManagers,
       NamedScheduledExecutorService commitExecutor,
       ReplicationOptimeUpdater replicationOptimeUpdater,
       InitializedIndexCatalog initializedIndexCatalog,
@@ -275,30 +276,50 @@ public class MongoDbReplicationManager implements ReplicationManager {
     if (syncSourceConfig.isEmpty()) {
       throw new IllegalArgumentException("syncSourceConfig must be provided");
     }
+    syncSourceConfig.get().validateReplicationUrisAvailable();
+
     LOG.info("creating MongoDbReplicationManager");
     var meterRegistry = meterAndFtdcRegistry.meterRegistry();
     meterRegistry.gauge("replication.manager", 1);
+    boolean enableLifecycleAttributionMetrics =
+        featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS);
+
     var lifecycleExecutor =
         Executors.fixedSizeThreadPool(
             "indexing-lifecycle", Math.max(1, Runtime.INSTANCE.getNumCpus() / 4), meterRegistry);
+    if (enableLifecycleAttributionMetrics) {
+      ThreadPoolResourceMetrics.create("replication").register(lifecycleExecutor, meterRegistry);
+    }
 
     var indexingWorkSchedulerFactory =
         embeddingServiceManagerSupplier
             .map(
                 supplier ->
                     IndexingWorkSchedulerFactory.create(
-                        replicationConfig.numIndexingThreads, supplier, meterRegistry))
+                        replicationConfig.numIndexingThreads,
+                        supplier,
+                        meterRegistry,
+                        enableLifecycleAttributionMetrics))
             .orElseGet(
                 () ->
                     IndexingWorkSchedulerFactory.createWithoutEmbeddingStrategy(
-                        replicationConfig.numIndexingThreads, meterRegistry));
+                        replicationConfig.numIndexingThreads,
+                        meterRegistry,
+                        enableLifecycleAttributionMetrics));
 
     var decodingWorkScheduler =
         DecodingWorkScheduler.create(
-            replicationConfig.numChangeStreamDecodingThreads, meterRegistry);
+            replicationConfig.numChangeStreamDecodingThreads,
+            CommonReplicationConfig.Type.DEFAULT,
+            meterRegistry,
+            enableLifecycleAttributionMetrics);
 
     var sessionRefreshExecutor =
         Executors.singleThreadScheduledExecutor("session-refresh", meterRegistry);
+    if (enableLifecycleAttributionMetrics) {
+      ThreadPoolResourceMetrics.create("replication")
+          .register(sessionRefreshExecutor, meterRegistry);
+    }
 
     // There should only be one sync source host
     var syncSourceHost = getSyncSourceHost(syncSourceConfig.get());
@@ -314,18 +335,26 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
     var syncMongoClient = clientSessionRecords.get(syncSourceHost).syncMongoClient();
     var sessionRefresher = clientSessionRecords.get(syncSourceHost).sessionRefresher();
-    // create mongos client/session refresher if mongosUri is provided, otherwise use mongod client
-    var synonymsMongoClient =
-        syncSourceConfig
-            .get()
-            .mongosUri
-            .map(
-                syncSource ->
-                    getSynonymsMongoClient(
-                        syncSource.uri(),
-                        syncSource.sslContext(),
-                        replicationConfig.numConcurrentSynonymSyncs,
-                        meterRegistry));
+
+    // create mongos client/session refresher if we're in a sharded environment,
+    // otherwise use mongod client
+    Optional<MongoClient> synonymsMongoClient;
+    if (syncSourceConfig.get().isSharded) {
+      ConnectionInfo mongosSingleHostUri =
+          Optionals.orElseThrow(
+              syncSourceConfig.get().mongosSingleHostReplicationUri,
+              "mongosSingleHostReplicationUri must be set before starting up the "
+                  + "MongoDbReplicationManager if we're in a sharded environment");
+      synonymsMongoClient =
+          Optional.of(
+              getSynonymsMongoClient(
+                  mongosSingleHostUri.uri(),
+                  mongosSingleHostUri.sslContext(),
+                  replicationConfig.numConcurrentSynonymSyncs,
+                  meterRegistry));
+    } else {
+      synonymsMongoClient = Optional.empty();
+    }
 
     var synonymsSessionRefresher =
         synonymsMongoClient.map(
@@ -359,11 +388,12 @@ public class MongoDbReplicationManager implements ReplicationManager {
             syncMongoClient,
             syncBatchMongoClient,
             decodingWorkScheduler,
-            steadyStateReplicationConfig);
+            steadyStateReplicationConfig,
+            enableLifecycleAttributionMetrics);
 
     var synonymManager =
         SynonymManager.create(
-            synonymsMongoClient.isPresent(),
+            syncSourceConfig.get().isSharded,
             synonymsMongoClient.orElse(syncMongoClient),
             synonymsSessionRefresher.orElse((DefaultSessionRefresher) sessionRefresher),
             meterRegistry,
@@ -372,6 +402,9 @@ public class MongoDbReplicationManager implements ReplicationManager {
     var commitExecutor =
         Executors.fixedSizeThreadScheduledExecutor(
             "index-commit", durabilityConfig.numCommittingThreads, meterRegistry);
+    if (enableLifecycleAttributionMetrics) {
+      ThreadPoolResourceMetrics.create("replication").register(commitExecutor, meterRegistry);
+    }
 
     var replicationOptimeMetricUpdater =
         ReplicationOptimeUpdater.create(
@@ -379,7 +412,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
             initializedIndexCatalog,
             syncSourceConfig,
             replicationOptimeUpdaterInterval,
-            meterRegistry);
+            meterRegistry,
+            enableLifecycleAttributionMetrics);
 
     return MongoDbReplicationManager.create(
         lifecycleExecutor,
@@ -483,7 +517,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   /** Creates gauges to track the number of index replication managers by state */
   private static void createStateGauges(
       MongoDbReplicationManager mongoDbReplicationManager, MetricsFactory metricsFactory) {
-    Arrays.stream(ReplicationIndexManager.State.values())
+    Arrays.stream(IndexManager.State.values())
         .forEach(
             state ->
                 metricsFactory.objectValueGauge(
@@ -494,7 +528,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   }
 
   // lock is not needed because we iterate through a copy of managers
-  private double gaugeReplicationManagers(ReplicationIndexManager.State state) {
+  private double gaugeReplicationManagers(IndexManager.State state) {
     return this.getIndexManagers().entrySet().stream()
         .filter(m -> m.getValue().getState() == state)
         .count();
@@ -520,14 +554,23 @@ public class MongoDbReplicationManager implements ReplicationManager {
       MeterRegistry meterRegistry,
       NamedScheduledExecutorService sessionRefreshExecutor,
       String syncSourceHost) {
+
+    // validateReplicationUrisAvailable() should have caught an absent URI before we get here;
+    // the orElseThrow is a defensive assertion.
+    ConnectionInfo mongodUri =
+        Optionals.orElseThrow(
+            syncSourceConfig.mongodSingleHostReplicationUri,
+            "syncSourceConfig.mongodSingleHostReplicationUri must be set before starting up"
+                + " the MongoDbReplicationManager");
+
     LOG.atInfo().addKeyValue("defaultHost", syncSourceHost).log("start constructing mongoClients");
 
     var sessionRefresherMetricsFactory =
         new MetricsFactory("replication.sessionRefresher", meterRegistry);
-    // make sure syncClient and session refresher connecting mongodUri is included
+    // make sure syncClient and session refresher connecting mongodSingleHostReplicationUri is
+    // included
     var syncMongoClient =
-        getSyncMongoClient(
-            syncSourceConfig.mongodUri, type.metricsNamespacePrefix, meterRegistry, maxConnections);
+        getSyncMongoClient(mongodUri, type.metricsNamespacePrefix, meterRegistry, maxConnections);
     var sessionRefresher =
         DefaultSessionRefresher.create(
             sessionRefresherMetricsFactory, type, sessionRefreshExecutor, syncMongoClient);
@@ -556,9 +599,9 @@ public class MongoDbReplicationManager implements ReplicationManager {
   static int getSyncMaxConnections(
       SyncSourceConfig syncSourceConfig, MongoDbReplicationConfig replicationConfig) {
     int initialSyncConnections = (2 * replicationConfig.numConcurrentInitialSyncs);
-    // synonym syncs do not use this client when mongosUri exists
+    // synonym syncs do not use this client when cluster is sharded
     int synonymSyncConnections =
-        syncSourceConfig.mongosUri.isPresent() ? 0 : replicationConfig.numConcurrentSynonymSyncs;
+        syncSourceConfig.isSharded ? 0 : replicationConfig.numConcurrentSynonymSyncs;
     int sessionRefreshConnections = 1;
     int changeStreamModeSelectionConnections = 1;
 
@@ -568,19 +611,34 @@ public class MongoDbReplicationManager implements ReplicationManager {
         + changeStreamModeSelectionConnections;
   }
 
+  /**
+   * Returns the hostname (without port) of the single mongod instance used for initial sync.
+   *
+   * <p>Prefers a match from {@link SyncSourceConfig#mongodUris} when available. Falls back to
+   * extracting the first host from {@link SyncSourceConfig#mongodSingleHostReplicationUri}.
+   */
   public static String getSyncSourceHost(SyncSourceConfig syncSourceConfig) {
+
+    // validateReplicationUrisAvailable() should have caught an absent URI before we get here;
+    // the orElseThrow is a defensive assertion.
+    ConnectionInfo mongodUri =
+        Optionals.orElseThrow(
+            syncSourceConfig.mongodSingleHostReplicationUri,
+            "syncSourceConfig.mongodSingleHostReplicationUri must be set before starting up"
+                + " the MongoDbReplicationManager");
+
     Optional<String> hostName =
         syncSourceConfig.mongodUris.flatMap(
             map ->
                 map.entrySet().stream()
-                    .filter(e -> syncSourceConfig.mongodUri.equals(e.getValue()))
+                    .filter(e -> mongodUri.equals(e.getValue()))
                     .map(Map.Entry::getKey)
                     .findFirst());
 
     if (hostName.isEmpty()) {
-      // There should only be one host from mongodUri for Atlas that's using a direct connection for
-      // initial sync
-      String host = syncSourceConfig.mongodUri.uri().getHosts().getFirst();
+      // There should only be one host from mongodSingleHostReplicationUri for Atlas that's using a
+      // direct connection for initial sync
+      String host = mongodUri.uri().getHosts().getFirst();
       // return the host name excluding port.
       return host.split(":")[0];
     }
@@ -606,8 +664,10 @@ public class MongoDbReplicationManager implements ReplicationManager {
       String metricsNamespacePrefix,
       MeterRegistry meterRegistry) {
     return MongoClientBuilder.builder(
-            syncSourceConfig.mongodClusterReaderUri.uri(), metricsNamespacePrefix, meterRegistry)
-        .sslContext(syncSourceConfig.mongodClusterReaderUri.sslContext())
+            syncSourceConfig.mongodClusterReplicationUri.uri(),
+            metricsNamespacePrefix,
+            meterRegistry)
+        .sslContext(syncSourceConfig.mongodClusterReplicationUri.sslContext())
         .description("steady state sync")
         .maxConnections(numConcurrentChangeStreams)
         .buildSyncBatchClient();
@@ -638,7 +698,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   @Override
   public synchronized boolean isInitialized() {
     return this.indexManagers.values().stream()
-        .map(ReplicationIndexManager::getInitFuture)
+        .map(IndexManager::getInitFuture)
         .allMatch(initFuture -> initFuture.isDone() && !initFuture.isCompletedExceptionally());
   }
 
@@ -657,26 +717,26 @@ public class MongoDbReplicationManager implements ReplicationManager {
       return;
     }
 
-    Index index = indexGeneration.getIndex();
     DefaultDocumentIndexer indexer = DefaultDocumentIndexer.create(initializedIndex.get());
-    PeriodicIndexCommitter committer =
-        new PeriodicIndexCommitter(index, indexer, this.commitExecutor, this.commitInterval);
 
-    ReplicationIndexManager indexManager =
-        this.replicationIndexManagerFactory.create(
-            this.lifecycleExecutor,
-            this.cursorManager,
-            this.initialSyncQueue,
-            this.steadyStateManager,
-            Optional.of(this.synonymManager),
-            indexGeneration,
-            initializedIndex.get(),
-            indexer,
-            committer,
-            this.requestRateLimitBackoffDuration,
-            this.meterRegistry,
-            this.featureFlags,
-            this.enableNaturalOrderScan);
+    IndexManager indexManager =
+        ReplicationIndexManagerFactory.forIndexGeneration(
+                indexGeneration, this.replicationIndexManagerFactory)
+            .create(
+                this.lifecycleExecutor,
+                this.cursorManager,
+                this.initialSyncQueue,
+                this.steadyStateManager,
+                Optional.of(this.synonymManager),
+                indexGeneration,
+                initializedIndex.get(),
+                indexer,
+                this.commitExecutor,
+                this.commitInterval,
+                this.requestRateLimitBackoffDuration,
+                this.meterRegistry,
+                this.featureFlags,
+                this.enableNaturalOrderScan);
 
     this.indexManagers.put(generationId, indexManager);
   }
@@ -689,7 +749,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       return CompletableFuture.completedFuture(null);
     }
 
-    ReplicationIndexManager indexManager = this.indexManagers.remove(generationId);
+    IndexManager indexManager = this.indexManagers.remove(generationId);
     return indexManager.drop();
   }
 
@@ -701,7 +761,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
     List<CompletableFuture<?>> futures =
         this.indexManagers.values().stream()
-            .map(ReplicationIndexManager::shutdown)
+            .map(IndexManager::shutdown)
             .collect(Collectors.toList());
 
     // Need to create a separate executor to run the shutdown tasks, otherwise it may end up running
@@ -755,13 +815,13 @@ public class MongoDbReplicationManager implements ReplicationManager {
   }
 
   @VisibleForTesting
-  synchronized ReplicationIndexManager getReplicationIndexManager(IndexGeneration indexGeneration) {
+  synchronized IndexManager getReplicationIndexManager(IndexGeneration indexGeneration) {
     return this.indexManagers.get(indexGeneration.getGenerationId());
   }
 
   /** Creates a copy of {@link MongoDbReplicationManager#indexManagers}. Thread safe method. */
   @SuppressWarnings("GuardedBy") // iterations through ConcurrentHashMap (copying) are thread safe
-  private Map<GenerationId, ReplicationIndexManager> getIndexManagers() {
+  private Map<GenerationId, IndexManager> getIndexManagers() {
     return new HashMap<>(this.indexManagers);
   }
 

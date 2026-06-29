@@ -90,11 +90,9 @@ class AutocompleteAnalyzerSpecification {
       return true;
     }
 
-    if (!(obj instanceof AutocompleteAnalyzerSpecification)) {
+    if (!(obj instanceof AutocompleteAnalyzerSpecification other)) {
       return false;
     }
-
-    AutocompleteAnalyzerSpecification other = (AutocompleteAnalyzerSpecification) obj;
     return this.minGrams == other.minGrams
         && this.maxGrams == other.maxGrams
         && this.foldDiacritics == other.foldDiacritics

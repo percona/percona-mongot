@@ -32,11 +32,9 @@ public class StringMultiFieldPath extends StringPath {
       return true;
     }
 
-    if (!(other instanceof StringMultiFieldPath)) {
+    if (!(other instanceof StringMultiFieldPath otherMultiFieldPath)) {
       return false;
     }
-
-    StringMultiFieldPath otherMultiFieldPath = (StringMultiFieldPath) other;
     return Objects.equals(this.path, otherMultiFieldPath.getFieldPath())
         && Objects.equals(this.multi, otherMultiFieldPath.multi);
   }

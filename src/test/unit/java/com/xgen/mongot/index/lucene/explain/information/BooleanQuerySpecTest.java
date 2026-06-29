@@ -18,8 +18,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      BooleanQuerySpecTest.TestDeserialization.class,
-      BooleanQuerySpecTest.TestSerialization.class,
+      BooleanQuerySpecTest.DeserializationTest.class,
+      BooleanQuerySpecTest.SerializationTest.class,
     })
 public class BooleanQuerySpecTest {
   private static final QueryExplainInformation TEXT_EXPLAIN_INFO =
@@ -30,7 +30,7 @@ public class BooleanQuerySpecTest {
           .build();
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "bool-query-deserialization";
     private static final BsonDeserializationTestSuite<BooleanQuerySpec> TEST_SUITE =
         fromDocument(
@@ -38,7 +38,7 @@ public class BooleanQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<BooleanQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<BooleanQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -72,14 +72,14 @@ public class BooleanQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "bool-query-serialization";
     private static final BsonSerializationTestSuite<BooleanQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<BooleanQuerySpec> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<BooleanQuerySpec> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<BooleanQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
 

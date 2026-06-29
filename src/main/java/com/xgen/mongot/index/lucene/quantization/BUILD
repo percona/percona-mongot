@@ -28,10 +28,11 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/query/operators",
         "//src/main/java/com/xgen/mongot/util/concurrent",
         "@maven//:com_google_auto_service_auto_service_annotations",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_flogger_flogger",
         "@maven//:com_google_guava_guava",
         "@maven//:org_apache_lucene_lucene_core",
+        "@maven//:org_apache_lucene_lucene_join",
+        "@maven//:org_jetbrains_annotations",
     ],
 )

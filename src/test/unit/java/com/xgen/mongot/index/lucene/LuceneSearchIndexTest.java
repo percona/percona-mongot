@@ -249,7 +249,7 @@ public class LuceneSearchIndexTest {
         // Ensure that we find two documents in the index.
         @Var TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), 10);
         Assert.assertEquals(
-            "expected to find two documents in the index", 2L, topDocs.totalHits.value);
+            "expected to find two documents in the index", 2L, topDocs.totalHits.value());
 
         // Ensure we can find the first document.
         Query query = new TermQuery(LuceneDocumentIdEncoder.documentIdTerm(id1));
@@ -257,7 +257,7 @@ public class LuceneSearchIndexTest {
         Assert.assertEquals(
             "expected to only find one document with the matching _id",
             1L,
-            topDocs.totalHits.value);
+            topDocs.totalHits.value());
 
         // Ensure that the document we found was the intended document.
         @Var Document returned = searcher.storedFields().document(topDocs.scoreDocs[0].doc);
@@ -281,14 +281,14 @@ public class LuceneSearchIndexTest {
         // Ensure that we still find only two documents in the index.
         topDocs = searcher.search(new MatchAllDocsQuery(), 10);
         Assert.assertEquals(
-            "expected to find two documents in the index", 2L, topDocs.totalHits.value);
+            "expected to find two documents in the index", 2L, topDocs.totalHits.value());
 
         // Ensure we can still find the first document.
         topDocs = searcher.search(query, 10);
         Assert.assertEquals(
             "expected to only find one document with the matching _id",
             1L,
-            topDocs.totalHits.value);
+            topDocs.totalHits.value());
 
         // Ensure that the document we found was the updated intended document.
         returned = searcher.storedFields().document(topDocs.scoreDocs[0].doc);

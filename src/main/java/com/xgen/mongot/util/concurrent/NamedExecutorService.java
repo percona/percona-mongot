@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ExecutorService;
 
@@ -71,5 +72,16 @@ public interface NamedExecutorService extends ExecutorService {
    */
   default OptionalInt getQueueSize() {
     return OptionalInt.empty();
+  }
+
+  /**
+   * Returns the registry of live thread ids owned by the underlying pool, if the pool's thread
+   * factory tracks them.
+   *
+   * <p>Returns {@link Optional#empty()} for executors built from externally-supplied executors
+   * whose threads we don't control.
+   */
+  default Optional<LiveThreadIdsRegistry> getLiveThreadIdsRegistry() {
+    return Optional.empty();
   }
 }

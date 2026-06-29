@@ -5,11 +5,11 @@ import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.bson.ByteUtils;
 import java.io.IOException;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.util.BytesRef;
 import org.bson.RawBsonDocument;
+import org.jetbrains.annotations.Nullable;
 
 class StoredSourceStrategy implements ProjectStrategy<RawBsonDocument> {
 

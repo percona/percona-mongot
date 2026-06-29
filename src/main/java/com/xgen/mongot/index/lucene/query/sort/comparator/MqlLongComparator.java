@@ -3,8 +3,6 @@ package com.xgen.mongot.index.lucene.query.sort.comparator;
 import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import java.io.IOException;
-import javax.annotation.Nullable;
-import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
@@ -13,7 +11,8 @@ import org.apache.lucene.search.Pruning;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSelector;
 import org.apache.lucene.search.comparators.LongComparator;
-import org.apache.lucene.search.comparators.NumericComparator;
+import org.apache.lucene.util.NumericUtils;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * MqlLongComparator is able to sort Long values in a way that's compliant with the MQL sort order.
@@ -22,18 +21,19 @@ import org.apache.lucene.search.comparators.NumericComparator;
  * <p>This is mostly a copy of {@link LongComparator}, but with missing values stored explicitly as
  * null.
  */
-public class MqlLongComparator extends NumericComparator<Long> {
+public class MqlLongComparator extends MongotNumericComparator<Long> {
   private final Long[] values;
   protected @Nullable Long topValue;
   protected @Nullable Long bottom;
   private final SortField.Type sortType;
   private final SortedNumericSelector.Type selector;
   private final NullEmptySortPosition nullEmptySortPosition;
+  private final long missingValueAsLong;
 
   /**
    * Records the initial pruning configuration set by Lucene. The pruning configuration may be
    * modified depending on the bottom value and the type of sort requested, as described below in
-   * {@link MqlLongComparator.LongLeafComparator#encodeBottom(byte[])}}.
+   * {@link MqlLongComparator.LongLeafComparator#updatePruningConfiguration(boolean)}.
    */
   private final Pruning originalPruningConfig;
 
@@ -53,6 +53,10 @@ public class MqlLongComparator extends NumericComparator<Long> {
     // record initial pruning configuration set by Lucene
     this.originalPruningConfig = pruning;
     this.nullEmptySortPosition = nullEmptySortPosition;
+    this.missingValueAsLong =
+        (this.nullEmptySortPosition == NullEmptySortPosition.LOWEST)
+            ? Long.MIN_VALUE
+            : Long.MAX_VALUE;
   }
 
   @Override
@@ -69,6 +73,16 @@ public class MqlLongComparator extends NumericComparator<Long> {
   public void setTopValue(Long value) {
     super.setTopValue(value);
     this.topValue = value;
+  }
+
+  @Override
+  protected long missingValueAsComparableLong() {
+    return this.missingValueAsLong;
+  }
+
+  @Override
+  protected long sortableBytesToLong(byte[] bytes) {
+    return NumericUtils.sortableBytesToLong(bytes, 0);
   }
 
   @Override
@@ -125,93 +139,19 @@ public class MqlLongComparator extends NumericComparator<Long> {
       super.copy(slot, doc);
     }
 
-    /**
-     * Determines if a missing value is currently competitive in this sort by comparing it to the
-     * existing bottom value. This method is called as part of a preliminary check when trying to
-     * prune documents in {@link NumericLeafComparator#updateCompetitiveIterator()}. It ensures that
-     * we aren't incorrectly discarding documents containing missing values if they're still
-     * competitive.
-     *
-     * <p>Note that if bottom==null, bottom is encoded as Long.MIN_VALUE or Long.MAX_VALUE depending
-     * on the {@link NullEmptySortPosition} when pruning. In that case, mongot should be careful not
-     * to discard documents containing actual values of Long.MIN_VALUE / Long.MAX_VALUE from the
-     * result set.
-     *
-     * <p>For a simpler example, if the bottom == 5 and an ascending sort with nulls: lowest is
-     * being run, then missing values are still competitive since they're weaker than 5 in an asc
-     * sort so the caller method {@link NumericLeafComparator#isMissingValueCompetitive()} should
-     * return true.
-     */
     @Override
-    protected int compareMissingValueWithBottomValue() {
-      // Reset the pruning config to its original state before evaluating if the missing value is
-      // competitive with the bottom value, since previous calls to encodeBottom() may have modified
-      // the Pruning enum if pruning was performed earlier.
-      MqlLongComparator.super.pruning = MqlLongComparator.this.originalPruningConfig;
-
-      return mqlLongCompare(
-          MqlLongComparator.this.missingValue,
-          MqlLongComparator.this.bottom,
-          MqlLongComparator.this.nullEmptySortPosition);
+    protected long bottomAsComparableLong(boolean isComparing) {
+      updatePruningConfiguration(isComparing);
+      return MqlLongComparator.this.bottom == null
+          ? MqlLongComparator.this.missingValueAsLong
+          : MqlLongComparator.this.bottom;
     }
 
     @Override
-    protected int compareMissingValueWithTopValue() {
-      return mqlLongCompare(
-          MqlLongComparator.this.missingValue,
-          MqlLongComparator.this.topValue,
-          MqlLongComparator.this.nullEmptySortPosition);
-    }
-
-    @Override
-    protected void encodeBottom(byte[] packedValue) {
-      // If bottom is null and nulls should be treated as lowest, encode bottom as Long.MIN_VALUE.
-      // If nulls should be treated as highest, encode bottom as Long.MAX_VALUE. Note that docs
-      // with nulls are treated as equivalent to docs that contain Long.MIN_VALUE / Long.MAX_VALUE
-      // depending on the encoding when generating candidates for the competitiveIterator. These
-      // docs will be correctly ordered by the MqlLongComparator.
-      long encodedBottom =
-          MqlLongComparator.this.bottom != null
-              ? MqlLongComparator.this.bottom
-              : MqlLongComparator.this.nullEmptySortPosition == NullEmptySortPosition.HIGHEST
-                  ? Long.MAX_VALUE
-                  : Long.MIN_VALUE;
-      LongPoint.encodeDimension(encodedBottom, packedValue, 0);
-
-      if (MqlLongComparator.this.reverse
-          && MqlLongComparator.this.nullEmptySortPosition != NullEmptySortPosition.HIGHEST
-          && (MqlLongComparator.this.bottom == null)) {
-        // For a descending sort with nulls lowest, we set the pruning enum to Pruning.GREATER_THAN
-        // to ensure that documents containing actual Long.MIN_VALUE-s are not discarded when
-        // bottom == null.
-        MqlLongComparator.super.pruning = Pruning.GREATER_THAN;
-        return;
-      } else if (!MqlLongComparator.this.reverse
-          && MqlLongComparator.this.nullEmptySortPosition == NullEmptySortPosition.HIGHEST
-          && (MqlLongComparator.this.bottom == null)) {
-        // For an ascending sort with nulls highest, we set the pruning enum to Pruning.GREATER_THAN
-        // to ensure that documents containing actual Long.MAX_VALUE-s are not discarded when
-        // bottom == null.
-        MqlLongComparator.super.pruning = Pruning.GREATER_THAN;
-        return;
-      }
-      // In all other sort scenarios, mongot can prune according to its original pruning
-      // configuration defined at this class's instantiation
-      MqlLongComparator.super.pruning = MqlLongComparator.this.originalPruningConfig;
-    }
-
-    @Override
-    protected void encodeTop(byte[] packedValue) {
-      // Same logic from encodeBottom applies in encodeTop. Since Lucene's NumericComparator always
-      // calls encodeBottom() before encodeTop() when about to prune, the pruning configuration has
-      // already been set.
-      long encodedTop =
-          MqlLongComparator.this.topValue != null
-              ? MqlLongComparator.this.topValue
-              : MqlLongComparator.this.nullEmptySortPosition == NullEmptySortPosition.HIGHEST
-                  ? Long.MAX_VALUE
-                  : Long.MIN_VALUE;
-      LongPoint.encodeDimension(encodedTop, packedValue, 0);
+    protected long topAsComparableLong() {
+      return MqlLongComparator.this.topValue == null
+          ? MqlLongComparator.this.missingValueAsLong
+          : MqlLongComparator.this.topValue;
     }
 
     @Override
@@ -240,5 +180,43 @@ public class MqlLongComparator extends NumericComparator<Long> {
     }
 
     return Long.compare(first, second);
+  }
+
+  private void updatePruningConfiguration(boolean isComparing) {
+    if (isComparing) {
+      // When bottom is a real value equal to missingValueAsLong, Long.compare in
+      // isMissingValueCompetitive returns 0, incorrectly marking missing docs as
+      // non-competitive. Shifting the value ensures the comparison reflects that
+      // null is strictly less than (LOWEST) or greater than (HIGHEST) any real value.
+      if (MqlLongComparator.this.bottom != null
+          && MqlLongComparator.this.bottom == MqlLongComparator.this.missingValueAsLong
+          && ((!MqlLongComparator.this.reverse
+                  && MqlLongComparator.this.nullEmptySortPosition == NullEmptySortPosition.LOWEST)
+              || (MqlLongComparator.this.reverse
+                  && MqlLongComparator.this.nullEmptySortPosition
+                      == NullEmptySortPosition.HIGHEST))) {
+        MqlLongComparator.super.pruning = Pruning.GREATER_THAN;
+      } else {
+        MqlLongComparator.super.pruning = MqlLongComparator.this.originalPruningConfig;
+      }
+    } else if (MqlLongComparator.this.reverse
+        && MqlLongComparator.this.nullEmptySortPosition != NullEmptySortPosition.HIGHEST
+        && (MqlLongComparator.this.bottom == null)) {
+      // For a descending sort with nulls lowest, we set the pruning enum to Pruning.GREATER_THAN
+      // to ensure that documents containing actual Long.MIN_VALUE-s are not discarded when
+      // bottom == null.
+      MqlLongComparator.super.pruning = Pruning.GREATER_THAN;
+    } else if (!MqlLongComparator.this.reverse
+        && MqlLongComparator.this.nullEmptySortPosition == NullEmptySortPosition.HIGHEST
+        && (MqlLongComparator.this.bottom == null)) {
+      // For an ascending sort with nulls highest, we set the pruning enum to Pruning.GREATER_THAN
+      // to ensure that documents containing actual Long.MAX_VALUE-s are not discarded when
+      // bottom == null.
+      MqlLongComparator.super.pruning = Pruning.GREATER_THAN;
+    } else {
+      // In all other sort scenarios, mongot can prune according to its original pruning
+      // configuration defined at this class's instantiation
+      MqlLongComparator.super.pruning = MqlLongComparator.this.originalPruningConfig;
+    }
   }
 }

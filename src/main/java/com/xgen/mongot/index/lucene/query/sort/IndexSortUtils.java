@@ -30,15 +30,15 @@ public class IndexSortUtils {
     if (reader.leaves().isEmpty()) {
       return Optional.empty();
     }
-    return Optional.ofNullable(reader.leaves().get(0).reader().getMetaData().getSort());
+    return Optional.ofNullable(reader.leaves().get(0).reader().getMetaData().sort());
   }
 
   /**
-   * Determines if a query sort can benefit from index sort optimization.
+   * Determines if a query sort uses index sort optimization.
    *
    * <p>this method is the same as TopFieldCollector#canEarlyTerminateOnPrefix.
    */
-  public static boolean canBenefitFromIndexSort(
+  public static boolean usesIndexSort(
       org.apache.lucene.search.Sort querySort,
       org.apache.lucene.search.Sort indexSort) {
     SortField[] querySortFields = querySort.getSort();
@@ -108,11 +108,13 @@ public class IndexSortUtils {
       String indexFieldName = indexValueNames.get(i);
       Optional<FieldName.TypeField> indexType =
           FieldName.TypeField.getTypeOf(indexFieldName);
-      if (indexType.isEmpty()) {
-        return false;
-      }
-      if (!indexType.get().stripPrefix(indexFieldName)
-          .equals(field.field().toString())) {
+      if (indexType.isPresent()) {
+        if (!indexType.get().stripPrefix(indexFieldName)
+            .equals(field.field().toString())) {
+          return false;
+        }
+      } else if (!indexFieldName.equals(field.field().toString())) {
+        // MqlMixedSort uses the plain field path as Lucene field name (no $type: prefix).
         return false;
       }
     }

@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_ID;
 import static org.junit.Assert.assertEquals;
@@ -15,7 +16,6 @@ import static org.mockito.Mockito.verify;
 
 import com.google.common.util.concurrent.RateLimiter;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.EncodedUserData;
@@ -80,8 +80,13 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false, 
+                directory),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -92,7 +97,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     // This ensures the spy delegates to a writer that has the mocked luceneWriter
@@ -200,8 +205,13 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false, 
+                directory),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -212,7 +222,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -268,8 +278,13 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false, 
+                directory),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -280,7 +295,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -336,8 +351,13 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false, 
+                directory),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -348,7 +368,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            () -> false);
 
     // Replace the lucene writer with the mock BEFORE creating the spy
     Field luceneWriterField = SingleLuceneIndexWriter.class.getDeclaredField("luceneWriter");
@@ -404,8 +424,13 @@ public class LuceneIndexingFailuresTest {
     var writer =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(SearchIndex.MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                SearchIndex.MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false, 
+                directory),
             new TieredMergePolicy(),
             10.0,
             Optional.empty(),
@@ -416,7 +441,7 @@ public class LuceneIndexingFailuresTest {
             indexingMetricsUpdater,
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            () -> false);
 
     // Spy the writer to mock doLogIndexingFailure method
     var spyWriter = spy(writer);

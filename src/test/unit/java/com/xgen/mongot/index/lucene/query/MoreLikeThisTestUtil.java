@@ -59,8 +59,8 @@ public class MoreLikeThisTestUtil {
     return bq.clauses().stream()
         .map(
             clause -> {
-              Assert.assertEquals(BooleanClause.Occur.SHOULD, clause.getOccur());
-              var tq = (TermQuery) clause.getQuery();
+              Assert.assertEquals(BooleanClause.Occur.SHOULD, clause.occur());
+              var tq = (TermQuery) clause.query();
               return tq.getTerm();
             })
         .sorted() // Terms are sortable.

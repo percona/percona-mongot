@@ -1,5 +1,6 @@
 package com.xgen.mongot.replication.mongodb;
 
+import static com.xgen.mongot.replication.mongodb.IndexManager.State;
 import static com.xgen.mongot.util.Check.checkState;
 import static com.xgen.mongot.util.mongodb.Errors.isMatchCollectionUuidUnsupportedException;
 
@@ -13,6 +14,7 @@ import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.EncodedUserData;
+import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.ReplicationOpTimeInfo;
@@ -55,43 +57,34 @@ import java.util.HashMap;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.bson.BsonTimestamp;
 
 /** Handles replication for a single index generation. */
-public class ReplicationIndexManager {
+public class ReplicationIndexManager implements IndexManager {
   // TODO(CLOUDP-365528): Visibility of some of these fields have been raised for re-use in
   // MaterializedViewGenerator. Need to revisit these fields/values for auto-embedding.
   /** Default resync backoff when replication config does not specify {@code resyncBackoffMs}. */
   public static final Duration DEFAULT_RESYNC_BACKOFF = Duration.ofSeconds(30);
+
   /**
    * Default transient backoff when replication config does not specify {@code transientBackoffMs}.
    */
   public static final Duration DEFAULT_TRANSIENT_BACKOFF = Duration.ofSeconds(30);
+
   private static final String EMPTY_EXCEPTION_METRIC_FIELD = "None";
   private static final String INDEX_DROPPED_COUNTER_UNKNOWN_TAG = "unknown";
-  @VisibleForTesting static final String REPLICATION_FAILED_REASON_PREFIX = "Replication failed: ";
   @VisibleForTesting static final String EXCEEDED_LIMIT_REASON_PREFIX = "Exceeded max limit: ";
 
-  /**
-   * The state of the ReplicationIndexManager. Note that this is not a direct mapping to the Index's
-   * state.
-   */
-  public enum State {
-    INITIALIZING,
-    INITIAL_SYNC,
-    INITIAL_SYNC_BACKOFF,
-    STEADY_STATE,
-    STEADY_STATE_SHUT_DOWN,
-    FAILED,
-    /**
-     * Similar to FAILED only due to a user exceeding a usage limit. Unlike FAILED, this state is
-     * persisted and recoverable after restart.
-     */
-    FAILED_EXCEEDED,
-    SHUT_DOWN,
+  /** The action taken when an index fails. */
+  enum FailedIndexAction {
+    DROP,
+    CLEAR,
+    CLOSE,
+    RETAIN
   }
 
   /**
@@ -225,8 +218,6 @@ public class ReplicationIndexManager {
    *     tasks onto
    * @param indexGeneration the index whose lifecycle the created ReplicationIndexManager should own
    * @param documentIndexer the indexer used to process document events and commit the index
-   * @param periodicCommitter the periodic committer, which triggers commits with a configured
-   *     frequency
    * @return an ReplicationIndexManager that owns the supplied index
    */
   public static ReplicationIndexManager create(
@@ -238,11 +229,15 @@ public class ReplicationIndexManager {
       IndexGeneration indexGeneration,
       InitializedIndex initializedIndex,
       DocumentIndexer documentIndexer,
-      PeriodicIndexCommitter periodicCommitter,
+      ScheduledExecutorService commitExecutor,
+      Duration commitInterval,
       Duration requestRateLimitBackoff,
       MeterRegistry meterRegistry,
       FeatureFlags featureFlags,
       boolean enableNaturalOrderScan) {
+    Index index = indexGeneration.getIndex();
+    PeriodicIndexCommitter periodicCommitter =
+        PeriodicIndexCommitter.create(index, documentIndexer, commitExecutor, commitInterval);
     return create(
         lifecycleExecutor,
         cursorManager,
@@ -338,6 +333,7 @@ public class ReplicationIndexManager {
    * @return a future that completes when the ReplicationIndexManager has completed shutting down.
    *     The future will only ever complete successfully.
    */
+  @Override
   public synchronized CompletableFuture<Void> shutdown() {
     // Set our state to SHUT_DOWN so no further events will be scheduled.
     State currentState = this.state;
@@ -353,10 +349,12 @@ public class ReplicationIndexManager {
             .collect(Collectors.toList()));
   }
 
+  @Override
   public synchronized CompletableFuture<Void> getInitFuture() {
     return this.initFuture;
   }
 
+  @Override
   public synchronized State getState() {
     return this.state;
   }
@@ -385,7 +383,8 @@ public class ReplicationIndexManager {
    * @return a future that completes when the ReplicationIndexManager has been dropped. The future
    *     will only ever complete successfully.
    */
-  synchronized CompletableFuture<Void> drop() {
+  @Override
+  public synchronized CompletableFuture<Void> drop() {
     return this.shutdown().thenRunAsync(this::dropIndex, this.lifecycleExecutor);
   }
 
@@ -435,20 +434,23 @@ public class ReplicationIndexManager {
     InitAction initAction = determineInitAction(userData);
     switch (initAction) {
       case RUN_INITIAL_SYNC -> enqueueInitialSync(IndexStatus.initialSync());
-      case RESUME_INITIAL_SYNC -> enqueueInitialSyncResume(
-          userData
-              .getInitialSyncResumeInfo()
-              .orElseThrow(
-                  () ->
-                      new IllegalStateException(
-                          "initial sync resume info should be present to resume initial sync")));
-      case RESUME_STEADY_STATE -> resumeSteadyState(
-          userData
-              .getResumeInfo()
-              .orElseThrow(
-                  () ->
-                      new IllegalStateException(
-                          "resume info should be present to resume steady state.")));
+      case RESUME_INITIAL_SYNC ->
+          enqueueInitialSyncResume(
+              userData
+                  .getInitialSyncResumeInfo()
+                  .orElseThrow(
+                      () ->
+                          new IllegalStateException(
+                              "initial sync resume info should be present "
+                                  + "to resume initial sync")));
+      case RESUME_STEADY_STATE ->
+          resumeSteadyState(
+              userData
+                  .getResumeInfo()
+                  .orElseThrow(
+                      () ->
+                          new IllegalStateException(
+                              "resume info should be present to resume steady state.")));
     }
   }
 
@@ -624,7 +626,11 @@ public class ReplicationIndexManager {
     // If the exception was not an InitialSyncException (i.e. was unexpected), fail the index.
     if (!(throwable instanceof InitialSyncException)) {
       maybeCrashOnUnexpectedThrowable(throwable);
-      failAndDropIndex(throwable, IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+        failAndCloseIndex(throwable, IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      } else {
+        failAndDropIndex(throwable, IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED);
+      }
       return;
     }
 
@@ -646,7 +652,11 @@ public class ReplicationIndexManager {
         if (InitialSyncException.isNotablescanError(throwable.getCause())) {
           this.metricsFactory.counter("failedInitialSyncDueToNotablescan").increment();
         }
-        failAndDropIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+        if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+          failAndCloseIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+        } else {
+          failAndDropIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+        }
         return;
       }
       case FIELD_EXCEEDED, DOCS_EXCEEDED ->
@@ -665,7 +675,7 @@ public class ReplicationIndexManager {
         if (InitialSyncException.isInitialSyncIdMismatched(throwable.getCause())) {
           Tags tags = Tags.of("reason", "initialSyncIdMismatched", "useNaturalOrderScan", "true");
           this.metricsFactory.counter("naturalOrderScanRetry", tags).increment();
-          scheduleResync(throwable, IndexStatus.initialSync());
+          failRetainOrResync(throwable, IndexStatus.initialSync());
           return;
         }
 
@@ -673,7 +683,12 @@ public class ReplicationIndexManager {
           this.isNaturalOrderScanSupported = false;
           Tags tags = Tags.of("reason", "ServerQueryFailed", "useNaturalOrderScan", "false");
           this.metricsFactory.counter("naturalOrderScanRetry", tags).increment();
-          scheduleResync(throwable, IndexStatus.initialSync());
+          failRetainOrResync(throwable, IndexStatus.initialSync());
+          return;
+        }
+
+        if (InitialSyncException.isBsonTooLargeError(throwable.getCause())) {
+          failClearOrResync(throwable, IndexStatus.initialSync());
           return;
         }
 
@@ -684,25 +699,37 @@ public class ReplicationIndexManager {
           if (MongoViewExceptionUtils.isViewPipelineRelated(cause)) {
             this.metricsFactory.counter("viewPipelineRelatedInitialSyncRetry").increment();
 
-            IndexStatus status =
-                IndexStatus.initialSync(
-                    MongoViewExceptionUtils.getViewPipelineErrorMessage(
-                        Check.isPresent(cause, "cause")));
+            String viewPipelineErrorMessage =
+                MongoViewExceptionUtils.getViewPipelineErrorMessage(
+                    Check.isPresent(cause, "cause"));
 
-            // Set index status so that the error message is exposed to the user
-            this.index.setStatus(status);
-
-            // Schedule resync with the same status. This way the error will only be cleared
-            // when we transition to STEADY and user won't observe flickering of the status
-            scheduleResync(throwable, status);
+            if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+              // Close the index with the view pipeline error message preserved in the
+              // FAILED status so the user can see what went wrong.
+              this.logger.error("Failing due to unexpected error.", throwable);
+              incrementFailedIndexCounter(FailedIndexAction.CLOSE, getState(), throwable);
+              transitionState(State.FAILED);
+              closeIndex(
+                  IndexStatus.failed(
+                      viewPipelineErrorMessage, Reason.INITIAL_SYNC_REPLICATION_FAILED));
+            } else {
+              IndexStatus status = IndexStatus.initialSync(viewPipelineErrorMessage);
+              // Set index status so that the error message is exposed to the user during
+              // backoff. The error will be cleared when we transition to STEADY after a
+              // successful resync.
+              this.index.setStatus(status);
+              scheduleResync(throwable, status);
+            }
             return;
           }
         }
 
         if (InitialSyncException.isNoQueryExecutionPlansError(throwable.getCause())) {
           this.metricsFactory.counter("retriedInitialSyncDueToNoQueryExecutionPlans").increment();
+          failCloseOrResync(throwable, IndexStatus.initialSync());
+          return;
         }
-        scheduleResync(throwable, IndexStatus.initialSync());
+        failRetainOrResync(throwable, IndexStatus.initialSync());
         return;
       }
       case RESUMABLE_TRANSIENT -> {
@@ -720,9 +747,9 @@ public class ReplicationIndexManager {
         // requests are enqueued. This ideally should never happen, but adding this here to cover
         // unforeseen corner cases
         if ((initialSyncException.getResumeInfo().isBufferlessIdOrderInitialSyncResumeInfo()
-            && this.isNaturalOrderScanSupported)
+                && this.isNaturalOrderScanSupported)
             || (initialSyncException.getResumeInfo().isBufferlessNaturalOrderInitialSyncResumeInfo()
-            && !this.isNaturalOrderScanSupported)) {
+                && !this.isNaturalOrderScanSupported)) {
           this.isNaturalOrderScanSupported =
               !initialSyncException.getResumeInfo().isBufferlessIdOrderInitialSyncResumeInfo();
           Tags tags =
@@ -860,10 +887,10 @@ public class ReplicationIndexManager {
     }
 
     String type;
-    if (throwable instanceof SteadyStateException) {
-      type = ((SteadyStateException) throwable).getType().name();
-    } else if (throwable instanceof InitialSyncException) {
-      type = ((InitialSyncException) throwable).getType().name();
+    if (throwable instanceof SteadyStateException steadyStateException) {
+      type = steadyStateException.getType().name();
+    } else if (throwable instanceof InitialSyncException initialSyncException) {
+      type = initialSyncException.getType().name();
     } else {
       type = EMPTY_EXCEPTION_METRIC_FIELD;
     }
@@ -1171,12 +1198,16 @@ public class ReplicationIndexManager {
   }
 
   private void staleIndex(StaleStatusReason staleStatusReason, Optional<String> errorMessage) {
-    BsonTimestamp lastOptime = getLastOptime();
-    String message = staleStatusReason.formatMessage(errorMessage.orElse(""));
-    this.logger.warn(
-        "Transitioning to STALE index. Reason: {}. Last optime: {}", message, lastOptime);
+    IndexCommitUserData userData = getIndexCommitUserData();
 
-    StaleStateInfo staleStateInfo = StaleStateInfo.create(lastOptime, staleStatusReason, message);
+    String message = staleStatusReason.formatMessage(errorMessage.orElse(""));
+
+    this.logger.warn(
+        "Transitioning to STALE index. Reason: {}. Last optime: {}",
+        message,
+        getLastOptimeFromUserData(userData));
+
+    StaleStateInfo staleStateInfo = StaleStateInfo.create(staleStatusReason, message, userData);
 
     shutDownReplicationOnStaleIndex(staleStateInfo);
 
@@ -1186,20 +1217,21 @@ public class ReplicationIndexManager {
   }
 
   private BsonTimestamp getLastOptime() {
-    var lastOptime =
-        getIndexCommitUserData()
+    return getLastOptimeFromUserData(getIndexCommitUserData());
+  }
+
+  private BsonTimestamp getLastOptimeFromUserData(IndexCommitUserData userData) {
+    var resumeInfo =
+        userData
             .getResumeInfo()
-            .map(ChangeStreamResumeInfo::getResumeToken)
-            .map(
-                resumeToken ->
-                    Crash.because("failed to parse resume token")
-                        .ifThrows(() -> ResumeTokenUtils.opTimeFromResumeToken(resumeToken)));
-    if (lastOptime.isEmpty()) {
-      Crash.because("Failed to get last optime").now();
-      return Check.unreachable("Crash.now() should have halted the JVM");
-    } else {
-      return lastOptime.get();
-    }
+            .orElseGet(
+                () -> {
+                  Crash.because("Failed to get change stream resume info from user data").now();
+                  return Check.unreachable("Crash.now() should have halted the JVM");
+                });
+    return Crash.because("failed to parse resume token")
+        .ifThrowsExceptionOrError(
+            () -> ResumeTokenUtils.opTimeFromResumeToken(resumeInfo.getResumeToken()));
   }
 
   private void clearIndex(IndexStatus status, IndexCommitUserData indexCommitUserData) {
@@ -1216,16 +1248,120 @@ public class ReplicationIndexManager {
 
   protected void failAndDropIndex(Throwable throwable, IndexStatus.Reason reason) {
     this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.DROP, getState(), throwable);
     transitionState(State.FAILED);
-    dropIndex(
-        IndexStatus.failed(REPLICATION_FAILED_REASON_PREFIX + throwable.getMessage(), reason));
+    dropIndex(IndexStatus.failed(failureMessage(FailedIndexAction.DROP, throwable), reason));
   }
 
   protected void failAndCloseIndex(Throwable throwable, IndexStatus.Reason reason) {
     this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.CLOSE, getState(), throwable);
     transitionState(State.FAILED);
-    String failureMessage = REPLICATION_FAILED_REASON_PREFIX + throwable.getMessage();
-    closeIndex(IndexStatus.failed(failureMessage, reason));
+    closeIndex(IndexStatus.failed(failureMessage(FailedIndexAction.CLOSE, throwable), reason));
+  }
+
+  /**
+   * If RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK is enabled, retain the failed index data. Otherwise,
+   * attempt to resync the index.
+   *
+   * @param throwable the throwable that caused the failure
+   * @param indexStatus the index status to set on failure
+   */
+  void failRetainOrResync(Throwable throwable, IndexStatus indexStatus) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndRetainIndex(throwable);
+    } else {
+      // Old resync behavior.
+      scheduleResync(throwable, indexStatus);
+    }
+  }
+
+  /**
+   * If RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK is enabled, clear the failed index data. Otherwise,
+   * attempt to resync the index.
+   *
+   * @param throwable the throwable that caused the failure
+   * @param indexStatus the index status to set on failure
+   */
+  void failClearOrResync(Throwable throwable, IndexStatus indexStatus) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndClearIndex(throwable);
+    } else {
+      // Old resync behavior.
+      scheduleResync(throwable, indexStatus);
+    }
+  }
+
+  /**
+   * If RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK is enabled, close the failed index. Otherwise,
+   * attempt to resync the index.
+   *
+   * @param throwable the throwable that caused the failure
+   * @param indexStatus the index status to set on failure
+   */
+  void failCloseOrResync(Throwable throwable, IndexStatus indexStatus) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndCloseIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+    } else {
+      scheduleResync(throwable, indexStatus);
+    }
+  }
+
+  /**
+   * Clear the index data and mark the index as failed. The index data is removed but the index
+   * entry is preserved so recovery can create a new initial sync attempt.
+   *
+   * @param throwable the throwable that caused the failure
+   */
+  void failAndClearIndex(Throwable throwable) {
+    this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.CLEAR, getState(), throwable);
+    transitionState(State.FAILED);
+    clearIndex(
+        IndexStatus.failed(
+            failureMessage(FailedIndexAction.CLEAR, throwable),
+            Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY),
+        IndexCommitUserData.EMPTY);
+  }
+
+  /**
+   * Retain the data for the failed index and mark the failed index as recoverable.
+   *
+   * @param throwable the throwable that caused the failure
+   */
+  void failAndRetainIndex(Throwable throwable) {
+    this.logger.error("Failing due to unexpected error.", throwable);
+    incrementFailedIndexCounter(FailedIndexAction.RETAIN, getState(), throwable);
+    transitionState(State.FAILED);
+    // Close keeps the current generation's index data on disk so a rebuild can reuse it.
+    closeIndex(
+        IndexStatus.failed(
+            failureMessage(FailedIndexAction.RETAIN, throwable),
+            Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY));
+  }
+
+  private String failureMessage(FailedIndexAction action, Throwable throwable) {
+    return String.format(
+        "replication failed (action=%s)%s",
+        action.name().toLowerCase(), throwable == null ? "" : ": " + throwable.getMessage());
+  }
+
+  private void incrementFailedIndexCounter(
+      FailedIndexAction action, State state, Throwable throwable) {
+    if (throwable == null) {
+      return;
+    }
+    this.metricsFactory
+        .counter(
+            "failed_index",
+            Tags.of(
+                "action",
+                action.name(),
+                "state",
+                state.name(),
+                "error",
+                exceptionClassWithErrorCode(throwable)))
+        .increment();
   }
 
   private void closeIndex(IndexStatus status) {

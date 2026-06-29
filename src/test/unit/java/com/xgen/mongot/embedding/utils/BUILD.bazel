@@ -3,12 +3,14 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "utils",
     srcs = [
+        "AutoEmbedFieldMappingCreatorTest.java",
         "AutoEmbeddingDocumentUtilsTest.java",
         "AutoEmbeddingIndexDefinitionUtilsTest.java",
         "MongoClientOperationExecutorTest.java",
     ],
     tags = ["unit"],
     deps = [
+        "//src/main/java/com/xgen/mongot/embedding",
         "//src/main/java/com/xgen/mongot/embedding/config",
         "//src/main/java/com/xgen/mongot/embedding/exceptions",
         "//src/main/java/com/xgen/mongot/embedding/providers/configs",
@@ -22,6 +24,7 @@ java_test_suite(
         "//src/main/java/com/xgen/mongot/util/bson",
         "//src/main/java/com/xgen/mongot/util/bson/parser",
         "//src/main/java/com/xgen/mongot/util/mongodb",
+        "//src/main/java/com/xgen/mongot/util/retry",
         "//src/main/java/com/xgen/testing/mongot/index/definition",
         "@maven//:com_google_errorprone_error_prone_annotations",
         "@maven//:com_google_flogger_flogger",  # keep: flogger for libs under test

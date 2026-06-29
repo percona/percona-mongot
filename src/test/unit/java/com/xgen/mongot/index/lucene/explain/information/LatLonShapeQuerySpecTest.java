@@ -17,8 +17,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      LatLonShapeQuerySpecTest.TestDeserialization.class,
-      LatLonShapeQuerySpecTest.TestSerialization.class,
+      LatLonShapeQuerySpecTest.DeserializationTest.class,
+      LatLonShapeQuerySpecTest.SerializationTest.class,
     })
 public class LatLonShapeQuerySpecTest {
   private static final List<List<Coordinate>> COORDS =
@@ -29,7 +29,7 @@ public class LatLonShapeQuerySpecTest {
               CoordinateBuilder.builder().lon(11.0).lat(10.0).build()));
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "lat-lon-shape-query-deserialization";
     private static final BsonDeserializationTestSuite<LatLonShapeQuerySpec> TEST_SUITE =
         fromDocument(
@@ -37,7 +37,7 @@ public class LatLonShapeQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<LatLonShapeQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<LatLonShapeQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -72,14 +72,14 @@ public class LatLonShapeQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "lat-lon-shape-query-serialization";
     private static final BsonSerializationTestSuite<LatLonShapeQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<LatLonShapeQuerySpec> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<LatLonShapeQuerySpec> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<LatLonShapeQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
 

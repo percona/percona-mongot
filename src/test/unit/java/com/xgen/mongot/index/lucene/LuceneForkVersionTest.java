@@ -11,7 +11,7 @@ import org.apache.lucene.analysis.morfologik.MorfologikFilter;
 import org.apache.lucene.analysis.phonetic.BeiderMorseFilter;
 import org.apache.lucene.analysis.stempel.StempelPolishStemFilterFactory;
 import org.apache.lucene.backward_codecs.lucene95.Lucene95Codec;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
+import org.apache.lucene.codecs.bloom.DefaultBloomFilterFactory;
 import org.apache.lucene.expressions.Expression;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.misc.SweetSpotSimilarity;
@@ -24,16 +24,16 @@ import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * Verify that lucene-core, lucene-codecs and lucene-backward-codecs are loaded from our fork
- * (version 9.11.1-2), while other Lucene modules come from upstream (9.11.1).
+ * Verify that lucene-core, lucene-codecs, and lucene-backward-codecs are loaded from our fork,
+ * while other Lucene modules come from upstream.
  *
  * <p>The fork is resolved via a separate maven_install ("lucene_fork") and wired into the main
  * dependency graph via override_targets in deps.bzl. If this test fails, check that configuration.
  */
 public class LuceneForkVersionTest {
 
-  private static final String UPSTREAM_VERSION = "9.11.1";
-  private static final String FORK_VERSION = "9.11.1-2";
+  private static final String UPSTREAM_VERSION = "10.1.0";
+  private static final String FORK_VERSION = "10.1.0-4";
 
   @Test
   public void luceneCore_fromFork() {
@@ -51,7 +51,7 @@ public class LuceneForkVersionTest {
 
   @Test
   public void luceneCodecs_fromFork() {
-    String jarPath = jarLocationOf(BloomFilteringPostingsFormat.class);
+    String jarPath = jarLocationOf(DefaultBloomFilterFactory.class);
     Truth.assertThat(jarPath).contains("lucene-codecs-" + FORK_VERSION + ".jar");
     Truth.assertThat(jarPath).doesNotContain("lucene-codecs-" + UPSTREAM_VERSION + ".jar");
   }

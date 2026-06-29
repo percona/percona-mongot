@@ -21,11 +21,11 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {CollectorTest.TestDeserialization.class, CollectorTest.TestSerialization.class})
+    value = {CollectorTest.DeserializationTest.class, CollectorTest.SerializationTest.class})
 public class CollectorTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "collector-deserialization";
     private static final BsonDeserializationTestSuite<Collector> TEST_SUITE =
         fromDocument(
@@ -35,7 +35,7 @@ public class CollectorTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Collector> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Collector> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Collector> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -88,14 +88,14 @@ public class CollectorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "collector-serialization";
     private static final BsonSerializationTestSuite<Collector> TEST_SUITE =
         fromEncodable("src/test/unit/resources/index/query/collectors/", SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<Collector> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Collector> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Collector> testSpec) {
       this.testSpec = testSpec;
     }
 

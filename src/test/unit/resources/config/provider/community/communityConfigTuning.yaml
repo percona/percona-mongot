@@ -1,0 +1,86 @@
+syncSource:
+  replicaSet:
+    hostAndPort: "mongod1.internal:27017"
+    scramAuth:
+      username: "user"
+      passwordFile: "/etc/mongot/router.passwd"
+      authSource: "admin"
+      tls:
+        enabled: true
+        tlsCertificateKeyFile: "/etc/mongot/tls/client-combined.pem"
+        caFile: "/etc/mongot/ca.pem"
+storage:
+  dataPath: "data/mongot"
+server:
+  grpc:
+    address: "localhost:27028"
+advancedConfigs:
+  indexing:
+    lucene:
+      refresh:
+        intervalMs: 2000
+      mergePolicy:
+        tiered:
+          vectorMergePolicy:
+            mergeBudgetMb: 512
+      mergeScheduler:
+        concurrent:
+          maxThreadCount: 6
+      fieldLimit: 500
+    definition:
+      maxEmbeddedDocumentsNestingLevel: 7
+  querying:
+    lucene:
+      maxClauseLimit: 2048
+      vectorFloorSegmentMB: 128.0
+  replication:
+    mongodb:
+      numConcurrentInitialSyncs: 3
+      numConcurrentChangeStreams: 12
+      numIndexingThreads: 8
+      numConcurrentSynonymSyncs: 2
+      changeStreamMaxTimeMs: 500
+      changeStreamCursorMaxTimeSec: 900
+      numChangeStreamDecodingThreads: 4
+      pauseAllInitialSyncs: true
+      pauseInitialSyncOnIndexIds:
+        - "507f1f77bcf86cd799439011"
+        - "507f1f77bcf86cd799439012"
+      excludedChangestreamFields:
+        - "lsid"
+        - "txnNumber"
+  autoEmbedding:
+    materializedView:
+      numConcurrentChangeStreams: 10
+      numIndexingThreads: 5
+      numEmbeddingThreads: 6
+      numConcurrentInitialSyncs: 2
+      matViewWriterMaxConnections: 8
+      maxInFlightEmbeddingGetMores: 3
+      embeddingGetMoreBatchSize: 2000
+      changeStreamMaxTimeMs: 700
+      changeStreamCursorMaxTimeSec: 1200
+      numChangeStreamDecodingThreads: 3
+      requestRateLimitBackoffMs: 250
+      mvWriteRateLimitRps: 60
+      embeddingProviderRpsLimit: 30
+      globalMemoryBudgetHeapPercent: 80
+      perBatchMemoryBudgetHeapPercent: 40
+  cursor:
+    idleCursorHandlingRateMs: 1800000
+    cursorIdleTimeMs: 3600000
+  searchQueryAdmissionControl:
+    threadPoolSizeMultiplier: 3.0
+    queueCapacityMultiplier: 30.0
+    virtualQueueCapacity: true
+  diskMonitor:
+    pauseReplicationThreshold: 0.93
+    resumeReplicationThreshold: 0.88
+    crashThreshold: 0.98
+    pauseInitialSyncThreshold: 0.86
+    resumeInitialSyncThreshold: 0.83
+  ftdc:
+    enabled: false
+    directorySizeMb: 250
+    fileSizeMb: 25
+    collectionPeriodMillis: 2500

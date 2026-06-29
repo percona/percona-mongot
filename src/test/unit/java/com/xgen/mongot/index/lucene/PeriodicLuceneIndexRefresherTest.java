@@ -1,5 +1,6 @@
 package com.xgen.mongot.index.lucene;
 
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
@@ -7,7 +8,6 @@ import static org.mockito.ArgumentMatchers.any;
 
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.analyzer.wrapper.LuceneAnalyzer;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
@@ -137,7 +137,8 @@ public class PeriodicLuceneIndexRefresherTest {
             new QueryCacheProvider.DefaultQueryCacheProvider(),
             Optional.empty(),
             SearchIndex.mockQueryMetricsUpdater(MOCK_INDEX_DEFINITION.getType())),
-        SearchIndex.mockMetricsFactory());
+        SearchIndex.mockMetricsFactory(),
+        () -> false);
   }
 
   private static SingleLuceneIndexWriter getIndexWriter() throws Exception {
@@ -147,8 +148,13 @@ public class PeriodicLuceneIndexRefresherTest {
     var luceneIndexWriter =
         SingleLuceneIndexWriter.createForSearchIndex(
             directory,
-            new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-                .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false),
+            createMergeScheduler(
+                new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+                MOCK_INDEX_GENERATION_ID,
+                0,
+                1,
+                false,
+                directory),
             new TieredMergePolicy(),
             16D,
             Optional.empty(),
@@ -159,7 +165,7 @@ public class PeriodicLuceneIndexRefresherTest {
             SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
             Optional.empty(),
             FeatureFlags.getDefault(),
-            DynamicFeatureFlagRegistry.empty());
+            () -> false);
 
     luceneIndexWriter.commit(EncodedUserData.EMPTY);
 

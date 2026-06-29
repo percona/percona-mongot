@@ -10,6 +10,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.RateLimiter;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.VectorOrError;
+import com.xgen.mongot.embedding.exceptions.EmbeddingProviderBatchingException;
 import com.xgen.mongot.embedding.exceptions.EmbeddingProviderNonTransientException;
 import com.xgen.mongot.embedding.exceptions.EmbeddingProviderTransientException;
 import com.xgen.mongot.embedding.providers.clients.ClientInterface;
@@ -307,6 +308,11 @@ public class EmbeddingProviderManager {
             this.successfulRequestCounters.get(serviceTier).increment();
             return result;
           });
+    } catch (EmbeddingProviderBatchingException e) {
+      this.failedRequestCounters.get(serviceTier).increment();
+      throw new EmbeddingProviderNonTransientException(
+          String.valueOf(e.getMessage()),
+          EmbeddingProviderNonTransientException.Reason.INPUT_TOO_LARGE);
     } catch (Exception e) {
       this.failedRequestCounters.get(serviceTier).increment();
       throw e;
@@ -340,7 +346,8 @@ public class EmbeddingProviderManager {
                       serviceTier,
                       context.database());
                   throw new EmbeddingProviderTransientException(
-                      "Client side rate limit exceeded, retry it later");
+                      "Client side rate limit exceeded, retry it later",
+                      EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED);
                 }
               }
               this.batchSizeDistributions.get(serviceTier).record(texts.size());

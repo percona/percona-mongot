@@ -5,11 +5,11 @@ import com.google.common.base.Stopwatch;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache;
 import com.xgen.mongot.index.lucene.field.FieldName;
-import com.xgen.mongot.util.Check;
 import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.facet.sortedset.DefaultSortedSetDocValuesReaderState;
 import org.apache.lucene.facet.sortedset.SortedSetDocValuesReaderState;
 import org.apache.lucene.index.IndexReader;
@@ -47,6 +47,15 @@ public class LuceneIndexSearcher extends IndexSearcher {
         cardinalityLimit,
         Optional.empty(),
         Optional.empty());
+  }
+
+  /**
+   * Creates a new IndexSearcher based on the provided one that shares the IndexReader and all
+   * cached state from the given searcher but can have its own mutable fields (e.g. timeout). Use
+   * this to obtain a per-request searcher instance to avoid race across concurrent requests.
+   */
+  public static LuceneIndexSearcher create(LuceneIndexSearcher other) {
+    return new LuceneIndexSearcher(other);
   }
 
   static LuceneIndexSearcher create(
@@ -127,7 +136,6 @@ public class LuceneIndexSearcher extends IndexSearcher {
     this.facetsState = other.facetsState;
     this.fieldToSortableTypesMapping = other.fieldToSortableTypesMapping;
     this.tokenFacetsStateCache = other.tokenFacetsStateCache;
-    Check.argIsNull(other.getExecutor(), "executor");
   }
 
   /**
@@ -141,7 +149,6 @@ public class LuceneIndexSearcher extends IndexSearcher {
     this.facetsState = other.facetsState;
     this.fieldToSortableTypesMapping = other.fieldToSortableTypesMapping;
     this.tokenFacetsStateCache = other.tokenFacetsStateCache;
-    Check.argNotNull(executor, "executor");
   }
 
   private static Optional<TokenFacetsStateCache> createTokenFacetsStateCache(
@@ -220,7 +227,7 @@ public class LuceneIndexSearcher extends IndexSearcher {
      */
     var stopwatch = Stopwatch.createStarted();
     try {
-      return Optional.of(new DefaultSortedSetDocValuesReaderState(reader));
+      return Optional.of(new DefaultSortedSetDocValuesReaderState(reader, new FacetsConfig()));
     } catch (IllegalArgumentException e) {
       if (e.getMessage() != null
           && e.getMessage().contains("was not indexed with SortedSetDocValues")) {

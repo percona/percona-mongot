@@ -19,6 +19,7 @@ import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.metrics.MetricsFactory;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -28,6 +29,7 @@ import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -45,7 +47,8 @@ public class FtdcScheduledReporterTest {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(registry);
-    FtdcScheduledReporter.create(registry, combinedRegistry, ftdc, false);
+    FtdcScheduledReporter.create(
+        registry, combinedRegistry, ftdc, false, FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
     Thread.sleep(100);
     verifyNoMoreInteractions(ftdc);
   }
@@ -56,7 +59,9 @@ public class FtdcScheduledReporterTest {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(registry);
-    var reporter = FtdcScheduledReporter.create(registry, combinedRegistry, ftdc, false);
+    var reporter =
+        FtdcScheduledReporter.create(
+            registry, combinedRegistry, ftdc, false, FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
     reporter.start(10, TimeUnit.MILLISECONDS);
     // we report every 10 ms, so we can report 10 times in under a second.
     verify(ftdc, timeout(1000).atLeast(10)).addSample(any(), anyLong());
@@ -485,11 +490,16 @@ public class FtdcScheduledReporterTest {
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(meterRegistry);
     var scheduledReporter =
-        FtdcScheduledReporter.create(meterRegistry, combinedRegistry, ftdc, false);
-    
+        FtdcScheduledReporter.create(
+            meterRegistry,
+            combinedRegistry,
+            ftdc,
+            false,
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+
     // Set up captor to capture all successful reports before starting
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
-    
+
     scheduledReporter.start(10, TimeUnit.MILLISECONDS);
 
     try {
@@ -503,7 +513,7 @@ public class FtdcScheduledReporterTest {
       // Get the actual number of times getMeters() was called
       // This equals the number of report() calls since each report() calls getMeters()
       int getMetersCallCount = callCount.get();
-      
+
       // Verify that getMeters() was called at least 5 times
       assertThat(getMetersCallCount).isAtLeast(5);
 
@@ -514,7 +524,7 @@ public class FtdcScheduledReporterTest {
       // because one report (the 3rd one) failed and didn't reach addSample()
       int expectedAddSampleCount = getMetersCallCount - 1;
       verify(ftdc, times(expectedAddSampleCount)).addSample(docCaptor.capture(), anyLong());
-      
+
       // Verify that we got the expected number of successful reports
       Assert.assertEquals(
           "Should have exactly " + expectedAddSampleCount + " successful reports",
@@ -635,19 +645,23 @@ public class FtdcScheduledReporterTest {
 
     // Create three gauges: before, middle (will throw on second report), after
     meterRegistry.gauge("gauge_before", 10.0);
-    
+
     // Create a gauge that will throw exception on the second report
     // Use AtomicInteger to track call count, increment in value() method
     AtomicInteger callCount = new AtomicInteger(0);
-    Gauge.Builder<AtomicInteger> gaugeBuilder = Gauge.builder("gauge_middle", callCount, count -> {
-      int currentCount = count.incrementAndGet();
-      if (currentCount == 2) { // Second call (1-indexed, so 2 means second)
-        throw new RuntimeException("Simulated exception in gauge.value()");
-      }
-      return 20.0;
-    });
+    Gauge.Builder<AtomicInteger> gaugeBuilder =
+        Gauge.builder(
+            "gauge_middle",
+            callCount,
+            count -> {
+              int currentCount = count.incrementAndGet();
+              if (currentCount == 2) { // Second call (1-indexed, so 2 means second)
+                throw new RuntimeException("Simulated exception in gauge.value()");
+              }
+              return 20.0;
+            });
     gaugeBuilder.register(meterRegistry);
-    
+
     meterRegistry.gauge("gauge_after", 30.0);
 
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
@@ -714,15 +728,18 @@ public class FtdcScheduledReporterTest {
 
     // Create three gauges: before, middle (will always throw), after
     meterRegistry.gauge("gauge_before", 10.0);
-    
+
     // Create a gauge that will always throw exception
     AtomicInteger throwCounter = new AtomicInteger(0);
     Gauge.Builder<AtomicInteger> gaugeBuilder =
-        Gauge.builder("gauge_middle", throwCounter, count -> {
-          throw new RuntimeException("Simulated exception in gauge.value()");
-        });
+        Gauge.builder(
+            "gauge_middle",
+            throwCounter,
+            count -> {
+              throw new RuntimeException("Simulated exception in gauge.value()");
+            });
     gaugeBuilder.register(meterRegistry);
-    
+
     meterRegistry.gauge("gauge_after", 30.0);
 
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
@@ -794,25 +811,34 @@ public class FtdcScheduledReporterTest {
 
     // Create three gauges: before, middle (will throw on second report), after
     meterRegistry.gauge("gauge_before", 10.0);
-    
+
     // Create a gauge that will throw exception on the second report
     // Use AtomicInteger to track call count, increment in value() method
     AtomicInteger callCount = new AtomicInteger(0);
-    Gauge.Builder<AtomicInteger> gaugeBuilder = Gauge.builder("gauge_middle", callCount, count -> {
-      int currentCount = count.incrementAndGet();
-      if (currentCount == 2) { // Second call (1-indexed, so 2 means second)
-        throw new RuntimeException("Simulated exception in gauge.value()");
-      }
-      return 20.0;
-    });
+    Gauge.Builder<AtomicInteger> gaugeBuilder =
+        Gauge.builder(
+            "gauge_middle",
+            callCount,
+            count -> {
+              int currentCount = count.incrementAndGet();
+              if (currentCount == 2) { // Second call (1-indexed, so 2 means second)
+                throw new RuntimeException("Simulated exception in gauge.value()");
+              }
+              return 20.0;
+            });
     gaugeBuilder.register(meterRegistry);
-    
+
     meterRegistry.gauge("gauge_after", 30.0);
 
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(meterRegistry);
     var scheduledReporter =
-        FtdcScheduledReporter.create(meterRegistry, combinedRegistry, ftdc, false);
+        FtdcScheduledReporter.create(
+            meterRegistry,
+            combinedRegistry,
+            ftdc,
+            false,
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
     String gaugeBeforeKey = getFormattedKey("gauge_before", Optional.empty());
     String gaugeMiddleKey = getFormattedKey("gauge_middle", Optional.empty());
@@ -885,21 +911,29 @@ public class FtdcScheduledReporterTest {
 
     // Create three gauges: before, middle (will always throw), after
     meterRegistry.gauge("gauge_before", 10.0);
-    
+
     // Create a gauge that will always throw exception
     AtomicInteger throwCounter = new AtomicInteger(0);
     Gauge.Builder<AtomicInteger> gaugeBuilder =
-        Gauge.builder("gauge_middle", throwCounter, count -> {
-          throw new RuntimeException("Simulated exception in gauge.value()");
-        });
+        Gauge.builder(
+            "gauge_middle",
+            throwCounter,
+            count -> {
+              throw new RuntimeException("Simulated exception in gauge.value()");
+            });
     gaugeBuilder.register(meterRegistry);
-    
+
     meterRegistry.gauge("gauge_after", 30.0);
 
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(meterRegistry);
     var scheduledReporter =
-        FtdcScheduledReporter.create(meterRegistry, combinedRegistry, ftdc, false);
+        FtdcScheduledReporter.create(
+            meterRegistry,
+            combinedRegistry,
+            ftdc,
+            false,
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
     String gaugeBeforeKey = getFormattedKey("gauge_before", Optional.empty());
     String gaugeMiddleKey = getFormattedKey("gauge_middle", Optional.empty());
@@ -940,7 +974,6 @@ public class FtdcScheduledReporterTest {
     }
   }
 
-
   @Test
   public void start_twoRegistriesProvided_executorMetricsInExecutorRegistryNotReportingRegistry()
       throws Exception {
@@ -954,7 +987,12 @@ public class FtdcScheduledReporterTest {
 
     // Use combinedRegistry for executor metrics so they go to executorRegistry
     var reporter =
-        FtdcScheduledReporter.create(reportingRegistry, combinedRegistry, ftdc, true);
+        FtdcScheduledReporter.create(
+            reportingRegistry,
+            combinedRegistry,
+            ftdc,
+            true,
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
     reporter.start(10, TimeUnit.MILLISECONDS);
 
     try {
@@ -1000,6 +1038,185 @@ public class FtdcScheduledReporterTest {
     } finally {
       reporter.stop();
     }
+  }
+
+  @Test
+  public void create_reporterThreadAttributionCounterIncreasesUnderLoad() throws Exception {
+    var ftdc = mockFtdc();
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
+    combinedRegistry.add(registry);
+    var reporter =
+        FtdcScheduledReporter.create(
+            registry, combinedRegistry, ftdc, false, FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+
+    FunctionCounter allocated =
+        registry
+            .find("executor.thread.allocatedBytes")
+            .tag("subsystem", "ftdc")
+            .tag("name", "ftdc-reporter")
+            .functionCounter();
+    assertThat(allocated).isNotNull();
+
+    reporter.start(10, TimeUnit.MILLISECONDS);
+    try {
+      verify(ftdc, timeout(20000).atLeast(1)).addSample(any(), anyLong());
+      double before = allocated.count();
+      // JVMs without per-thread allocation tracking report 0; skip rather than flake.
+      if (before == 0.0) {
+        return;
+      }
+      assertThat(pollUntil(() -> allocated.count() > before, Duration.ofSeconds(20))).isTrue();
+    } finally {
+      reporter.stop();
+    }
+  }
+
+  @Test
+  public void create_withMeterLimit_skipsSampleWhenExceeded() throws Exception {
+    var ftdc = mockFtdc();
+    SimpleMeterRegistry reportingRegistry = new SimpleMeterRegistry();
+    CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
+    combinedRegistry.add(reportingRegistry);
+    var reporter =
+        FtdcScheduledReporter.create(reportingRegistry, combinedRegistry, ftdc, false, 1);
+    reporter.start(10, TimeUnit.MILLISECONDS);
+
+    try {
+      // Wait until the reporting timer proves that report cycles ran and were skipped.
+      assertThat(
+              pollUntil(
+                  () ->
+                      reportingRegistry
+                          .find(FtdcScheduledReporter.FTDC_MONGOT_REPORTING_TIMER_NAME)
+                          .timers()
+                          .stream()
+                          .anyMatch(t -> t.count() > 0),
+                  Duration.ofSeconds(2)))
+          .isTrue();
+      verifyNoInteractions(ftdc);
+    } finally {
+      reporter.stop();
+    }
+  }
+
+  private static boolean pollUntil(java.util.function.BooleanSupplier condition, Duration timeout)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + timeout.toNanos();
+    while (System.nanoTime() < deadline) {
+      if (condition.getAsBoolean()) {
+        return true;
+      }
+      Thread.sleep(10);
+    }
+    return false;
+  }
+
+  @Test
+  public void create_withMeterLimit_reportsSampleWhenBelowLimit() throws Exception {
+    var ftdc = mockFtdc();
+    SimpleMeterRegistry reportingRegistry = new SimpleMeterRegistry();
+    CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
+    combinedRegistry.add(reportingRegistry);
+
+    var reporter =
+        FtdcScheduledReporter.create(
+            reportingRegistry,
+            combinedRegistry,
+            ftdc,
+            false,
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+    reporter.start(10, TimeUnit.MILLISECONDS);
+
+    try {
+      verify(ftdc, timeout(1000).atLeast(1)).addSample(any(), anyLong());
+    } finally {
+      reporter.stop();
+    }
+  }
+
+  @Test
+  public void report_meterCountExceedsLimit_skipsSample() throws Exception {
+    var ftdc = mockFtdc();
+    var executorRegistry = new SimpleMeterRegistry();
+    var reportingRegistry = new SimpleMeterRegistry();
+    var reporter = new FtdcScheduledReporter.Reporter(executorRegistry, reportingRegistry, ftdc, 1);
+
+    reporter.report();
+
+    // Limit is 1 and the reporter always registers at least one meter (the reporting timer).
+    verifyNoInteractions(ftdc);
+  }
+
+  @Test
+  public void report_meterCountBelowLimit_reportsSample() throws Exception {
+    var ftdc = mockFtdc();
+    var executorRegistry = new SimpleMeterRegistry();
+    var reportingRegistry = new SimpleMeterRegistry();
+    // Use a limit well above any plausible internal meter count so the test is not
+    // sensitive to how many meters the reporting timer creates internally.
+    var reporter =
+        new FtdcScheduledReporter.Reporter(executorRegistry, reportingRegistry, ftdc, 10_000);
+
+    reportingRegistry.counter("counter1").increment();
+    reportingRegistry.counter("counter2").increment();
+
+    reporter.report();
+
+    verify(ftdc).addSample(any(), anyLong());
+  }
+
+  @Test
+  public void report_meterLimitDisabled_reportsRegardlessOfCount() throws Exception {
+    var ftdc = mockFtdc();
+    var meterRegistry = new SimpleMeterRegistry();
+    var reporter =
+        new FtdcScheduledReporter.Reporter(meterRegistry, meterRegistry, ftdc, Integer.MAX_VALUE);
+
+    for (int i = 0; i < 100; i++) {
+      meterRegistry.counter("counter_" + i).increment();
+    }
+
+    reporter.report();
+
+    verify(ftdc).addSample(any(), anyLong());
+  }
+
+  @Test
+  public void report_meterCountDropsBelowLimit_resumesReporting() throws Exception {
+    var ftdc = mockFtdc();
+    var executorRegistry = new SimpleMeterRegistry();
+    var reportingRegistry = new SimpleMeterRegistry();
+
+    // Measure baseline: register the same timer the Reporter creates internally to discover
+    // how many meters SimpleMeterRegistry actually allocates for it.
+    Timer.builder(FtdcScheduledReporter.FTDC_MONGOT_REPORTING_TIMER_NAME)
+        .tags(FtdcScheduledReporter.FTDC_MONGOT_REPORTING_TIMER_TAGS)
+        .publishPercentiles(0.5, 0.75, 0.9, 0.99)
+        .register(reportingRegistry);
+    int baseMeterCount = reportingRegistry.getMeters().size();
+    reportingRegistry.clear();
+
+    int limit = baseMeterCount + 1;
+    var reporter =
+        new FtdcScheduledReporter.Reporter(executorRegistry, reportingRegistry, ftdc, limit);
+
+    // Add 2 counters — puts us at baseMeterCount + 2, which exceeds limit.
+    var c1 = reportingRegistry.counter("a");
+    var c2 = reportingRegistry.counter("b");
+    c1.increment();
+    c2.increment();
+
+    assertThat(reportingRegistry.getMeters().size()).isGreaterThan(limit);
+    reporter.report();
+    verifyNoInteractions(ftdc);
+
+    // Remove one counter to drop to baseMeterCount + 1, which equals the limit (not exceeded).
+    reportingRegistry.remove(c2);
+
+    assertThat(reportingRegistry.getMeters().size()).isAtMost(limit);
+    reporter.report();
+    verify(ftdc).addSample(any(), anyLong());
   }
 
   @Test

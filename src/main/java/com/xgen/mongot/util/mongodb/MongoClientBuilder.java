@@ -41,6 +41,10 @@ public class MongoClientBuilder {
   private Optional<Integer> socketTimeoutMs;
   private Optional<SSLContext> sslContext;
   private Optional<ReadConcern> readConcern;
+  private Optional<Long> heartbeatFrequencyMs;
+  private Optional<Long> minHeartbeatFrequencyMs;
+  private Optional<Long> localThresholdMs;
+  private Optional<Long> serverSelectionTimeoutMs;
 
   private MongoClientBuilder(
       ConnectionString connectionString,
@@ -60,6 +64,10 @@ public class MongoClientBuilder {
     this.socketTimeoutMs = Optional.empty();
     this.sslContext = Optional.empty();
     this.readConcern = Optional.empty();
+    this.heartbeatFrequencyMs = Optional.empty();
+    this.minHeartbeatFrequencyMs = Optional.empty();
+    this.localThresholdMs = Optional.empty();
+    this.serverSelectionTimeoutMs = Optional.empty();
   }
 
   public static MongoClientBuilder builder(
@@ -75,29 +83,48 @@ public class MongoClientBuilder {
   }
 
   /**
-   * Builds a non-replication {@link MongoClient} for read/write against the sync source as a whole
-   * cluster: uses {@link SyncSourceConfig#mongosUri} when present (sharded deployments), otherwise
-   * {@link SyncSourceConfig#mongodClusterReadWriteUri} so the driver can discover the primary via
-   * replica-set discovery. Prefer this over {@link #buildNonReplicationPreferringMongos} when
-   * operations must reach the correct primary or mongos rather than a single direct {@code mongod}
-   * host.
+   * Builds a non-replication {@link MongoClient} for cluster-wide read/write operations (e.g.
+   * index-management commands, auto-embedding, metadata service).
+   *
+   * <p>In sharded deployments uses {@link SyncSourceConfig#mongosClusterReadWriteUri} ({@code
+   * directConnection=false} to all mongos instances) so the driver can route to any available
+   * mongos. In non-sharded deployments falls back to {@link
+   * SyncSourceConfig#mongodClusterReadWriteUri} so the driver can discover the primary via
+   * replica-set discovery.
+   *
+   * <p>Prefer this over {@link #buildNonReplicationPreferringMongos} for any operation that must
+   * reach the correct primary or needs full cluster routing rather than a single direct host.
    */
   public static MongoClient buildClusterReadWriteClient(
       SyncSourceConfig syncSourceConfig, String applicationName, MeterRegistry meterRegistry) {
-    var syncSource = syncSourceConfig.mongosUri.orElse(syncSourceConfig.mongodClusterReadWriteUri);
+    var syncSource =
+        syncSourceConfig.mongosClusterReadWriteUri.orElse(
+            syncSourceConfig.mongodClusterReadWriteUri);
     return buildNonReplicationWithDefaults(syncSource, applicationName, meterRegistry);
   }
 
   /**
-   * Builds a non-replication {@link MongoClient} using {@link SyncSourceConfig#mongosUri} when set,
-   * otherwise {@link SyncSourceConfig#mongodUri}. Use this when traffic should go through mongos if
-   * available (e.g. metadata or read paths), while still working when only a direct mongod URI is
-   * configured. Not suitable for writes that must hit the full cluster; for that use {@link
-   * #buildClusterReadWriteClient}.
+   * Builds a non-replication {@link MongoClient} that routes through a single mongos when in a
+   * sharded deployment, otherwise connects directly to a single mongod (e.g. for server-info
+   * resolution, collection metadata reads).
+   *
+   * <p>Uses {@link SyncSourceConfig#mongosSingleHostReplicationUri} ({@code directConnection=true}
+   * to the selected mongos) when present, otherwise falls back to {@link
+   * SyncSourceConfig#mongodSingleHostReplicationUri} ({@code directConnection=true} to the selected
+   * mongod).
+   *
+   * <p>Not suitable for writes or operations that require reaching the primary; use {@link
+   * #buildClusterReadWriteClient} for those.
    */
   public static MongoClient buildNonReplicationPreferringMongos(
       SyncSourceConfig syncSourceConfig, String applicationName, MeterRegistry meterRegistry) {
-    var syncSource = syncSourceConfig.mongosUri.orElse(syncSourceConfig.mongodUri);
+    syncSourceConfig.validateReplicationUrisAvailable();
+
+    var syncSource =
+        syncSourceConfig
+            .mongosSingleHostReplicationUri
+            .or(() -> syncSourceConfig.mongodSingleHostReplicationUri)
+            .orElseThrow();
     return buildNonReplicationWithDefaults(syncSource, applicationName, meterRegistry);
   }
 
@@ -164,6 +191,26 @@ public class MongoClientBuilder {
     return this;
   }
 
+  public MongoClientBuilder heartbeatFrequencyMs(long ms) {
+    this.heartbeatFrequencyMs = Optional.of(ms);
+    return this;
+  }
+
+  public MongoClientBuilder minHeartbeatFrequencyMs(long ms) {
+    this.minHeartbeatFrequencyMs = Optional.of(ms);
+    return this;
+  }
+
+  public MongoClientBuilder localThresholdMs(long ms) {
+    this.localThresholdMs = Optional.of(ms);
+    return this;
+  }
+
+  public MongoClientBuilder serverSelectionTimeoutMs(long ms) {
+    this.serverSelectionTimeoutMs = Optional.of(ms);
+    return this;
+  }
+
   public MongoClient buildSyncClientForTesting(ReadConcern readConcern) {
     return MongoClients.create(buildSettings(readConcern));
   }
@@ -191,11 +238,24 @@ public class MongoClientBuilder {
   MongoClientSettings buildSettings(boolean replicationClient) {
     var settings = MongoClientSettings.builder().applyConnectionString(this.connectionString);
 
-    // Reduce server selection timeout from 30 seconds, effectively makes
-    // commands fail faster in case mongod/mongodb is not available before
-    // the command is run
     settings.applyToClusterSettings(
-        builder -> builder.serverSelectionTimeout(10, TimeUnit.SECONDS));
+        builder -> {
+          builder.serverSelectionTimeout(
+              // Default to 10 s (down from the 30 s driver default) so commands fail fast
+              // when mongod/mongos is unavailable at call time.
+              this.serverSelectionTimeoutMs.orElse(10_000L), TimeUnit.MILLISECONDS);
+          this.localThresholdMs.ifPresent(ms -> builder.localThreshold(ms, TimeUnit.MILLISECONDS));
+        });
+
+    if (this.heartbeatFrequencyMs.isPresent() || this.minHeartbeatFrequencyMs.isPresent()) {
+      settings.applyToServerSettings(
+          b -> {
+            this.heartbeatFrequencyMs.ifPresent(
+                ms -> b.heartbeatFrequency(ms, TimeUnit.MILLISECONDS));
+            this.minHeartbeatFrequencyMs.ifPresent(
+                ms -> b.minHeartbeatFrequency(ms, TimeUnit.MILLISECONDS));
+          });
+    }
 
     if (replicationClient) {
       // Settings for replication clients.

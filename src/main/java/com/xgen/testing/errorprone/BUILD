@@ -13,8 +13,8 @@ java_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "@maven//:com_google_auto_service_auto_service_annotations",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
         "@maven//:com_uber_nullaway_nullaway",
+        "@maven//:org_jetbrains_annotations",
     ],
 )

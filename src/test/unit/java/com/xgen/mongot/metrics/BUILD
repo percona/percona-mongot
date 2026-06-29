@@ -37,15 +37,18 @@ java_test_suite(
         "MetricsFactoryTest.java",
         "PerIndexMetricsFactoryTest.java",
         "ServerStatusDataExtractorTest.java",
+        "ThreadPoolResourceMetricsTest.java",
         "TimerTest.java",
     ],
     tags = ["unit"],
     deps = [
         "//src/main/java/com/xgen/mongot/metrics",
         "//src/main/java/com/xgen/mongot/util",
+        "//src/main/java/com/xgen/mongot/util/concurrent",
         "//src/main/java/com/xgen/mongot/util/functionalinterfaces",
         "//src/main/java/com/xgen/testing",
         "//src/main/java/com/xgen/testing/mongot/metrics/micrometer",
+        "@maven//:com_google_flogger_flogger_system_backend",  # keep
         "@maven//:com_google_guava_guava",
         "@maven//:com_google_guava_guava_testlib",
         "@maven//:com_google_truth_truth",

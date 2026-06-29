@@ -7,8 +7,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import javax.annotation.Nullable;
 import net.logstash.logback.composite.AbstractJsonProvider;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.event.KeyValuePair;
 
 /**

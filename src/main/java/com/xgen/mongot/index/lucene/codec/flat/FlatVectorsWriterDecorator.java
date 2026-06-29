@@ -27,7 +27,7 @@ class FlatVectorsWriterDecorator extends KnnVectorsWriter {
 
   @Override
   public KnnFieldVectorsWriter<?> addField(FieldInfo fieldInfo) throws IOException {
-    return this.writer.addField(fieldInfo, null);
+    return this.writer.addField(fieldInfo);
   }
 
   @Override

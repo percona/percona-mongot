@@ -12,7 +12,6 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
-import javax.annotation.Nullable;
 import org.bson.BsonArray;
 import org.bson.BsonBinary;
 import org.bson.BsonBoolean;
@@ -35,6 +34,7 @@ import org.bson.BsonValue;
 import org.bson.protobuf.FieldOptions;
 import org.bson.protobuf.MessageType;
 import org.bson.protobuf.Options;
+import org.jetbrains.annotations.Nullable;
 
 public class CodeGeneratorUtils {
   private CodeGeneratorUtils() {}

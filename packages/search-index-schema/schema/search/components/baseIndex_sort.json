@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "search/components/baseIndex_sort.json",
+  "type": "object",
+  "description": "Define your Atlas Search Index",
+  "properties": {
+    "mappings": {
+      "suggestSortText": "0",
+      "$ref": "mappings.json"
+    },
+    "synonyms": {
+      "suggestSortText": "4",
+      "$ref": "synonyms.json"
+    },
+    "analyzer": {
+      "suggestSortText": "2",
+      "$ref": "common.json#/definitions/analyzers",
+      "markdownDescription": "[Analyzer](https://dochub.mongodb.org/core/analyzers-fts) to apply on fields when indexing. If you omit this parameter, it defaults to the [Standard Analyzer](https://dochub.mongodb.org/core/standard-fts). Atlas Search applies this analyzer to all fields unless you specify a different analyzer in the field mapping definition.",
+      "description": "Analyzer to apply to string fields when indexing."
+    },
+    "searchAnalyzer": {
+      "suggestSortText": "3",
+      "$ref": "common.json#/definitions/analyzers",
+      "markdownDescription": "[Analyzer](https://dochub.mongodb.org/core/analyzers-fts) to apply to query text before searching with it. If you omit this parameter, it defaults to the analyzer that you specify for the `analyzer` option. If you omit both the `searchAnalyzer` and the `analyzer` options, it defaults to the [Standard Analyzer](https://dochub.mongodb.org/core/standard-fts).",
+      "description": "Analyzer to apply to query text before searching with it."
+    },
+    "analyzers": {
+      "suggestSortText": "1",
+      "type": "array",
+      "items": {
+        "$ref": "custom_analyzer.json"
+      },
+      "markdownDescription": "[Custom analyzers](https://dochub.mongodb.org/core/custom-fts) to define for your index. You can define as many custom analyzers as you need for your specific indexing purposes.",
+      "description": "Custom analyzers to define for your index.",
+      "minItems": 1
+    },
+    "storedSource": {
+      "suggestSortText": "5",
+      "$ref": "storedSource.json"
+    },
+    "numPartitions": {
+      "description": "Number of index partitions. Allowed values are [1, 2, 4].",
+      "markdownDescription": "Number of [index partitions](https://dochub.mongodb.org/core/atlas-search-index-partition). Allowed values are [1, 2, 4].",
+      "default": 1,
+      "oneOf": [{ "const": 1 }, { "const": 2 }, { "const": 4 }],
+      "suggestSortText": "6",
+      "type": "integer"
+    },
+    "typeSets": {
+      "suggestSortText": "7",
+      "$ref": "typeSets.json"
+    },
+    "sort": {
+      "suggestSortText": "8",
+      "$ref": "sort.json"
+    }
+  }
+}

@@ -8,6 +8,8 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.Var;
@@ -455,6 +457,65 @@ public class LuceneFacetDrillSidewaysMetaBatchProducerFactoryTest {
     assertTrue(
         "Expected leagueFacet buckets present even if teamFacet DrillSidewaysResult missing",
         sawLeagueFacetBucket);
+  }
+
+  @Test
+  public void create_tokenFacet_emptyTokenSsdvState_emitsCountOnlyWithoutCallingFacets()
+      throws Exception {
+
+    when(this.facetContext.getStringFacetFieldDefinition(any(), any()))
+        .thenReturn(new com.xgen.mongot.index.definition.TokenFieldDefinition(Optional.empty()));
+
+    com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache tokenCache =
+        mock(com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache.class);
+    when(this.searcher.getTokenFacetsStateCache()).thenReturn(Optional.of(tokenCache));
+    when(tokenCache.get(anyString())).thenReturn(Optional.empty());
+
+    String facetName = "ageFacet";
+    FacetDefinition.StringFacetDefinition def =
+        new FacetDefinition.StringFacetDefinition("indexables.ageGroups", 10);
+
+    this.facetNameToDefinition.clear();
+    this.facetNameToDefinition.put(facetName, def);
+
+    this.facetCollector =
+        FacetCollectorBuilder.facet()
+            .operator(OperatorBuilder.exists().path("_id").build())
+            .facetDefinitions(this.facetNameToDefinition)
+            .build();
+
+    this.collectorQuery =
+        CollectorQueryBuilder.builder()
+            .collector(this.facetCollector)
+            .index(SearchIndex.MOCK_INDEX_NAME)
+            .returnScope(new ReturnScope(FieldPath.parse("custom.scope")))
+            .returnStoredSource(false)
+            .build();
+
+    Facets drillSidewaysFacets = mock(Facets.class);
+    DrillSidewaysResult drillResult =
+        new DrillSidewaysResult(drillSidewaysFacets, null, null, null, null);
+
+    LuceneFacetCollectorMetaBatchProducer producer =
+        LuceneFacetDrillSidewaysMetaBatchProducerFactory.create(
+            this.collectorQuery,
+            this.facetContext,
+            this.searcherReference,
+            TOP_DOCS,
+            name -> Optional.of(drillResult),
+            Optional.empty());
+
+    assertNotNull(producer);
+    assertTrue(
+        "No facet bucket producers when token SSDV state is missing", producer.isExhausted());
+
+    producer.execute(CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, BatchCursorOptionsBuilder.empty());
+    BsonArray batch = producer.getNextBatch(CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    assertEquals(1, batch.size());
+    assertEquals(new BsonString("count"), batch.getValues().get(0).asDocument().get("type"));
+
+    verify(drillSidewaysFacets, never()).getAllChildren(anyString());
   }
 
   @Test

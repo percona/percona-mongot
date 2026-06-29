@@ -1,6 +1,7 @@
 package com.xgen.mongot.server.executors;
 
 import com.google.common.collect.HashBasedTable;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.server.util.NettyUtil;
 import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.Crash;
@@ -31,13 +32,20 @@ public class ExecutorManager implements Closeable {
       eventLoopGroups;
 
   public ExecutorManager(MeterRegistry meterRegistry) {
-    this(meterRegistry, RegularBlockingRequestSettings.defaults());
+    this(meterRegistry, RegularBlockingRequestSettings.defaults(), FeatureFlags.getDefault());
   }
 
   public ExecutorManager(
       MeterRegistry meterRegistry, RegularBlockingRequestSettings regularBlockingRequestSettings) {
+    this(meterRegistry, regularBlockingRequestSettings, FeatureFlags.getDefault());
+  }
+
+  public ExecutorManager(
+      MeterRegistry meterRegistry,
+      RegularBlockingRequestSettings regularBlockingRequestSettings,
+      FeatureFlags featureFlags) {
     this.commandExecutor =
-        new BulkheadCommandExecutor(meterRegistry, regularBlockingRequestSettings);
+        new BulkheadCommandExecutor(meterRegistry, regularBlockingRequestSettings, featureFlags);
     this.eventLoopGroups = HashBasedTable.create();
   }
 

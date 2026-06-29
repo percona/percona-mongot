@@ -15,13 +15,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      PercentilesTest.TestDeserialization.class,
-      PercentilesTest.TestSerialization.class,
+      PercentilesTest.DeserializationTest.class,
+      PercentilesTest.SerializationTest.class,
     })
 public class PercentilesTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "percentiles-deserialization";
     private static final BsonDeserializationTestSuite<Percentiles> TEST_SUITE =
         fromDocument(
@@ -29,7 +29,7 @@ public class PercentilesTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Percentiles> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Percentiles> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Percentiles> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -57,7 +57,7 @@ public class PercentilesTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "percentiles-serialization";
     private static final BsonSerializationTestSuite<Percentiles> TEST_SUITE =
@@ -65,7 +65,7 @@ public class PercentilesTest {
 
     private final BsonSerializationTestSuite.TestSpec<Percentiles> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<Percentiles> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<Percentiles> testSpec) {
       this.testSpec = testSpec;
     }
 

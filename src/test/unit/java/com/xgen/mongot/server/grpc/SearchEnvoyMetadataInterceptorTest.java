@@ -33,6 +33,33 @@ public class SearchEnvoyMetadataInterceptorTest {
     triggerInterceptor(metadata, SearchEnvoyMetadata.getDefaultInstance());
   }
 
+  @Test
+  public void testAttemptCount_parsedFromHeader() {
+    Metadata metadata = new Metadata();
+    metadata.put(GrpcMetadata.ENVOY_ATTEMPT_COUNT_KEY, "2");
+    triggerInterceptorAndCheckAttemptCount(metadata, 2);
+  }
+
+  @Test
+  public void testAttemptCount_defaultsTo1WhenMissing() {
+    Metadata metadata = new Metadata();
+    triggerInterceptorAndCheckAttemptCount(metadata, 1);
+  }
+
+  @Test
+  public void testAttemptCount_defaultsTo1WhenInvalid() {
+    Metadata metadata = new Metadata();
+    metadata.put(GrpcMetadata.ENVOY_ATTEMPT_COUNT_KEY, "not-a-number");
+    triggerInterceptorAndCheckAttemptCount(metadata, 1);
+  }
+
+  @Test
+  public void testAttemptCount_parsesLargeValue() {
+    Metadata metadata = new Metadata();
+    metadata.put(GrpcMetadata.ENVOY_ATTEMPT_COUNT_KEY, "5");
+    triggerInterceptorAndCheckAttemptCount(metadata, 5);
+  }
+
   @SuppressWarnings("unchecked")
   private void triggerInterceptor(
       Metadata metadata, SearchEnvoyMetadata expectedSearchEnvoyMetadata) {
@@ -42,6 +69,26 @@ public class SearchEnvoyMetadataInterceptorTest {
             invocation -> {
               assertEquals(
                   expectedSearchEnvoyMetadata, GrpcContext.SEARCH_ENVOY_METADATA_KEY.get());
+              return null;
+            })
+        .when(listener)
+        .onReady();
+    var interceptor = new SearchEnvoyMetadataInterceptor();
+    var interceptedCall =
+        interceptor.interceptCall(serverCall, metadata, (call, headers) -> listener);
+    interceptedCall.onReady();
+  }
+
+  @SuppressWarnings("unchecked")
+  private void triggerInterceptorAndCheckAttemptCount(
+      Metadata metadata, int expectedAttemptCount) {
+    ServerCall<Object, Object> serverCall = mock(ServerCall.class);
+    ServerCall.Listener<Object> listener = mock(ServerCall.Listener.class);
+    doAnswer(
+            invocation -> {
+              assertEquals(
+                  Integer.valueOf(expectedAttemptCount),
+                  GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get());
               return null;
             })
         .when(listener)

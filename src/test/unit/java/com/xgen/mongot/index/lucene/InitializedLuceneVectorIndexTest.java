@@ -16,6 +16,7 @@ import static org.mockito.Mockito.verify;
 
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.EncodedUserData;
@@ -95,7 +96,9 @@ public class InitializedLuceneVectorIndexTest {
             directoryFactory,
             mock(IndexDirectoryHelper.class),
             Optional.empty(),
-            FeatureFlags.getDefault());
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            () -> false);
     Assert.assertEquals(
         DirectorySize.of(indexPath.toFile()),
         initializedIndex.getMetricsUpdater().getMetrics().indexingMetrics().indexSize().toBytes());
@@ -142,7 +145,9 @@ public class InitializedLuceneVectorIndexTest {
                 directoryFactory,
                 indexDirectoryHelper,
                 Optional.empty(),
-                FeatureFlags.getDefault()));
+                FeatureFlags.getDefault(),
+                DynamicFeatureFlagRegistry.empty(),
+                () -> false));
     verify(indexDirectoryHelper, times(1))
         .attemptToRecoverUnreadableIndex(any(), any(), any(), any(), any());
     verify(index, times(1)).getVectorIndexProperties();
@@ -200,7 +205,9 @@ public class InitializedLuceneVectorIndexTest {
                 directoryFactory,
                 indexDirectoryHelper,
                 Optional.empty(),
-                FeatureFlags.getDefault()));
+                FeatureFlags.getDefault(),
+                DynamicFeatureFlagRegistry.empty(),
+                () -> false));
 
     verify(indexDirectoryHelper, times(1))
         .attemptToRecoverUnreadableIndex(any(), any(), any(), any(), any());
@@ -258,7 +265,9 @@ public class InitializedLuceneVectorIndexTest {
             directoryFactory,
             indexDirectoryHelper,
             Optional.empty(),
-            FeatureFlags.getDefault());
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            () -> false);
     assertEquals(SearchIndex.MOCK_INDEX_GENERATION_ID, vectorIndex.getGenerationId());
     verify(indexDirectoryHelper, times(1))
         .attemptToRecoverUnreadableIndex(any(), any(), any(), any(), any());
@@ -315,7 +324,9 @@ public class InitializedLuceneVectorIndexTest {
             directoryFactory,
             indexDirectoryHelper,
             Optional.empty(),
-            FeatureFlags.getDefault());
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            () -> false);
     assertEquals(SearchIndex.MOCK_INDEX_GENERATION_ID, vectorIndex.getGenerationId());
     verify(indexDirectoryHelper).attemptToRecoverUnreadableIndex(any(), any(), any(), any(), any());
     verify(index, times(2)).getVectorIndexProperties();
@@ -484,7 +495,9 @@ public class InitializedLuceneVectorIndexTest {
             directoryFactory,
             indexDirectoryHelper,
             Optional.empty(),
-            FeatureFlags.getDefault());
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            () -> false);
 
     // Ensure metadata is cleared but not index directory.
     var commitData = IndexCommitUserData.createExceeded("test").toEncodedData();
@@ -568,7 +581,9 @@ public class InitializedLuceneVectorIndexTest {
             directoryFactory,
             mock(IndexDirectoryHelper.class),
             Optional.empty(),
-            FeatureFlags.getDefault());
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            () -> false);
     // Ensure the directory exists after creating the Index.
     Assert.assertTrue(indexPath.toFile().exists());
     Assert.assertTrue(metadataPath.toFile().exists());
@@ -619,7 +634,9 @@ public class InitializedLuceneVectorIndexTest {
         directoryFactory,
         mock(IndexDirectoryHelper.class),
         Optional.empty(),
-        FeatureFlags.getDefault());
+        FeatureFlags.getDefault(),
+        DynamicFeatureFlagRegistry.empty(),
+        () -> false);
   }
 
   private LuceneVectorIndex.VectorIndexProperties getIndexProperties() {

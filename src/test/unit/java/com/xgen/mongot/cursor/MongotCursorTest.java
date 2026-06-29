@@ -206,7 +206,7 @@ public class MongotCursorTest {
               new ConstantBatchSizeStrategy());
 
       assertEquals(u.getSpan().getSpanContext().getTraceId(), mockCursor.getTraceId());
-      assertEquals(TraceFlags.getSampled(), mockCursor.getTraceFlags());
+      Assert.assertTrue(mockCursor.getTraceFlags().isSampled());
 
       // running twice forces it to use this.traceId and this.traceFlags
       // OTel should not throw an exception since traceId and traceFlags are valid.
@@ -230,7 +230,7 @@ public class MongotCursorTest {
               new ConstantBatchSizeStrategy());
 
       assertEquals(u.getSpan().getSpanContext().getTraceId(), mockCursor.getTraceId());
-      assertEquals(TraceFlags.getDefault(), mockCursor.getTraceFlags()); // unsampled i.e. "default"
+      Assert.assertFalse(mockCursor.getTraceFlags().isSampled());
 
       // running twice forces it to use this.traceId and this.traceFlags
       // Should not throw exception.

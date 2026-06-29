@@ -18,12 +18,16 @@ public class SystemMetricsInstrumentationTest {
     var mockNetstatMetrics = mock(NetstatMetrics.class);
     var mockProcessMetrics = mock(ProcessMetrics.class);
     var mockMemoryMetrics = mock(MemoryMetrics.class);
+    var mockCpuInfoMetrics = mock(CpuInfoMetrics.class);
+    var mockNumaInfoMetrics = mock(NumaInfoMetrics.class);
     new SystemMetricsInstrumentation(
         new SimpleMeterRegistry(),
         mockDiskMetrics,
         mockNetstatMetrics,
         mockProcessMetrics,
-        mockMemoryMetrics);
+        mockMemoryMetrics,
+        mockCpuInfoMetrics,
+        mockNumaInfoMetrics);
 
     verifyNoMoreInteractions(mockDiskMetrics);
     verifyNoMoreInteractions(mockNetstatMetrics);
@@ -35,13 +39,17 @@ public class SystemMetricsInstrumentationTest {
     var mockNetstatMetrics = mock(NetstatMetrics.class);
     var mockProcessMetrics = mock(ProcessMetrics.class);
     var mockMemoryMetrics = mock(MemoryMetrics.class);
+    var mockCpuInfoMetrics = mock(CpuInfoMetrics.class);
+    var mockNumaInfoMetrics = mock(NumaInfoMetrics.class);
     var systemMetricsInstrumentation =
         new SystemMetricsInstrumentation(
             new SimpleMeterRegistry(),
             mockDiskMetrics,
             mockNetstatMetrics,
             mockProcessMetrics,
-            mockMemoryMetrics);
+            mockMemoryMetrics,
+            mockCpuInfoMetrics,
+            mockNumaInfoMetrics);
     systemMetricsInstrumentation.start(10, TimeUnit.MILLISECONDS);
     // Metrics are updated at least 10 times in one second.
     verify(mockDiskMetrics, timeout(1000).atLeast(10)).update();

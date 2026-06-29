@@ -1,8 +1,10 @@
 package com.xgen.mongot.util.concurrent;
 
+import com.xgen.mongot.util.concurrent.Executors.CountingNamedThreadFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -18,20 +20,19 @@ class DefaultNamedExecutorService implements NamedExecutorService {
   private final ExecutorService originalExecutor;
   private final String name;
   private final MeterRegistry meterRegistry;
-
-  DefaultNamedExecutorService(ExecutorService delegate, String name, MeterRegistry meterRegistry) {
-    this(delegate, delegate, name, meterRegistry);
-  }
+  private final Optional<CountingNamedThreadFactory> threadFactory;
 
   DefaultNamedExecutorService(
       ExecutorService delegate,
       ExecutorService originalExecutor,
       String name,
-      MeterRegistry meterRegistry) {
+      MeterRegistry meterRegistry,
+      Optional<CountingNamedThreadFactory> threadFactory) {
     this.delegate = delegate;
     this.originalExecutor = originalExecutor;
     this.name = name;
     this.meterRegistry = meterRegistry;
+    this.threadFactory = threadFactory;
   }
 
   @Override
@@ -137,5 +138,10 @@ class DefaultNamedExecutorService implements NamedExecutorService {
       return OptionalInt.of(tpe.getQueue().size());
     }
     return OptionalInt.empty();
+  }
+
+  @Override
+  public Optional<LiveThreadIdsRegistry> getLiveThreadIdsRegistry() {
+    return this.threadFactory.map(CountingNamedThreadFactory::getLiveThreadIdsRegistry);
   }
 }

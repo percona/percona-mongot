@@ -6,8 +6,8 @@ import java.util.Collection;
 import java.util.Optional;
 import java.util.StringJoiner;
 import java.util.stream.Collectors;
-import javax.annotation.Nullable;
 import org.bson.BsonType;
+import org.jetbrains.annotations.Nullable;
 
 public class BsonParseContext {
 

@@ -18,6 +18,7 @@ import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.lucene.codec.bloom.BloomCodecPolicy;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryHelper;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -27,6 +28,7 @@ import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
+import com.xgen.mongot.replication.mongodb.common.IdTypeObservingDocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncException;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncResumeInfo;
@@ -222,7 +224,8 @@ public class InitialSyncQueue {
                     clientSessionRecord.syncMongoClient(),
                     clientSessionRecord.sessionRefresher(),
                     meterRegistry,
-                    syncSourceHost)));
+                    syncSourceHost,
+                    replicationConfig.getSplitLargeChangeStreamEventsForInitialSync())));
     MetricsFactory metricsFactory = new MetricsFactory("initialSyncManager", meterRegistry);
     InitialSyncManagerFactory factory =
         getFactory(
@@ -451,7 +454,7 @@ public class InitialSyncQueue {
       }
 
       // TODO(CLOUDP-364699): Auto-embedding indexes do not support natural order scan for now.
-      if (indexDefinition.getIndexDefinition().isAutoEmbeddingIndex()) {
+      if (BloomCodecPolicy.isNaturalScanUnsupportedForIndex(indexDefinition.getIndexDefinition())) {
         useNaturalOrderScan = false;
       }
 
@@ -573,6 +576,20 @@ public class InitialSyncQueue {
     }
   }
 
+  /**
+   * Returns true if this generationId has an entry in the queue (queued or in-progress).
+   * Used by {@code MaterializedViewManager.refreshStatus()} to defer leadership acquisition until
+   * stale entries from a previous generator's shutdown are fully cleaned up.
+   *
+   * <p>The cancelled set is not checked because cancelled entries remain in the queued map
+   * until the dispatcher processes them.
+   */
+  public boolean hasEntry(GenerationId generationId) {
+    try (LockGuard ignored = LockGuard.with(this.queueLock)) {
+      return this.queued.containsKey(generationId) || this.inProgress.containsKey(generationId);
+    }
+  }
+
   @TestOnly
   @VisibleForTesting
   Optional<Integer> getEmbeddingAvailablePermits() {
@@ -599,7 +616,7 @@ public class InitialSyncQueue {
     private final Boolean pauseAllInitialSync;
     private final Optional<Integer> embeddingGetMoreBatchSize;
 
-    private final Map<Boolean, AtomicLong> collectionScansFeatureFlagMapping;
+    private final Map<Boolean, Counter> collectionScansFeatureFlagMapping;
 
     /** A helper for persisting metrics data */
     @SuppressWarnings("unused")
@@ -650,18 +667,16 @@ public class InitialSyncQueue {
       Tags idOrderScanTag = Tags.of("scan_type", "id_order");
 
       String collectionScanName = "collectionScan";
+      Tags replicationTypeTag =
+          Tags.of("replicationType", replicationConfig.getReplicationType().name());
       this.collectionScansFeatureFlagMapping =
           Map.of(
               true,
-              this.metricsFactory.numGauge(
-                  collectionScanName,
-                  naturalOrderScanTag.and(
-                      Tag.of("replicationType", replicationConfig.getReplicationType().name()))),
+              this.metricsFactory.counter(
+                  collectionScanName, naturalOrderScanTag.and(replicationTypeTag)),
               false,
-              this.metricsFactory.numGauge(
-                  collectionScanName,
-                  idOrderScanTag.and(
-                      Tag.of("replicationType", replicationConfig.getReplicationType().name()))));
+              this.metricsFactory.counter(
+                  collectionScanName, idOrderScanTag.and(replicationTypeTag)));
       this.inProgressResumedSyncs =
           this.metricsFactory.numGauge(
               "inProgressResumedSyncs",
@@ -776,21 +791,20 @@ public class InitialSyncQueue {
             IndexDefinition indexDefinition =
                 request.getIndexDefinitionGeneration().getIndexDefinition();
             this.inProgressSyncs.get(getIndexTypeTag(indexDefinition)).incrementAndGet();
-            this.collectionScansFeatureFlagMapping
-                .get(request.getUseNaturalOrderScan())
-                .incrementAndGet();
             request
                 .getResumeInfo()
                 .ifPresent(unused -> this.inProgressResumedSyncs.incrementAndGet());
             Crash.because("failed running initial sync")
                 .ifCompletesExceptionally(
                     CompletableFuture.runAsync(() -> runInitialSync(request), syncExecutor))
+                .whenComplete(
+                    (result, throwable) ->
+                        this.collectionScansFeatureFlagMapping
+                            .get(request.getUseNaturalOrderScan())
+                            .increment())
                 .thenRun(
                     () -> {
                       this.inProgressSyncs.get(getIndexTypeTag(indexDefinition)).decrementAndGet();
-                      this.collectionScansFeatureFlagMapping
-                          .get(request.getUseNaturalOrderScan())
-                          .decrementAndGet();
                       request
                           .getResumeInfo()
                           .ifPresent(unused -> this.inProgressResumedSyncs.decrementAndGet());
@@ -922,12 +936,22 @@ public class InitialSyncQueue {
             mongoClient.resolveAndUpdateCollectionName(
                 request.getIndexDefinitionGeneration().getIndexDefinition());
 
+        DocumentIndexer observingIndexer =
+            IdTypeObservingDocumentIndexer.wrap(
+                request.getDocumentIndexer(),
+                typeName ->
+                    request
+                        .getIndexMetricsUpdater()
+                        .getReplicationMetricsUpdater()
+                        .getInitialSyncMetrics()
+                        .reportIdKeyFieldType(typeName));
+
         InitialSyncContext syncContext =
             InitialSyncContext.create(
                 request.getIndexDefinitionGeneration(),
                 InitialSyncQueue.this.indexingWorkSchedulerFactory.getIndexingWorkScheduler(
                     request.getIndexDefinitionGeneration().getIndexDefinition()),
-                request.getDocumentIndexer(),
+                observingIndexer,
                 request.getIndexMetricsUpdater(),
                 this.embeddingGetMoreBatchSize,
                 request.isRemoveMatchCollectionUuid(),

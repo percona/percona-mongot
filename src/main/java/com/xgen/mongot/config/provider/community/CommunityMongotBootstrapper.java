@@ -3,15 +3,20 @@ package com.xgen.mongot.config.provider.community;
 import static com.xgen.mongot.cursor.CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT;
 import static com.xgen.mongot.cursor.CursorConfig.DEFAULT_MESSAGE_SIZE_LIMIT;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.net.HostAndPort;
+import com.mongodb.ReadPreference;
 import com.xgen.mongot.catalog.DefaultIndexCatalog;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.DefaultMetadataService;
 import com.xgen.mongot.catalogservice.MetadataService;
+import com.xgen.mongot.catalogservice.MongodTopologyMonitor;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.manager.DefaultConfigManager;
 import com.xgen.mongot.config.provider.CommonUtils;
@@ -21,7 +26,6 @@ import com.xgen.mongot.config.provider.community.embedding.EmbeddingServiceManag
 import com.xgen.mongot.config.provider.monitor.PeriodicConfigMonitor;
 import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.config.util.HysteresisConfig;
-import com.xgen.mongot.cursor.CursorConfig;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.cursor.MongotCursorManagerImpl;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
@@ -39,12 +43,12 @@ import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.definition.config.IndexDefinitionConfig;
 import com.xgen.mongot.index.lucene.LuceneGlobalSettings;
 import com.xgen.mongot.index.lucene.LuceneIndexFactory;
-import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.directory.EnvironmentVariantPerfConfig;
 import com.xgen.mongot.lifecycle.LifecycleConfig;
 import com.xgen.mongot.logging.Logging;
 import com.xgen.mongot.metrics.Instrumentation;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
+import com.xgen.mongot.metrics.cache.ScrapeCacheConfig;
 import com.xgen.mongot.metrics.ftdc.Ftdc;
 import com.xgen.mongot.metrics.ftdc.FtdcConfig;
 import com.xgen.mongot.metrics.ftdc.FtdcMetadata;
@@ -56,9 +60,6 @@ import com.xgen.mongot.monitor.PeriodicDiskMonitor;
 import com.xgen.mongot.monitor.ReplicationStateMonitor;
 import com.xgen.mongot.replication.mongodb.DurabilityConfig;
 import com.xgen.mongot.replication.mongodb.autoembedding.AutoEmbeddingMaterializedViewManagerFactory;
-import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
-import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
-import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.server.CommandServer;
 import com.xgen.mongot.server.auth.SecurityConfig;
@@ -78,7 +79,9 @@ import com.xgen.mongot.util.MongotVersionResolver;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.SecretsParser;
 import com.xgen.mongot.util.Shutdown;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.concurrent.Executors;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.MongoDbMetadataClient;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -106,12 +109,10 @@ public class CommunityMongotBootstrapper {
 
   public static final Logger LOG = LoggerFactory.getLogger(CommunityMongotBootstrapper.class);
 
-  private static final double DISK_USAGE_PAUSE_REPLICATION_THRESHOLD = 0.9;
-  private static final double DISK_USAGE_RESUME_REPLICATION_THRESHOLD = 0.85;
-  // Never crash in community.
-  private static final double CRASH_THRESHOLD = 1.01;
-
   private static final Duration DEFAULT_CONFIG_UPDATE_PERIOD = Duration.ofSeconds(1);
+
+  // Fixed cadence for refreshing system metrics (disk/memory/netstat/process) gauges.
+  private static final Duration SYSTEM_METRICS_UPDATE_INTERVAL = Duration.ofSeconds(5);
 
   /**
    * Bootstraps the mongot using the config file from the supplied configPath.
@@ -120,9 +121,10 @@ public class CommunityMongotBootstrapper {
    */
   public static void bootstrap(Path configPath, boolean internalListAllIndexesForTesting) {
 
-    CommunityConfig config =
+    CommunityConfig.ParsedCommunityConfig parsedConfig =
         Crash.because("failed to parse config file")
-            .ifThrows(() -> CommunityConfig.readFromFile(configPath));
+            .ifThrowsExceptionOrError(() -> CommunityConfig.readFromFile(configPath));
+    CommunityConfig config = parsedConfig.config();
 
     config
         .loggingConfig()
@@ -142,30 +144,39 @@ public class CommunityMongotBootstrapper {
 
     // Unlike production mode, we expect that the path to the data dir may not exist yet
     Crash.because("failed to create data directory")
-        .ifThrows(() -> Files.createDirectories(config.storageConfig().dataPath()));
+        .ifThrowsExceptionOrError(() -> Files.createDirectories(config.storageConfig().dataPath()));
 
     // The server-id is stored to disk so we need the datapath to exist before fetching it.
     var serverInfo = new CommunityServerInfo(config);
     LOG.atInfo().addKeyValue("serverInfo", serverInfo).log("Starting server with server info");
 
-    var syncSourceConfig = syncSourceConfig(config.syncSourceConfig());
+    var meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithCompositeMeterRegistry();
+    var meterRegistry = meterAndFtdcRegistry.getCompositeMeterRegistry();
+
+    // Log any BsonParseExceptions from unknown fields when parsing the mongot config.
+    reportUnknownFields(parsedConfig.unknownFieldExceptions());
+
+    // InitialSyncHostProvider starts replica-set discovery when it's first instantiated. Initiate
+    // it early in the bootstrap process so as a best-effort it can be ready before first use.
+    var initialSyncHostProvider =
+        new InitialSyncHostProvider(config.syncSourceConfig(), meterRegistry);
+
     var indexCatalog = new DefaultIndexCatalog();
     var initializedIndexCatalog = new InitializedIndexCatalog();
 
     var mongotVersion = MongotVersionResolver.create().getVersion();
-    var mongotConfigs =
-        getMongotConfigs(config.storageConfig().dataPath(), config.embeddingConfig());
+    var mongotConfigs = getMongotConfigs(config);
+
+    // Initialize static global feature flags for quantization or codec objects
+    FeatureFlags.initializeProcessInstance(mongotConfigs.featureFlags);
 
     // Initialize global feature flags for utility classes
     LoggableIdUtils.initialize(mongotConfigs.featureFlags.isEnabled(Feature.LOGGABLE_DOCUMENT_ID));
 
-    // metrics
-
-    var meterAndFtdcRegistry = MeterAndFtdcRegistry.createWithCompositeMeterRegistry();
-    var meterRegistry = meterAndFtdcRegistry.getCompositeMeterRegistry();
-
     var prometheusServerOptional =
-        config.metricsConfig().flatMap(CommunityMongotBootstrapper::maybeStartPrometheusServer);
+        config
+            .metricsConfig()
+            .flatMap(mc -> maybeStartPrometheusServer(mc, mongotConfigs.featureFlags));
     prometheusServerOptional.ifPresent(
         (promServer) -> meterRegistry.add(promServer.getPrometheusMeterRegistry()));
 
@@ -184,22 +195,39 @@ public class CommunityMongotBootstrapper {
 
     var cursorManager =
         MongotCursorManagerImpl.fromConfig(
-            CursorConfig.getDefault(), meterRegistry, indexCatalog, initializedIndexCatalog);
+            mongotConfigs.cursorConfig, meterRegistry, indexCatalog, initializedIndexCatalog);
 
+    var diskMonitorConfig = config.diskMonitorConfig();
     var diskMonitor =
         PeriodicDiskMonitor.createAndStart(
-            config.storageConfig().dataPath(), CRASH_THRESHOLD, meterRegistry);
+            config.storageConfig().dataPath(), diskMonitorConfig.crashThreshold(), meterRegistry);
     var replicationGateConfig =
         new HysteresisConfig(
-            DISK_USAGE_RESUME_REPLICATION_THRESHOLD, DISK_USAGE_PAUSE_REPLICATION_THRESHOLD);
-    // Never pause initial syncs in community.
-    Optional<HysteresisConfig> initialSyncConfig = Optional.empty();
+            diskMonitorConfig.resumeReplicationThreshold(),
+            diskMonitorConfig.pauseReplicationThreshold());
+    var initialSyncGateConfig =
+        Optional.of(
+            new HysteresisConfig(
+                diskMonitorConfig.resumeInitialSyncThreshold(),
+                diskMonitorConfig.pauseInitialSyncThreshold()));
     var replicationStateMonitor =
-        ReplicationStateMonitor.diskBased(replicationGateConfig, initialSyncConfig, diskMonitor);
+        ReplicationStateMonitor.diskBased(
+            replicationGateConfig, initialSyncGateConfig, diskMonitor);
 
+    var syncSourceConfig = syncSourceConfig(config.syncSourceConfig(), initialSyncHostProvider);
     var mongoDbMetadataClient =
         new MongoDbMetadataClient(Optional.of(syncSourceConfig), meterRegistry);
     mongoDbMetadataClient.refreshServerInfo();
+
+    var mongodTopologyMonitor = new MongodTopologyMonitor(syncSourceConfig, meterRegistry);
+    mongodTopologyMonitor.start();
+    var clusterTopologyGuard =
+        new CatalogAccessGuard(
+            mongodTopologyMonitor, config.syncSourceConfig().router().isPresent());
+
+    // Crash early if mongod is reachable and the topology contradicts syncSource.router.
+    // If mongod is unreachable, continue.
+    failFastOnTopologyMismatch(clusterTopologyGuard);
 
     var commandRegisterMetadata =
         new SearchCommandsRegister.BootstrapperMetadata(
@@ -244,6 +272,8 @@ public class CommunityMongotBootstrapper {
             serverInfo,
             metadataService,
             configManager,
+            clusterTopologyGuard,
+            mongoDbMetadataClient,
             meterRegistry,
             internalListAllIndexesForTesting);
 
@@ -260,12 +290,19 @@ public class CommunityMongotBootstrapper {
             meterRegistry,
             healthManager,
             metadataService,
+            clusterTopologyGuard,
             internalListAllIndexesForTesting,
-            embeddingServiceManagerSupplier);
+            embeddingServiceManagerSupplier,
+            mongotConfigs.featureFlags);
 
     var readinessChecker =
         new CommunityReadinessChecker(
-            serverInfo, configManager, configManager, metadataService, serverLifecycles.servers);
+            serverInfo,
+            configManager,
+            configManager,
+            metadataService,
+            clusterTopologyGuard,
+            serverLifecycles.servers);
     var healthCheckServer =
         createHealthCheckServer(config, meterRegistry, healthManager, readinessChecker);
 
@@ -277,7 +314,10 @@ public class CommunityMongotBootstrapper {
             mongoDbMetadataClient,
             configManager,
             mongotConfigs.featureFlags,
-            meterRegistry);
+            meterRegistry,
+            syncSourceConfig,
+            initialSyncHostProvider,
+            clusterTopologyGuard);
 
     // Register shutdown hook prior to starting the server.
     // Close the server to cleanly finish any in-flight requests.
@@ -293,6 +333,8 @@ public class CommunityMongotBootstrapper {
         healthCheckServer::stop,
         diskMonitor::stop,
         metadataService::close,
+        initialSyncHostProvider::close,
+        mongodTopologyMonitor::close,
         Logging::shutdown);
 
     // Start our background processes.
@@ -300,6 +342,12 @@ public class CommunityMongotBootstrapper {
     metadataUpdater.start();
     serverLifecycles.start.run();
     ftdcReporterLifecycle.ifPresent(f -> f.start.run());
+    // Begin periodically refreshing system metrics (disk/memory/netstat/process gauges). Without
+    // this the gauges (e.g. system.disk.space.data.path.free) stay frozen at their startup
+    // snapshot.
+    systemMetricsInstrumentation.ifPresent(
+        instrumentation ->
+            instrumentation.start(SYSTEM_METRICS_UPDATE_INTERVAL.getSeconds(), TimeUnit.SECONDS));
 
     // Health check server should be started last, to minimize the chance that we service health
     // check requests on startup that immediately return unhealthy.
@@ -307,40 +355,56 @@ public class CommunityMongotBootstrapper {
   }
 
   private static SyncSourceConfig syncSourceConfig(
-      com.xgen.mongot.config.provider.community.SyncSourceConfig communitySyncSourceConfig) {
+      com.xgen.mongot.config.provider.community.SyncSourceConfig communitySyncSourceConfig,
+      InitialSyncHostProvider initialSyncHostProvider) {
 
-    var caFile = communitySyncSourceConfig.caFile();
-    var mongodHostConnectionInfo =
-        ConnectionInfoFactory.getConnectionInfo(
-            communitySyncSourceConfig.replicaSet(), caFile, true /* directConnect */);
-    var mongodClusterConnectionInfo =
-        ConnectionInfoFactory.getConnectionInfo(
-            communitySyncSourceConfig.replicaSet(), caFile, false /* directConnect */);
-    var mongosConnectionInfo =
+    var replicaSet = communitySyncSourceConfig.replicaSet();
+    var replicationReadPreference = communitySyncSourceConfig.getReplicationReaderReadPreference();
+
+    var mongodClusterReplicationUri =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            replicaSet, replicationReadPreference);
+
+    // Default the read-preference to secondary-preferred. Callers should override to primary where
+    // applicable.
+    var mongodClusterReadWriteUri =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            replicaSet, ReadPreference.secondaryPreferred());
+
+    var mongosClusterReadWriteUri =
         communitySyncSourceConfig
             .router()
             .map(
                 router ->
-                    ConnectionInfoFactory.getConnectionInfo(
-                        router, caFile, false /* directConnect */));
+                    ConnectionInfoFactory.getClusterConnectionInfo(
+                        router, ReadPreference.secondaryPreferred()));
 
-    return new SyncSourceConfig(
-        mongodHostConnectionInfo,
-        mongodClusterConnectionInfo,
-        mongodClusterConnectionInfo, // mongodClusterConnectionInfo has directConnection=false
-        mongosConnectionInfo,
-        Optional.empty());
+    // The InitialSyncHostProvider may not have finished replica-set discovery and is not 'ready'
+    // yet. If that's the case the SyncSourceConfig will be configured with empty single host
+    // replication URIs and we will start up the NoOpReplicationManager. By the first run of the
+    // CommunityConfigUpdater the InitialSyncHostProvider will be ready and start up the real
+    // ReplicationManager.
+    return SyncSourceConfig.builder()
+        .mongodSingleHostReplicationUri(initialSyncHostProvider.getMongodInitialSyncConnection())
+        .mongodClusterReplicationUri(mongodClusterReplicationUri)
+        .mongodClusterReadWriteUri(mongodClusterReadWriteUri)
+        .mongosSingleHostReplicationUri(initialSyncHostProvider.getMongosInitialSyncConnection())
+        .mongosClusterReadWriteUri(mongosClusterReadWriteUri)
+        .isSharded(communitySyncSourceConfig.router().isPresent())
+        .build();
   }
 
   private static Optional<PrometheusServer> maybeStartPrometheusServer(
-      MetricsConfig metricsConfig) {
+      MetricsConfig metricsConfig, FeatureFlags featureFlags) {
     if (!metricsConfig.enabled()) {
       LOG.info("Not starting Prometheus endpoint since it was explicitly disabled");
       return Optional.empty();
     }
 
     var address = CommunityMongotBootstrapper.parseInetSocketAddress(metricsConfig.address());
-    return Optional.of(PrometheusServer.start(address, List.of(), List.of()));
+    return Optional.of(
+        PrometheusServer.start(
+            address, List.of(), List.of(), featureFlags, ScrapeCacheConfig.getDefault()));
   }
 
   private static Optional<SystemMetricsInstrumentation> maybeStartSystemMetrics(
@@ -374,6 +438,7 @@ public class CommunityMongotBootstrapper {
             // Use defaults for the remaining configs
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     var metadata =
@@ -388,7 +453,7 @@ public class CommunityMongotBootstrapper {
 
     var ftdc =
         Crash.because("failed to initialize ftdc")
-            .ifThrows(() -> Ftdc.initialize(ftdcConfig, metadata));
+            .ifThrowsExceptionOrError(() -> Ftdc.initialize(ftdcConfig, metadata));
     // If feature flag is enabled, use CompositeMeterRegistry so executor metrics are exported to
     // both FTDC itself and Prometheus. Otherwise, use ftdcRegistry to keep executor metrics only
     // in FTDC.
@@ -396,7 +461,11 @@ public class CommunityMongotBootstrapper {
         mongotConfigs.featureFlags.isEnabled(Feature.FTDC_EXECUTOR_METRICS_TO_PROMETHEUS);
     var reporter =
         FtdcScheduledReporter.create(
-            reportingRegistry, executorRegistry, ftdc, useCombinedRegistryForExecutorMetrics);
+            reportingRegistry,
+            executorRegistry,
+            ftdc,
+            useCombinedRegistryForExecutorMetrics,
+            ftdcConfig.maxMeterCount());
 
     return Optional.of(
         new MetricsLifecycles(
@@ -421,7 +490,10 @@ public class CommunityMongotBootstrapper {
 
   private static SecurityConfig createGrpcSecurityConfig(ServerConfig config) {
     return SecurityConfig.createAuthDisabled(
-        config.getGrpcTlsMode(), config.getGrpcCertificateKeyFile(), config.getGrpcCaFile());
+        config.getGrpcTlsMode(),
+        config.getGrpcCertificateKeyFile(),
+        config.getGrpcCertificateKeyFilePasswordFile(),
+        config.getGrpcCaFile());
   }
 
   private static InetSocketAddress parseInetSocketAddress(String address) {
@@ -438,6 +510,34 @@ public class CommunityMongotBootstrapper {
   private static MetadataService initializeMetadataService(
       SyncSourceConfig syncSourceConfig, MeterRegistry meterRegistry) {
     return DefaultMetadataService.create(syncSourceConfig, meterRegistry);
+  }
+
+  /**
+   * Bootstrap-time topology mismatch check. Calls {@link CatalogAccessGuard#requireTopologyMatch()}
+   * once and:
+   *
+   * <ul>
+   *   <li>On {@link TopologyMismatchException}: crashes the process. The mongot's
+   *       {@code syncSource.router} setting does not match the actual cluster topology.
+   *   <li>On {@link CheckedMongoException}: logs and continues. The cluster topology could not be
+   *       determined (mongod might not be available yet).
+   * </ul>
+   */
+  @VisibleForTesting
+  static void failFastOnTopologyMismatch(CatalogAccessGuard catalogAccessGuard) {
+    try {
+      catalogAccessGuard.requireTopologyMatch();
+      LOG.info("Bootstrap topology check passed: syncSource.router matches cluster topology.");
+    } catch (TopologyMismatchException e) {
+      Crash.because(
+              "Bootstrap topology check failed: syncSource.router does not match the actual"
+                  + " cluster topology; update the mongot config and restart.")
+          .withThrowable(e)
+          .now();
+    } catch (CheckedMongoException e) {
+      LOG.info("Bootstrap topology check skipped. mongod might not be available yet."
+          + "Continuing bootstrap.");
+    }
   }
 
   /**
@@ -505,10 +605,11 @@ public class CommunityMongotBootstrapper {
                 new EmbeddingClientFactory(meterRegistry, DeploymentEnvironment.COMMUNITY),
                 Executors.fixedSizeThreadScheduledExecutor(
                     "embedding-providers",
-                    mongotConfigs.autoEmbeddingMaterializedViewConfig.numIndexingThreads * 2,
+                    mongotConfigs.autoEmbeddingMaterializedViewConfig.numEmbeddingThreads,
                     meterRegistry),
                 meterRegistry,
-                mongotConfigs.autoEmbeddingMaterializedViewConfig.congestionControl));
+                mongotConfigs.autoEmbeddingMaterializedViewConfig.congestionControl,
+                mongotConfigs.autoEmbeddingMaterializedViewConfig.embeddingProviderRpsLimit));
   }
 
   /** Loads Voyage API credential secrets from files specified in embedding config. */
@@ -540,7 +641,7 @@ public class CommunityMongotBootstrapper {
           new EmbeddingServiceManagerConfig.VoyageCredentials(
               new VoyageEmbeddingCredentials(queryKey),
               new VoyageEmbeddingCredentials(indexingKey)));
-    } catch (IOException e) {
+    } catch (IOException | IllegalArgumentException e) {
       LOG.warn("Failed to read Voyage API credential files. Auto-embedding disabled.", e);
       return Optional.empty();
     }
@@ -578,6 +679,8 @@ public class CommunityMongotBootstrapper {
       CommunityServerInfo serverInfo,
       MetadataService metadataService,
       ConfigManager configManager,
+      CatalogAccessGuard catalogAccessGuard,
+      MongoDbMetadataClient mongoDbMetadataClient,
       MeterRegistry meterRegistry,
       boolean internalListAllIndexesForTesting) {
     Duration runFrequency =
@@ -592,7 +695,13 @@ public class CommunityMongotBootstrapper {
     }
 
     return new CommunityMetadataUpdater(
-        serverInfo, metadataService, configManager, meterRegistry, runFrequency);
+        serverInfo,
+        metadataService,
+        configManager,
+        catalogAccessGuard,
+        mongoDbMetadataClient,
+        meterRegistry,
+        runFrequency);
   }
 
   private static DefaultConfigManager configManager(
@@ -612,10 +721,10 @@ public class CommunityMongotBootstrapper {
     LuceneGlobalSettings.apply(mongotConfigs.luceneConfig);
     var analyzerRegistryFactory =
         Crash.because("failed to get AnalyzerRegistry.Factory instance")
-            .ifThrows(AnalyzerRegistry::factory);
+            .ifThrowsExceptionOrError(AnalyzerRegistry::factory);
     var indexFactory =
         Crash.because("failed to get LuceneIndexFactory instance")
-            .ifThrows(
+            .ifThrowsExceptionOrError(
                 () ->
                     LuceneIndexFactory.fromConfig(
                         mongotConfigs.luceneConfig,
@@ -625,12 +734,15 @@ public class CommunityMongotBootstrapper {
                         meterAndFtdcRegistry,
                         Optional.empty(),
                         analyzerRegistryFactory,
-                        diskMonitor));
+                        diskMonitor,
+                        mongotConfigs.initialSyncConfig.enableNaturalOrderScan()));
 
     var mvMetadataCatalog = new MaterializedViewCollectionMetadataCatalog();
     var autoEmbeddingMongoClient =
         new AutoEmbeddingMongoClient(
-            Optional.of(syncSourceConfig), meterAndFtdcRegistry.meterRegistry());
+            Optional.of(syncSourceConfig),
+            meterAndFtdcRegistry.meterRegistry(),
+            mongotConfigs.autoEmbeddingMaterializedViewConfig);
     var dbResolver = new DefaultInternalDatabaseResolver();
     var leaseManager =
         CommonUtils.getLeaseManager(
@@ -645,7 +757,8 @@ public class CommunityMongotBootstrapper {
             autoEmbeddingMongoClient,
             mvMetadataCatalog,
             leaseManager,
-            mongotConfigs.autoEmbeddingMaterializedViewConfig);
+            mongotConfigs.autoEmbeddingMaterializedViewConfig,
+            meterAndFtdcRegistry.meterRegistry());
     var materializedViewIndexFactory =
         CommonUtils.getMaterializedViewIndexFactory(
             autoEmbeddingMongoClient,
@@ -694,7 +807,8 @@ public class CommunityMongotBootstrapper {
             Optional.empty(),
             autoEmbeddingMaterializedViewManagerFactory,
             meterAndFtdcRegistry.meterRegistry(),
-            replicationStateMonitor.getReplicationGate());
+            replicationStateMonitor.getReplicationGate(),
+            mongotConfigs.featureFlags);
 
     return DefaultConfigManager.initialize(
         indexCatalog,
@@ -723,11 +837,14 @@ public class CommunityMongotBootstrapper {
       MeterRegistry meterRegistry,
       HealthManager healthManager,
       MetadataService metadataService,
+      CatalogAccessGuard catalogAccessGuard,
       boolean internalListAllIndexesForTesting,
-      Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier) {
+      Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
+      FeatureFlags featureFlags) {
     // Create the ExecutorManager that can serve requests for the tcpServer (and the grpcServer).
     // noinspection resource
-    var executorManager = new ExecutorManager(meterRegistry, regularBlockingRequestSettings);
+    var executorManager =
+        new ExecutorManager(meterRegistry, regularBlockingRequestSettings, featureFlags);
 
     var grpcServer =
         GrpcStreamingServer.createCommunity(
@@ -744,6 +861,7 @@ public class CommunityMongotBootstrapper {
             DEFAULT_BSON_SIZE_SOFT_LIMIT,
             DEFAULT_MESSAGE_SIZE_LIMIT,
             metadataService,
+            catalogAccessGuard,
             internalListAllIndexesForTesting,
             embeddingServiceManagerSupplier);
 
@@ -767,10 +885,19 @@ public class CommunityMongotBootstrapper {
       MongoDbMetadataClient mongoDbMetadataClient,
       ConfigManager configManager,
       FeatureFlags featureFlags,
-      MeterRegistry meterRegistry) {
+      MeterRegistry meterRegistry,
+      SyncSourceConfig initialSyncSourceConfig,
+      InitialSyncHostProvider initialSyncHostProvider,
+      CatalogAccessGuard catalogAccessGuard) {
     var configUpdater =
         new CommunityConfigUpdater(
-            authoritativeIndexCatalog, mongoDbMetadataClient, configManager, featureFlags);
+            authoritativeIndexCatalog,
+            mongoDbMetadataClient,
+            configManager,
+            featureFlags,
+            initialSyncSourceConfig,
+            initialSyncHostProvider,
+            catalogAccessGuard);
     return PeriodicConfigMonitor.create(configUpdater, DEFAULT_CONFIG_UPDATE_PERIOD, meterRegistry);
   }
 
@@ -799,89 +926,60 @@ public class CommunityMongotBootstrapper {
         .append("jvmArgs", new BsonArray(bsonJvmArgs));
   }
 
-  private static MongotConfigs getMongotConfigs(
-      Path dataPath, Optional<EmbeddingConfig> embeddingConfig) {
+  private static void reportUnknownFields(List<BsonParseException> unknownFieldExceptions) {
+    if (unknownFieldExceptions.isEmpty()) {
+      return;
+    }
+    String unknownFields =
+        unknownFieldExceptions.stream()
+            .map(Throwable::getMessage)
+            .collect(Collectors.joining("; "));
+    LOG.atWarn().log("Ignoring unrecognized field(s) in mongot config file: {}", unknownFields);
+  }
+
+  private static MongotConfigs getMongotConfigs(CommunityConfig config) {
     var luceneConfig =
-        LuceneConfig.create(
-            dataPath,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
+        LuceneConfigMapper.toLuceneConfig(
+            config,
+            Runtime.INSTANCE,
             Optional.of(
                 new HysteresisConfig(
-                    DISK_USAGE_PAUSE_REPLICATION_THRESHOLD,
-                    DISK_USAGE_PAUSE_REPLICATION_THRESHOLD)),
-            Optional.empty(),
-            Optional.empty());
+                    config.diskMonitorConfig().resumeReplicationThreshold(),
+                    config.diskMonitorConfig().pauseReplicationThreshold())));
 
-    var replicationConfig = MongoDbReplicationConfig.getDefault();
+    var globalReplicationConfig =
+        MongoDbReplicationConfigMapper.toGlobalReplicationConfig(
+            config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
+
+    var replicationConfig =
+        MongoDbReplicationConfigMapper.toMongoDbReplicationConfig(
+            globalReplicationConfig, Runtime.INSTANCE,
+            config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
 
     var initialSyncConfig = new InitialSyncConfig();
 
     var durabilityConfig = DurabilityConfig.create(Optional.empty(), Optional.empty());
 
-    var cursorConfig = CursorConfig.getDefault();
+    var cursorConfig = CursorConfigMapper.toCursorConfig(
+        config.advancedConfigs().flatMap(AdvancedConfigs::cursorConfig));
 
-    var indexDefinitionConfig = IndexDefinitionConfig.getDefault();
+    var indexDefinitionConfig =
+        IndexDefinitionConfig.create(
+            config
+                .advancedConfigs()
+                .flatMap(AdvancedConfigs::indexingConfig)
+                .flatMap(CommunityIndexingConfig::definitionConfig)
+                .flatMap(d -> d.maxEmbeddedDocumentsNestingLevel()));
     var lifecycleConfig = LifecycleConfig.getDefault();
-    var featureFlags = FeatureFlags.withQueryFeaturesEnabled();
+    var featureFlags = FeatureFlags.communityDefaults();
     var environmentVariantPerfConfig = EnvironmentVariantPerfConfig.getDefault();
-    var regularBlockingRequestSettings = RegularBlockingRequestSettings.defaults();
+    var regularBlockingRequestSettings =
+        RegularBlockingRequestConfigMapper.createRegularBlockingRequestSettings(
+            config.advancedConfigs().flatMap(AdvancedConfigs::regularBlockingRequestConfig));
 
-    var mvWriteRateLimitRps = embeddingConfig.flatMap(EmbeddingConfig::mvWriteRateLimitRps);
-    var embeddingProviderRpsLimit =
-        embeddingConfig.flatMap(EmbeddingConfig::embeddingProviderRpsLimit);
     var autoEmbeddingMaterializedViewConfig =
-        AutoEmbeddingMaterializedViewConfig.create(
-            CommonReplicationConfig.defaultGlobalReplicationConfig(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            mvWriteRateLimitRps,
-            embeddingProviderRpsLimit,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            // Set 0 for now, as we are still working on the mat view collection naming.
-            Optional.of(0L),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty());
+        AutoEmbeddingMaterializedViewConfigMapper.toAutoEmbeddingMaterializedViewConfig(
+            globalReplicationConfig, config);
     return new MongotConfigs(
         luceneConfig,
         replicationConfig,

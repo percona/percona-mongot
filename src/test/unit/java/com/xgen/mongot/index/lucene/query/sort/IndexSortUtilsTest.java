@@ -7,6 +7,7 @@ import static org.junit.Assert.assertFalse;
 import com.google.common.collect.ImmutableSet;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.lucene.field.FieldName;
+import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import com.xgen.mongot.util.FieldPath;
@@ -77,43 +78,43 @@ public class IndexSortUtilsTest {
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_ExactMatch() {
+  public void testUsesIndexSort_ExactMatch() {
     Sort querySort = new Sort(new SortField("date", SortField.Type.LONG));
     Sort indexSort = new Sort(new SortField("date", SortField.Type.LONG));
 
-    assertThat(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort)).isTrue();
+    assertThat(IndexSortUtils.usesIndexSort(querySort, indexSort)).isTrue();
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_QueryIsPrefix() {
+  public void testUsesIndexSort_QueryIsPrefix() {
     Sort querySort = new Sort(new SortField("date", SortField.Type.LONG));
     Sort indexSort = new Sort(
         new SortField("date", SortField.Type.LONG),
         new SortField("score", SortField.Type.SCORE));
 
-    assertThat(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort)).isTrue();
+    assertThat(IndexSortUtils.usesIndexSort(querySort, indexSort)).isTrue();
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_QueryLongerThanIndex() {
+  public void testUsesIndexSort_QueryLongerThanIndex() {
     Sort querySort = new Sort(
         new SortField("date", SortField.Type.LONG),
         new SortField("score", SortField.Type.SCORE));
     Sort indexSort = new Sort(new SortField("date", SortField.Type.LONG));
 
-    assertFalse(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort));
+    assertFalse(IndexSortUtils.usesIndexSort(querySort, indexSort));
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_DifferentFields() {
+  public void testUsesIndexSort_DifferentFields() {
     Sort querySort = new Sort(new SortField("name", SortField.Type.STRING));
     Sort indexSort = new Sort(new SortField("date", SortField.Type.LONG));
 
-    assertFalse(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort));
+    assertFalse(IndexSortUtils.usesIndexSort(querySort, indexSort));
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_MqlLongSort_SameOrder() {
+  public void testUsesIndexSort_MqlLongSort_SameOrder() {
     MqlLongSort queryField = new MqlLongSort(
         FieldName.TypeField.NUMBER_INT64_V2,
         new MongotSortField(FieldPath.newRoot("score"), UserFieldSortOptions.DEFAULT_ASC),
@@ -130,11 +131,11 @@ public class IndexSortUtilsTest {
     Sort querySort = new Sort(queryField);
     Sort indexSort = new Sort(indexField);
 
-    assertThat(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort)).isTrue();
+    assertThat(IndexSortUtils.usesIndexSort(querySort, indexSort)).isTrue();
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_MqlLongSort_DifferentOrder() {
+  public void testUsesIndexSort_MqlLongSort_DifferentOrder() {
     MqlLongSort queryField = new MqlLongSort(
         FieldName.TypeField.NUMBER_INT64_V2,
         new MongotSortField(FieldPath.newRoot("score"), UserFieldSortOptions.DEFAULT_DESC),
@@ -151,11 +152,11 @@ public class IndexSortUtilsTest {
     Sort querySort = new Sort(queryField);
     Sort indexSort = new Sort(indexField);
 
-    assertFalse(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort));
+    assertFalse(IndexSortUtils.usesIndexSort(querySort, indexSort));
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_MqlDateSort_SameOrder() {
+  public void testUsesIndexSort_MqlDateSort_SameOrder() {
     MqlDateSort queryField = new MqlDateSort(
         FieldName.TypeField.DATE_V2,
         new MongotSortField(FieldPath.newRoot("date"), UserFieldSortOptions.DEFAULT_ASC),
@@ -172,11 +173,11 @@ public class IndexSortUtilsTest {
     Sort querySort = new Sort(queryField);
     Sort indexSort = new Sort(indexField);
 
-    assertThat(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort)).isTrue();
+    assertThat(IndexSortUtils.usesIndexSort(querySort, indexSort)).isTrue();
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_MqlDateSort_DifferentOrder() {
+  public void testUsesIndexSort_MqlDateSort_DifferentOrder() {
     MqlDateSort queryField = new MqlDateSort(
         FieldName.TypeField.DATE_V2,
         new MongotSortField(FieldPath.newRoot("date"), UserFieldSortOptions.DEFAULT_ASC),
@@ -193,11 +194,11 @@ public class IndexSortUtilsTest {
     Sort querySort = new Sort(queryField);
     Sort indexSort = new Sort(indexField);
 
-    assertFalse(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort));
+    assertFalse(IndexSortUtils.usesIndexSort(querySort, indexSort));
   }
 
   @Test
-  public void testCanBenefitFromIndexSort_MixedMqlTypes_Incompatible() {
+  public void testUsesIndexSort_MixedMqlTypes_Incompatible() {
     MqlLongSort queryField = new MqlLongSort(
         FieldName.TypeField.NUMBER_INT64_V2,
         new MongotSortField(FieldPath.newRoot("field"), UserFieldSortOptions.DEFAULT_ASC),
@@ -214,7 +215,7 @@ public class IndexSortUtilsTest {
     Sort querySort = new Sort(queryField);
     Sort indexSort = new Sort(indexField);
 
-    assertFalse(IndexSortUtils.canBenefitFromIndexSort(querySort, indexSort));
+    assertFalse(IndexSortUtils.usesIndexSort(querySort, indexSort));
   }
 
   // --- expandedSortAlignsWithIndexSort tests ---
@@ -348,11 +349,11 @@ public class IndexSortUtilsTest {
   // type after a Lucene disk round-trip because Lucene deserializes them as the base
   // SortedNumericSortField / SortedSetSortField. Our Mql* sort field classes override equals()
   // to use instanceof instead of getClass(), so Lucene's canEarlyTerminateOnPrefix,
-  // IndexWriter.validateIndexSort, and our canBenefitFromIndexSort all work correctly across
+  // IndexWriter.validateIndexSort, and our usesIndexSort all work correctly across
   // the serialization boundary.
 
   @Test
-  public void canBenefitFromIndexSort_survivesSerializationBoundary_int64()
+  public void usesIndexSort_survivesSerializationBoundary_int64()
       throws IOException {
     MongotSortField scoreSortField =
         new MongotSortField(FieldPath.newRoot("score"), UserFieldSortOptions.DEFAULT_ASC);
@@ -399,14 +400,14 @@ public class IndexSortUtilsTest {
                     true)
                 .orElseThrow());
 
-        assertThat(IndexSortUtils.canBenefitFromIndexSort(freshQuerySort, deserializedSort.get()))
+        assertThat(IndexSortUtils.usesIndexSort(freshQuerySort, deserializedSort.get()))
             .isTrue();
       }
     }
   }
 
   @Test
-  public void canBenefitFromIndexSort_survivesSerializationBoundary_token()
+  public void usesIndexSort_survivesSerializationBoundary_token()
       throws IOException {
     MongotSortField nameSortField =
         new MongotSortField(FieldPath.newRoot("name"), UserFieldSortOptions.DEFAULT_ASC);
@@ -454,7 +455,7 @@ public class IndexSortUtilsTest {
                     true)
                 .orElseThrow());
 
-        assertThat(IndexSortUtils.canBenefitFromIndexSort(freshQuerySort, deserializedSort.get()))
+        assertThat(IndexSortUtils.usesIndexSort(freshQuerySort, deserializedSort.get()))
             .isTrue();
       }
     }
@@ -553,6 +554,99 @@ public class IndexSortUtilsTest {
     if (!Objects.equals(mql.getMissingValue(), SortField.STRING_LAST)) {
       assertThat(mql.equals(wrongMissing)).isFalse();
       assertThat(luceneMirror.equals(wrongMissing)).isFalse();
+    }
+  }
+
+  @Test
+  public void relaxedEquals_MqlMixedSort_matchesDeserializedSortField() {
+    MqlMixedSort mql = new MqlMixedSort(
+        new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+        Optional.empty());
+
+    SortField deserialized = new SortField("f", SortField.Type.CUSTOM, false);
+    assertThat(mql.equals(deserialized)).isTrue();
+
+    SortField wrongField = new SortField("g", SortField.Type.CUSTOM, false);
+    assertThat(mql.equals(wrongField)).isFalse();
+
+    SortField wrongReverse = new SortField("f", SortField.Type.CUSTOM, true);
+    assertThat(mql.equals(wrongReverse)).isFalse();
+
+    SortField wrongType = new SortField("f", SortField.Type.LONG, false);
+    assertThat(mql.equals(wrongType)).isFalse();
+  }
+
+  @Test
+  public void expandedSortAligns_int64PlusMqlMixedSort_returnsTrue() {
+    List<MongotSortField> queryFields =
+        List.of(userSortField("dateField"), userSortField("mixedField"));
+    Sort indexSort = new Sort(
+        nullnessSortField("dateField"),
+        valueSortField("$type:int64V2/dateField"),
+        new SortField("mixedField", SortField.Type.CUSTOM, false));
+
+    assertThat(IndexSortUtils.expandedSortAlignsWithIndexSort(
+        queryFields, indexSort))
+        .isTrue();
+  }
+
+  @Test
+  public void expandedSortAligns_mqlMixedSortOnly_returnsTrue() {
+    List<MongotSortField> queryFields = List.of(userSortField("mixedField"));
+    Sort indexSort = new Sort(
+        new SortField("mixedField", SortField.Type.CUSTOM, false));
+
+    assertThat(IndexSortUtils.expandedSortAlignsWithIndexSort(
+        queryFields, indexSort))
+        .isTrue();
+  }
+
+  @Test
+  public void expandedSortAligns_mqlMixedSortWrongField_returnsFalse() {
+    List<MongotSortField> queryFields = List.of(userSortField("mixedField"));
+    Sort indexSort = new Sort(
+        new SortField("otherField", SortField.Type.CUSTOM, false));
+
+    assertThat(IndexSortUtils.expandedSortAlignsWithIndexSort(
+        queryFields, indexSort))
+        .isFalse();
+  }
+
+  @Test
+  public void usesIndexSort_survivesSerializationBoundary_mqlMixedSort()
+      throws IOException {
+    MongotSortField mongotField =
+        new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC);
+    MqlMixedSort valueField = new MqlMixedSort(mongotField, Optional.empty());
+
+    Sort indexSort = new Sort(valueField);
+
+    try (Directory dir = new ByteBuffersDirectory()) {
+      IndexWriterConfig config = new IndexWriterConfig();
+      config.setIndexSort(indexSort);
+      String intLuceneName =
+          FieldName.TypeField.NUMBER_INT64_V2.getLuceneFieldName(
+              FieldPath.newRoot("f"), Optional.empty());
+
+      try (IndexWriter writer = new IndexWriter(dir, config)) {
+        Document doc = new Document();
+        doc.add(new SortedNumericDocValuesField(intLuceneName, 42L));
+        writer.addDocument(doc);
+      }
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        Optional<Sort> deserializedSort = IndexSortUtils.extractFirstIndexSort(reader);
+        assertThat(deserializedSort).isPresent();
+
+        SortField[] deserialized = deserializedSort.get().getSort();
+        assertThat(deserialized[0]).isNotInstanceOf(MqlMixedSort.class);
+
+        Sort freshQuerySort = new Sort(
+            new MqlMixedSort(mongotField, Optional.empty()));
+
+        assertThat(IndexSortUtils.usesIndexSort(freshQuerySort, deserializedSort.get()))
+            .isTrue();
+      }
     }
   }
 }

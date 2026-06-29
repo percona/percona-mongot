@@ -16,8 +16,8 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Stream;
-import javax.annotation.Nullable;
 import org.bson.codecs.configuration.CodecConfigurationException;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * InitialSyncException is a checked exception used throughout the initialsync package. Its purpose
@@ -202,9 +202,11 @@ public class InitialSyncException extends Exception {
       throw createRequiresResync(e, "presumed transient issue decoding response from mongod");
     } catch (InitialSyncException e) {
       throw e;
+    } catch (FragmentProcessingException e) {
+      throw createRequiresResync(e);
     } catch (Exception e) {
-      if (e instanceof RuntimeException) {
-        throw (RuntimeException) e;
+      if (e instanceof RuntimeException runtimeException) {
+        throw runtimeException;
       }
 
       throw new AssertionError("threw unexpected checked exception: " + e, e);
@@ -300,6 +302,11 @@ public class InitialSyncException extends Exception {
   public static boolean isInitialSyncIdMismatched(@Nullable Throwable cause) {
     return cause instanceof MongoCommandException mongoCommandException
         && mongoCommandException.getErrorCode() == Errors.INITIAL_SYNC_ID_MISMATCH.code;
+  }
+
+  public static boolean isBsonTooLargeError(@Nullable Throwable cause) {
+    return cause instanceof MongoException mongoException
+        && mongoException.getCode() == Errors.BSON_OBJECT_TOO_LARGE.code;
   }
 
   @SuppressWarnings("checkstyle:MissingJavadocMethod")

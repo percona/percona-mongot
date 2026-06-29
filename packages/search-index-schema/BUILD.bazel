@@ -7,10 +7,13 @@ js_library(
     name = "scripts_lib",
     srcs = glob(["scripts/**/*.js"]),
     data = [
+        "index.js",
         "package.json",
+        "variants.json",
         ":node_modules",
     ] + glob([
         "schema/**/*.json",
+        "test/**/*.json",
     ]),
 )
 
@@ -90,25 +93,23 @@ genrule(
 
 genrule(
     name = "pkg",
-    srcs = glob(
-        [
-            "schema/**/*",
-        ],
-        exclude = [
-            "schema/search/test/**",
-            "schema/vectorSearch/test/**",
-        ],
-    ) + [
+    srcs = glob([
+        "schema/**/*",
+    ]) + [
         "README.md",
         "CHANGELOG.md",
+        "index.d.ts",
+        "index.js",
         "package.json",
+        "variants.json",
     ],
     outs = ["pkg.stamp"],
     cmd = """
         PACKAGE_DIR=$$(dirname $$(echo $(locations package.json) | cut -d' ' -f1))
         PKG_DIR=$$(dirname $(location pkg.stamp))/pkg
 
-        # Create pkg directory structure
+        # Create pkg directory structure (clear any stale contents from a prior build)
+        rm -rf $$PKG_DIR
         mkdir -p $$PKG_DIR
 
         # Copy metadata files
@@ -116,8 +117,13 @@ genrule(
         cp $$PACKAGE_DIR/README.md $$PKG_DIR/
         cp $$PACKAGE_DIR/CHANGELOG.md $$PKG_DIR/
 
-        # Copy schema directory (excluding test directories)
-        rsync -av --exclude='search/test' --exclude='vectorSearch/test' $$PACKAGE_DIR/schema/ $$PKG_DIR/schema/
+        # Copy the schema selector entry point and variant manifest
+        cp $$PACKAGE_DIR/index.js $$PKG_DIR/
+        cp $$PACKAGE_DIR/index.d.ts $$PKG_DIR/
+        cp $$PACKAGE_DIR/variants.json $$PKG_DIR/
+
+        # Copy schema directory
+        rsync -av $$PACKAGE_DIR/schema/ $$PKG_DIR/schema/
 
         # Run bundle script to generate bundled schemas directly into pkg/output
         export BAZEL_BINDIR=.
@@ -145,6 +151,7 @@ js_library(
     ] + glob([
         "schema/**/*.json",
         "scripts/**/*.js",
+        "test/**/*.json",
         "*.json",
         "*.md",
     ]),
@@ -172,6 +179,7 @@ js_library(
     ] + glob([
         "schema/**/*.json",
         "scripts/**/*.js",
+        "test/**/*.json",
         "*.json",
         "*.md",
     ]),

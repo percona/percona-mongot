@@ -67,6 +67,11 @@ public class IndexCommitUserData implements DocumentEncodable {
             .optional()
             .noDefault();
 
+    // Note: allowUnknownFields() is used here for forwards compatibility.
+    // If mongot is rolled back to an older version after a stale index was persisted
+    // with a newer field (e.g., changeStreamResumeInfo), the old mongot should still
+    // be able to parse the StaleStateInfo and recover the index (though without the
+    // new field's data).
     // TODO(CLOUDP-339757): Change back to disallowUnknownFields() in v1.66+
     private static final Field.Optional<StaleStateInfo> STALE_STATE_INFO =
         Field.builder("staleStateInfo")

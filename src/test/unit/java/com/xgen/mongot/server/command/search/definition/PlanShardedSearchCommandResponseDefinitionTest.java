@@ -17,12 +17,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      PlanShardedSearchCommandResponseDefinitionTest.TestSerialization.class,
-      PlanShardedSearchCommandResponseDefinitionTest.TestShardedSearchPlan.class
+      PlanShardedSearchCommandResponseDefinitionTest.SerializationTest.class,
+      PlanShardedSearchCommandResponseDefinitionTest.ShardedSearchPlanTest.class
     })
 public class PlanShardedSearchCommandResponseDefinitionTest {
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "plan-sharded-search-response";
     private static final BsonSerializationTestSuite<PlanShardedSearchCommandResponseDefinition>
         TEST_SUITE =
@@ -33,7 +33,7 @@ public class PlanShardedSearchCommandResponseDefinitionTest {
 
     private final TestSpec<PlanShardedSearchCommandResponseDefinition> testSpec;
 
-    public TestSerialization(TestSpec<PlanShardedSearchCommandResponseDefinition> testSpec) {
+    public SerializationTest(TestSpec<PlanShardedSearchCommandResponseDefinition> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -70,7 +70,7 @@ public class PlanShardedSearchCommandResponseDefinitionTest {
     }
   }
 
-  public static class TestShardedSearchPlan {
+  public static class ShardedSearchPlanTest {
     @Test
     public void testDefaultSortSpec() {
       Assert.assertEquals(

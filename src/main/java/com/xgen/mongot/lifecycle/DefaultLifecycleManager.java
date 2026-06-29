@@ -13,6 +13,7 @@ import com.xgen.mongot.index.blobstore.BlobstoreSnapshotterManager;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.replication.ReplicationManager;
 import com.xgen.mongot.replication.ReplicationManagerFactory;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import org.jetbrains.annotations.TestOnly;
 import org.slf4j.LoggerFactory;
 
@@ -87,6 +89,7 @@ public class DefaultLifecycleManager implements LifecycleManager {
   private Optional<SyncSourceConfig> syncSourceConfig;
 
   private final IndexLifecycleManager.Metrics metrics;
+  private final AtomicLong lifecycleInitialized;
 
   /**
    * A wrapper over the ReplicationManager that can be used across different instantiations of the
@@ -137,7 +140,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
       AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMaterializedViewManagerFactory,
       MeterRegistry meterRegistry,
       Gate replicationGate,
-      LifecycleConfig lifecycleConfig) {
+      LifecycleConfig lifecycleConfig,
+      boolean enableInitAttributionMetrics) {
     this(
         replicationManagerFactory,
         syncSourceConfig,
@@ -153,7 +157,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
             meterRegistry),
         Executors.fixedSizeThreadPool(
             "index-lifecycle", Math.max(1, Runtime.INSTANCE.getNumCpus() / 4), meterRegistry),
-        Executors.fixedSizeThreadPool("blobstore-lifecycle", 1, meterRegistry));
+        Executors.fixedSizeThreadPool("blobstore-lifecycle", 1, meterRegistry),
+        enableInitAttributionMetrics);
   }
 
   @VisibleForTesting
@@ -168,7 +173,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
       Gate replicationGate,
       NamedExecutorService initExecutor,
       NamedExecutorService lifecycleExecutor,
-      NamedExecutorService blobstoreExecutor) {
+      NamedExecutorService blobstoreExecutor,
+      boolean enableInitAttributionMetrics) {
     this.initExecutor = initExecutor;
     this.lifecycleExecutor = lifecycleExecutor;
     this.blobstoreExecutor = blobstoreExecutor;
@@ -195,6 +201,12 @@ public class DefaultLifecycleManager implements LifecycleManager {
     this.initialized = false;
     this.shutdown = false;
     this.metrics = IndexLifecycleManager.Metrics.create(metricsFactory);
+    this.lifecycleInitialized =
+        new MetricsFactory("readiness", meterRegistry).numGauge("lifecycleInitialized");
+    this.lifecycleInitialized.set(0);
+    if (enableInitAttributionMetrics) {
+      ThreadPoolResourceMetrics.create("init").register(initExecutor, meterRegistry);
+    }
   }
 
   @Override
@@ -209,6 +221,9 @@ public class DefaultLifecycleManager implements LifecycleManager {
               // TODO(CLOUDP-361594): Should we include MaterializedViewManager::initialized in
               // this method for HealthManager/ConfCall?
               && this.replicationManagerWrapper.currentReplicationManager.isInitialized();
+      if (this.initialized) {
+        this.lifecycleInitialized.set(1);
+      }
     }
     return this.initialized;
   }
@@ -265,12 +280,17 @@ public class DefaultLifecycleManager implements LifecycleManager {
     }
     this.snapshotterManager.ifPresent(manager -> manager.drop(generationId));
     IndexLifecycleManager indexManager = this.indexManagers.remove(generationId);
-    return FutureUtils.allOf(
-        List.of(
-            indexManager.drop(),
-            this.materializedViewManager
-                .map(matViewManager -> matViewManager.dropIndex(generationId))
-                .orElse(FutureUtils.COMPLETED_FUTURE)));
+    // Initiate MV drop first: indexManager.drop() can block synchronously (e.g. if
+    // PeriodicIndexCommitter.close() contends with a Lucene merge stall, especially until
+    // CLOUDP-359705 is fully rolled out) and there is a user cost element to keeping the embedding
+    // generator running, so we must ensure the MV cleanup future is created before
+    // dropping the lucene index. Java evaluates List.of() arguments in order, and a blocking
+    // first argument would prevent the second from ever being evaluated.
+    CompletableFuture<Void> mvDropFuture =
+        this.materializedViewManager
+            .map(matViewManager -> matViewManager.dropIndex(generationId))
+            .orElse(FutureUtils.COMPLETED_FUTURE);
+    return FutureUtils.allOf(List.of(indexManager.drop(), mvDropFuture));
   }
 
   @Override
@@ -298,6 +318,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
     // on the indexing executor. As one of the shutdown tasks is shutting down that executor, this
     // will hang forever.
     this.shutdown = true;
+    this.initialized = false;
+    this.lifecycleInitialized.set(0);
     this.replicationManagerWrapper.setReplicationEnabled(false);
     var shutdownExecutor =
         Executors.fixedSizeThreadPool("lifecycle-manager-shutdown", 1, this.meterRegistry);

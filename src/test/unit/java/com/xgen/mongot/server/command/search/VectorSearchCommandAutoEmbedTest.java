@@ -151,7 +151,7 @@ public class VectorSearchCommandAutoEmbedTest {
     // ensure that reader is being called with QUERY_VECTOR
     ArgumentCaptor<MaterializedVectorSearchQuery> captor =
         ArgumentCaptor.forClass(MaterializedVectorSearchQuery.class);
-    Mockito.verify(mocks.reader, times(1)).query(captor.capture());
+    Mockito.verify(mocks.reader, times(1)).query(captor.capture(), any());
     MaterializedVectorSearchQuery ranQuery = captor.getValue();
     Assert.assertEquals(QUERY_VECTOR, ranQuery.queryVector().get());
 
@@ -225,7 +225,7 @@ public class VectorSearchCommandAutoEmbedTest {
     // ensure that reader is being called with QUERY_VECTOR
     ArgumentCaptor<MaterializedVectorSearchQuery> captor =
         ArgumentCaptor.forClass(MaterializedVectorSearchQuery.class);
-    Mockito.verify(mocks.reader, times(1)).query(captor.capture());
+    Mockito.verify(mocks.reader, times(1)).query(captor.capture(), any());
     MaterializedVectorSearchQuery ranQuery = captor.getValue();
     Assert.assertEquals(QUERY_VECTOR, ranQuery.queryVector().get());
 
@@ -279,7 +279,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append(
                 "errmsg",
                 new BsonString(
-                    "Vector index for this text based query is invalid due to missing model")),
+                    "Path 'testPath.invalid_child' is not defined in Automated Embedding "
+                        + "index 'default'")),
         result);
   }
 
@@ -366,6 +367,37 @@ public class VectorSearchCommandAutoEmbedTest {
                         .build(),
                     queryWithInvalidModel));
     assertThat(exception.getMessage()).contains("model 'invalid-model' is not allowed");
+  }
+
+  @Test
+  public void findEmbedRequestInfo_throwsException_whenPathHasNoEmbeddingField_withQueryModel()
+      throws Exception {
+    var mocks = new Mocks();
+    var queryWithModelAndBadPath =
+        VectorQueryBuilder.builder()
+            .index(MAT_VIEW_INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .query(
+                        new VectorSearchQueryInput.Text("test query", Optional.of("voyage-4-lite")))
+                    .path(PATH.newChild("wrong"))
+                    .filter(getFilter())
+                    .build())
+            .build();
+    var command = buildAutoEmbeddingVectorSearchCommandWithMocks(mocks, queryWithModelAndBadPath);
+    var exception =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                command.findEmbedRequestInfo(
+                    VectorIndexDefinitionBuilder.builder()
+                        .withDotProductVectorField(PATH.toString(), 1024)
+                        .build(),
+                    queryWithModelAndBadPath));
+    assertThat(exception.getMessage()).contains("not defined in Automated Embedding index");
+    assertThat(exception.getMessage()).contains("testPath.wrong");
   }
 
   @Test
@@ -742,7 +774,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append(
                 "errmsg",
                 new BsonString(
-                    "Vector index for this text based query is invalid due to missing model")),
+                    "Path 'testPath.invalid_child' is not defined in Automated Embedding "
+                        + "index 'default'")),
         result);
   }
 
@@ -782,7 +815,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append("ok", new BsonInt32(0))
             .append(
                 "errmsg",
-                new BsonString("'query' field cannot be empty for auto-embedding vector search")),
+                new BsonString(
+                    "'query' field cannot be empty when querying Automated Embedding index")),
         result);
   }
 
@@ -823,7 +857,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append("ok", new BsonInt32(0))
             .append(
                 "errmsg",
-                new BsonString("'query' field cannot be empty for auto-embedding vector search")),
+                new BsonString(
+                    "'query' field cannot be empty when querying Automated Embedding index")),
         result);
   }
 
@@ -864,7 +899,8 @@ public class VectorSearchCommandAutoEmbedTest {
             .append("ok", new BsonInt32(0))
             .append(
                 "errmsg",
-                new BsonString("'query' field cannot be empty for auto-embedding vector search")),
+                new BsonString(
+                    "'query' field cannot be empty when querying Automated Embedding index")),
         result);
   }
 
@@ -1006,7 +1042,7 @@ public class VectorSearchCommandAutoEmbedTest {
       LuceneVectorIndexReader reader) throws Exception {
     ArgumentCaptor<MaterializedVectorSearchQuery> captor =
         ArgumentCaptor.forClass(MaterializedVectorSearchQuery.class);
-    Mockito.verify(reader).query(captor.capture());
+    Mockito.verify(reader).query(captor.capture(), any());
     return captor.getValue();
   }
 
@@ -1178,7 +1214,7 @@ public class VectorSearchCommandAutoEmbedTest {
       when(initializedIndex.getReader()).thenReturn(this.reader);
 
       this.bsonResults = new VectorSearchResultBatch(4).getBsonResults();
-      when(this.reader.query(any())).thenReturn(this.bsonResults);
+      when(this.reader.query(any(), any())).thenReturn(this.bsonResults);
 
       this.metricsUpdater =
           IndexMetricsUpdaterBuilder.builder()
@@ -1211,7 +1247,7 @@ public class VectorSearchCommandAutoEmbedTest {
     var queryCountDown = new CountDownLatch(1);
     var testCountDown = new CountDownLatch(1);
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenAnswer(
             invocation -> {
               // Signal the test thread proceed.
@@ -1275,7 +1311,7 @@ public class VectorSearchCommandAutoEmbedTest {
     var queryCountDown = new CountDownLatch(1);
     var testCountDown = new CountDownLatch(1);
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenAnswer(
             invocation -> {
               // Signal the test thread proceed.

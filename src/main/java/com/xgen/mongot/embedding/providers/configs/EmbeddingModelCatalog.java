@@ -43,7 +43,8 @@ public class EmbeddingModelCatalog {
       throw new EmbeddingProviderNonTransientException(
           String.format(
               "CanonicalModel: %s not registered yet, supported models are: [%s]",
-              modelName, String.join(", ", REGISTERED_MODEL_CONFIGS.keySet())));
+              modelName, String.join(", ", REGISTERED_MODEL_CONFIGS.keySet())),
+          EmbeddingProviderNonTransientException.Reason.MODEL_NOT_REGISTERED);
     }
     return REGISTERED_MODEL_CONFIGS.get(modelName);
   }

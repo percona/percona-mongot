@@ -4,6 +4,7 @@ import static com.xgen.mongot.index.lucene.query.util.BooleanComposer.filterClau
 import static com.xgen.mongot.index.lucene.query.util.BooleanComposer.mustClause;
 import static com.xgen.mongot.index.lucene.query.util.BooleanComposer.shouldClause;
 
+import com.xgen.mongot.index.lucene.query.util.DisableBulkScorerQuery;
 import com.xgen.mongot.index.lucene.query.util.WrappedToChildBlockJoinQuery;
 import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.testing.TestUtils;
@@ -118,6 +119,37 @@ public class ScoreDetailsWrappedQueryTest {
   }
 
   @Test
+  public void testWrapStripsDisableBulkScorerAroundBlockJoinChild() {
+    TermQuery termQuery = termQuery("hello");
+    QueryBitSetProducer parentsFilter = new QueryBitSetProducer(termQuery("parent"));
+    ScoreMode scoreMode = ScoreMode.Total;
+
+    ScoreDetailsWrappedQuery expected =
+        ScoreDetailsWrappedQueryBuilder.builder()
+            .query(
+                new WrappedToParentBlockJoinQuery(
+                    ScoreDetailsWrappedQueryBuilder.builder().query(termQuery).build(),
+                    parentsFilter,
+                    scoreMode))
+            .build();
+
+    ScoreDetailsWrappedQuery actual =
+        ScoreDetailsWrappedQuery.wrap(
+            new WrappedToParentBlockJoinQuery(
+                new DisableBulkScorerQuery(termQuery), parentsFilter, scoreMode));
+    Assert.assertEquals(expected, actual);
+  }
+
+  @Test
+  public void testWrapStripsDisableBulkScorerAroundTerm() {
+    TermQuery termQuery = termQuery("hello");
+    ScoreDetailsWrappedQuery expected =
+        ScoreDetailsWrappedQueryBuilder.builder().query(termQuery).build();
+    Assert.assertEquals(
+        expected, ScoreDetailsWrappedQuery.wrap(new DisableBulkScorerQuery(termQuery)));
+  }
+
+  @Test
   public void testWrapToChildBlockJoinQuery() {
     TermQuery termQuery = termQuery("hello");
     QueryBitSetProducer parentsFilter = new QueryBitSetProducer(termQuery("parent"));
@@ -157,7 +189,8 @@ public class ScoreDetailsWrappedQueryTest {
       ScoreDetailsWrappedQuery scoreDetailsWrappedQuery =
           ScoreDetailsWrappedQuery.wrap(new PrefixQuery(new Term("path", "hello")));
 
-      Query result = scoreDetailsWrappedQuery.rewrite(new IndexSearcher(reader));
+      var searcher = new IndexSearcher(reader);
+      Query result = scoreDetailsWrappedQuery.rewrite(searcher);
       Assert.assertNotEquals(
           "wrapped PrefixQuery should be rewritten into a different query",
           scoreDetailsWrappedQuery,
@@ -168,7 +201,7 @@ public class ScoreDetailsWrappedQueryTest {
           ScoreDetailsWrappedQueryBuilder.builder()
               .query(
                   MultiTermQuery.CONSTANT_SCORE_BLENDED_REWRITE.rewrite(
-                      reader, new PrefixQuery(new Term("path", "hello"))))
+                      searcher, new PrefixQuery(new Term("path", "hello"))))
               .build();
 
       Assert.assertEquals(

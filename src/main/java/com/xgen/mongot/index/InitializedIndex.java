@@ -6,7 +6,7 @@ import com.xgen.mongot.util.Check;
 import java.io.Closeable;
 
 public sealed interface InitializedIndex extends Index, Closeable
-    permits InitializedSearchIndex, InitializedVectorIndex {
+    permits InitializedSearchIndex, InitializedVectorIndex, InitializedAutoEmbedIndex {
   /**
    * Returns the IndexReader for the Index.
    *

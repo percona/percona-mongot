@@ -75,7 +75,10 @@ public class VectorSearchNestedFilterTest {
   private static final int NUM_CANDIDATES = 100;
   private static final int LIMIT = 2;
   private static final int NUM_DIMENSIONS = 3;
-  private static final FeatureFlags FLAGS = FeatureFlags.getDefault();
+  private static final FeatureFlags FLAGS =
+      FeatureFlags.withDefaults()
+          .enable(com.xgen.mongot.featureflag.Feature.NESTED_VECTOR)
+          .build();
 
   private static final String EMBEDDED_VECTOR_FIELD =
       "$embedded:8/sections/$type:knnVector/sections.section_vector";
@@ -122,8 +125,7 @@ public class VectorSearchNestedFilterTest {
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .parentFilter(eqClauseFilter("name", "value1"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -142,8 +144,7 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
     Assert.assertEquals("Nested vector query with parentFilter:", expected, result);
@@ -164,8 +165,7 @@ public class VectorSearchNestedFilterTest {
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .filter(eqClauseFilter("sections.section_name", "value3"))
                     .parentFilter(eqClauseFilter("name", "value1"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -187,12 +187,10 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
-    Assert.assertEquals(
-        "Nested vector query with filter and parentFilter:", expected, result);
+    Assert.assertEquals("Nested vector query with filter and parentFilter:", expected, result);
   }
 
   @Test
@@ -208,8 +206,7 @@ public class VectorSearchNestedFilterTest {
                     .numCandidates(NUM_CANDIDATES)
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -242,8 +239,7 @@ public class VectorSearchNestedFilterTest {
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .filter(eqClauseFilter("sections.section_name", "value3"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
@@ -261,8 +257,8 @@ public class VectorSearchNestedFilterTest {
             new QueryBitSetProducer(EmbeddedDocumentQueryFactory.ROOT_DOCUMENTS_QUERY),
             ScoreMode.Max);
 
-    Assert.assertEquals("With filter only, query should be blockJoin (no outer FILTER):",
-        expected, result);
+    Assert.assertEquals(
+        "With filter only, query should be blockJoin (no outer FILTER):", expected, result);
   }
 
   @Test
@@ -330,8 +326,7 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
     Assert.assertEquals(
@@ -412,8 +407,7 @@ public class VectorSearchNestedFilterTest {
         new BooleanQuery.Builder()
             .add(expectedBlockJoin, BooleanClause.Occur.MUST)
             .add(
-                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")),
-                BooleanClause.Occur.FILTER)
+                scopedParentFilter(eqQuery(ROOT_TOKEN_FIELD, "value1")), BooleanClause.Occur.FILTER)
             .build();
 
     Assert.assertEquals(
@@ -422,13 +416,12 @@ public class VectorSearchNestedFilterTest {
         result);
   }
 
-
   @Test
   public void testIsIndexWithEmbeddedFieldsForNestedVectorIndex() {
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
 
     Assert.assertTrue(
         "isIndexWithEmbeddedFields() should return true for vector indexes with nestedRoot",
@@ -444,11 +437,41 @@ public class VectorSearchNestedFilterTest {
             .build();
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
 
     Assert.assertFalse(
         "isIndexWithEmbeddedFields() should return false for vector indexes without nestedRoot",
         context.isIndexWithEmbeddedFields());
+  }
+
+  @Test
+  public void testNestedOptionsOnNonEmbeddedFieldThrowsDescriptiveError() throws Exception {
+    VectorIndexDefinition definition =
+        VectorIndexDefinitionBuilder.builder()
+            .withEuclideanVectorField("chapters.vec", NUM_DIMENSIONS)
+            .build();
+
+    VectorSearchQuery query =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(FieldPath.parse("chapters.vec"))
+                    .numCandidates(NUM_CANDIDATES)
+                    .limit(LIMIT)
+                    .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .build())
+            .build();
+
+    InvalidQueryException e =
+        Assert.assertThrows(InvalidQueryException.class, () -> translate(definition, query));
+    Assert.assertEquals(
+        "\"nestedOptions\" requires a vector path within the index's nested root, but"
+            + " 'chapters.vec' is outside it. Specify a path under the index's \"nestedRoot\""
+            + " field, or remove \"nestedOptions\" to query 'chapters.vec' as a standard vector"
+            + " field.",
+        e.getMessage());
   }
 
   @Test
@@ -465,26 +488,24 @@ public class VectorSearchNestedFilterTest {
                     .limit(LIMIT)
                     .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
                     .parentFilter(eqClauseFilter("name", "value1"))
-                    .embeddedOptions(
-                        new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
                     .build())
             .build();
 
     Query result = translate(definition, query);
 
-    Assert.assertTrue(
-        "Result should be BooleanQuery", result instanceof BooleanQuery);
+    Assert.assertTrue("Result should be BooleanQuery", result instanceof BooleanQuery);
     BooleanQuery boolQuery = (BooleanQuery) result;
 
     BooleanClause filterClause =
         boolQuery.clauses().stream()
-            .filter(c -> c.getOccur() == BooleanClause.Occur.FILTER)
+            .filter(c -> c.occur() == BooleanClause.Occur.FILTER)
             .findFirst()
             .orElseThrow(() -> new AssertionError("No FILTER clause"));
 
     // Structurally inspect the query tree for TermQuery field names instead of relying on
     // Query#toString(), which can change across Lucene versions.
-    Set<String> termFields = collectTermFields(filterClause.getQuery());
+    Set<String> termFields = collectTermFields(filterClause.query());
 
     Assert.assertTrue(
         "parentFilter should reference the root field ($type:token/name), found fields: "
@@ -496,6 +517,122 @@ public class VectorSearchNestedFilterTest {
         termFields.stream().noneMatch(f -> f.startsWith("$embedded:")));
   }
 
+  /**
+   * Regression test for CLOUDP-398738. Verifies that a vector query with {@code nestedOptions} on
+   * an auto-embedding + nestedRoot index does not throw "nestedOptions can only be specified for
+   * embedded vector fields". Before the fix, the derived definition's {@code nestedRoot} was the
+   * user-facing path ({@code sections}) while the materialized query path was the MV-namespaced
+   * path ({@code _autoEmbed.sections.section_vector}), so embedded-vector detection failed. The
+   * fix remaps {@code nestedRoot} into the MV namespace as well.
+   */
+  @Test
+  public void testAutoEmbedNestedRootRemappedAcceptsNestedOptions() throws Exception {
+    // Mirrors the shape of the derived definition produced by
+    // AutoEmbeddingIndexDefinitionUtils.getDerivedVectorIndexDefinition after the fix: both the
+    // vector field path and the nestedRoot are in the _autoEmbed.* namespace.
+    VectorIndexDefinition derivedDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .nestedRoot("_autoEmbed.sections")
+            .withEuclideanVectorField("_autoEmbed.sections.section_vector", NUM_DIMENSIONS)
+            .withFilterPath("sections.section_name")
+            .build();
+
+    // The user-provided query uses the user-facing path; MaterializedVectorSearchQuery rewrites
+    // it to the MV path via the autoEmbedding field mapping before invoking the query factory.
+    VectorSearchQuery userQuery =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(FieldPath.parse("sections.section_vector"))
+                    .numCandidates(NUM_CANDIDATES)
+                    .limit(LIMIT)
+                    .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .build())
+            .build();
+
+    MaterializedVectorSearchQuery materialized =
+        new MaterializedVectorSearchQuery(
+            userQuery,
+            userQuery.criteria().queryVector().get(),
+            java.util.Map.of(
+                FieldPath.parse("sections.section_vector"),
+                FieldPath.parse("_autoEmbed.sections.section_vector")));
+
+    var context =
+        new VectorQueryFactoryContext(
+            derivedDefinition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
+    var factory = LuceneVectorQueryFactoryDistributor.create(context);
+
+    try (var reader = DirectoryReader.open(this.directory)) {
+      // Before the fix, this call threw InvalidQueryException: "nestedOptions can only be
+      // specified for embedded vector fields, but '_autoEmbed.sections.section_vector' is not
+      // embedded".
+      Query result = factory.createQuery(materialized, reader);
+
+      Assert.assertTrue(
+          "Auto-embed + nestedRoot query with nestedOptions should produce an embedded "
+              + "block-join query, got: "
+              + result.getClass().getName(),
+          result instanceof WrappedToParentBlockJoinQuery);
+    }
+  }
+
+  /**
+   * Companion test to {@link #testAutoEmbedNestedRootRemappedAcceptsNestedOptions} covering the
+   * no-{@code nestedOptions} path. Before the fix, such queries were silently classified as
+   * non-embedded and skipped the block-join wrap, returning bogus rankings against an actually
+   * embedded index. After the fix, the remapped {@code nestedRoot} lets embedded-vector detection
+   * succeed regardless of whether the user supplied {@code nestedOptions}, so the query is still
+   * wrapped in a block-join. See CLOUDP-398738.
+   */
+  @Test
+  public void testAutoEmbedNestedRootRemappedProducesEmbeddedQueryWithoutNestedOptions()
+      throws Exception {
+    VectorIndexDefinition derivedDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .nestedRoot("_autoEmbed.sections")
+            .withEuclideanVectorField("_autoEmbed.sections.section_vector", NUM_DIMENSIONS)
+            .withFilterPath("sections.section_name")
+            .build();
+
+    VectorSearchQuery userQuery =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(FieldPath.parse("sections.section_vector"))
+                    .numCandidates(NUM_CANDIDATES)
+                    .limit(LIMIT)
+                    .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
+                    .build())
+            .build();
+
+    MaterializedVectorSearchQuery materialized =
+        new MaterializedVectorSearchQuery(
+            userQuery,
+            userQuery.criteria().queryVector().get(),
+            java.util.Map.of(
+                FieldPath.parse("sections.section_vector"),
+                FieldPath.parse("_autoEmbed.sections.section_vector")));
+
+    var context =
+        new VectorQueryFactoryContext(
+            derivedDefinition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
+    var factory = LuceneVectorQueryFactoryDistributor.create(context);
+
+    try (var reader = DirectoryReader.open(this.directory)) {
+      Query result = factory.createQuery(materialized, reader);
+
+      Assert.assertTrue(
+          "Auto-embed + nestedRoot query without nestedOptions should still produce an embedded "
+              + "block-join query, got: "
+              + result.getClass().getName(),
+          result instanceof WrappedToParentBlockJoinQuery);
+    }
+  }
+
   // ---- integration tests: execute queries against an indexed Lucene directory ----
 
   @Test
@@ -504,13 +641,12 @@ public class VectorSearchNestedFilterTest {
 
     VectorSearchQuery query =
         buildNestedQuery(
-            eqClauseFilter("sections.section_name", "value3"),
-            eqClauseFilter("name", "value1"));
+            eqClauseFilter("sections.section_name", "value3"), eqClauseFilter("name", "value1"));
 
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
     var factory = LuceneVectorQueryFactoryDistributor.create(context);
 
     try (var reader = DirectoryReader.open(this.directory)) {
@@ -541,7 +677,7 @@ public class VectorSearchNestedFilterTest {
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
     var factory = LuceneVectorQueryFactoryDistributor.create(context);
 
     try (var reader = DirectoryReader.open(this.directory)) {
@@ -557,8 +693,7 @@ public class VectorSearchNestedFilterTest {
           2,
           results.scoreDocs.length);
       Set<String> names = getStoredDocNames(reader, results);
-      Assert.assertEquals(
-          "All returned docs should have name='value1'", Set.of("value1"), names);
+      Assert.assertEquals("All returned docs should have name='value1'", Set.of("value1"), names);
     }
   }
 
@@ -572,7 +707,7 @@ public class VectorSearchNestedFilterTest {
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
     var factory = LuceneVectorQueryFactoryDistributor.create(context);
 
     try (var reader = DirectoryReader.open(this.directory)) {
@@ -608,13 +743,12 @@ public class VectorSearchNestedFilterTest {
     // and both have at least one child with section_name != "value3").
     VectorSearchQuery query =
         buildNestedQuery(
-            neClauseFilter("sections.section_name", "value3"),
-            neClauseFilter("name", "value7"));
+            neClauseFilter("sections.section_name", "value3"), neClauseFilter("name", "value7"));
 
     VectorIndexDefinition definition = createNestedDefinition();
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
     var factory = LuceneVectorQueryFactoryDistributor.create(context);
 
     try (var reader = DirectoryReader.open(this.directory)) {
@@ -631,10 +765,82 @@ public class VectorSearchNestedFilterTest {
           2,
           results.scoreDocs.length);
       Set<String> names = getStoredDocNames(reader, results);
-      Assert.assertEquals(
-          "All returned docs should have name='value1'", Set.of("value1"), names);
-      Assert.assertFalse(
-          "Should NOT return doc with name='value7'", names.contains("value7"));
+      Assert.assertEquals("All returned docs should have name='value1'", Set.of("value1"), names);
+      Assert.assertFalse("Should NOT return doc with name='value7'", names.contains("value7"));
+    }
+  }
+
+  @Test
+  public void testNestedVectorQueryRejectedWhenFeatureFlagDisabled() throws Exception {
+    VectorIndexDefinition definition = createNestedDefinition();
+
+    VectorSearchQuery query =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(FieldPath.parse("sections.section_vector"))
+                    .numCandidates(NUM_CANDIDATES)
+                    .limit(LIMIT)
+                    .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
+                    .embeddedOptions(new VectorEmbeddedOptions(VectorEmbeddedOptions.ScoreMode.MAX))
+                    .build())
+            .build();
+
+    FeatureFlags flagsWithNestedDisabled =
+        FeatureFlags.withDefaults()
+            .disable(com.xgen.mongot.featureflag.Feature.NESTED_VECTOR)
+            .build();
+    var context =
+        new VectorQueryFactoryContext(
+            definition, IndexFormatVersion.CURRENT, flagsWithNestedDisabled, METRICS);
+    var factory = LuceneVectorQueryFactoryDistributor.create(context);
+
+    try (var reader = DirectoryReader.open(this.directory)) {
+      Assert.assertThrows(
+          "Nested vector query should be rejected when NESTED_VECTOR flag is disabled",
+          InvalidQueryException.class,
+          () ->
+              factory.createQuery(
+                  new MaterializedVectorSearchQuery(query, query.criteria().queryVector().get()),
+                  reader));
+    }
+  }
+
+  @Test
+  public void testNestedVectorQueryWithoutNestedOptionsRejectedWhenFeatureFlagDisabled()
+      throws Exception {
+    VectorIndexDefinition definition = createNestedDefinition();
+
+    VectorSearchQuery query =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(FieldPath.parse("sections.section_vector"))
+                    .numCandidates(NUM_CANDIDATES)
+                    .limit(LIMIT)
+                    .queryVector(Vector.fromFloats(QUERY_VECTOR, NATIVE))
+                    .build())
+            .build();
+
+    FeatureFlags flagsWithNestedDisabled =
+        FeatureFlags.withDefaults()
+            .disable(com.xgen.mongot.featureflag.Feature.NESTED_VECTOR)
+            .build();
+    var context =
+        new VectorQueryFactoryContext(
+            definition, IndexFormatVersion.CURRENT, flagsWithNestedDisabled, METRICS);
+    var factory = LuceneVectorQueryFactoryDistributor.create(context);
+
+    try (var reader = DirectoryReader.open(this.directory)) {
+      Assert.assertThrows(
+          "Nested vector query should be rejected even without nestedOptions when flag is disabled",
+          InvalidQueryException.class,
+          () ->
+              factory.createQuery(
+                  new MaterializedVectorSearchQuery(query, query.criteria().queryVector().get()),
+                  reader));
     }
   }
 
@@ -653,7 +859,7 @@ public class VectorSearchNestedFilterTest {
       throws IOException, InvalidQueryException {
     var context =
         new VectorQueryFactoryContext(
-            definition, IndexFormatVersion.CURRENT, FeatureFlags.getDefault(), METRICS);
+            definition, IndexFormatVersion.CURRENT, FLAGS, METRICS);
     var factory = LuceneVectorQueryFactoryDistributor.create(context);
     try (var reader = DirectoryReader.open(this.directory)) {
       return factory.createQuery(
@@ -681,8 +887,7 @@ public class VectorSearchNestedFilterTest {
 
   private static Query eqQuery(String luceneField, String value) {
     return new IndexOrDocValuesQuery(
-        new ConstantScoreQuery(
-            new TermQuery(new Term(luceneField, new BytesRef(value)))),
+        new ConstantScoreQuery(new TermQuery(new Term(luceneField, new BytesRef(value)))),
         SortedSetDocValuesField.newSlowExactQuery(luceneField, new BytesRef(value)));
   }
 
@@ -702,7 +907,7 @@ public class VectorSearchNestedFilterTest {
       fields.add(termQuery.getTerm().field());
     } else if (query instanceof BooleanQuery boolQuery) {
       for (BooleanClause clause : boolQuery.clauses()) {
-        collectTermFieldsRecursive(clause.getQuery(), fields);
+        collectTermFieldsRecursive(clause.query(), fields);
       }
     } else if (query instanceof ConstantScoreQuery csQuery) {
       collectTermFieldsRecursive(csQuery.getQuery(), fields);
@@ -782,8 +987,7 @@ public class VectorSearchNestedFilterTest {
     Document doc = new Document();
     doc.add(new StringField("$meta/embeddedPath", "sections", Field.Store.NO));
     doc.add(
-        new KnnFloatVectorField(
-            EMBEDDED_VECTOR_FIELD, vector, VectorSimilarityFunction.EUCLIDEAN));
+        new KnnFloatVectorField(EMBEDDED_VECTOR_FIELD, vector, VectorSimilarityFunction.EUCLIDEAN));
     doc.add(new StringField(EMBEDDED_TOKEN_FIELD, sectionName, Field.Store.NO));
     doc.add(new SortedSetDocValuesField(EMBEDDED_TOKEN_FIELD, new BytesRef(sectionName)));
     return doc;

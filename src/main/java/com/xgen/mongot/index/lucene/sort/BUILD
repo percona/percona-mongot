@@ -14,6 +14,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/definition",
         "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/lucene/query/sort",
+        "//src/main/java/com/xgen/mongot/index/lucene/query/sort/mixed",
         "//src/main/java/com/xgen/mongot/index/query/sort",
         "//src/main/java/com/xgen/mongot/logging",
         "//src/main/java/com/xgen/mongot/util",

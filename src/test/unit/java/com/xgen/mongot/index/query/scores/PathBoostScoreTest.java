@@ -14,19 +14,19 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      PathBoostScoreTest.TestDeserialization.class,
-      PathBoostScoreTest.TestSerialization.class,
+      PathBoostScoreTest.DeserializationTest.class,
+      PathBoostScoreTest.SerializationTest.class,
     })
 public class PathBoostScoreTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "path-boost-score-deserialization";
     private static final BsonDeserializationTestSuite<Score> TEST_SUITE =
         fromDocument(ScoreTests.RESOURCES_PATH, SUITE_NAME, Score::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<Score> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<Score> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<Score> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -54,14 +54,14 @@ public class PathBoostScoreTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     public static final String SUITE_NAME = "path-boost-score-serialization";
     public static final BsonSerializationTestSuite<PathBoostScore> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(ScoreTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<PathBoostScore> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<PathBoostScore> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<PathBoostScore> testSpec) {
       this.testSpec = testSpec;
     }
 

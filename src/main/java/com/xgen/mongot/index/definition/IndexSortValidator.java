@@ -1,5 +1,6 @@
 package com.xgen.mongot.index.definition;
 
+import com.google.common.collect.ImmutableSet;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.query.sort.MetaSortOptions;
@@ -7,8 +8,7 @@ import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.Sort;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,65 +53,68 @@ public class IndexSortValidator {
     }
   }
 
-  // TODO(CLOUDP-356691): support multitype sort fields.
-  static void validateSortFieldsHaveSingleType(
+  /**
+   * String-ish types that are not sortable on their own but are acceptable alongside TOKEN.
+   * When TOKEN is present, STRING and AUTOCOMPLETE definitions are filtered out before validation.
+   */
+  private static final ImmutableSet<FieldTypeDefinition.Type> STRING_ISH_NON_SORTABLE_TYPES =
+      ImmutableSet.of(FieldTypeDefinition.Type.STRING, FieldTypeDefinition.Type.AUTOCOMPLETE);
+
+  /**
+   * Validates that all sort fields have at least one sortable type definition, and that every type
+   * definition (after string-ish deduplication) is in
+   * {@link FieldDefinition#INDEXING_SORTABLE_TYPES}.
+   *
+   * <p>String-ish deduplication: if TOKEN is present, STRING and AUTOCOMPLETE definitions are
+   * ignored because TOKEN subsumes them for sort purposes.
+   */
+  static void validateSortFieldsAreSortable(
       Sort sort,
       Trie<String, FieldDefinition> staticFields) throws BsonParseException {
-    Set<String> multiTypeOrEmptySortFields = new HashSet<>();
+    // LinkedHashMap preserves insertion order for deterministic error messages.
+    Map<String, List<FieldTypeDefinition.Type>> unsortableFields = new LinkedHashMap<>();
+
     for (MongotSortField sortField : sort.getSortFields()) {
       FieldDefinition fieldDefinition =
           Check.isNotNull(staticFields.get(sortField.field().toString()), "fieldDefinition");
-      List<? extends FieldTypeDefinition> allDefinitions =
-          fieldDefinition.getAllDefinitions().flatMap(Optional::stream).toList();
-      if (allDefinitions.size() != 1) {
-        multiTypeOrEmptySortFields.add(sortField.field().toString());
+
+      List<FieldTypeDefinition.Type> allTypes = fieldDefinition.getAllDefinitions()
+          .flatMap(Optional::stream)
+          .map(FieldTypeDefinition::getType)
+          .toList();
+
+      List<FieldTypeDefinition.Type> effectiveTypes = filterStringishTypes(allTypes);
+
+      if (effectiveTypes.isEmpty()) {
+        unsortableFields.put(sortField.field().toString(), allTypes);
+        continue;
+      }
+
+      boolean allSortable = effectiveTypes.stream()
+          .allMatch(FieldDefinition.INDEXING_SORTABLE_TYPES::contains);
+      if (!allSortable) {
+        unsortableFields.put(sortField.field().toString(), effectiveTypes);
       }
     }
 
-    if (!multiTypeOrEmptySortFields.isEmpty()) {
+    if (!unsortableFields.isEmpty()) {
       throw new BsonParseException(
-          String.format("Sort fields: %s have mixed types or are not defined",
-              multiTypeOrEmptySortFields),
+          String.format(
+              "Sort fields are not sortable: %s. Sortable types are: %s",
+              unsortableFields, FieldDefinition.INDEXING_SORTABLE_TYPES),
           Optional.empty());
     }
   }
 
-  static void validateSortFieldsAreSortable(
-      Sort sort,
-      Trie<String, FieldDefinition> staticFields) throws BsonParseException {
-    Map<String, FieldTypeDefinition> sortFieldDefinitions =
-        sort.getSortFields().stream()
-            .collect(
-                Collectors.toMap(
-                    f -> f.field().toString(),
-                    f -> {
-                      FieldDefinition fieldDefinition =
-                          Check.isNotNull(
-                              staticFields.get(f.field().toString()), "fieldDefinition");
-                      // Since validateSortFieldsAreSortable is called after
-                      // validateSortFieldsHaveSingleType there has to be exactly one definition.
-                      return Check.isNotNull(fieldDefinition
-                          .getAllDefinitions()
-                          .flatMap(Optional::stream)
-                          .toList()
-                          .getFirst(), "fieldDefinition");
-                    },
-                    (a, b) -> b
-                )
-            );
-    Map<String, FieldTypeDefinition.Type> nonSortableTypes = new HashMap<>();
-    for (var entry : sortFieldDefinitions.entrySet()) {
-      if (!FieldDefinition.INDEXING_SORTABLE_TYPES.contains(entry.getValue().getType())) {
-        nonSortableTypes.put(entry.getKey(), entry.getValue().getType());
-      }
+  static List<FieldTypeDefinition.Type> filterStringishTypes(
+      List<FieldTypeDefinition.Type> types) {
+    boolean hasToken = types.contains(FieldTypeDefinition.Type.TOKEN);
+    if (hasToken) {
+      return types.stream()
+          .filter(t -> !STRING_ISH_NON_SORTABLE_TYPES.contains(t))
+          .toList();
     }
-    if (!nonSortableTypes.isEmpty()) {
-      throw new BsonParseException(
-          String.format(
-              "Sort fields: %s are not sortable types. Sortable types are: %s",
-              nonSortableTypes, FieldDefinition.INDEXING_SORTABLE_TYPES),
-          Optional.empty());
-    }
+    return types;
   }
 
   public static void checkSortedIndexEnabled(
@@ -141,7 +144,6 @@ public class IndexSortValidator {
 
     validateNoScoreFields(sort);
     validateSortFieldsStaticallyDefined(sort, staticFields);
-    validateSortFieldsHaveSingleType(sort, staticFields);
     validateSortFieldsAreSortable(sort, staticFields);
   }
 

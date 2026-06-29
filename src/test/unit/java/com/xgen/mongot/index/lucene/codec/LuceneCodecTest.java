@@ -17,10 +17,12 @@ import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
 import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.Float32AndByteFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBinaryQuantizedVectorsFormat;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBitVectorsFormat;
+import com.xgen.mongot.index.lucene.vector.Lucene99NativeHnswVectorsFormat;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.lang.reflect.Field;
@@ -28,19 +30,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.lucene.backward_codecs.lucene99.Lucene94FieldInfosFormatV1;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90CompoundFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90DocValuesFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90LiveDocsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90NormsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90PointsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90TermVectorsFormat;
-import org.apache.lucene.codecs.lucene94.Lucene94FieldInfosFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99SegmentInfoFormat;
 import org.apache.lucene.codecs.perfield.PerFieldDocValuesFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -65,7 +67,7 @@ public class LuceneCodecTest {
   public static final List<TestSetup> data =
       List.of(
           new TestSetup(KNN_VECTOR, Lucene99HnswVectorsFormat.class, 32, 200),
-          new TestSetup(KNN_BYTE, Lucene99HnswVectorsFormat.class, 128, 100),
+          new TestSetup(KNN_BYTE, Lucene99NativeHnswVectorsFormat.class, 128, 100),
           new TestSetup(KNN_BIT, Mongot01042HnswBitVectorsFormat.class, 512, 1000),
           new TestSetup(KNN_F32_Q7, Lucene99HnswScalarQuantizedVectorsFormat.class, 2, 30),
           new TestSetup(KNN_F32_Q1, Mongot01042HnswBinaryQuantizedVectorsFormat.class, 49, 66));
@@ -232,7 +234,7 @@ public class LuceneCodecTest {
     // Remaining formats delegated from Lucene99Codec (except storedFieldsFormat, which LuceneCodec
     // overrides with its own LuceneStoredFieldsFormat).
     assertThat(codec.storedFieldsFormat()).isInstanceOf(LuceneStoredFieldsFormat.class);
-    assertThat(codec.fieldInfosFormat()).isInstanceOf(Lucene94FieldInfosFormat.class);
+    assertThat(codec.fieldInfosFormat()).isInstanceOf(Lucene94FieldInfosFormatV1.class);
     assertThat(codec.segmentInfoFormat()).isInstanceOf(Lucene99SegmentInfoFormat.class);
     assertThat(codec.termVectorsFormat()).isInstanceOf(Lucene90TermVectorsFormat.class);
     assertThat(codec.liveDocsFormat()).isInstanceOf(Lucene90LiveDocsFormat.class);
@@ -244,7 +246,9 @@ public class LuceneCodecTest {
   @Test
   public void postingsFormat_idField_bloomFilterEnabled_returnsBloomFilterPostingsFormat() {
     testPostingsFormat(
-        true, FieldName.MetaField.ID.getLuceneFieldName(), BloomFilteringPostingsFormat.class);
+        true,
+        FieldName.MetaField.ID.getLuceneFieldName(),
+        MongotBloomFilteringPostingsFormat.class);
   }
 
   @Test
@@ -262,8 +266,7 @@ public class LuceneCodecTest {
   public void postingsFormat_idField_dynamicToggle_switchesFormatAtRuntime() {
     AtomicBoolean bloomEnabled = new AtomicBoolean(false);
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
-            Map.of(), bloomEnabled::get, Optional.empty());
+        LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), bloomEnabled::get, Optional.empty());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -272,7 +275,7 @@ public class LuceneCodecTest {
 
     bloomEnabled.set(true);
     assertThat(format.getPostingsFormatForField(idField))
-        .isInstanceOf(BloomFilteringPostingsFormat.class);
+        .isInstanceOf(MongotBloomFilteringPostingsFormat.class);
 
     bloomEnabled.set(false);
     assertThat(format.getPostingsFormatForField(idField))
@@ -284,44 +287,46 @@ public class LuceneCodecTest {
   public void postingsFormat_bloomFilterDelegate_reusesPostingsFormatFromDelegateCodec()
       throws NoSuchFieldException, IllegalAccessException {
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(Map.of(), () -> true, Optional.empty());
+        LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), () -> true, Optional.empty());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
     PostingsFormat bloomFormat = format.getPostingsFormatForField(idField);
-    assertThat(bloomFormat).isInstanceOf(BloomFilteringPostingsFormat.class);
+    assertThat(bloomFormat).isInstanceOf(MongotBloomFilteringPostingsFormat.class);
 
     Field delegateField =
-        BloomFilteringPostingsFormat.class.getDeclaredField("delegatePostingsFormat");
+        MongotBloomFilteringPostingsFormat.class.getDeclaredField("delegatePostingsFormat");
     delegateField.setAccessible(true);
     PostingsFormat bloomDelegate = (PostingsFormat) delegateField.get(bloomFormat);
 
     PostingsFormat defaultFormat = format.getPostingsFormatForField("someOtherField");
 
     assertThat(bloomDelegate).isSameInstanceAs(defaultFormat);
+    assertThat(bloomDelegate.getName())
+        .isEqualTo(new Lucene99Codec().getPostingsFormatForField(idField).getName());
   }
 
   @Test
   public void postingsFormat_idField_withMetricsUpdater_incrementsBloomPostingCounter() {
     var metricsUpdater = SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH);
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+        LuceneCodec.Factory.forIndexWithBloomFilter(
             Map.of(), () -> true, Optional.of(metricsUpdater));
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
     assertThat(metricsUpdater.getBloomFilterIdPostingCreatedCounter().count()).isEqualTo(0.0);
     PostingsFormat bloomFormat = format.getPostingsFormatForField(idField);
-    assertThat(bloomFormat).isInstanceOf(BloomFilteringPostingsFormat.class);
+    assertThat(bloomFormat).isInstanceOf(MongotBloomFilteringPostingsFormat.class);
     assertThat(metricsUpdater.getBloomFilterIdPostingCreatedCounter().count()).isEqualTo(1.0);
-    assertEquals(BloomFilteringPostingsFormat.BLOOM_CODEC_NAME, bloomFormat.getName());
+    assertEquals(MongotBloomFilteringPostingsFormat.BLOOM_CODEC_NAME, bloomFormat.getName());
   }
 
   @Test
   public void postingsFormat_idField_bloomDisabled_withMetrics_incrementsLucene99PostingCounter() {
     var metricsUpdater = SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH);
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+        LuceneCodec.Factory.forIndexWithBloomFilter(
             Map.of(), () -> false, Optional.of(metricsUpdater));
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
@@ -330,14 +335,15 @@ public class LuceneCodecTest {
     PostingsFormat defaultFormat = format.getPostingsFormatForField(idField);
     assertThat(defaultFormat).isInstanceOf(Lucene99PostingsFormat.class);
     assertThat(metricsUpdater.getLucene99IdPostingCreatedCounter().count()).isEqualTo(1.0);
-    assertThat(defaultFormat).isNotInstanceOf(BloomFilteringPostingsFormat.class);
-    assertThat(defaultFormat.getName()).isNotEqualTo(BloomFilteringPostingsFormat.BLOOM_CODEC_NAME);
+    assertThat(defaultFormat).isNotInstanceOf(MongotBloomFilteringPostingsFormat.class);
+    assertThat(defaultFormat.getName())
+        .isNotEqualTo(MongotBloomFilteringPostingsFormat.BLOOM_CODEC_NAME);
   }
 
   private static void testPostingsFormat(
       boolean isBloomEnabled, String fieldName, Class<? extends PostingsFormat> expectedType) {
     LuceneCodec codec =
-        LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+        LuceneCodec.Factory.forIndexWithBloomFilter(
             Map.of(), () -> isBloomEnabled, Optional.empty());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
 

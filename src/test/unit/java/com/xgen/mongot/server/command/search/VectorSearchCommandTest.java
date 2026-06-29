@@ -25,8 +25,11 @@ import com.xgen.mongot.cursor.MongotCursorResultInfo;
 import com.xgen.mongot.cursor.SearchCursorInfo;
 import com.xgen.mongot.cursor.serialization.MongotCursorBatch;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.EmptyExplainInformation;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
@@ -44,8 +47,10 @@ import com.xgen.mongot.index.lucene.explain.information.MetadataExplainInformati
 import com.xgen.mongot.index.lucene.explain.information.SearchExplainInformation;
 import com.xgen.mongot.index.lucene.explain.information.SearchExplainInformationBuilder;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
+import com.xgen.mongot.index.query.DeadlineExceededException;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchFilter;
 import com.xgen.mongot.index.query.operators.VectorSearchQueryInput;
@@ -91,6 +96,7 @@ import org.bson.BsonArray;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
+import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.Rule;
@@ -125,12 +131,33 @@ public class VectorSearchCommandTest {
   }
 
   private SearchCommandsRegister.BootstrapperMetadata bootstrapperMetadata() {
+    return bootstrapperMetadata(registryWithVectorSearchTimeoutEnabled());
+  }
+
+  private SearchCommandsRegister.BootstrapperMetadata bootstrapperMetadata(
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     return new SearchCommandsRegister.BootstrapperMetadata(
         "testVersion",
         "localhost",
         () -> new MongoDbServerInfo(Optional.of(this.mongoDbVersion), Optional.of("testRs")),
         FeatureFlags.getDefault(),
-        DynamicFeatureFlagRegistry.empty());
+        dynamicFeatureFlagRegistry);
+  }
+
+  private static DynamicFeatureFlagRegistry registryWithVectorSearchTimeoutEnabled() {
+    return new DynamicFeatureFlagRegistry(
+        Optional.of(
+            List.of(
+                new DynamicFeatureFlagConfig(
+                    DynamicFeatureFlags.VECTOR_SEARCH_QUERY_TIMEOUT.getName(),
+                    DynamicFeatureFlagConfig.Phase.ENABLED,
+                    List.of(),
+                    List.of(),
+                    0,
+                    DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER))),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of(new ObjectId()));
   }
 
   // Simple mock - embedding service is never invoked for queryVector-based tests
@@ -196,7 +223,9 @@ public class VectorSearchCommandTest {
 
     // ensure that reader is being called with the exact same query as in command
     Mockito.verify(mocks.reader, times(1))
-        .query(new MaterializedVectorSearchQuery(query, query.criteria().queryVector().get()));
+        .query(
+            new MaterializedVectorSearchQuery(query, query.criteria().queryVector().get()),
+            QueryExecutionContext.empty());
     var expected =
         mockInitialMongotCursorBatchForVectorSearch(0, new VectorSearchResultBatch(4), NAMESPACE)
             .toBson();
@@ -204,6 +233,131 @@ public class VectorSearchCommandTest {
     Assert.assertTrue(command.getCreatedCursorIds().isEmpty());
     Assert.assertEquals(
         1, mocks.metricsUpdater.getQueryingMetricsUpdater().getVectorCommandCounter().count(), 0);
+  }
+
+  @Test
+  public void testDeadlineTimestampIsThreadedToQuery() throws Exception {
+    var mocks = new Mocks();
+    long deadline = System.currentTimeMillis();
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .build();
+    var command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(query)
+                .deadlineTimestampMs(deadline)
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            bootstrapperMetadata(),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    command.run();
+
+    var contextCaptor = org.mockito.ArgumentCaptor.forClass(QueryExecutionContext.class);
+    Mockito.verify(mocks.reader, times(1)).query(any(), contextCaptor.capture());
+    assertThat(contextCaptor.getValue().deadlineTimestampMs()).isEqualTo(Optional.of(deadline));
+  }
+
+  @Test
+  public void testDeadlineExceededIsReturnedAsErrorToUser() throws Exception {
+    var mocks = new Mocks();
+
+    when(mocks.reader.query(any(), any()))
+        .thenThrow(
+            new DeadlineExceededException());
+
+    VectorSearchCommand command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .build())
+                        .build())
+                .deadlineTimestampMs(System.currentTimeMillis() - 1000)
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            bootstrapperMetadata(),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    var result = command.run();
+
+    Assert.assertEquals(
+        new BsonDocument()
+            .append("ok", new BsonInt32(0))
+            .append("code", new BsonInt32(50))
+            .append("codeName", new BsonString("MaxTimeMSExpired"))
+            .append("errmsg", new BsonString("operation exceeded time limit")),
+        result);
+  }
+
+  @Test
+  public void testDeadlineIgnoredWhenFeatureFlagDisabled() throws Exception {
+    var mocks = new Mocks();
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .build();
+    var command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(query)
+                .deadlineTimestampMs(System.currentTimeMillis() - 1000)
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            bootstrapperMetadata(DynamicFeatureFlagRegistry.empty()),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    command.run();
+
+    // With the feature flag disabled the deadline is dropped, so the context carries no deadline
+    // and downstream timeout checks become no-ops.
+    var contextCaptor = org.mockito.ArgumentCaptor.forClass(QueryExecutionContext.class);
+    Mockito.verify(mocks.reader, times(1)).query(any(), contextCaptor.capture());
+    assertThat(contextCaptor.getValue().deadlineTimestampMs()).isEqualTo(Optional.empty());
   }
 
   @Test
@@ -309,8 +463,7 @@ public class VectorSearchCommandTest {
   }
 
   @Test
-  public void maybeLoadShed_autoEmbeddingQuery_returnsFalse()
-      throws Exception {
+  public void maybeLoadShed_autoEmbeddingQuery_returnsFalse() throws Exception {
     var mocks = new Mocks();
     var command =
         new VectorSearchCommand(
@@ -325,9 +478,7 @@ public class VectorSearchCommandTest {
                             ApproximateVectorQueryCriteriaBuilder.builder()
                                 .limit(LIMIT)
                                 .numCandidates(NUM_CANDIDATES)
-                                .query(
-                                    new VectorSearchQueryInput.Text(
-                                        "test query"))
+                                .query(new VectorSearchQueryInput.Text("test query"))
                                 .path(PATH)
                                 .build())
                         .build())
@@ -352,9 +503,7 @@ public class VectorSearchCommandTest {
                 .db(DATABASE_NAME)
                 .collectionName(COLLECTION_NAME)
                 .collectionUuid(COLLECTION_UUID)
-                .vectorSearchQuery(
-                    new BsonParseException(
-                        "invalid query", Optional.of(PATH)))
+                .vectorSearchQuery(new BsonParseException("invalid query", Optional.of(PATH)))
                 .build(),
             new DefaultIndexCatalog(),
             new InitializedIndexCatalog(),
@@ -499,7 +648,7 @@ public class VectorSearchCommandTest {
   public void testIoExceptionVectorSearchCommand() throws Exception {
     var mocks = new Mocks();
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenAnswer(
             invocation -> {
               throw new IOException("IO error");
@@ -793,7 +942,7 @@ public class VectorSearchCommandTest {
     for (int i = 0; i < 1_000_000; i++) {
       largeArray.add(new BsonInt32(i));
     }
-    when(mocks.reader.query(any())).thenReturn(largeArray);
+    when(mocks.reader.query(any(), any())).thenReturn(largeArray);
 
     VectorSearchCommand command =
         new VectorSearchCommand(
@@ -892,7 +1041,7 @@ public class VectorSearchCommandTest {
   public void testCommandRetriesUponReaderClosedException() throws Exception {
     var mocks = new Mocks();
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenThrow(ReaderClosedException.class)
         .thenReturn(mocks.bsonResults);
 
@@ -984,7 +1133,7 @@ public class VectorSearchCommandTest {
             .contains("Search result output exceeds BSON size limit"));
     assertThat(command.getCreatedCursorIds()).containsExactly(cursorId);
     verify(mocks.cursorManager, times(1)).getNextBatch(Mockito.eq(cursorId), any(), any());
-    verify(mocks.reader, times(0)).query(any());
+    verify(mocks.reader, times(0)).query(any(), any());
   }
 
   @Test
@@ -1049,7 +1198,7 @@ public class VectorSearchCommandTest {
         .newCursor(any(), any(), any(), any(), any(CursorQuery.class), any(), any(), any());
     verify(mocks.cursorManager, times(1)).getNextBatch(Mockito.eq(firstCursorId), any(), any());
     verify(mocks.cursorManager, times(1)).getNextBatch(Mockito.eq(secondCursorId), any(), any());
-    verify(mocks.reader, times(0)).query(any());
+    verify(mocks.reader, times(0)).query(any(), any());
   }
 
   @Test
@@ -1232,7 +1381,7 @@ public class VectorSearchCommandTest {
     Assert.assertEquals(1, result.getInt32("ok").getValue());
     assertThat(command.getCreatedCursorIds()).containsExactly(cursorId);
     verify(mocks.cursorManager, times(1)).getNextBatch(Mockito.eq(cursorId), any(), any());
-    verify(mocks.reader, times(0)).query(any());
+    verify(mocks.reader, times(0)).query(any(), any());
     Assert.assertEquals(
         1, mocks.metricsUpdater.getQueryingMetricsUpdater().getVectorCommandCounter().count(), 0);
     Assert.assertEquals(
@@ -1629,7 +1778,7 @@ public class VectorSearchCommandTest {
     var queryCountDown = new CountDownLatch(1);
     var testCountDown = new CountDownLatch(1);
 
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenAnswer(
             invocation -> {
               // Signal the test thread proceed.
@@ -1771,7 +1920,7 @@ public class VectorSearchCommandTest {
     var mocks = new Mocks();
 
     // Force the reader to throw a RuntimeException that wraps an InvalidQueryException.
-    when(mocks.reader.query(any()))
+    when(mocks.reader.query(any(), any()))
         .thenThrow(new RuntimeException(new InvalidQueryException("wrapped user error")));
 
     var query =
@@ -1826,6 +1975,83 @@ public class VectorSearchCommandTest {
         0.0);
   }
 
+  @Test
+  public void testCheckSupportRejectsWhenStoredSourceUndefined() throws Exception {
+    Assume.assumeTrue(this.mongoDbVersion.compareTo(MIN_STORED_SOURCE_VERSION) >= 0);
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .returnStoredSource(true)
+            .build();
+
+    InitializedVectorIndex mockIndex = mock(InitializedVectorIndex.class);
+    when(mockIndex.getDefinition())
+        .thenReturn(
+            VectorIndexDefinitionBuilder.builder()
+                .withCosineVectorField(PATH.toString(), 3)
+                .build());
+
+    var ex =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.checkSupportForVectorStoredSource(
+                    bootstrapperMetadata(), query, Optional.of(mockIndex)));
+    Assert.assertTrue(ex.getMessage().contains("storedSource is not configured for this index"));
+  }
+
+  @Test
+  public void testCheckSupportRejectsOldMongoDbVersion() throws Exception {
+    Assume.assumeTrue(this.mongoDbVersion.compareTo(MIN_STORED_SOURCE_VERSION) < 0);
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .returnStoredSource(true)
+            .build();
+
+    InitializedVectorIndex mockIndex = mock(InitializedVectorIndex.class);
+    when(mockIndex.getDefinition())
+        .thenReturn(
+            VectorIndexDefinitionBuilder.builder()
+                .withCosineVectorField(PATH.toString(), 3)
+                .storedSource(
+                    StoredSourceDefinition.create(
+                        StoredSourceDefinition.Mode.INCLUSION, List.of("_id")))
+                .build());
+
+    var metadata =
+        new SearchCommandsRegister.BootstrapperMetadata(
+            "testVersion",
+            "localhost",
+            () -> new MongoDbServerInfo(Optional.of(this.mongoDbVersion), Optional.of("testRs")),
+            FeatureFlags.withDefaults()
+                .enable(Feature.ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE)
+                .build(),
+            DynamicFeatureFlagRegistry.empty());
+
+    var ex =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.checkSupportForVectorStoredSource(
+                    metadata, query, Optional.of(mockIndex)));
+    Assert.assertTrue(ex.getMessage().contains("requires MongoDB server version"));
+  }
+
   private static class Mocks {
 
     private final IndexCatalog catalog;
@@ -1877,7 +2103,7 @@ public class VectorSearchCommandTest {
       when(initializedIndex.getReader()).thenReturn(this.reader);
 
       this.bsonResults = new VectorSearchResultBatch(4).getBsonResults();
-      when(this.reader.query(any())).thenReturn(this.bsonResults);
+      when(this.reader.query(any(), any())).thenReturn(this.bsonResults);
 
       this.metricsUpdater =
           IndexMetricsUpdaterBuilder.builder()

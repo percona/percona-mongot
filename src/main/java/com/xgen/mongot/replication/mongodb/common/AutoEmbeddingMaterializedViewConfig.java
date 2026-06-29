@@ -40,6 +40,8 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
       Duration.ofSeconds(30).toMillis();
   private static final long DEFAULT_MATERIALIZED_VIEW_OPTIME_UPDATE_INTERVAL_MS =
       Duration.ofSeconds(10).toMillis();
+  private static final long DEFAULT_MATERIALIZED_VIEW_WRITER_TIMEOUT_MS =
+      Duration.ofSeconds(60).toMillis();
 
   /**
    * Default memory budget as a percentage of JVM heap. The global default is 100% (unbounded). The
@@ -108,9 +110,8 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
   public final Optional<Integer> mvWriteRateLimitRps;
 
   /**
-   * Node-level rate limit (RPS) for embedding provider API calls.
-   * Merged with per-model values using min so every value acts as
-   * an upper bound.
+   * Node-level rate limit (RPS) for embedding provider API calls. Merged with per-model values
+   * using min so every value acts as an upper bound.
    */
   public final Optional<Integer> embeddingProviderRpsLimit;
 
@@ -126,16 +127,14 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
    */
   public final Optional<Set<EmbeddingServiceConfig.ServiceTier>> flexTierWorkloads;
 
-  /**
-   * The maximum number of connections to the materialized view
-   */
+  /** The maximum number of connections to the materialized view */
   public final int matViewWriterMaxConnections;
 
   /**
    * Thread pool size for embedding provider work (e.g. {@link
-   * com.xgen.mongot.embedding.providers.EmbeddingServiceManager}). When not set in config,
-   * defaults to {@code max(1, runtime.getNumCpus())} at bootstrap (independent of Lucene indexing
-   * thread counts).
+   * com.xgen.mongot.embedding.providers.EmbeddingServiceManager}). When not set in config, defaults
+   * to {@code max(1, runtime.getNumCpus())} at bootstrap (independent of Lucene indexing thread
+   * counts).
    */
   public final int numEmbeddingThreads;
 
@@ -185,12 +184,21 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
   /** The interval in milliseconds at which the materialized view index optime is updated. */
   public final long materializedViewOptimeUpdateIntervalMs;
 
+  /**
+   * Socket read timeout (milliseconds) for the materialized view writer MongoClient (see {@link
+   * com.xgen.mongot.embedding.mongodb.common.AutoEmbeddingMongoClient}). Stored as {@code long}
+   * like other interval fields; validated to fit {@code int} because the driver {@code
+   * socketTimeoutMs} setting is int-valued.
+   */
+  public final long materializedViewWriterSocketTimeoutMs;
+
   private AutoEmbeddingMaterializedViewConfig(
       boolean pauseAllInitialSyncs,
       List<ObjectId> pauseInitialSyncOnIndexIds,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       int numConcurrentChangeStreams,
       int numIndexingThreads,
       int changeStreamMaxTimeMs,
@@ -214,11 +222,13 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
       int perBatchMemoryBudgetHeapPercent,
       long leaseManagerHeartbeatIntervalMs,
       long materializedViewStatusRefreshIntervalMs,
-      long materializedViewOptimeUpdateIntervalMs) {
+      long materializedViewOptimeUpdateIntervalMs,
+      long materializedViewWriterSocketTimeoutMs) {
     super(
         pauseAllInitialSyncs,
         pauseInitialSyncOnIndexIds,
         enableSplitLargeChangeStreamEvents,
+        splitLargeChangeStreamEventsForInitialSync,
         excludedChangestreamFields,
         matchCollectionUuidForUpdateLookup);
     this.maxConcurrentEmbeddingInitialSyncs = maxConcurrentEmbeddingInitialSyncs;
@@ -245,6 +255,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
     this.leaseManagerHeartbeatIntervalMs = leaseManagerHeartbeatIntervalMs;
     this.materializedViewStatusRefreshIntervalMs = materializedViewStatusRefreshIntervalMs;
     this.materializedViewOptimeUpdateIntervalMs = materializedViewOptimeUpdateIntervalMs;
+    this.materializedViewWriterSocketTimeoutMs = materializedViewWriterSocketTimeoutMs;
   }
 
   /**
@@ -276,7 +287,8 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
       Optional<Integer> perBatchMemoryBudgetHeapPercent,
       Optional<Long> optionalLeaseManagerHeartbeatIntervalMs,
       Optional<Long> optionalMaterializedViewStatusRefreshIntervalMs,
-      Optional<Long> optionalMaterializedViewOptimeUpdateIntervalMs) {
+      Optional<Long> optionalMaterializedViewOptimeUpdateIntervalMs,
+      Optional<Long> optionalMaterializedViewWriterSocketTimeoutMs) {
     return create(
         Runtime.INSTANCE,
         globalReplicationConfig,
@@ -303,7 +315,8 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
         perBatchMemoryBudgetHeapPercent,
         optionalLeaseManagerHeartbeatIntervalMs,
         optionalMaterializedViewStatusRefreshIntervalMs,
-        optionalMaterializedViewOptimeUpdateIntervalMs);
+        optionalMaterializedViewOptimeUpdateIntervalMs,
+        optionalMaterializedViewWriterSocketTimeoutMs);
   }
 
   /** Used for testing. The above create() method should be called instead. */
@@ -334,7 +347,8 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
       Optional<Integer> optionalPerBatchMemoryBudgetHeapPercent,
       Optional<Long> optionalLeaseManagerHeartbeatIntervalMs,
       Optional<Long> optionalMaterializedViewStatusRefreshIntervalMs,
-      Optional<Long> optionalMaterializedViewOptimeUpdateIntervalMs) {
+      Optional<Long> optionalMaterializedViewOptimeUpdateIntervalMs,
+      Optional<Long> optionalMaterializedViewWriterSocketTimeoutMs) {
 
     int maxConcurrentEmbeddingInitialSyncs =
         getMaxConcurrentEmbeddingInitialSyncsWithDefault(
@@ -367,8 +381,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
 
     int matViewWriterMaxConnections =
         getMatViewWriterMaxConnectionsWithDefault(optionalMatViewWriterMaxConnections);
-    Check.argIsPositive(matViewWriterMaxConnections,
-        "matViewWriterMaxConnections");
+    Check.argIsPositive(matViewWriterMaxConnections, "matViewWriterMaxConnections");
     Check.checkArg(
         matViewWriterMaxConnections <= MAX_MAT_VIEW_WRITER_MAX_CONNECTIONS,
         "matViewWriterMaxConnections must be at most %s, got %s",
@@ -402,10 +415,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
           Check.argIsPositive(c.slowStartThreshold(), "congestionControl.slowStartThreshold");
           Check.argIsPositive(c.linearIncrease(), "congestionControl.linearIncrease");
           Check.argInInclusiveRange(
-              c.multiplicativeDecrease(),
-              0.0,
-              1.0,
-              "congestionControl.multiplicativeDecrease");
+              c.multiplicativeDecrease(), 0.0, 1.0, "congestionControl.multiplicativeDecrease");
           Check.argIsPositive(c.idleTimeoutMillis(), "congestionControl.idleTimeoutMillis");
         });
 
@@ -451,12 +461,22 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
             "materializedViewOptimeUpdateIntervalMs",
             DEFAULT_MATERIALIZED_VIEW_OPTIME_UPDATE_INTERVAL_MS);
 
+    long materializedViewWriterSocketTimeoutMs =
+        optionalMaterializedViewWriterSocketTimeoutMs.orElse(
+            DEFAULT_MATERIALIZED_VIEW_WRITER_TIMEOUT_MS);
+    Check.checkArg(
+        materializedViewWriterSocketTimeoutMs > 0
+            && materializedViewWriterSocketTimeoutMs <= Integer.MAX_VALUE,
+        "materializedViewWriterSocketTimeoutMs must be in (0, Integer.MAX_VALUE], got %s",
+        materializedViewWriterSocketTimeoutMs);
+
     return new AutoEmbeddingMaterializedViewConfig(
         globalReplicationConfig.pauseAllInitialSyncs(),
         globalReplicationConfig.pauseInitialSyncOnIndexIds(),
         globalReplicationConfig.excludedChangestreamFields(),
         globalReplicationConfig.matchCollectionUuidForUpdateLookup(),
         globalReplicationConfig.enableSplitLargeChangeStreamEvents(),
+        globalReplicationConfig.splitLargeChangeStreamEventsForInitialSync(),
         numConcurrentChangeStreams,
         numIndexingThreads,
         changeStreamMaxTimeMs,
@@ -480,7 +500,8 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
         perBatchMemoryBudgetHeapPercent,
         leaseManagerHeartbeatIntervalMs,
         materializedViewStatusRefreshIntervalMs,
-        materializedViewOptimeUpdateIntervalMs);
+        materializedViewOptimeUpdateIntervalMs,
+        materializedViewWriterSocketTimeoutMs);
   }
 
   private static long getIntervalMsWithDefault(
@@ -529,6 +550,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
+        Optional.empty(),
         Optional.empty());
   }
 
@@ -538,6 +560,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
     return create(
         runtime,
         defaultGlobalReplicationConfig(),
+        Optional.empty(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
@@ -606,14 +629,16 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
             Fields.GLOBAL_MEMORY_BUDGET_HEAP_PERCENT, this.globalMemoryBudgetHeapPercent)
         .fieldOmitDefaultValue(
             Fields.PER_BATCH_MEMORY_BUDGET_HEAP_PERCENT, this.perBatchMemoryBudgetHeapPercent)
-        .field(
-            Fields.LEASE_MANAGER_HEARTBEAT_INTERVAL_MS, this.leaseManagerHeartbeatIntervalMs)
+        .field(Fields.LEASE_MANAGER_HEARTBEAT_INTERVAL_MS, this.leaseManagerHeartbeatIntervalMs)
         .field(
             Fields.MATERIALIZED_VIEW_STATUS_REFRESH_INTERVAL_MS,
             this.materializedViewStatusRefreshIntervalMs)
         .field(
             Fields.MATERIALIZED_VIEW_OPTIME_UPDATE_INTERVAL_MS,
             this.materializedViewOptimeUpdateIntervalMs)
+        .fieldOmitDefaultValue(
+            Fields.MATERIALIZED_VIEW_WRITER_SOCKET_TIMEOUT_MS,
+            this.materializedViewWriterSocketTimeoutMs)
         .build();
   }
 
@@ -758,8 +783,7 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
 
   private static int getNumEmbeddingThreadsWithDefault(
       Runtime runtime, Optional<Integer> optionalNumEmbeddingThreads) {
-    optionalNumEmbeddingThreads.ifPresent(
-        n -> Check.argIsPositive(n, "numEmbeddingThreads"));
+    optionalNumEmbeddingThreads.ifPresent(n -> Check.argIsPositive(n, "numEmbeddingThreads"));
     int numEmbeddingThreads =
         optionalNumEmbeddingThreads.orElseGet(
             () -> {
@@ -989,5 +1013,13 @@ public final class AutoEmbeddingMaterializedViewConfig extends CommonReplication
             .mustBePositive()
             .optional()
             .withDefault(DEFAULT_MATERIALIZED_VIEW_OPTIME_UPDATE_INTERVAL_MS);
+
+    private static final Field.WithDefault<Long> MATERIALIZED_VIEW_WRITER_SOCKET_TIMEOUT_MS =
+        Field.builder("materializedViewWriterSocketTimeoutMs")
+            .longField()
+            .mustBePositive()
+            .optional()
+            .withDefault(DEFAULT_MATERIALIZED_VIEW_WRITER_TIMEOUT_MS);
+
   }
 }

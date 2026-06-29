@@ -1,6 +1,6 @@
 package com.xgen.mongot.util;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Parent class for checked exceptions that must have a non-null message. Used for NullAway

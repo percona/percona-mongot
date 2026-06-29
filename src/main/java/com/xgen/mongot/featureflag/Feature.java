@@ -45,6 +45,7 @@ package com.xgen.mongot.featureflag;
 public enum Feature {
   STALE_STATE_TRANSITION("enableStaleStateTransition", State.DISABLED),
   RETAIN_FAILED_INDEX_DATA_ON_DISK("retainFailedIndexDataOnDisk", State.DISABLED),
+  RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK("retainFailedInitialSyncDataOnDisk", State.DISABLED),
   REMOVE_ABSENT_INDEXES_BEFORE_INITIALIZATION(
       "removeAbsentIndexesBeforeInitialization", State.DISABLED),
   FACETING_OVER_TOKEN_FIELDS("enableFacetingOverTokenFields", State.DISABLED),
@@ -75,7 +76,13 @@ public enum Feature {
   CONCURRENT_INDEX_PARTITION_SEARCH("enableConcurrentIndexPartitionSearch", State.DISABLED),
   CANCEL_MERGE("enableCancelMerge", State.DISABLED),
   KNN_FULL_SCAN_HEURISTIC("enableKnnFullScanHeuristic", State.DISABLED),
-  CUSTOM_VECTOR_ENGINE("customVectorEngine", State.DISABLED);
+  CUSTOM_VECTOR_ENGINE("customVectorEngine", State.DISABLED),
+  OVERLOAD_RETRY_SIGNAL("overloadRetrySignal", State.DISABLED),
+  NESTED_VECTOR("nestedVector", State.ENABLED),
+  QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.DISABLED),
+  METRICS_CACHE("metricsCache", State.DISABLED),
+  MERGE_ATTRIBUTION_METRICS("mergeAttributionMetrics", State.DISABLED),
+  LIFECYCLE_ATTRIBUTION_METRICS("lifecycleAttributionMetrics", State.DISABLED);
 
   private final String name;
   private final State defaultState;

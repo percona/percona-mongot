@@ -14,6 +14,14 @@ public class StatusResolutionUtilsTest {
     assertEffectiveStatus(StatusCode.STEADY, true, StatusCode.STEADY, true, StatusCode.STEADY);
     assertEffectiveStatus(
         StatusCode.INITIAL_SYNC, false, StatusCode.INITIAL_SYNC, false, StatusCode.INITIAL_SYNC);
+    // Same version, INITIAL_SYNC but previously queryable (e.g. fell off the oplog) ->
+    // RECOVERING_TRANSIENT
+    assertEffectiveStatus(
+        StatusCode.INITIAL_SYNC,
+        true,
+        StatusCode.INITIAL_SYNC,
+        true,
+        StatusCode.RECOVERING_TRANSIENT);
 
     // V1 terminal states always take precedence (regardless of V2)
     assertEffectiveStatus(StatusCode.FAILED, false, StatusCode.STEADY, true, StatusCode.FAILED);

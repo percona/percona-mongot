@@ -6,8 +6,11 @@ java_library(
         "BsonConverter.java",
         "DoubleFieldConverter.java",
         "FieldComparatorBsonWrapper.java",
+        "MongotNumericComparator.java",
         "MqlLongComparator.java",
     ],
+    # Disable checks for this specific file as it's cloned from library
+    javacopts = ["-XepExcludedPaths:.*/com.xgen.mongot.index.lucene.query.sort.comparator.MongotNumericComparator.java"],
     visibility = ["//visibility:public"],
     exports = [
         "@maven//:org_apache_lucene_lucene_core",
@@ -16,7 +19,6 @@ java_library(
     deps = [
         "//src/main/java/com/xgen/mongot/index/lucene/util",
         "//src/main/java/com/xgen/mongot/index/query/sort",
-        "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
         "@maven//:org_apache_lucene_lucene_core",
         "@maven//:org_jetbrains_annotations",

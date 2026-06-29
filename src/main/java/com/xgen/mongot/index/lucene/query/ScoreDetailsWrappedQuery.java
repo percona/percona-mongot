@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene.query;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.xgen.mongot.index.lucene.query.util.DisableBulkScorerQuery;
 import com.xgen.mongot.index.lucene.query.util.WrappedToChildBlockJoinQuery;
 import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.mongot.index.lucene.query.weights.WrappedExplainWeight;
@@ -38,7 +39,7 @@ public class ScoreDetailsWrappedQuery extends Query {
       case BooleanQuery booleanQuery -> {
         BooleanQuery.Builder booleanQueryBuilder = new BooleanQuery.Builder();
         for (var clause : booleanQuery.clauses()) {
-          booleanQueryBuilder.add(wrap(clause.getQuery()), clause.getOccur());
+          booleanQueryBuilder.add(wrap(clause.query()), clause.occur());
         }
         booleanQueryBuilder.setMinimumNumberShouldMatch(booleanQuery.getMinimumNumberShouldMatch());
         yield new ScoreDetailsWrappedQuery(booleanQueryBuilder.build());
@@ -58,6 +59,9 @@ public class ScoreDetailsWrappedQuery extends Query {
                       .map(ScoreDetailsWrappedQuery::wrap)
                       .collect(Collectors.toUnmodifiableList()),
                   disjunctionMaxQuery.getTieBreakerMultiplier()));
+      case DisableBulkScorerQuery disableBulkScorerQuery ->
+          // Execution-only wrapper; score details / explain should match the inner query alone.
+          wrap(disableBulkScorerQuery.innerQuery());
       default -> new ScoreDetailsWrappedQuery(query);
     };
   }

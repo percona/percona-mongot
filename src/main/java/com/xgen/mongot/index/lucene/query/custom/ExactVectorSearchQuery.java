@@ -1,10 +1,10 @@
 package com.xgen.mongot.index.lucene.query.custom;
 
-import com.mongodb.lang.Nullable;
 import com.xgen.mongot.index.lucene.util.VectorSearchUtil;
 import com.xgen.mongot.util.bson.Vector;
 import java.io.IOException;
 import java.util.Objects;
+import java.util.Optional;
 import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.LeafReaderContext;
@@ -17,7 +17,9 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Class for executing exact vector search over a vector index. Takes a "Match All" or filter query
@@ -80,30 +82,41 @@ public class ExactVectorSearchQuery extends Query {
         searcher.createWeight(this.filterQuery, ScoreMode.COMPLETE_NO_SCORES, 1f);
 
     return new Weight(this) {
+
       @Override
       @Nullable
-      public Scorer scorer(LeafReaderContext leafReaderContext) throws IOException {
-        Scorer filterScorer = filterQueryWeight.scorer(leafReaderContext);
-        // Some filters result with no matches for a term query will return a null scorer.
-        // In these cases pass on the null, since TopScoreDocCollector is expecting it.
-        if (filterScorer == null) {
+      public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+        ScorerSupplier filterSupplier = filterQueryWeight.scorerSupplier(context);
+        if (filterSupplier == null) {
           return null;
         }
-        return new ExactVectorSearchScorer(
-            filterScorer,
-            leafReaderContext.reader().getFloatVectorValues(ExactVectorSearchQuery.this.field),
-            leafReaderContext.reader().getByteVectorValues(ExactVectorSearchQuery.this.field),
-            ExactVectorSearchQuery.this.targetVector,
-            ExactVectorSearchQuery.this.similarityFunction);
+
+        return new ScorerSupplier() {
+          @Override
+          @Nullable
+          public Scorer get(long leadCost) throws IOException {
+            Scorer filterScorer = filterSupplier.get(leadCost);
+            if (filterScorer == null) {
+              return null;
+            }
+            return new ExactVectorSearchScorer(
+                filterScorer,
+                context.reader().getFloatVectorValues(ExactVectorSearchQuery.this.field),
+                context.reader().getByteVectorValues(ExactVectorSearchQuery.this.field),
+                ExactVectorSearchQuery.this.targetVector,
+                ExactVectorSearchQuery.this.similarityFunction);
+          }
+
+          @Override
+          public long cost() {
+            return filterSupplier.cost();
+          }
+        };
       }
 
       @Override
       public Explanation explain(LeafReaderContext context, int doc) throws IOException {
-        Scorer filterQueryScorer = filterQueryWeight.scorer(context);
-        if (filterQueryScorer == null) {
-          return Explanation.noMatch("no filter matches");
-        }
-        Explanation filterQueryExplanation = filterQueryScorer.getWeight().explain(context, doc);
+        Explanation filterQueryExplanation = filterQueryWeight.explain(context, doc);
         if (!filterQueryExplanation.isMatch()) {
           return filterQueryExplanation;
         }
@@ -115,7 +128,6 @@ public class ExactVectorSearchQuery extends Query {
         return s.iterator().advance(doc) == doc
             ? Explanation.match(
                 s.score(), ExactVectorSearchQuery.this.toString(), filterQueryExplanation)
-            // should never reach this case, would've terminated at filterQuery match check
             : Explanation.noMatch(getQuery().toString(), filterQueryExplanation);
       }
 
@@ -154,20 +166,32 @@ public class ExactVectorSearchQuery extends Query {
   }
 
   static class ExactVectorSearchScorer extends FilterScorer {
-    private final FloatVectorValues floatVectorValues;
-    private final ByteVectorValues byteVectorValues;
+
+    // Wrapped with Optional per mongot style guide (null-vs-optional.md)
+    // Third-party Lucene API can return null, so we wrap immediately with Optional.ofNullable()
+    private final Optional<FloatVectorValues> floatVectorValues;
+    private final Optional<FloatVectorValues.DocIndexIterator> floatVectorIterator;
+
+    private final Optional<ByteVectorValues> byteVectorValues;
+    private final Optional<ByteVectorValues.DocIndexIterator> byteVectorIterator;
+
     private final Vector target;
     private final VectorSimilarityFunction similarityFunction;
 
     ExactVectorSearchScorer(
         Scorer filterQueryScorer,
-        FloatVectorValues floatVectorValues,
-        ByteVectorValues byteVectorValues,
+        @Nullable FloatVectorValues floatVectorValues,
+        @Nullable ByteVectorValues byteVectorValues,
         Vector target,
         VectorSimilarityFunction similarityFunction) {
       super(filterQueryScorer);
-      this.floatVectorValues = floatVectorValues;
-      this.byteVectorValues = byteVectorValues;
+      // Wrap third-party nullable values with Optional.ofNullable() per style guide
+      this.floatVectorValues = Optional.ofNullable(floatVectorValues);
+      this.floatVectorIterator = this.floatVectorValues.map(FloatVectorValues::iterator);
+
+      this.byteVectorValues = Optional.ofNullable(byteVectorValues);
+      this.byteVectorIterator = this.byteVectorValues.map(ByteVectorValues::iterator);
+
       this.target = target;
       this.similarityFunction = similarityFunction;
     }
@@ -177,37 +201,56 @@ public class ExactVectorSearchQuery extends Query {
       Vector.VectorType vectorType = this.target.getVectorType();
       return switch (vectorType) {
         case FLOAT -> {
-          if (this.floatVectorValues.advance(docID()) != docID()) {
+          var floatIterator =
+              this.floatVectorIterator.orElseThrow(
+                  () -> new IllegalStateException("float iterator required for FLOAT vector type"));
+          var floatValues =
+              this.floatVectorValues.orElseThrow(
+                  () -> new IllegalStateException("float values required for FLOAT vector type"));
+          if (floatIterator.advance(docID()) != docID()) {
             throw new AssertionError(
                 String.format(
                     "value docID %s should match subquery docID %s",
-                    this.floatVectorValues.docID(), docID()));
+                    floatIterator.docID(), docID()));
           }
           yield this.similarityFunction.compare(
-              this.floatVectorValues.vectorValue(), this.target.asFloatVector().getFloatVector());
+              floatValues.vectorValue(floatIterator.index()),
+              this.target.asFloatVector().getFloatVector());
         }
         case BYTE -> {
-          if (this.byteVectorValues.advance(docID()) != docID()) {
+          var byteIterator =
+              this.byteVectorIterator.orElseThrow(
+                  () -> new IllegalStateException("byte iterator required for BYTE vector type"));
+          var byteValues =
+              this.byteVectorValues.orElseThrow(
+                  () -> new IllegalStateException("byte values required for BYTE vector type"));
+          if (byteIterator.advance(docID()) != docID()) {
             throw new AssertionError(
                 String.format(
                     "value docID %s should match subquery docID %s",
-                    this.byteVectorValues.docID(), docID()));
+                    byteIterator.docID(), docID()));
           }
           yield this.similarityFunction.compare(
-              this.byteVectorValues.vectorValue(), this.target.getBytes());
+              byteValues.vectorValue(byteIterator.index()), this.target.getBytes());
         }
         case BIT -> {
-          if (this.byteVectorValues.advance(docID()) != docID()) {
+          var byteIterator =
+              this.byteVectorIterator.orElseThrow(
+                  () -> new IllegalStateException("byte iterator required for BIT vector type"));
+          var byteValues =
+              this.byteVectorValues.orElseThrow(
+                  () -> new IllegalStateException("byte values required for BIT vector type"));
+          if (byteIterator.advance(docID()) != docID()) {
             throw new AssertionError(
                 String.format(
                     "value docID %s should match subquery docID %s",
-                    this.byteVectorValues.docID(), docID()));
+                    byteIterator.docID(), docID()));
           }
           // similarityFunction.compare() cannot be used here because it assumes each dimension is
           // one byte (instead of one bit as in this case)
           int dimensions = this.target.numDimensions();
           yield VectorSearchUtil.bitSimilarity(
-              this.target.getBytes(), this.byteVectorValues.vectorValue(), dimensions);
+              this.target.getBytes(), byteValues.vectorValue(byteIterator.index()), dimensions);
         }
       };
     }

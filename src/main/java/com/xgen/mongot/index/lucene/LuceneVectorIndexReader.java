@@ -33,6 +33,7 @@ import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.util.LuceneDocumentIdEncoder;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.trace.Tracing;
 import com.xgen.mongot.util.FieldPath;
@@ -141,14 +142,16 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
   }
 
   @Override
-  public BsonArray query(MaterializedVectorSearchQuery materializedVectorQuery)
+  public BsonArray query(
+      MaterializedVectorSearchQuery materializedVectorQuery, QueryExecutionContext context)
       throws ReaderClosedException, IOException, InvalidQueryException {
-    return getBsonArray(queryResults(materializedVectorQuery), this.metricsUpdater);
+    return getBsonArray(queryResults(materializedVectorQuery, context), this.metricsUpdater);
   }
 
   @Override
   public VectorProducerAndMetaResults query(
       MaterializedVectorSearchQuery query,
+      QueryExecutionContext context,
       QueryCursorOptions queryCursorOptions,
       BatchSizeStrategy batchSizeStrategy,
       QueryOptimizationFlags queryOptimizationFlags)
@@ -157,23 +160,22 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
       ensureOpen("query");
       List<VectorSearchResult> allResults;
       try (var searcherReference = createSearcherReference(query.concurrent())) {
-        allResults = queryResults(query, searcherReference);
+        allResults = queryResults(query, context, searcherReference);
       }
       return new VectorProducerAndMetaResults(
-          new LuceneVectorSearchBatchProducer(
-              allResults, this.metricsUpdater, batchSizeStrategy),
+          new LuceneVectorSearchBatchProducer(allResults, this.metricsUpdater, batchSizeStrategy),
           MetaResults.EMPTY);
     }
   }
 
   /** Returns a List of {@link VectorSearchResult}. */
   public List<VectorSearchResult> queryResults(
-      MaterializedVectorSearchQuery materializedVectorQuery)
+      MaterializedVectorSearchQuery materializedVectorQuery, QueryExecutionContext context)
       throws ReaderClosedException, IOException, InvalidQueryException {
     try (LockGuard ignored = LockGuard.with(this.shutdownSharedLock)) {
       ensureOpen("query");
       try (var searcherReference = createSearcherReference(materializedVectorQuery.concurrent())) {
-        return queryResults(materializedVectorQuery, searcherReference);
+        return queryResults(materializedVectorQuery, context, searcherReference);
       }
     }
   }
@@ -181,9 +183,13 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
   /** Returns a List of {@link VectorSearchResult}. */
   public List<VectorSearchResult> queryResults(
       MaterializedVectorSearchQuery materializedVectorQuery,
+      QueryExecutionContext context,
       LuceneIndexSearcherReference searcherReference)
-      throws ReaderClosedException, IOException, InvalidQueryException {
+      throws IOException, InvalidQueryException {
     var indexSearcher = searcherReference.getIndexSearcher();
+    DeadlineQueryTimeout.fromDeadline(context.deadlineTimestampMs())
+        .ifPresent(indexSearcher::setTimeout);
+
     var luceneQuery =
         Explain.isEnabled()
             ? this.queryFactory.createExplainQuery(
@@ -196,6 +202,9 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
             luceneQuery, materializedVectorQuery.materializedCriteria());
 
     QueryInfo queryInfo = searchManager.initialSearch(searcherReference, VECTOR_SEARCH_BATCH_SIZE);
+
+    // Surface a timeout to the user if the deadline is exceeded
+    DeadlineQueryTimeout.throwIfExceeded(Optional.ofNullable(indexSearcher.getTimeout()));
 
     return getResults(queryInfo.topDocs, indexSearcher, materializedVectorQuery);
   }
@@ -290,7 +299,7 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
             new VectorSearchResult(id, scoreDoc.score, ps.project(scoreDoc.doc)));
       }
 
-      this.metricsUpdater.getTotalHitsLowerBoundCount().increment(topDocs.totalHits.value);
+      this.metricsUpdater.getTotalHitsLowerBoundCount().increment(topDocs.totalHits.value());
       sp.getSpan()
           .setAttribute("num vector results", vectorSearchResults.size())
           .setAttribute("time", stopwatch.toString());
@@ -404,8 +413,7 @@ public class LuceneVectorIndexReader implements VectorIndexReader {
   private String getLuceneFieldName(
       FieldPath fieldPath, VectorQuantization quantization, Vector.VectorType vectorType) {
     Optional<FieldPath> nestedRoot =
-        this.queryFactory.getDefinitionResolver().getNestedRoot()
-            .filter(fieldPath::isChildOf);
+        this.queryFactory.getDefinitionResolver().getNestedRoot().filter(fieldPath::isChildOf);
     return switch (vectorType) {
       case FLOAT -> quantization.toTypeField().getLuceneFieldName(fieldPath, nestedRoot);
       case BYTE -> FieldName.TypeField.KNN_BYTE.getLuceneFieldName(fieldPath, nestedRoot);

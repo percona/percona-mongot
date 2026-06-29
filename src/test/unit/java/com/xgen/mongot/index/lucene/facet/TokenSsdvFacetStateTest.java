@@ -31,8 +31,8 @@ public class TokenSsdvFacetStateTest {
       assertThat(facetState).isPresent();
 
       var ordRange = facetState.get().getOrdRange("foo");
-      assertThat(ordRange.start).isEqualTo(0);
-      assertThat(ordRange.end).isEqualTo(0);
+      assertThat(ordRange.start()).isEqualTo(0);
+      assertThat(ordRange.end()).isEqualTo(0);
     }
   }
 
@@ -47,8 +47,8 @@ public class TokenSsdvFacetStateTest {
       assertThat(facetState).isPresent();
 
       var ordRange = facetState.get().getOrdRange("foo");
-      assertThat(ordRange.start).isEqualTo(0);
-      assertThat(ordRange.end).isEqualTo(2);
+      assertThat(ordRange.start()).isEqualTo(0);
+      assertThat(ordRange.end()).isEqualTo(2);
     }
   }
 
@@ -102,7 +102,7 @@ public class TokenSsdvFacetStateTest {
       assertThat(docValues instanceof MultiDocValues.MultiSortedSetDocValues).isTrue();
       assertThat(((MultiDocValues.MultiSortedSetDocValues) docValues).values.length).isEqualTo(3);
       assertThat(facetState.get().ordinalMap).isPresent();
-      assertThat(facetState.get().getOrdRange("foo").end).isEqualTo(9);
+      assertThat(facetState.get().getOrdRange("foo").end()).isEqualTo(9);
     }
   }
 
@@ -170,8 +170,8 @@ public class TokenSsdvFacetStateTest {
       assertThat(facetState).isPresent();
 
       var ordRange = facetState.get().getOrdRange("foo");
-      assertThat(ordRange.start).isEqualTo(0);
-      assertThat(ordRange.end).isEqualTo(1);
+      assertThat(ordRange.start()).isEqualTo(0);
+      assertThat(ordRange.end()).isEqualTo(1);
 
       Assert.assertThrows(
           IllegalArgumentException.class, () -> facetState.get().getOrdRange("invalidDim"));
@@ -193,8 +193,8 @@ public class TokenSsdvFacetStateTest {
       var prefixToOrdRange = facetState.get().getPrefixToOrdRange();
       assertThat(prefixToOrdRange).containsKey("foo");
       assertThat(prefixToOrdRange.keySet().size()).isEqualTo(1);
-      assertThat(prefixToOrdRange.get("foo").start).isEqualTo(0);
-      assertThat(prefixToOrdRange.get("foo").end).isEqualTo(2);
+      assertThat(prefixToOrdRange.get("foo").start()).isEqualTo(0);
+      assertThat(prefixToOrdRange.get("foo").end()).isEqualTo(2);
     }
   }
 

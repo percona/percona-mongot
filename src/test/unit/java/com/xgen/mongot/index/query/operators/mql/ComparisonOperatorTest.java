@@ -17,20 +17,20 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      ComparisonOperatorTest.TestDeserialization.class,
-      ComparisonOperatorTest.TestSerialization.class
+      ComparisonOperatorTest.DeserializationTest.class,
+      ComparisonOperatorTest.SerializationTest.class
     })
 public class ComparisonOperatorTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "comparison-operator-deserialization";
     private static final BsonDeserializationTestSuite<ComparisonOperator> TEST_SUITE =
         fromDocument(ClauseTests.RESOURCES_PATH, SUITE_NAME, ComparisonOperator::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<ComparisonOperator> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<ComparisonOperator> testSpec) {
       this.testSpec = testSpec;
     }
@@ -113,14 +113,14 @@ public class ComparisonOperatorTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "comparison-operator-serialization";
     private static final BsonSerializationTestSuite<ComparisonOperator> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable(ClauseTests.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<ComparisonOperator> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<ComparisonOperator> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<ComparisonOperator> testSpec) {
       this.testSpec = testSpec;
     }
 

@@ -228,9 +228,9 @@ public class BsonDeserializationTestSuite<T> {
           name,
           v -> {
             Assert.assertEquals("expected object did not match result", expected, v);
-            if (v instanceof Encodable) {
+            if (v instanceof Encodable encodable) {
               // Does not need to reconstruct original value, but it should not throw
-              ((Encodable) v).toBson();
+              encodable.toBson();
             }
           });
     }

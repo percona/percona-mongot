@@ -16,13 +16,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      UnresolvedStringPathTest.TestDeserialization.class,
-      UnresolvedStringPathTest.TestSerialization.class,
-      UnresolvedStringPathTest.TestClass.class,
+      UnresolvedStringPathTest.DeserializationTest.class,
+      UnresolvedStringPathTest.SerializationTest.class,
+      UnresolvedStringPathTest.ClassTest.class,
     })
 public class UnresolvedStringPathTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "unresolved-string-path-deserialization";
     private static final BsonDeserializationTestSuite<UnresolvedStringPath> TEST_SUITE =
         fromValue(
@@ -32,7 +32,7 @@ public class UnresolvedStringPathTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<UnresolvedStringPath> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<UnresolvedStringPath> testSpec) {
       this.testSpec = testSpec;
     }
@@ -91,7 +91,7 @@ public class UnresolvedStringPathTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "unresolved-string-path-serialization";
     private static final BsonSerializationTestSuite<UnresolvedStringPath> TEST_SUITE =
@@ -99,7 +99,7 @@ public class UnresolvedStringPathTest {
 
     private final BsonSerializationTestSuite.TestSpec<UnresolvedStringPath> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<UnresolvedStringPath> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<UnresolvedStringPath> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -130,7 +130,7 @@ public class UnresolvedStringPathTest {
     }
   }
 
-  public static class TestClass {
+  public static class ClassTest {
     @Test
     public void testEquality() {
       TestUtils.assertEqualityGroups(

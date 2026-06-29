@@ -30,10 +30,12 @@ java_library(
         "@maven//:org_mongodb_bson",
     ],
     deps = [
+        "//src/main/java/com/xgen/mongot/embedding",
         "//src/main/java/com/xgen/mongot/embedding/config",
         "//src/main/java/com/xgen/mongot/embedding/utils",
         "//src/main/java/com/xgen/mongot/index",
         "//src/main/java/com/xgen/mongot/index/definition",
+        "//src/main/java/com/xgen/mongot/index/lucene/codec/bloom",
         "//src/main/java/com/xgen/mongot/index/lucene/directory",
         "//src/main/java/com/xgen/mongot/index/lucene/query/pushdown",
         "//src/main/java/com/xgen/mongot/index/version",

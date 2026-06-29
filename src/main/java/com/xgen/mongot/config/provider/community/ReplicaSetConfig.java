@@ -3,22 +3,16 @@ package com.xgen.mongot.config.provider.community;
 import com.google.common.net.HostAndPort;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
-import org.bson.BsonDocument;
 
 public final class ReplicaSetConfig extends MongoConnectionConfig {
 
   public ReplicaSetConfig(
       List<HostAndPort> hostandPorts,
-      Optional<String> username,
-      Optional<Path> passwordFile,
-      String authSource,
-      boolean tls,
-      MongoReadPreferenceName readPreference,
-      Optional<X509Config> x509) {
-    super(hostandPorts, username, passwordFile, authSource, tls, readPreference, x509);
+      Optional<X509Config> x509,
+      Optional<ScramConfig> scram) {
+    super(hostandPorts, x509, scram);
   }
 
   public static ReplicaSetConfig fromBson(DocumentParser parser) throws BsonParseException {
@@ -26,16 +20,8 @@ public final class ReplicaSetConfig extends MongoConnectionConfig {
         parser.getField(Fields.HOST_AND_PORT).unwrap().stream()
             .map(HostAndPort::fromString)
             .toList(),
-        parser.getField(Fields.USERNAME).unwrap(),
-        parser.getField(Fields.PASSWORD_FILE).unwrap(),
-        parser.getField(Fields.AUTH_SOURCE).unwrap(),
-        parser.getField(Fields.TLS).unwrap(),
-        parser.getField(Fields.SECONDARY_READ_PREFERENCE).unwrap(),
-        parser.getField(Fields.X509).unwrap());
-  }
-
-  @Override
-  public BsonDocument toBson() {
-    return toBson(Fields.SECONDARY_READ_PREFERENCE);
+        parser.getField(Fields.X509).unwrap(),
+        parser.getField(Fields.SCRAM).unwrap()
+    );
   }
 }

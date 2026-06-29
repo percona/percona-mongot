@@ -228,6 +228,8 @@ public abstract class IndexingWorkScheduler extends Thread {
                 .log("Failed the index due to unrecoverable error.");
             // rethrow MaterializedViewNonTransientException, this should fail the index.
             throw unrecoverable;
+          } catch (MaterializedViewTransientException e) {
+            throw e;
           } catch (Exception e) {
             LOG.atError()
                 .addKeyValue("indexId", batch.generationId.indexId)

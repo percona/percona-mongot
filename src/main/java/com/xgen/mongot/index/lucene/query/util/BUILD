@@ -4,6 +4,7 @@ java_library(
     name = "util",
     srcs = [
         "BooleanComposer.java",
+        "DisableBulkScorerQuery.java",
         "LucenePath.java",
         "MappingCompatibilityValidator.java",
         "MetaIdRetriever.java",
@@ -35,6 +36,7 @@ java_library(
         "@maven//:org_apache_lucene_lucene_join",
         "@maven//:org_apache_lucene_lucene_queries",
         "@maven//:org_apache_lucene_lucene_sandbox",
+        "@maven//:org_jetbrains_annotations",
         "@maven//:org_mongodb_bson",
     ],
 )

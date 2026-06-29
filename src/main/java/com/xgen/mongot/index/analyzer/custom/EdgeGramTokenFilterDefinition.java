@@ -74,11 +74,9 @@ public class EdgeGramTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof EdgeGramTokenFilterDefinition)) {
+    if (!(other instanceof EdgeGramTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    EdgeGramTokenFilterDefinition otherDefinition = (EdgeGramTokenFilterDefinition) other;
     return (this.minGram == otherDefinition.minGram)
         && (this.maxGram == otherDefinition.maxGram)
         && (this.termNotInBounds == otherDefinition.termNotInBounds);

@@ -22,12 +22,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      SortStatsTest.TestClass.class,
-      SortStatsTest.TestDeserialization.class,
-      SortStatsTest.TestSerialization.class,
+      SortStatsTest.ClassTest.class,
+      SortStatsTest.DeserializationTest.class,
+      SortStatsTest.SerializationTest.class,
     })
 public class SortStatsTest {
-  public static class TestClass {
+  public static class ClassTest {
     @Test
     public void testCreate() {
       SortStats expected =
@@ -36,7 +36,7 @@ public class SortStatsTest {
               .sortExecutionArea(ExplainInformationTestUtil.QUERY_EXECUTION_AREA)
               .fieldInfos(
                   Map.of("foo", List.of(FieldName.TypeField.DATE, FieldName.TypeField.TOKEN)))
-              .canBenefitFromIndexSort(true)
+              .usesIndexSort(true)
               .build();
 
       SortStats result =
@@ -55,7 +55,7 @@ public class SortStatsTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "sort-stats-deserialization";
 
     private static final BsonDeserializationTestSuite<SortStats> TEST_SUITE =
@@ -63,7 +63,7 @@ public class SortStatsTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<SortStats> testSpec;
 
-    public TestDeserialization(BsonDeserializationTestSuite.TestSpecWrapper<SortStats> testSpec) {
+    public DeserializationTest(BsonDeserializationTestSuite.TestSpecWrapper<SortStats> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -77,7 +77,7 @@ public class SortStatsTest {
     public static Iterable<BsonDeserializationTestSuite.TestSpecWrapper<SortStats>> data() {
       return TEST_SUITE.withExamples(
           full(),
-          fullWithCanBenefitFromIndexSort());
+          fullWithUsesIndexSort());
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<SortStats> full() {
@@ -92,21 +92,21 @@ public class SortStatsTest {
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<SortStats>
-        fullWithCanBenefitFromIndexSort() {
+        fullWithUsesIndexSort() {
       return BsonDeserializationTestSuite.TestSpec.valid(
-          "full-with-can-benefit-from-index-sort",
+          "full-with-uses-index-sort",
           SortStatsBuilder.builder()
               .profilingIteratorExecutionArea(ExplainInformationTestUtil.QUERY_EXECUTION_AREA)
               .sortExecutionArea(ExplainInformationTestUtil.QUERY_EXECUTION_AREA)
               .fieldInfos(
                   Map.of("foo", List.of(FieldName.TypeField.DATE, FieldName.TypeField.TOKEN)))
-              .canBenefitFromIndexSort(true)
+              .usesIndexSort(true)
               .build());
     }
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "sort-stats-serialization";
 
     private static final BsonSerializationTestSuite<SortStats> TEST_SUITE =
@@ -114,7 +114,7 @@ public class SortStatsTest {
 
     private final BsonSerializationTestSuite.TestSpec<SortStats> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<SortStats> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<SortStats> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -123,7 +123,7 @@ public class SortStatsTest {
     public static Iterable<BsonSerializationTestSuite.TestSpec<SortStats>> data() {
       return List.of(
           full(),
-          fullWithCanBenefitFromIndexSort());
+          fullWithUsesIndexSort());
     }
 
     @Test
@@ -143,15 +143,15 @@ public class SortStatsTest {
     }
 
     private static BsonSerializationTestSuite.TestSpec<SortStats>
-        fullWithCanBenefitFromIndexSort() {
+        fullWithUsesIndexSort() {
       return BsonSerializationTestSuite.TestSpec.create(
-          "full-with-can-benefit-from-index-sort",
+          "full-with-uses-index-sort",
           SortStatsBuilder.builder()
               .profilingIteratorExecutionArea(ExplainInformationTestUtil.QUERY_EXECUTION_AREA)
               .sortExecutionArea(ExplainInformationTestUtil.QUERY_EXECUTION_AREA)
               .fieldInfos(
                   Map.of("foo", List.of(FieldName.TypeField.DATE, FieldName.TypeField.TOKEN)))
-              .canBenefitFromIndexSort(true)
+              .usesIndexSort(true)
               .build());
     }
   }

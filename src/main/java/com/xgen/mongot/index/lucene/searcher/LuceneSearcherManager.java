@@ -4,17 +4,20 @@ import static com.xgen.mongot.util.Check.checkArg;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomHeapEvictor;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomReadPolicy;
 import com.xgen.mongot.metrics.CachedGauge;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Optional;
-import javax.annotation.Nullable;
+import java.util.function.BooleanSupplier;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.search.SearcherManager;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,24 +34,45 @@ public class LuceneSearcherManager extends ReferenceManager<LuceneIndexSearcher>
   private static final Logger LOG = LoggerFactory.getLogger(LuceneSearcherManager.class);
 
   private final LuceneSearcherFactory factory;
+  private final IndexWriter indexWriter;
+  private final BooleanSupplier useIdBloomFilter;
+
+  /**
+   * Tracks whether bloom bitsets were loaded on the last reader open. Used to detect the
+   * initial-sync → steady-state transition so bloom can be proactively evicted from heap.
+   *
+   * <p>Accessed only inside {@link #refreshIfNeeded}, which {@link ReferenceManager} calls under
+   * its refresh lock, so no additional synchronization is needed.
+   */
+  private volatile boolean lastBloomLoadState;
 
   /**
    * Protected constructor - does not register gauges. Use {@link #create} to construct instances.
    * Protected to allow test subclasses.
    */
-  protected LuceneSearcherManager(IndexWriter writer, LuceneSearcherFactory factory)
+  protected LuceneSearcherManager(
+      IndexWriter writer, LuceneSearcherFactory factory, BooleanSupplier useIdBloomFilter)
       throws IOException {
     this.factory = factory;
+    this.indexWriter = writer;
+    this.useIdBloomFilter = useIdBloomFilter;
+
+    boolean initialBloomLoad = useIdBloomFilter.getAsBoolean();
+    this.lastBloomLoadState = initialBloomLoad;
+    MongotBloomReadPolicy.setLoadBloomOnHeap(writer.getDirectory(), initialBloomLoad);
+
     this.current = getSearcher(DirectoryReader.open(writer));
   }
 
-  /**
-   * Static factory method that constructs the manager and registers all gauges.
-   */
+  /** Static factory method that constructs the manager and registers all gauges. */
   public static LuceneSearcherManager create(
-      IndexWriter writer, LuceneSearcherFactory factory, PerIndexMetricsFactory metrics)
+      IndexWriter writer,
+      LuceneSearcherFactory factory,
+      PerIndexMetricsFactory metrics,
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
-    LuceneSearcherManager manager = new LuceneSearcherManager(writer, factory);
+
+    LuceneSearcherManager manager = new LuceneSearcherManager(writer, factory, useIdBloomFilter);
 
     // Register gauges after construction is complete
     metrics.perIndexObjectValueGauge(
@@ -74,12 +98,38 @@ public class LuceneSearcherManager extends ReferenceManager<LuceneIndexSearcher>
       throws IOException {
     var oldReader = referenceToRefresh.getIndexReader();
     checkArg(oldReader instanceof DirectoryReader, "IndexReader should be a DirectoryReader");
-    var newReader = DirectoryReader.openIfChanged((DirectoryReader) oldReader);
-    if (newReader == null) {
-      return null;
+    var oldDirectoryReader = (DirectoryReader) oldReader;
+
+    boolean loadBloomOnHeap = this.useIdBloomFilter.getAsBoolean();
+    MongotBloomReadPolicy.setLoadBloomOnHeap(this.indexWriter.getDirectory(), loadBloomOnHeap);
+    boolean evictBloom = this.lastBloomLoadState && !loadBloomOnHeap;
+    this.lastBloomLoadState = loadBloomOnHeap;
+    @Var DirectoryReader newReader;
+    if (evictBloom) {
+      // Bloom eviction reopens only the DirectoryReader, not the Directory or IndexWriter.
+      // The writer and on-disk index stay open for the life of the index partition.
+      //
+      // openIfChanged and DirectoryReader.open(IndexWriter) can reuse unchanged SegmentReaders
+      // from a prior reader; those readers still hold heap-resident bloom bitsets opened under the
+      // initial-sync policy. Clear heap bloom on the live segment readers, then reopen from the
+      // writer so near-real-time refresh is preserved and we do not consult a stale IndexCommit
+      // (which may reference a deleted segments_N file after the writer commits).
+      //
+      // ReferenceManager swaps to the returned searcher and release()s the previous one, which
+      // decRefs and closes the old DirectoryReader. That closes bloom FieldsProducers and clears
+      // their in-heap bitsets (see MongotBloomFilteredFieldsProducer#close).
+      MongotBloomHeapEvictor.evictHeapBloomFromReader(oldDirectoryReader);
+      newReader = DirectoryReader.openIfChanged(oldDirectoryReader, this.indexWriter);
+      if (newReader == null) {
+        newReader = DirectoryReader.open(this.indexWriter);
+      }
     } else {
-      return getSearcher(newReader);
+      newReader = DirectoryReader.openIfChanged(oldDirectoryReader);
+      if (newReader == null) {
+        return null;
+      }
     }
+    return getSearcher(newReader);
   }
 
   @Override

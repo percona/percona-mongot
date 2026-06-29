@@ -5,8 +5,8 @@ import com.xgen.mongot.util.FileUtils;
 import com.xgen.mongot.util.bson.JsonCodec;
 import java.io.IOException;
 import java.nio.file.Path;
-import javax.annotation.Nullable;
 import org.bson.BsonDocument;
+import org.jetbrains.annotations.Nullable;
 
 public class DynamicFeatureFlagJournalWriter {
 

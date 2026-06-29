@@ -5,6 +5,8 @@ import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
+import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomReadPolicy;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.io.IOException;
@@ -17,7 +19,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.CompoundDirectory;
-import org.apache.lucene.codecs.bloom.BloomFilteringPostingsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -36,7 +37,6 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.IOContext;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
 import org.junit.runner.RunWith;
@@ -50,14 +50,14 @@ import org.junit.runners.Parameterized;
 public class LuceneCodecBloomFilterTest {
 
   private static final String ID_FIELD = FieldName.MetaField.ID.getLuceneFieldName();
-  private static final String BLOOM_FORMAT = BloomFilteringPostingsFormat.BLOOM_CODEC_NAME;
+  private static final String BLOOM_FORMAT = MongotBloomFilteringPostingsFormat.BLOOM_CODEC_NAME;
   private static final String LUCENE99_FORMAT = "Lucene99";
   private static final String POSTINGS_FORMAT_ATTR = PerFieldPostingsFormat.PER_FIELD_FORMAT_KEY;
   private static final String DOC_1 = "doc1";
   private static final String DOC_2 = "doc2";
   private static final String DOC_3 = "doc3";
 
-  /** Bloom filter postings data file suffix (see {@link BloomFilteringPostingsFormat}). */
+  /** Bloom filter postings data file suffix (see {@link MongotBloomFilteringPostingsFormat}). */
   private static final String BLM_FILE_SUFFIX = ".blm";
 
   private static final boolean DFF_ENABLED = true;
@@ -71,12 +71,13 @@ public class LuceneCodecBloomFilterTest {
 
     /**
      * Critical check to validate that BloomFilteredTermsEnum being used prefers seek exact, which
-     * is critical to bloom filter performance. 
+     * is critical to bloom filter performance.
      */
     @Test
     public void bloomFilteredTermsEnum_prefersSeekExact() throws IOException {
       try (Directory dir = new ByteBuffersDirectory()) {
         writeDocuments(dir, () -> DFF_ENABLED, DOC_1);
+        MongotBloomReadPolicy.setLoadBloomOnHeap(dir, true);
         try (DirectoryReader reader = DirectoryReader.open(dir)) {
           for (LeafReaderContext ctx : reader.leaves()) {
             Terms terms = ctx.reader().terms(ID_FIELD);
@@ -84,6 +85,8 @@ public class LuceneCodecBloomFilterTest {
             TermsEnum termsEnum = terms.iterator();
             assertThat(termsEnum.preferSeekExact()).isTrue();
           }
+        } finally {
+          MongotBloomReadPolicy.setLoadBloomOnHeap(dir, false);
         }
       }
     }
@@ -198,7 +201,7 @@ public class LuceneCodecBloomFilterTest {
         IndexWriterConfig config =
             new IndexWriterConfig()
                 .setCodec(
-                    LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                    LuceneCodec.Factory.forIndexWithBloomFilter(
                         Map.of(), () -> DFF_ENABLED, Optional.of(metricsUpdater)));
         try (IndexWriter writer = new IndexWriter(dir, config)) {
           addDoc(writer, DOC_1);
@@ -224,7 +227,7 @@ public class LuceneCodecBloomFilterTest {
         IndexWriterConfig config =
             new IndexWriterConfig()
                 .setCodec(
-                    LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                    LuceneCodec.Factory.forIndexWithBloomFilter(
                         Map.of(), () -> DFF_DISABLED, Optional.of(metricsUpdater)));
         try (IndexWriter writer = new IndexWriter(dir, config)) {
           addDoc(writer, DOC_1);
@@ -319,7 +322,7 @@ public class LuceneCodecBloomFilterTest {
     IndexWriterConfig config =
         new IndexWriterConfig()
             .setCodec(
-                LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                LuceneCodec.Factory.forIndexWithBloomFilter(
                     Map.of(), bloomSupplier, Optional.empty()));
     return new IndexWriter(dir, config);
   }
@@ -361,8 +364,8 @@ public class LuceneCodecBloomFilterTest {
   }
 
   /**
-   * Asserts whether each segment contains a bloom filter {@code .blm} file. When compound files
-   * are enabled, {@code .blm} is stored inside the {@code .cfs} stream; the check uses the segment
+   * Asserts whether each segment contains a bloom filter {@code .blm} file. When compound files are
+   * enabled, {@code .blm} is stored inside the {@code .cfs} stream; the check uses the segment
    * codec's compound reader or {@link SegmentInfo#files()} as appropriate.
    */
   private static void assertAllSegmentsHaveBlmFiles(Directory dir, boolean expectBlm)
@@ -372,8 +375,7 @@ public class LuceneCodecBloomFilterTest {
       for (LeafReaderContext ctx : reader.leaves()) {
         SegmentReader segReader = (SegmentReader) ctx.reader();
         boolean hasBlm = segmentContainsBlmFile(dir, segReader);
-        assertWithMessage(
-                "BLM file presence for segment %s", segReader.getSegmentInfo().info.name)
+        assertWithMessage("BLM file presence for segment %s", segReader.getSegmentInfo().info.name)
             .that(hasBlm)
             .isEqualTo(expectBlm);
       }
@@ -385,8 +387,7 @@ public class LuceneCodecBloomFilterTest {
     SegmentInfo si = segReader.getSegmentInfo().info;
     Codec codec = si.getCodec();
     if (si.getUseCompoundFile()) {
-      try (CompoundDirectory compoundDir =
-          codec.compoundFormat().getCompoundReader(dir, si, IOContext.DEFAULT)) {
+      try (CompoundDirectory compoundDir = codec.compoundFormat().getCompoundReader(dir, si)) {
         for (String name : compoundDir.listAll()) {
           if (name.endsWith(BLM_FILE_SUFFIX)) {
             return true;
@@ -417,7 +418,7 @@ public class LuceneCodecBloomFilterTest {
       IndexWriterConfig config =
           new IndexWriterConfig()
               .setCodec(
-                  LuceneCodec.Factory.forSearchIndexWithBloomFilter(
+                  LuceneCodec.Factory.forIndexWithBloomFilter(
                       Map.of(), bloomEnabled::get, Optional.empty()));
 
       try (IndexWriter writer = new IndexWriter(dir, config)) {

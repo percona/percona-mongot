@@ -2,6 +2,7 @@ package com.xgen.mongot.index.lucene.query.sort.mixed;
 
 import com.google.errorprone.annotations.Immutable;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.bson.BsonValue;
 
 /**
@@ -45,7 +46,10 @@ class MixedEmptyLeafComparator implements MixedLeafFieldComparator {
   }
 
   @Override
-  public void notifyNewBottom(BsonValue bottom) {
+  public void notifyNewBottom(BsonValue bottom) {}
 
+  @Override
+  public int nextDoc() {
+    return DocIdSetIterator.NO_MORE_DOCS;
   }
 }

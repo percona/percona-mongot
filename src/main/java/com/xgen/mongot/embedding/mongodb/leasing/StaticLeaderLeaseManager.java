@@ -13,6 +13,7 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.ReplaceOptions;
+import com.mongodb.client.model.Updates;
 import com.mongodb.lang.Nullable;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
@@ -28,8 +29,10 @@ import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -39,6 +42,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
@@ -303,8 +307,14 @@ public class StaticLeaderLeaseManager implements LeaseManager {
   @Override
   public void updateCommitInfo(
       MaterializedViewGenerationId generationId, EncodedUserData encodedUserData) {
+    // Only the leader owns the lease. A follower can reach this path because
+    // MaterializedViewWriter.commit calls updateCommitInfo unconditionally (e.g. from a
+    // PeriodicIndexCommitter tick), which must be a no-op rather than fatal, matching
+    // DynamicLeaderLeaseManager.
+    if (!this.isLeader) {
+      return;
+    }
     ensureLeaseExists(generationId);
-    ensureLeader();
     Lease currentLease = this.leases.get(getLeaseKey(generationId));
     Lease updatedLease = currentLease.withUpdatedCheckpoint(encodedUserData);
     updateLeaseInDatabase(generationId, currentLease, updatedLease, encodedUserData);
@@ -403,6 +413,101 @@ public class StaticLeaderLeaseManager implements LeaseManager {
   }
 
   @Override
+  public List<Lease> findGcCandidates(Instant expirationCutoff) {
+    // Scans only the default internal database — static deployments are single-tenant (see
+    // DynamicLeaderLeaseManager#findGcCandidates for the multi-database variant). A healthy
+    // leader keeps its lease fresh on every PeriodicIndexCommitter tick (the commit refreshes
+    // leaseExpiration even with no source writes), well within the lease TTL, so an idle index
+    // does not expire; a lapsed lease means the generator is not running.
+    List<Lease> candidates = new ArrayList<>();
+    try {
+      String defaultDb = this.dbResolver.resolveDefault();
+      List<BsonDocument> rawLeases =
+          this.operationExecutor.execute(
+              "findGcCandidates",
+              () ->
+                  this.getCollection(defaultDb)
+                      .find(
+                          Filters.lt(
+                              Lease.Fields.LEASE_EXPIRATION.getName(),
+                              new BsonDateTime(expirationCutoff.toEpochMilli())))
+                      .into(new ArrayList<>()));
+      for (BsonDocument rawLease : rawLeases) {
+        try {
+          Lease lease = Lease.fromBson(rawLease);
+          this.leaseKeyToDatabase.putIfAbsent(lease.id(), defaultDb);
+          candidates.add(lease);
+        } catch (BsonParseException e) {
+          LOG.atError()
+              .addKeyValue("leaseId", extractLeaseId(rawLease))
+              .setCause(e)
+              .log("Failed to parse lease document during GC candidate scan, skipping");
+        }
+      }
+    } catch (Exception e) {
+      // Best effort: the periodic GC sweep retries on a later tick.
+      LOG.atWarn().setCause(e).log("Failed to scan database for GC candidate leases");
+    }
+    return candidates;
+  }
+
+  @Override
+  public boolean markEligibleForCleanup(String leaseKey, Instant expirationCutoff) {
+    // Self-guarding OCC mark: see DynamicLeaderLeaseManager#markEligibleForCleanup. The expiration
+    // predicate lives in the filter so a heartbeat landing between read and write makes this a
+    // no-op rather than a wrong mark.
+    String dbName;
+    try {
+      dbName = getDatabaseForLease(leaseKey);
+    } catch (IllegalStateException e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("No database mapping for lease during cleanup mark, skipping");
+      return false;
+    }
+    String stateField = Lease.Fields.CLEANUP_STATE.getName();
+    var filter =
+        Filters.and(
+            Filters.eq("_id", leaseKey),
+            Filters.or(
+                Filters.eq(stateField, Lease.CleanupState.NOT_ELIGIBLE.name()),
+                Filters.exists(stateField, false)),
+            Filters.lt(
+                Lease.Fields.LEASE_EXPIRATION.getName(),
+                new BsonDateTime(expirationCutoff.toEpochMilli())));
+    var update = Updates.set(stateField, Lease.CleanupState.ELIGIBLE_FOR_CLEANUP.name());
+    try {
+      var result =
+          this.operationExecutor.execute(
+              "markEligibleForCleanup",
+              () -> this.getCollection(dbName).updateOne(filter, update));
+      if (result.getModifiedCount() > 0) {
+        this.leases.computeIfPresent(
+            leaseKey,
+            (k, lease) -> lease.withCleanupState(Lease.CleanupState.ELIGIBLE_FOR_CLEANUP));
+        return true;
+      }
+      return false;
+    } catch (Exception e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("Failed to mark lease eligible for cleanup");
+      return false;
+    }
+  }
+
+  /** Best-effort {@code _id} extraction from a possibly corrupted lease document, for logging. */
+  private static String extractLeaseId(BsonDocument rawLease) {
+    try {
+      return rawLease.containsKey("_id") ? rawLease.get("_id").asString().getValue() : "unknown";
+    } catch (Exception e) {
+      return "unparseable";
+    }
+  }
+
+  @Override
   public Set<MaterializedViewGenerationId> getLeaderGenerationIds() {
     if (this.isLeader) {
       return Collections.unmodifiableSet(this.managedGenerationIds);
@@ -468,16 +573,24 @@ public class StaticLeaderLeaseManager implements LeaseManager {
         .flatMap(Lease::getSteadyAsOfOplogPosition);
   }
 
-  private void ensureLeaseExists(MaterializedViewGenerationId generationId) {
-    if (!this.leases.containsKey(getLeaseKey(generationId))) {
-      throw new IllegalStateException("Lease does not exist for " + getLeaseKey(generationId));
+  @Override
+  public boolean isCurrentVersionQueryable(
+      MaterializedViewGenerationId generationId, long indexDefinitionVersion) {
+    try {
+      Lease lease = this.leases.get(getLeaseKey(generationId));
+      return lease != null && lease.isVersionQueryable(String.valueOf(indexDefinitionVersion));
+    } catch (IllegalStateException e) {
+      LOG.warn(
+          "Failed to look up lease for generation {} during isCurrentVersionQueryable",
+          generationId,
+          e);
+      return false;
     }
   }
 
-  private void ensureLeader() {
-    if (!this.isLeader) {
-      throw new IllegalStateException(
-          "Attempting to update lease state while not being the leader");
+  private void ensureLeaseExists(MaterializedViewGenerationId generationId) {
+    if (!this.leases.containsKey(getLeaseKey(generationId))) {
+      throw new IllegalStateException("Lease does not exist for " + getLeaseKey(generationId));
     }
   }
 
@@ -559,7 +672,8 @@ public class StaticLeaderLeaseManager implements LeaseManager {
           throw new MaterializedViewNonTransientException(
               "Fails to update lease for "
                   + getLeaseKey(generationId)
-                  + "please check Lease collection to clean up corrupted records");
+                  + " please check Lease collection to clean up corrupted records",
+              MaterializedViewNonTransientException.Reason.FENCING_REJECTION);
         } else {
           this.leases.put(getLeaseKey(generationId), updatedLease);
         }
@@ -571,7 +685,10 @@ public class StaticLeaderLeaseManager implements LeaseManager {
       }
       // TODO(CLOUDP-371153): we need to handle this appropriately in MatViewGenerator as updating
       // status can fail
-      throw new MaterializedViewTransientException(e);
+      throw new MaterializedViewTransientException(
+          String.valueOf(e.getMessage()),
+          e,
+          MaterializedViewTransientException.Reason.LEASE_OPERATION_FAILED);
     }
   }
 

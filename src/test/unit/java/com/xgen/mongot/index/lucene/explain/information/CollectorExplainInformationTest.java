@@ -21,12 +21,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      CollectorExplainInformationTest.TestDeserialization.class,
-      CollectorExplainInformationTest.TestSerialization.class,
+      CollectorExplainInformationTest.DeserializationTest.class,
+      CollectorExplainInformationTest.SerializationTest.class,
     })
 public class CollectorExplainInformationTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "collect-stats-deserialization";
 
     private static final BsonDeserializationTestSuite<CollectorExplainInformation> TEST_SUITE =
@@ -38,7 +38,7 @@ public class CollectorExplainInformationTest {
     private final BsonDeserializationTestSuite.TestSpecWrapper<CollectorExplainInformation>
         testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<CollectorExplainInformation> testSpec) {
       this.testSpec = testSpec;
     }
@@ -86,7 +86,7 @@ public class CollectorExplainInformationTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "collect-stats-serialization";
 
     private static final BsonSerializationTestSuite<CollectorExplainInformation> TEST_SUITE =
@@ -94,7 +94,7 @@ public class CollectorExplainInformationTest {
 
     private final BsonSerializationTestSuite.TestSpec<CollectorExplainInformation> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<CollectorExplainInformation> testSpec) {
       this.testSpec = testSpec;
     }

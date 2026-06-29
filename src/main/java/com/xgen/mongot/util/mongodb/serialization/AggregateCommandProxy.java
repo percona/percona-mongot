@@ -8,6 +8,7 @@ import org.bson.BsonArray;
 import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonDouble;
+import org.bson.BsonInt64;
 import org.bson.BsonValue;
 import org.bson.codecs.configuration.CodecRegistry;
 import org.bson.conversions.Bson;
@@ -26,6 +27,7 @@ public class AggregateCommandProxy implements Bson {
   private static final String READ_CONCERN_FIELD = "readConcern";
   private static final String REQUEST_RESUME_TOKEN = "$_requestResumeToken";
   private static final String START_AT = "$_startAt";
+  private static final String MAX_TIME_MS_FIELD = "maxTimeMS";
 
   private final BsonValue aggregate;
   private final List<Bson> pipeline;
@@ -35,6 +37,7 @@ public class AggregateCommandProxy implements Bson {
 
   private final Optional<BsonBoolean> requestResumeToken;
   private final Optional<BsonDocument> startAt;
+  private final Optional<Long> maxTimeMs;
 
   public AggregateCommandProxy(
       BsonValue aggregate,
@@ -43,7 +46,8 @@ public class AggregateCommandProxy implements Bson {
       Optional<Bson> hint,
       Optional<BsonDocument> readConcern,
       Optional<BsonBoolean> requestResumeToken,
-      Optional<BsonDocument> startAt) {
+      Optional<BsonDocument> startAt,
+      Optional<Long> maxTimeMs) {
     Check.argNotNull(aggregate, "aggregate");
     Check.argNotNull(pipeline, "pipeline");
     Check.argNotNull(cursor, "cursor");
@@ -55,6 +59,7 @@ public class AggregateCommandProxy implements Bson {
     this.readConcern = readConcern;
     this.requestResumeToken = requestResumeToken;
     this.startAt = startAt;
+    this.maxTimeMs = maxTimeMs;
   }
 
   public static class CursorProxy implements Bson {
@@ -102,6 +107,8 @@ public class AggregateCommandProxy implements Bson {
     this.requestResumeToken.ifPresent(bson -> doc.append(REQUEST_RESUME_TOKEN, bson));
 
     this.startAt.ifPresent(bson -> doc.append(START_AT, bson));
+
+    this.maxTimeMs.ifPresent(ms -> doc.append(MAX_TIME_MS_FIELD, new BsonInt64(ms)));
 
     return doc;
   }

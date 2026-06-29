@@ -19,7 +19,9 @@ public class TimingTestUtil {
     ThreadSafeInvocationCountingTimer mockedTimer =
         spy(new ThreadSafeInvocationCountingTimer(Ticker.systemTicker()));
     when(mockedTimer.getElapsedNanos()).thenReturn(RANDOM.nextLong(1000));
-    when(mockedTimer.getInvocationCount()).thenReturn(RANDOM.nextLong(1000));
+    // Must be non-zero: merged ExplainTimings use SamplingInvocationCountingTimer for
+    // high-frequency types, and getElapsedNanos() returns 0 when measurementCount is 0.
+    when(mockedTimer.getInvocationCount()).thenReturn(1 + RANDOM.nextLong(999));
     return new ExplainTimings(ignored -> mockedTimer);
   }
 

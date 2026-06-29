@@ -1,6 +1,5 @@
 package com.xgen.mongot.replication.mongodb.autoembedding;
 
-
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -14,11 +13,14 @@ import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
 import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
+import com.xgen.mongot.util.mongodb.Errors;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * MaterializedViewGenerator manages one materialized view collection for auto-embedding indexes.
@@ -63,6 +65,16 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   @GuardedBy("this")
   private boolean isLeader;
 
+  /**
+   * Cached shutdown future so that every caller of {@link #shutdown()} gets the same future from
+   * the first real shutdown. Without this, a second {@code shutdown()} call would see the generator
+   * already in {@code SHUT_DOWN} state and return {@code COMPLETED_FUTURE} immediately, which can
+   * cause {@code whenComplete} callbacks to fire before the real shutdown finishes.
+   */
+  @GuardedBy("this")
+  @Nullable
+  private CompletableFuture<Void> shutdownFuture = null;
+
   /** Executor for scheduling lifecycle tasks. Stored here since parent's field is private. */
   private final Executor lifecycleExecutor;
 
@@ -71,6 +83,8 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
    * via {@link InitializedMaterializedViewIndex#setLeaderMode(boolean)}.
    */
   private final InitializedMaterializedViewIndex matViewIndex;
+
+  private final Counter oplogFalloffResyncCounter;
 
   MaterializedViewGenerator(
       Executor lifecycleExecutor,
@@ -106,11 +120,23 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
     this.lifecycleExecutor = lifecycleExecutor;
     this.isLeader = false; // All generators start as followers
     this.matViewIndex = matViewIndex;
+    this.oplogFalloffResyncCounter = metricsFactory.counter("oplogFalloffResyncEvents");
   }
 
   /** Returns whether this generator is currently acting as the leader. */
   public synchronized boolean isLeader() {
     return this.isLeader;
+  }
+
+  /**
+   * Clears the cached leader flag and the leader-status gauge in lockstep. Idempotent. Lock
+   * order: manager → generator (caller in {@link MaterializedViewManager} holds the manager
+   * monitor; this method takes the generator monitor briefly), matching the existing
+   * {@link MaterializedViewManager#transitionToFollower} → {@link #shutdown()} path.
+   */
+  synchronized void clearLeaderState() {
+    this.isLeader = false;
+    this.matViewIndex.setLeaderMode(false);
   }
 
   /**
@@ -141,6 +167,10 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
             .handleAsync(
                 (ignored, throwable) -> {
                   if (throwable != null) {
+                    this.logger
+                        .atWarn()
+                        .setCause(throwable)
+                        .log("Leader initialization failed, dropping index for resync");
                     // For materialized views, data is stored in MongoDB. Always drop on failure,
                     // because the data can be resynced from the source collection.
                     this.failAndDropIndex(throwable, IndexStatus.Reason.INITIALIZATION_FAILED);
@@ -153,22 +183,26 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   /** Initializes the replication loop. Called by becomeLeader() to start replication. */
   private synchronized void initReplication() {
     super.init();
-    // If init() transitioned to a terminal state (e.g. stale index detected → SHUT_DOWN),
-    // clear the leader flag since a terminal generator cannot act as leader.
-    State state = this.getState();
-    if (state == State.SHUT_DOWN || state == State.FAILED) {
-      this.isLeader = false;
-      this.matViewIndex.setLeaderMode(false);
+    // init() may transition to a terminal state (stale index → SHUT_DOWN, exceededIndex →
+    // FAILED_EXCEEDED); a terminal generator cannot act as leader.
+    if (MaterializedViewManager.TERMINAL_STATES.contains(this.getState())) {
+      clearLeaderState();
     }
   }
 
   @Override
   public synchronized CompletableFuture<Void> shutdown() {
+    if (this.shutdownFuture != null) {
+      this.logger.atInfo().log("Shutdown already in progress");
+      return this.shutdownFuture;
+    }
+    this.logger.atInfo().log("Shutting down materialized view generator");
+    this.shutdownFuture = super.shutdown();
     this.matViewIndex.setLeaderMode(false);
     // Once shutdown, this generator is no longer the leader, as becomeLeader will be no-op because
     // of shutdown checks in ReplicationIndexManager
     this.isLeader = false;
-    return super.shutdown();
+    return this.shutdownFuture;
   }
 
   /**
@@ -219,9 +253,23 @@ public class MaterializedViewGenerator extends ReplicationIndexManager {
   // For auto-embedding index, we always resync instead of leaving the index in
   // RECOVERING_NON_TRANSIENT state.
   protected void handleSteadyStateNonInvalidatingResync(SteadyStateException steadyStateException) {
-    this.logger.info(
-        "Exception requiring resync occurred during steady state replication.",
-        steadyStateException);
+    this.logger
+        .atInfo()
+        .setCause(steadyStateException)
+        .log("Resync triggered during steady state replication for auto-embedding index");
+    if (isOplogFalloff(steadyStateException)) {
+      this.oplogFalloffResyncCounter.increment();
+    }
     enqueueInitialSync(IndexStatus.initialSync());
+  }
+
+  private static boolean isOplogFalloff(SteadyStateException steadyStateException) {
+    Throwable cause = steadyStateException.getCause();
+    if (cause instanceof com.mongodb.MongoException mongoException) {
+      int errorCode = mongoException.getCode();
+      return errorCode == Errors.CHANGE_STREAM_HISTORY_LOST.code
+          || errorCode == Errors.CAPPED_POSITION_LOST.code;
+    }
+    return false;
   }
 }

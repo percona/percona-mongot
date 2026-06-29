@@ -55,11 +55,9 @@ public class WhitespaceTokenizerDefinition extends TokenizerDefinition
       return true;
     }
 
-    if (!(other instanceof WhitespaceTokenizerDefinition)) {
+    if (!(other instanceof WhitespaceTokenizerDefinition otherDefinition)) {
       return false;
     }
-
-    WhitespaceTokenizerDefinition otherDefinition = (WhitespaceTokenizerDefinition) other;
     return Objects.equals(this.maxTokenLength, otherDefinition.maxTokenLength);
   }
 

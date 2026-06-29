@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerTest.createMergeScheduler;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_ID;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,6 +37,7 @@ import com.xgen.mongot.index.lucene.field.FieldValue;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.query.LuceneSearchQueryFactoryDistributor;
 import com.xgen.mongot.index.lucene.query.sort.LuceneSortFactory;
+import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.sort.LuceneIndexSortFactory;
 import com.xgen.mongot.index.lucene.util.LuceneDoubleConversionUtils;
@@ -480,8 +482,13 @@ public class IndexSortFactoryTest {
       this.resolver = indexDefinition.createFieldDefinitionResolver(IndexFormatVersion.CURRENT);
 
       var mergeScheduler =
-          new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry())
-              .createForIndexPartition(MOCK_INDEX_GENERATION_ID, 0, 1, false);
+          createMergeScheduler(
+              new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
+              MOCK_INDEX_GENERATION_ID,
+              0,
+              1,
+              false, 
+              this.directory);
       mergeScheduler.getIn().setMaxMergesAndThreads(10, 4);
 
       this.indexWriter =
@@ -497,7 +504,7 @@ public class IndexSortFactoryTest {
               SearchIndex.mockIndexingMetricsUpdater(indexDefinition.getType()),
               Optional.empty(),
               FeatureFlags.withDefaults().enable(Feature.SORTED_INDEX).build(),
-              DynamicFeatureFlagRegistry.empty());
+              () -> false);
 
       // Configure IndexWriter to have multiple segments by forcing a flush every 2 documents.
       this.indexWriter.getLuceneWriter().getConfig().setMaxBufferedDocs(2);
@@ -1331,6 +1338,65 @@ public class IndexSortFactoryTest {
               new BsonDocument("subfield", new BsonDocument("token", new BsonString("bravo")))),
           Optional.of("f.subfield.token"),
           Optional.empty());
+    }
+  }
+
+  public static class ValidateMultiTypeSortTest {
+
+    @Test
+    public void createIndexSort_multiTypeField_producesMqlMixedSort() {
+      SearchFieldDefinitionResolver mockResolver = mock(SearchFieldDefinitionResolver.class);
+      when(mockResolver.getIndexCapabilities()).thenReturn(SearchIndexCapabilities.CURRENT);
+      when(mockResolver.getFieldDefinition(any(), any()))
+          .thenReturn(
+              Optional.of(
+                  FieldDefinitionBuilder.builder()
+                      .token(TokenFieldDefinitionBuilder.builder().build())
+                      .number(
+                          NumericFieldDefinitionBuilder.builder()
+                              .indexIntegers(true)
+                              .representation(NumericFieldOptions.Representation.INT64)
+                              .buildNumberField())
+                      .build()));
+
+      LuceneIndexSortFactory sortFactory = new LuceneIndexSortFactory(mockResolver);
+      Sort sortSpec =
+          new Sort(
+              ImmutableList.of(
+                  new MongotSortField(
+                      FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC)));
+      org.apache.lucene.search.Sort actualSort = sortFactory.createIndexSort(sortSpec);
+
+      SortField[] sortFields = actualSort.getSort();
+      // MqlMixedSort handles null/missing internally; no nullness prefix for multi-type fields.
+      assertThat(sortFields.length).isEqualTo(1);
+      assertThat(sortFields[0]).isInstanceOf(MqlMixedSort.class);
+    }
+
+    @Test
+    public void createIndexSort_multiTypeFieldWithoutNumericOrDate_noNullnessPrefix() {
+      SearchFieldDefinitionResolver mockResolver = mock(SearchFieldDefinitionResolver.class);
+      when(mockResolver.getIndexCapabilities()).thenReturn(SearchIndexCapabilities.CURRENT);
+      when(mockResolver.getFieldDefinition(any(), any()))
+          .thenReturn(
+              Optional.of(
+                  FieldDefinitionBuilder.builder()
+                      .token(TokenFieldDefinitionBuilder.builder().build())
+                      .bool(BooleanFieldDefinitionBuilder.builder().build())
+                      .build()));
+
+      LuceneIndexSortFactory sortFactory = new LuceneIndexSortFactory(mockResolver);
+      Sort sortSpec =
+          new Sort(
+              ImmutableList.of(
+                  new MongotSortField(
+                      FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC)));
+      org.apache.lucene.search.Sort actualSort = sortFactory.createIndexSort(sortSpec);
+
+      SortField[] sortFields = actualSort.getSort();
+      // TOKEN + BOOLEAN: no numeric/date types, so no nullness prefix
+      assertThat(sortFields.length).isEqualTo(1);
+      assertThat(sortFields[0]).isInstanceOf(MqlMixedSort.class);
     }
   }
 

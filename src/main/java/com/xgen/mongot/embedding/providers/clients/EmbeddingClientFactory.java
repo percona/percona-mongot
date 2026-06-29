@@ -99,8 +99,9 @@ public class EmbeddingClientFactory {
    * Create an embedding client, optionally wiring AIMD congestion control for Voyage.
    *
    * <p>Voyage flex tier ({@code service_tier}) is enabled only when {@code
-   * congestionControlSemaphore} is present and the tier is in {@link #flexTiers} on Atlas, and the
-   * model allows flex ({@link EmbeddingModelConfig#useFlexTier()}).
+   * congestionControlSemaphore} is present and the tier is in {@link #flexTiers} on Atlas, the
+   * model allows flex ({@link EmbeddingModelConfig#useFlexTier()}), and the model supports flex
+   * ({@link VoyageClient#supportsFlexTierForModel(String)}).
    *
    * @param congestionControlSemaphore when present, may be attached to Voyage clients that use flex
    *     tier; when empty, flex tier is not used regardless of deployment flex-tier configuration
@@ -125,6 +126,7 @@ public class EmbeddingClientFactory {
       case EmbeddingProvider.VOYAGE -> {
         boolean useFlexTier =
             embeddingModelConfig.useFlexTier()
+                && VoyageClient.supportsFlexTierForModel(embeddingModelConfig.name())
                 && this.flexTiers.contains(serviceTier)
                 && this.deploymentEnvironment == DeploymentEnvironment.ATLAS
                 && congestionControlSemaphore.isPresent();

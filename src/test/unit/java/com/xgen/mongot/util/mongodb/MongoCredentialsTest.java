@@ -6,9 +6,9 @@ import static org.junit.Assert.assertThrows;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator.Feature;
-import com.xgen.mongot.util.mongodb.MongoCredentialsTest.TestBadFileCases;
-import com.xgen.mongot.util.mongodb.MongoCredentialsTest.TestFailureCases;
-import com.xgen.mongot.util.mongodb.MongoCredentialsTest.TestSuccessCases;
+import com.xgen.mongot.util.mongodb.MongoCredentialsTest.BadFileCasesTest;
+import com.xgen.mongot.util.mongodb.MongoCredentialsTest.FailureCasesTest;
+import com.xgen.mongot.util.mongodb.MongoCredentialsTest.SuccessCasesTest;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
@@ -22,13 +22,13 @@ import org.junit.runners.Parameterized.Parameters;
 import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
-@Suite.SuiteClasses({TestSuccessCases.class, TestFailureCases.class, TestBadFileCases.class})
+@Suite.SuiteClasses({SuccessCasesTest.class, FailureCasesTest.class, BadFileCasesTest.class})
 public class MongoCredentialsTest {
   private static final ObjectMapper MAPPER =
       new ObjectMapper(YAMLFactory.builder().disable(Feature.WRITE_DOC_START_MARKER).build());
 
   @RunWith(Parameterized.class)
-  public static class TestSuccessCases {
+  public static class SuccessCasesTest {
     @Rule public TemporaryFolder tempFolder = new TemporaryFolder();
 
     @Parameterized.Parameter(0)
@@ -37,7 +37,7 @@ public class MongoCredentialsTest {
     @Parameterized.Parameter(1)
     public String expectedKey;
 
-    @Parameters(name = "MongoCredentialsTest.TestSuccessCases {index}:{0}")
+    @Parameters(name = "MongoCredentialsTest.SuccessCasesTest {index}:{0}")
     public static List<String[]> args() {
       return List.of(
           new String[] {"encryptedKeyFile", "encryptedKeyFile"},
@@ -70,12 +70,12 @@ public class MongoCredentialsTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestFailureCases {
+  public static class FailureCasesTest {
     @Rule public TemporaryFolder tempFolder = new TemporaryFolder();
 
     @Parameterized.Parameter public String fileContents;
 
-    @Parameters(name = "MongoCredentialsTest.TestFailureCases {index}")
+    @Parameters(name = "MongoCredentialsTest.FailureCasesTest {index}")
     public static String[] args() {
       return new String[] {
         "aaaaa", // too short
@@ -117,7 +117,7 @@ public class MongoCredentialsTest {
     }
   }
 
-  public static class TestBadFileCases {
+  public static class BadFileCasesTest {
     @Rule public TemporaryFolder tempFolder = new TemporaryFolder();
 
     @Test

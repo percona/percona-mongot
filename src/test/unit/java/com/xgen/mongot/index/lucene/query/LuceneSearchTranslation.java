@@ -1,6 +1,9 @@
 package com.xgen.mongot.index.lucene.query;
 
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.definition.DocumentFieldDefinition;
@@ -36,6 +39,7 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
+import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.rules.TemporaryFolder;
 
@@ -48,6 +52,7 @@ class LuceneSearchTranslation {
   private final SearchIndexDefinition indexDefinition;
   private final SynonymRegistry synonymRegistry;
   private final FeatureFlags featureFlags;
+  private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
   private Directory directory;
   private IndexWriter writer;
   private int counter;
@@ -82,13 +87,23 @@ class LuceneSearchTranslation {
       Optional<String> analyzerName,
       Optional<DocumentFieldDefinition> mappings,
       Optional<Map<String, SynonymMappingDefinition>> synonyms,
-      Optional<FeatureFlags> featureFlags) {
+      Optional<FeatureFlags> featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     this.analyzerRegistry = AnalyzerRegistryBuilder.empty();
     this.indexDefinition = getIndexDefinition(mappings, analyzerName);
     this.synonymRegistry =
         LuceneSynonymRegistry.create(
             this.analyzerRegistry, synonyms.orElseGet(Collections::emptyMap), Optional.empty());
     this.featureFlags = featureFlags.orElse(FeatureFlags.getDefault());
+    this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+  }
+
+  private LuceneSearchTranslation(
+      Optional<String> analyzerName,
+      Optional<DocumentFieldDefinition> mappings,
+      Optional<Map<String, SynonymMappingDefinition>> synonyms,
+      Optional<FeatureFlags> featureFlags) {
+    this(analyzerName, mappings, synonyms, featureFlags, DynamicFeatureFlagRegistry.empty());
   }
 
   private LuceneSearchTranslation(
@@ -100,6 +115,18 @@ class LuceneSearchTranslation {
     this.indexDefinition = indexDefinition;
     this.synonymRegistry = synonymRegistry;
     this.featureFlags = featureFlags;
+    this.dynamicFeatureFlagRegistry = DynamicFeatureFlagRegistry.empty();
+  }
+
+  private LuceneSearchTranslation(
+      Optional<FeatureFlags> featureFlags, DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
+    this.analyzerRegistry = AnalyzerRegistryBuilder.empty();
+    this.indexDefinition = SearchIndexDefinitionBuilder.VALID_INDEX;
+    this.synonymRegistry =
+        LuceneSynonymRegistry.create(
+            this.analyzerRegistry, Collections.emptyMap(), Optional.empty());
+    this.featureFlags = featureFlags.orElse(FeatureFlags.getDefault());
+    this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
   }
 
   static LuceneSearchTranslation get() {
@@ -119,10 +146,57 @@ class LuceneSearchTranslation {
         Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(featureFlags));
   }
 
+  static LuceneSearchTranslation gatedWithDynamicFeatureFlags(DynamicFeatureFlags dff) {
+    DynamicFeatureFlagConfig config =
+        new DynamicFeatureFlagConfig(
+            dff.getName(),
+            DynamicFeatureFlagConfig.Phase.ENABLED,
+            List.of(),
+            List.of(),
+            0,
+            DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER);
+    DynamicFeatureFlagRegistry registry =
+        new DynamicFeatureFlagRegistry(
+            Optional.of(List.of(config)),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(new ObjectId()));
+    return new LuceneSearchTranslation(Optional.empty(), registry);
+  }
+
   static LuceneSearchTranslation featureFlagWithMapping(
       FeatureFlags featureFlags, DocumentFieldDefinition mapping) {
     return new LuceneSearchTranslation(
-        Optional.empty(), Optional.of(mapping), Optional.empty(), Optional.of(featureFlags));
+        Optional.empty(),
+        Optional.of(mapping),
+        Optional.empty(),
+        Optional.of(featureFlags),
+        DynamicFeatureFlagRegistry.empty());
+  }
+
+  /**
+   * Same as {@link #mapped(DocumentFieldDefinition)} but with {@link
+   * DynamicFeatureFlags#DISABLE_BULK_SCORER_QUERY_FOR_EMBEDDED_DOCUMENT_CHILD} explicitly disabled
+   * (cluster phase), so embedded child queries are not wrapped with {@code DisableBulkScorerQuery}.
+   */
+  static LuceneSearchTranslation mappedWithDisableBulkScorerQueryForEmbeddedDocumentChildDisabled(
+      DocumentFieldDefinition mapping) {
+    DynamicFeatureFlagConfig config =
+        new DynamicFeatureFlagConfig(
+            DynamicFeatureFlags.DISABLE_BULK_SCORER_QUERY_FOR_EMBEDDED_DOCUMENT_CHILD.getName(),
+            DynamicFeatureFlagConfig.Phase.DISABLED,
+            List.of(),
+            List.of(),
+            0,
+            DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER);
+    DynamicFeatureFlagRegistry registry =
+        new DynamicFeatureFlagRegistry(
+            Optional.of(List.of(config)),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(new ObjectId()));
+    return new LuceneSearchTranslation(
+        Optional.empty(), Optional.of(mapping), Optional.empty(), Optional.empty(), registry);
   }
 
   static LuceneSearchTranslation synonyms(
@@ -200,7 +274,8 @@ class LuceneSearchTranslation {
             this.synonymRegistry,
             new IndexMetricsUpdater.QueryingMetricsUpdater(SearchIndex.mockMetricsFactory()),
             false,
-            this.featureFlags);
+            this.featureFlags,
+            this.dynamicFeatureFlagRegistry);
     try (var reader = DirectoryReader.open(this.directory)) {
       return factory.createQuery(
           operator,

@@ -15,10 +15,10 @@ import java.io.IOException;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
-import javax.annotation.Nullable;
 import org.bson.BsonValue;
 import org.bson.types.Binary;
 import org.bson.types.ObjectId;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Delegates consuming indexed values to a wrapped {@link FieldValueHandler}. Determines when to

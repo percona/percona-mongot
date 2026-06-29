@@ -56,7 +56,13 @@ public class Projection {
             "ns",
             "documentKey",
             "clusterTime",
-            "updateDescription"));
+            "updateDescription",
+            // "to" carries the destination namespace for RENAME events; without it,
+            // getDestinationNamespaceDocument() returns null (HELP-93705).
+            // Note: "splitEvent" is intentionally omitted — it is added by the
+            // $changeStreamSplitLargeEvent stage which runs after $project, so it is
+            // never dropped by the projection and does not need to be listed here.
+            "to"));
 
     private final String pathPrefix;
     private final ImmutableSet<String> defaultIncludedPaths;

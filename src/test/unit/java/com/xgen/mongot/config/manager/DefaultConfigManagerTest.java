@@ -15,8 +15,10 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.emptySet;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -25,6 +27,8 @@ import com.xgen.mongot.config.manager.metrics.GroupedIndexGenerationMetrics;
 import com.xgen.mongot.config.manager.metrics.IndexConfigState;
 import com.xgen.mongot.config.manager.metrics.IndexGenerationStateMetrics;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexDetailedStatus;
@@ -41,6 +45,8 @@ import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.monitor.ReplicationStateMonitor;
 import com.xgen.mongot.monitor.ToggleGate;
+import com.xgen.mongot.util.mongodb.ConnectionStringUtil;
+import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import com.xgen.testing.mongot.config.backup.ConfigJournalV1Builder;
 import com.xgen.testing.mongot.config.manager.ConfigStateMocks;
 import com.xgen.testing.mongot.config.manager.DefaultConfigManagerMocks;
@@ -604,6 +610,7 @@ public class DefaultConfigManagerTest {
                         MOCK_SYNONYM_DETAILED_STATUS,
                         MOCK_INDEX_DEFINITION,
                         MOCK_INDEX_STATUS,
+                        MOCK_INDEX_DEFINITION_GENERATION_CURRENT.getGenerationId(),
                         Optional.of(new AggregatedIndexMetrics(0, 0, new BsonTimestamp(0), 0)))),
                 Optional.empty(),
                 MOCK_SYNONYM_STATUS),
@@ -616,6 +623,7 @@ public class DefaultConfigManagerTest {
                     new IndexDetailedStatus.Vector(
                         MOCK_VECTOR_DEFINITION,
                         IndexStatus.steady(),
+                        MOCK_VECTOR_INDEX_DEFINITION_GENERATION_CURRENT.getGenerationId(),
                         Optional.of(new AggregatedIndexMetrics(0, 0, new BsonTimestamp(0), 0)))),
                 Optional.empty()));
 
@@ -830,5 +838,165 @@ public class DefaultConfigManagerTest {
     assertThat(mocks.configManager.getReplicationStatus().initialSyncStatus());
     assertThat(mocks.configManager.getReplicationStatus().initialSyncStatus().isInitialSyncPaused())
         .isFalse();
+  }
+
+  @Test
+  public void testHandleReplicationAndSyncSourceUpdate_changedSyncSource_restartsReplication()
+      throws Exception {
+    var mocks = DefaultConfigManagerMocks.create();
+    mocks.clearInvocations();
+
+    var differentConfig =
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://otherhost"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://otherhost"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://otherhost"))
+            .build();
+
+    mocks.configManager.handleReplicationAndSyncSourceUpdate(differentConfig);
+
+    verify(mocks.lifecycleManager).updateSyncSource(differentConfig);
+  }
+
+  @Test
+  public void testHandleReplicationAndSyncSourceUpdate_missingMongodUri_restartsReplication()
+      throws Exception {
+    var mocks = DefaultConfigManagerMocks.create();
+    mocks.clearInvocations();
+
+    var configWithMissingUri =
+        SyncSourceConfig.builder()
+            // mongodSingleHostReplicationUri intentionally left empty — differs from
+            // MOCK_SYNC_SOURCE_CONFIG, so a restart is expected.
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://host"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://host"))
+            .build();
+
+    mocks.configManager.handleReplicationAndSyncSourceUpdate(configWithMissingUri);
+
+    verify(mocks.lifecycleManager).updateSyncSource(configWithMissingUri);
+  }
+
+  @Test
+  public void testHandleReplicationAndSyncSourceUpdate_unchangedSyncSource_doesNotRestart()
+      throws Exception {
+    var mocks = DefaultConfigManagerMocks.create();
+    mocks.clearInvocations();
+
+    mocks.configManager.handleReplicationAndSyncSourceUpdate(
+        ConfigStateMocks.MOCK_SYNC_SOURCE_CONFIG);
+
+    verify(mocks.lifecycleManager, never()).updateSyncSource(any());
+  }
+
+  @Test
+  public void
+      testHandleReplicationAndSyncSourceUpdate_unchangedSyncSource_missingUris_skipsDiskCheck()
+          throws Exception {
+    var mocks = DefaultConfigManagerMocks.create();
+
+    var noUriConfig =
+        SyncSourceConfig.builder()
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://host"))
+            .mongodClusterReadWriteUri(
+                ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://host"))
+            .build();
+
+    // First call: config differs from MOCK_SYNC_SOURCE_CONFIG, triggering a restart.
+    mocks.configManager.handleReplicationAndSyncSourceUpdate(noUriConfig);
+    mocks.clearInvocations();
+
+    // Second call: same no-URI config — sync source unchanged, URIs absent, disk check skipped.
+    mocks.configManager.handleReplicationAndSyncSourceUpdate(noUriConfig);
+
+    verify(mocks.lifecycleManager, never()).updateSyncSource(any());
+  }
+
+  @Test
+  public void testHandleReplicationAndSyncSourceUpdate_unchangedSyncSourceAndDiskPressure_restarts()
+      throws Exception {
+    var replicationGate = ToggleGate.opened();
+    var replicationStateMonitor =
+        ReplicationStateMonitor.builder()
+            .setReplicationGate(replicationGate)
+            .setInitialSyncGate(ToggleGate.opened())
+            .build();
+    var mocks = DefaultConfigManagerMocks.create(replicationStateMonitor);
+    mocks.clearInvocations();
+
+    // Simulate disk pressure crossing the pause threshold.
+    replicationGate.close();
+
+    // Same sync source with valid URIs — disk pressure changed, restart expected.
+    mocks.configManager.handleReplicationAndSyncSourceUpdate(
+        ConfigStateMocks.MOCK_SYNC_SOURCE_CONFIG);
+
+    verify(mocks.lifecycleManager).updateSyncSource(ConfigStateMocks.MOCK_SYNC_SOURCE_CONFIG);
+  }
+
+  /**
+   * Validates that when a live index (v1) fails with INITIAL_SYNC_REPLICATION_FAILED_RETRY while a
+   * staged replacement (v2) already exists, the recovery logic skips v1 instead of crashing.
+   *
+   * <p>This scenario occurs when a customer updates an index definition (staging v2) while v1's
+   * initial sync replication fails in the background. Since IndexInitialSyncRecovery runs before
+   * StagedIndexesSwapper in the update cycle, it must recognize that a staged replacement already
+   * handles v1's index ID and avoid retrying it. StagedIndexesSwapper then swaps v2 into live
+   * because v1 is non-serviceable (FAILED).
+   */
+  @Test
+  public void testFailedInitialSyncIndexWithStagedReplacement_skipsRetry() throws Exception {
+    var featureFlags =
+        FeatureFlags.withDefaults()
+            .enable(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)
+            .build();
+    var mocks = DefaultConfigManagerMocks.create(featureFlags);
+    var configStateMocks = mocks.mockedDependencies;
+
+    // Create v1 and let it reach steady state.
+    mocks.configManager.update(
+        emptyList(), List.of(MOCK_INDEX_DEFINITION), emptyList(), emptySet());
+    var liveIndex =
+        mocks.indexCatalog.getIndexById(MOCK_INDEX_ID).orElseThrow();
+    liveIndex.getIndex().setStatus(IndexStatus.steady());
+
+    // Future indexes created in initial sync (so v2 won't be immediately swapped in the
+    // same cycle it is staged).
+    configStateMocks.setStatusForCreatedIndexes(IndexStatus.initialSync());
+
+    // Change the definition to stage v2.
+    var newDef =
+        SearchIndexDefinitionBuilder.from(MOCK_INDEX_DEFINITION)
+            .analyzerName("lucene.keyword")
+            .build();
+    mocks.configManager.update(emptyList(), List.of(newDef), emptyList(), emptySet());
+
+    var stagedIndex = configStateMocks.staged.getIndex(MOCK_INDEX_ID).orElseThrow();
+
+    // Simulate v1 failing with a retryable initial sync failure in the background.
+    liveIndex.getIndex().setStatus(
+        IndexStatus.failed(
+            "initial sync failed",
+            IndexStatus.Reason.INITIAL_SYNC_REPLICATION_FAILED_RETRY));
+
+    configStateMocks.clearInvocations();
+
+    // Run another update cycle. IndexInitialSyncRecovery should skip v1 because v2 is staged.
+    // Then StagedIndexesSwapper swaps v2 into live because v1 is non-serviceable (FAILED).
+    mocks.configManager.update(emptyList(), List.of(newDef), emptyList(), emptySet());
+
+    // v2 was promoted to live by StagedIndexesSwapper (v1 is FAILED and non-serviceable).
+    configStateMocks.assertLiveIndexesAre(stagedIndex);
+    // No staged indexes remain after the swap.
+    configStateMocks.assertStagedIndexesAre();
+    // v1 was phased out by StagedIndexesSwapper and then dropped by PhasingOutIndexesDropper
+    // (no active cursors), so phasing out is now empty.
+    configStateMocks.assertPhasingOutIndexesAre();
   }
 }

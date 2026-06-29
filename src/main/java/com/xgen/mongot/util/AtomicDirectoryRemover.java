@@ -81,4 +81,35 @@ public class AtomicDirectoryRemover {
       // shut down cooperatively or next time AtomicDirectoryRemover is re-instantiated.
     }
   }
+
+  /**
+   * Deletes all immediate children (files and subdirectories) in a directory. Each child is
+   * atomically renamed to the trash directory before being deleted, so the child disappears
+   * from the source directory in a single atomic operation. The parent directory itself is
+   * preserved.
+   */
+  public synchronized void deleteChildrenInDirectory(Path dir) throws IOException {
+    if (!dir.toFile().exists()) {
+      return;
+    }
+
+    checkArg(!dir.equals(this.trashDirectory), "cannot remove %s", dir);
+    checkArg(dir.toFile().isDirectory(), "[%s] not a directory", dir);
+
+    try (Stream<Path> children = Files.list(dir)) {
+      for (Path child : children.collect(Collectors.toList())) {
+        if (child.toFile().isDirectory()) {
+          deleteDirectory(child);
+        } else {
+          String tempName = child.toFile().getName() + ".tmp";
+          Path temp = this.trashDirectory.resolve(tempName);
+          FileUtils.atomicallyRename(child, temp);
+          Files.delete(temp);
+        }
+      }
+    }
+
+    // As with the existing helpers, deletions may not be fsync-ed until cooperative
+    // shutdown or the next time AtomicDirectoryRemover is re-instantiated.
+  }
 }

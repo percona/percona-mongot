@@ -12,10 +12,12 @@ import com.xgen.mongot.index.query.sort.SortOrder;
 import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
+import com.xgen.testing.mongot.index.definition.AutocompleteFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.NumericFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.StringFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.TokenFieldDefinitionBuilder;
+import java.util.List;
 import org.apache.commons.collections4.Trie;
 import org.apache.commons.collections4.trie.PatriciaTrie;
 import org.junit.Test;
@@ -37,7 +39,7 @@ public class IndexSortValidatorTest {
   public void validateNoScoreFields_withScoreField_throwsException() {
     Sort sort = new Sort(ImmutableList.of(
         new MongotSortField(FieldPath.newRoot("field1"), UserFieldSortOptions.DEFAULT_ASC),
-        new MongotSortField(FieldPath.newRoot("scoreField"), 
+        new MongotSortField(FieldPath.newRoot("scoreField"),
             new MetaSortOptions(SortOrder.DESC, MetaSortField.SEARCH_SCORE))
     ));
 
@@ -85,7 +87,7 @@ public class IndexSortValidatorTest {
   }
 
   @Test
-  public void validateSortFieldsHaveSingleType_withSingleTypeFields_passes()
+  public void validateSortFieldsAreSortable_withSingleSortableType_passes()
       throws BsonParseException {
     Trie<String, FieldDefinition> staticFields = new PatriciaTrie<>();
     staticFields.put("field1", createTokenFieldDefinition());
@@ -97,11 +99,12 @@ public class IndexSortValidatorTest {
     ));
 
     // Should not throw
-    IndexSortValidator.validateSortFieldsHaveSingleType(sort, staticFields);
+    IndexSortValidator.validateSortFieldsAreSortable(sort, staticFields);
   }
 
   @Test
-  public void validateSortFieldsHaveSingleType_withMultiTypeField_throwsException() {
+  public void validateSortFieldsAreSortable_withMultipleSortableTypes_passes()
+      throws BsonParseException {
     Trie<String, FieldDefinition> staticFields = new PatriciaTrie<>();
     staticFields.put("field1", createMultiTypeFieldDefinition());
 
@@ -109,26 +112,7 @@ public class IndexSortValidatorTest {
         new MongotSortField(FieldPath.newRoot("field1"), UserFieldSortOptions.DEFAULT_ASC)
     ));
 
-    try {
-      IndexSortValidator.validateSortFieldsHaveSingleType(sort, staticFields);
-      fail("Expected BsonParseException");
-    } catch (BsonParseException e) {
-      assertEquals("Sort fields: [field1] have mixed types or are not defined", e.getMessage());
-    }
-  }
-
-  @Test
-  public void validateSortFieldsAreSortable_withSortableFields_passes() throws BsonParseException {
-    Trie<String, FieldDefinition> staticFields = new PatriciaTrie<>();
-    staticFields.put("field1", createTokenFieldDefinition());
-    staticFields.put("field2", createNumberFieldDefinition());
-
-    Sort sort = new Sort(ImmutableList.of(
-        new MongotSortField(FieldPath.newRoot("field1"), UserFieldSortOptions.DEFAULT_ASC),
-        new MongotSortField(FieldPath.newRoot("field2"), UserFieldSortOptions.DEFAULT_DESC)
-    ));
-
-    // Should not throw
+    // Multi-type fields with all sortable types should pass
     IndexSortValidator.validateSortFieldsAreSortable(sort, staticFields);
   }
 
@@ -145,9 +129,60 @@ public class IndexSortValidatorTest {
       IndexSortValidator.validateSortFieldsAreSortable(sort, staticFields);
       fail("Expected BsonParseException");
     } catch (BsonParseException e) {
-      assertEquals("Sort fields: {field1=STRING} are not sortable types. Sortable types are: "
+      assertEquals("Sort fields are not sortable: {field1=[STRING]}. Sortable types are: "
           + FieldDefinition.INDEXING_SORTABLE_TYPES, e.getMessage());
     }
+  }
+
+  @Test
+  public void validateSortFieldsAreSortable_withStringAndToken_stringIshDedup_passes()
+      throws BsonParseException {
+    Trie<String, FieldDefinition> staticFields = new PatriciaTrie<>();
+    staticFields.put("field1", createTokenAndStringFieldDefinition());
+
+    Sort sort = new Sort(ImmutableList.of(
+        new MongotSortField(FieldPath.newRoot("field1"), UserFieldSortOptions.DEFAULT_ASC)
+    ));
+
+    // TOKEN + STRING should pass: STRING is filtered out when TOKEN is present
+    IndexSortValidator.validateSortFieldsAreSortable(sort, staticFields);
+  }
+
+  @Test
+  public void validateSortFieldsAreSortable_withAutocompleteAndToken_stringIshDedup_passes()
+      throws BsonParseException {
+    Trie<String, FieldDefinition> staticFields = new PatriciaTrie<>();
+    staticFields.put("field1", createTokenAndAutocompleteFieldDefinition());
+
+    Sort sort = new Sort(ImmutableList.of(
+        new MongotSortField(FieldPath.newRoot("field1"), UserFieldSortOptions.DEFAULT_ASC)
+    ));
+
+    // TOKEN + AUTOCOMPLETE should pass: AUTOCOMPLETE is filtered out when TOKEN is present
+    IndexSortValidator.validateSortFieldsAreSortable(sort, staticFields);
+  }
+
+  @Test
+  public void filterStringishTypes_removesStringAndAutocomplete_whenTokenPresent() {
+    List<FieldTypeDefinition.Type> types = List.of(
+        FieldTypeDefinition.Type.TOKEN,
+        FieldTypeDefinition.Type.STRING,
+        FieldTypeDefinition.Type.AUTOCOMPLETE);
+
+    List<FieldTypeDefinition.Type> result = IndexSortValidator.filterStringishTypes(types);
+
+    assertEquals(List.of(FieldTypeDefinition.Type.TOKEN), result);
+  }
+
+  @Test
+  public void filterStringishTypes_keepsAllTypes_whenTokenAbsent() {
+    List<FieldTypeDefinition.Type> types = List.of(
+        FieldTypeDefinition.Type.STRING,
+        FieldTypeDefinition.Type.DATE);
+
+    List<FieldTypeDefinition.Type> result = IndexSortValidator.filterStringishTypes(types);
+
+    assertEquals(types, result);
   }
 
   // Helper methods to create field definitions
@@ -173,6 +208,20 @@ public class IndexSortValidatorTest {
     return FieldDefinitionBuilder.builder()
         .token(TokenFieldDefinitionBuilder.builder().build())
         .number(NumericFieldDefinitionBuilder.builder().buildNumberField())
+        .build();
+  }
+
+  private FieldDefinition createTokenAndStringFieldDefinition() {
+    return FieldDefinitionBuilder.builder()
+        .token(TokenFieldDefinitionBuilder.builder().build())
+        .string(StringFieldDefinitionBuilder.builder().build())
+        .build();
+  }
+
+  private FieldDefinition createTokenAndAutocompleteFieldDefinition() {
+    return FieldDefinitionBuilder.builder()
+        .token(TokenFieldDefinitionBuilder.builder().build())
+        .autocomplete(AutocompleteFieldDefinitionBuilder.builder().build())
         .build();
   }
 }

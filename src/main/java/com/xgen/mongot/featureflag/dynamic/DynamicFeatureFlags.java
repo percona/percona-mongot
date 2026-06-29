@@ -34,9 +34,29 @@ public enum DynamicFeatureFlags {
   COLLECT_MULTI_PARTITION_EMPTY_SEARCH_PRODUCER(
       "mongot.featureFlag.collectMultiPartitionEmptySearchProducer", false),
   ENABLE_10K_BUCKET_LIMIT("mongot.featureFlag.enable10kBucketLimit", false),
-  ENABLE_TOTAL_STRING_FACET_BUCKETS("mongot.featureFlag.enableTotalStringFacetBuckets", false),
+  ENABLE_TOTAL_FACET_BUCKETS("mongot.featureFlag.enableTotalFacetBuckets", false),
   BLOOM_FILTER_FOR_ID_FIELD("mongot.featureFlag.enableBloomFilterNaturalOrderInitialSync", false),
-  ;
+  BLOOM_FILTER_IN_STEADY_STATE("mongot.featureFlag.enableBloomFilterInSteadyState", false),
+  NUMERIC_V2_SEMANTICS("mongot.featureFlag.numericV2Semantics", false),
+  /**
+   * When enabled, wraps the Lucene child query of {@code embeddedDocument} operators so Lucene
+   * uses default bulk scoring instead of specialized bulk scorers for that subtree (mitigation for
+   * select Lucene 10 perf regressions on dense embedded child queries).
+   */
+  DISABLE_BULK_SCORER_QUERY_FOR_EMBEDDED_DOCUMENT_CHILD(
+      "mongot.featureFlag.disableBulkScorerQueryForEmbeddedDocumentChild", true),
+  /**
+   * When enabled, {@code $vectorSearch} enforces the wall-clock deadline ({@code
+   * deadlineTimestampMs}) supplied by mongod, failing the query with a timeout error once it
+   * elapses. When disabled, the deadline is ignored and queries run to completion.
+   */
+  VECTOR_SEARCH_QUERY_TIMEOUT("mongot.featureFlag.enableVectorSearchQueryTimeout", false),
+  /**
+   * When enabled, parks (closes) the change-stream cursor of an index that has seen no change
+   * events for the configured inactivity threshold, and reactivates it when activity resumes.
+   * Gates parking behavior only; inactivity detection and logging are always on.
+   */
+  INACTIVE_CURSOR_PARKING("mongot.featureFlag.enableInactiveCursorParking", false);
 
   private final String name;
   private final boolean fallback;

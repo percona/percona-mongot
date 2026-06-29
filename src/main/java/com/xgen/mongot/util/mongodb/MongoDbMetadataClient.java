@@ -6,6 +6,7 @@ import com.mongodb.MongoNamespace;
 import com.mongodb.client.MongoClient;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.CollectionUtils;
+import com.xgen.mongot.util.Optionals;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfos;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -45,10 +46,13 @@ public class MongoDbMetadataClient implements MongoDbServerInfoProvider, Closeab
     this.previousVersionString = Optional.empty();
     this.previousMongodbVersionGauge = Optional.empty();
 
-    syncSource.ifPresent(this::createMongoClients);
+    syncSource
+        .filter(SyncSourceConfig::hasReplicationUrisAvailable)
+        .ifPresent(this::createMongoClients);
   }
 
   private void createMongoClients(SyncSourceConfig syncSource) {
+    syncSource.validateReplicationUrisAvailable();
     this.mongosPreferredClient =
         Optional.of(
             MongoClientBuilder.buildNonReplicationPreferringMongos(
@@ -56,7 +60,11 @@ public class MongoDbMetadataClient implements MongoDbServerInfoProvider, Closeab
     this.directMongodClient =
         Optional.of(
             MongoClientBuilder.buildNonReplicationWithDefaults(
-                syncSource.mongodUri, "server info resolver", this.meterRegistry));
+                Optionals.orElseThrow(
+                    syncSource.mongodSingleHostReplicationUri,
+                    "mongodSingleHostReplicationUri must be present"),
+                "server info resolver",
+                this.meterRegistry));
   }
 
   private static MongoDbCollectionInfos resolveCollectionInfos(
@@ -153,8 +161,11 @@ public class MongoDbMetadataClient implements MongoDbServerInfoProvider, Closeab
         .increment();
 
     this.syncSource = Optional.of(newSyncSource);
+    // Close existing clients; they will be recreated once URIs are available.
     this.closeMongoClients();
-    this.createMongoClients(newSyncSource);
+    if (newSyncSource.hasReplicationUrisAvailable()) {
+      this.createMongoClients(newSyncSource);
+    }
   }
 
   @Override
@@ -170,11 +181,9 @@ public class MongoDbMetadataClient implements MongoDbServerInfoProvider, Closeab
   }
 
   private void closeMongoClients() {
-    if (this.mongosPreferredClient.isPresent()) {
-      this.mongosPreferredClient.get().close();
-    }
-    if (this.directMongodClient.isPresent()) {
-      this.directMongodClient.get().close();
-    }
+    this.mongosPreferredClient.ifPresent(MongoClient::close);
+    this.mongosPreferredClient = Optional.empty();
+    this.directMongodClient.ifPresent(MongoClient::close);
+    this.directMongodClient = Optional.empty();
   }
 }

@@ -100,12 +100,12 @@ public class ChangeStreamManagerTest {
           .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
           .build();
 
-  @Parameter() public TestContext context;
+  @Parameter() public ContextTest context;
 
   @Parameters(name = "{0}")
-  public static List<TestContext> params() {
+  public static List<ContextTest> params() {
     return List.of(
-        new TestContext("sync-client", ChangeStreamManagerTestSyncHelpers::getSyncParameters));
+        new ContextTest("sync-client", ChangeStreamManagerTestSyncHelpers::getSyncParameters));
   }
 
   @Test
@@ -2018,11 +2018,11 @@ public class ChangeStreamManagerTest {
     }
   }
 
-  private static class TestContext {
+  private static class ContextTest {
     final String name;
     final TestInstanceFactory instanceFactory;
 
-    TestContext(String name, TestInstanceFactory instanceFactory) {
+    ContextTest(String name, TestInstanceFactory instanceFactory) {
       this.name = name;
       this.instanceFactory = instanceFactory;
     }

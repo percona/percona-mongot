@@ -14,6 +14,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.NIOFSDirectory;
+import org.apache.lucene.store.ReadAdvice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -143,12 +144,11 @@ public class FileSystemDirectory extends FileSwitchDirectory {
         for (String bn : extensionsAndBaseNames.get(ex)) {
           String fileName = bn + "." + ex;
           LOG.atDebug().addKeyValue("file", fileName).log("Cache Warmer: warming segment");
-          try (IndexInput input = this.mmapDirectory.openInput(fileName, IOContext.LOAD)) {
+          try (IndexInput input =
+              this.mmapDirectory.openInput(
+                  fileName, IOContext.DEFAULT.withReadAdvice(ReadAdvice.NORMAL))) {
             // The openInput() call with IOContext.LOAD plus the above setPreload() call is
-            // expected to trigger the preload inside Lucene 9. For Lucene 10 the migration guide
-            // says to replace the IOContext.LOAD constant above with
-            // ioContext.withReadAdvice(ReadAdvice.RANDOM_PRELOAD).
-            // See: https://lucene.apache.org/core/10_0_0/MIGRATE.html
+            // expected to trigger the preload.
           }
         }
       }

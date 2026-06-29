@@ -3,7 +3,7 @@ package com.xgen.mongot.index.lucene.explain.tracing;
 import com.xgen.mongot.index.lucene.explain.information.SearchExplainInformation;
 import com.xgen.mongot.util.BsonUtils;
 import java.io.IOException;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 public class ExplainTooLargeException extends IOException {
   public ExplainTooLargeException(@Nullable String message) {

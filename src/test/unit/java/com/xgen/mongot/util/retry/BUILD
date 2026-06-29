@@ -4,6 +4,7 @@ java_test_suite(
     name = "retry",
     srcs = [
         "ActionRetryTest.java",
+        "BackoffPolicyDelayForTest.java",
         "BackoffRetryExecutorTest.java",
     ],
     tags = ["unit"],

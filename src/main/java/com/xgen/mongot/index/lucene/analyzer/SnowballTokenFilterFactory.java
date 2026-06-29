@@ -16,7 +16,7 @@ import org.tartarus.snowball.ext.EnglishStemmer;
 import org.tartarus.snowball.ext.EstonianStemmer;
 import org.tartarus.snowball.ext.FinnishStemmer;
 import org.tartarus.snowball.ext.FrenchStemmer;
-import org.tartarus.snowball.ext.German2Stemmer;
+import org.tartarus.snowball.ext.GermanStemmer;
 import org.tartarus.snowball.ext.HungarianStemmer;
 import org.tartarus.snowball.ext.IrishStemmer;
 import org.tartarus.snowball.ext.ItalianStemmer;
@@ -55,9 +55,9 @@ public class SnowballTokenFilterFactory {
               Map.entry(
                   SnowballStemmingTokenFilterDefinition.StemmerName.FRENCH, FrenchStemmer::new),
               Map.entry(
-                  SnowballStemmingTokenFilterDefinition.StemmerName.GERMAN, German2Stemmer::new),
+                  SnowballStemmingTokenFilterDefinition.StemmerName.GERMAN, GermanStemmer::new),
               Map.entry(
-                  SnowballStemmingTokenFilterDefinition.StemmerName.GERMAN2, German2Stemmer::new),
+                  SnowballStemmingTokenFilterDefinition.StemmerName.GERMAN2, GermanStemmer::new),
               Map.entry(
                   SnowballStemmingTokenFilterDefinition.StemmerName.HUNGARIAN,
                   HungarianStemmer::new),

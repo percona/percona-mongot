@@ -8,6 +8,8 @@ import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.time.Instant;
 import java.util.Arrays;
+import oshi.SystemInfo;
+import oshi.software.os.CgroupInfo;
 
 public abstract class Runtime {
 
@@ -16,6 +18,8 @@ public abstract class Runtime {
   public abstract int getNumCpus();
 
   public abstract Bytes getMaxHeapSize();
+
+  public abstract long getTotalMemoryBytes();
 
   public abstract void addShutdownHook(Runnable shutdownHook);
 
@@ -40,6 +44,24 @@ public abstract class Runtime {
     @Override
     public Bytes getMaxHeapSize() {
       return Bytes.ofBytes(RUNTIME.maxMemory());
+    }
+
+    /**
+     * Returns the instance's usable physical memory in bytes: the cgroup/container memory limit
+     * when one is set below the host total, otherwise the host's total physical memory.
+     * This mirrors how {@code MemoryMetrics} is computed.
+     */
+    @Override
+    public long getTotalMemoryBytes() {
+      var systemInfo = new SystemInfo();
+      var globalMemory = systemInfo.getHardware().getMemory();
+      var cgroupInfo = systemInfo.getOperatingSystem().getCgroupInfo();
+      long hostTotal = globalMemory.getTotal();
+      long cgroupLimit = cgroupInfo.getMemoryLimit();
+      if (cgroupLimit < CgroupInfo.UNLIMITED_MEMORY && cgroupLimit < hostTotal) {
+        return cgroupLimit;
+      }
+      return hostTotal;
     }
 
     @Override

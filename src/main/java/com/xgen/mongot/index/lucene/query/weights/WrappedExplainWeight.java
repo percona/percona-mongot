@@ -4,7 +4,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import java.io.IOException;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.queries.function.FunctionScoreQuery;
 import org.apache.lucene.sandbox.search.TermAutomatonQuery;
@@ -16,8 +15,10 @@ import org.apache.lucene.search.PhraseWeight;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.Weight;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * {@link WrappedExplainWeight} wraps a {@link Weight} to produce score details. It performs the
@@ -152,8 +153,8 @@ public class WrappedExplainWeight extends Weight {
 
   @Override
   @Nullable
-  public Scorer scorer(LeafReaderContext context) throws IOException {
-    return this.weight.scorer(context);
+  public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+    return this.weight.scorerSupplier(context);
   }
 
   @Override

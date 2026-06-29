@@ -11,18 +11,18 @@ import org.junit.runners.Suite;
 
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
-    value = {LifecycleConfigTest.TestSerialization.class, LifecycleConfigTest.TestConfig.class})
+    value = {LifecycleConfigTest.SerializationTest.class, LifecycleConfigTest.ConfigTest.class})
 public class LifecycleConfigTest {
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "lifecycle-config-serialization";
     private static final BsonSerializationTestSuite<LifecycleConfig> TEST_SUITE =
         BsonSerializationTestSuite.fromEncodable("src/test/unit/resources/lifecycle", SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<LifecycleConfig> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<LifecycleConfig> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<LifecycleConfig> testSpec) {
       this.testSpec = testSpec;
     }
 
@@ -47,7 +47,7 @@ public class LifecycleConfigTest {
     }
   }
 
-  public static class TestConfig {
+  public static class ConfigTest {
     @Test
     public void testConfigDefault() {
       var config = LifecycleConfig.getDefault();

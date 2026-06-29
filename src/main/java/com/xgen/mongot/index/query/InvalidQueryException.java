@@ -5,7 +5,7 @@ import com.google.errorprone.annotations.FormatMethod;
 import com.google.errorprone.annotations.FormatString;
 import com.xgen.mongot.util.UserFacingException;
 import com.xgen.mongot.util.functionalinterfaces.CheckedSupplier;
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * InvalidQueryException is thrown when the user's query cannot be processed due to parsing or

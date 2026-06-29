@@ -39,10 +39,10 @@ public class WireCommandParser {
   }
 
   public static ParsedCommand parse(InboundMessage msg) {
-    if (msg instanceof QueryMessage) {
-      return parse((QueryMessage) msg);
-    } else if (msg instanceof MessageMessage) {
-      return parse((MessageMessage) msg);
+    if (msg instanceof QueryMessage queryMessage) {
+      return parse(queryMessage);
+    } else if (msg instanceof MessageMessage messageMessage) {
+      return parse(messageMessage);
     } else {
       throw new UnsupportedOperationException(
           "do not know how to handle message " + msg.getHeader().opCode());

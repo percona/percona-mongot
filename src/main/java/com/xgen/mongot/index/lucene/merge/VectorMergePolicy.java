@@ -19,7 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
-import javax.annotation.Nullable;
 import org.apache.lucene.index.FilterMergePolicy;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.MergePolicy;
@@ -27,6 +26,7 @@ import org.apache.lucene.index.MergeTrigger;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Wrapper for <code>MergePolicy</code> that applies additional limits for vector indices.
@@ -258,6 +258,8 @@ public class VectorMergePolicy extends FilterMergePolicy {
         "budgetBytesUsed", policy, VectorMergePolicy::getBudgetBytesUsed);
     metricsFactory.objectValueGauge(
         "budgetBytesTotal", policy, VectorMergePolicy::getBudgetBytesTotal);
+    metricsFactory.objectValueGauge(
+        "budgetBytesHeapUsed", policy, VectorMergePolicy::getBudgetBytesHeapUsed);
 
     return policy;
   }
@@ -398,6 +400,10 @@ public class VectorMergePolicy extends FilterMergePolicy {
 
   synchronized long getBudgetBytesUsed() {
     return this.budgetBytesUsed;
+  }
+
+  synchronized long getBudgetBytesHeapUsed() {
+    return this.budgetBytesHeapUsed;
   }
 
   long getBudgetBytesTotal() {
@@ -698,7 +704,19 @@ public class VectorMergePolicy extends FilterMergePolicy {
     @Var long totalVectorBytes = 0;
     @Var long totalSegmentHeapBytes = 0;
 
-    for (SegmentVectorSize segment : sizedSegments) {
+    // Sort so that segments with deletes are packed first (ensuring they are not crowded out by
+    // clean segments), then by heap size ascending within each group so smaller segments are
+    // accumulated first, maximizing the total number of segments that fit within the budget
+    // regardless of the order the parent policy presents them.
+    List<SegmentVectorSize> sorted =
+        sizedSegments.stream()
+            .sorted(
+                Comparator.comparingInt((SegmentVectorSize s) -> s.info.getDelCount() > 0 ? 0 : 1)
+                    .thenComparingLong(s -> s.segmentHeapByteSize)
+                    .thenComparing(s -> s.info.info.name))
+            .toList();
+
+    for (SegmentVectorSize segment : sorted) {
       if (segment.vectorByteSize < this.maxVectorInputBytes
           && segment.segmentHeapByteSize < this.segmentHeapBytesBudget) {
         long newVectorBytes = totalVectorBytes + segment.vectorByteSize;

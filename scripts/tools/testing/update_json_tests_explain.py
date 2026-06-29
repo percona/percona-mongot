@@ -5,6 +5,15 @@ changes to a query implementation. The output should still be manually inspected
 correctness. This script will terminate if a test failure outside explain is encountered (e.g.
 it will not update returned doc IDs)
 
+Note on duplicate test cases with runFor restrictions:
+  Some test cases (mostly for TestQueryIntegration and TestQueryIntegrationV3) are duplicated in
+  the golden files to support different explain output across index feature versions.
+  For example, a date query test may have two entries with the same name:
+    - one with "runFor": { "indexFeatureVersion": { "from": 4 } }  (V4 explain)
+    - one with "runFor": { "indexFeatureVersion": { "to": 3 } }    (V3 explain)
+  This script matches by name AND by indexFeatureVersion from the test log. The first test case whose runFor.indexFeatureVersion range covers the
+  logged feature version is updated, so ordering in the JSON file no longer matters.
+
 Sample run:
 
 make test.e2e
@@ -25,7 +34,7 @@ from collections import OrderedDict
 # {"query": {"type": "ConstantScoreQuery", "args": {"query": {"type": "BooleanQuery", "args": {"must": [], "mustNot": [], "should": [{"type": "IndexOrDocValuesQuery", "args": {"query": [{"type": "PointRangeQuery", "args": {"path": "a", "representation": "double", "gte": 3.0, "lte": 3.0}}, {"type": "SortedNumericDocValuesRangeQuery", "args": {}}]}}, {"type": "PointRangeQuery", "args": {"path": "a", "representation": "int64", "gte": 3, "lte": 3}}, {"type": "IndexOrDocValuesQuery", "args": {"query": [{"type": "PointRangeQuery", "args": {"path": "a", "representation": "int64", "gte": 3, "lte": 3}}, {"type": "SortedNumericDocValuesRangeQuery", "args": {}}]}}, {"type": "PointRangeQuery", "args": {"path": "a", "representation": "double", "gte": 3.0, "lte": 3.0}}], "filter": [], "minimumShouldMatch": 0}}}}, "metadata": {"totalLuceneDocs": 2}}
 
 
-startRegex = re.compile(r"\d+\) runTest\[(.*?)_(.+)_FormatVersion-\d+")
+startRegex = re.compile(r"\d+\) runTest\[(.*?)_(.+)_FormatVersion-\d+_FeatureVersion-(\d+)")
 
 
 def main():
@@ -51,20 +60,28 @@ def main():
           m = startRegex.search(line)
           test_file = m.group(1) + '.json'
           test_case = m.group(2)
+          feature_version = int(m.group(3))
           error, expected, actual_literal = next(file), next(file), next(file)
           if "explain" not in error:
             print("Test case ", test_case, " contains unsupported error type:", error, file=sys.stderr)
             continue
           actual = next(file)
 
-          update_test_case(golden_file_directory, test_file, test_case, actual)
-        else:
-          pass
+          update_test_case(golden_file_directory, test_file, test_case, actual, feature_version)
+        elif re.search(r"\d+\) runTest\[", line):
+          print("WARNING: skipping unrecognized runTest line format:", line.strip(), file=sys.stderr)
     except StopIteration:
       print("Done")
 
 
-def update_test_case(directory, test_file, test_case, actual):
+def version_matches(case, feature_version):
+  ifv = case.get("index", {}).get("runFor", {}).get("indexFeatureVersion", {})
+  from_v = ifv.get("from", 0)
+  to_v = ifv.get("to", float("inf"))
+  return from_v <= feature_version <= to_v
+
+
+def update_test_case(directory, test_file, test_case, actual, feature_version=None):
   absolute_file = directory + '/' + test_file
   done = False
   print("Updating ", absolute_file, " -- ", test_case)
@@ -74,8 +91,10 @@ def update_test_case(directory, test_file, test_case, actual):
       # Load the JSON data into a Python dictionary
       data = json.load(file)
       for case in data['tests']:
-        # First try exact match
+        # First try exact match (name + feature version range)
         if case["name"] == test_case:
+          if feature_version is not None and not version_matches(case, feature_version):
+            continue
           updated = json.loads(actual, object_pairs_hook=OrderedDict)
           updated.pop('metadata', None)  # Don't include metadata for testing
           case['result']["explain"] = updated
@@ -85,6 +104,8 @@ def update_test_case(directory, test_file, test_case, actual):
         # Try matching by checking if the test_case starts with the case name and has a suffix.
         # e.g., test_case="numCandidates-higher-than-limit_docsOneShard" should match case name "numCandidates-higher-than-limit"
         if test_case.startswith(case["name"] + "_") and "shardZoneConfigs" in case:
+          if feature_version is not None and not version_matches(case, feature_version):
+            continue
           zone_config_suffix = test_case[len(case["name"]) + 1:]
           if zone_config_suffix in case["shardZoneConfigs"]:
             updated = json.loads(actual, object_pairs_hook=OrderedDict)

@@ -6,7 +6,6 @@ import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.lucene.explain.tracing.ExplainQueryState;
 import com.xgen.mongot.index.query.InvalidQueryException;
-import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
 import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.SearchQuery;
@@ -33,20 +32,6 @@ interface IndexCursorManager {
           ReaderClosedException {
     return createCursor(
         namespace, new CursorQuery.Search(query), queryCursorOptions, queryOptimizationFlags);
-  }
-
-  default SearchCursorInfo createCursor(
-      String namespace,
-      MaterializedVectorSearchQuery query,
-      QueryCursorOptions queryCursorOptions,
-      QueryOptimizationFlags queryOptimizationFlags)
-      throws IOException,
-          InvalidQueryException,
-          IndexUnavailableException,
-          InterruptedException,
-          ReaderClosedException {
-    return createCursor(
-        namespace, new CursorQuery.Vector(query), queryCursorOptions, queryOptimizationFlags);
   }
 
   SearchCursorInfo createCursor(

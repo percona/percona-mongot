@@ -29,6 +29,8 @@ public class Errors {
 
   public static final Error CURSOR_NOT_FOUND = new Error(43, "CursorNotFound");
 
+  public static final Error MAX_TIME_MS_EXPIRED = new Error(50, "MaxTimeMSExpired");
+
   public static final Error INDEX_ALREADY_EXISTS = new Error(68, "IndexAlreadyExists");
   public static final Error AUTH_SCHEMA_INCOMPATIBLE = new Error(69, "AuthSchemaIncompatible");
   public static final Error SHARD_NOT_FOUND = new Error(70, "ShardNotFound");
@@ -38,6 +40,8 @@ public class Errors {
   public static final Error CAPPED_POSITION_LOST = new Error(136, "CappedPositionLost");
 
   public static final Error QUERY_PLAN_KILLED = new Error(175, "QueryPlanKilled");
+
+  public static final Error KEY_NOT_FOUND = new Error(211, "KeyNotFound");
 
   public static final Error AUTHENTICATION_RESTRICTION_UNMET =
       new Error(214, "AuthenticationRestrictionUnmet");
@@ -53,8 +57,6 @@ public class Errors {
   public static final Error INGRESS_REQUEST_RATE_LIMIT_EXCEEDED =
       new Error(462, "IngressRequestRateLimitExceeded");
 
-  // Reserved for future load-shedding specific rejection code.
-  // Keep unused for now until mongo-side code is finalized and rolled out.
   public static final Error SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD =
       new Error(489, "SearchRequestRejectedDueToOverload");
 
@@ -78,7 +80,6 @@ public class Errors {
   public static final Error INITIAL_SYNC_ID_MISMATCH = new Error(8132701, "InitialSyncIdMismatch");
   public static final Error NO_QUERY_EXECUTION_PLANS = new Error(291, "NoQueryExecutionPlans");
 
-  // “489” is reserved for future load-shedding specific rejection code.
   public static final Set<Integer> RETRYABLE_ERROR_CODES =
       Set.of(
           6, 7, 63, 89, 91, 133, 150, 189, 234, 262, 462, 489, 9001, 10107, 11600, 11602, 13388,

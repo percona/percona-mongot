@@ -15,13 +15,13 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      CursorOptionsDefinitionTest.TestDeserialization.class,
-      CursorOptionsDefinitionTest.TestSerialization.class,
+      CursorOptionsDefinitionTest.DeserializationTest.class,
+      CursorOptionsDefinitionTest.SerializationTest.class,
     })
 public class CursorOptionsDefinitionTest {
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "cursor-options-deserialization";
     private static final BsonDeserializationTestSuite<CursorOptionsDefinition> TEST_SUITE =
         fromDocument(
@@ -31,7 +31,7 @@ public class CursorOptionsDefinitionTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<CursorOptionsDefinition> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<CursorOptionsDefinition> testSpec) {
       this.testSpec = testSpec;
     }
@@ -69,7 +69,7 @@ public class CursorOptionsDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "cursor-options-serialization";
     private static final BsonSerializationTestSuite<CursorOptionsDefinition> TEST_SUITE =
         fromEncodable(
@@ -77,7 +77,7 @@ public class CursorOptionsDefinitionTest {
 
     private final BsonSerializationTestSuite.TestSpec<CursorOptionsDefinition> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<CursorOptionsDefinition> testSpec) {
       this.testSpec = testSpec;
     }

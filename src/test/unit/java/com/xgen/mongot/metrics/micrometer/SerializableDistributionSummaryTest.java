@@ -16,12 +16,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      SerializableDistributionSummaryTest.TestDeserialization.class,
-      SerializableDistributionSummaryTest.TestSerialization.class,
+      SerializableDistributionSummaryTest.DeserializationTest.class,
+      SerializableDistributionSummaryTest.SerializationTest.class,
     })
 public class SerializableDistributionSummaryTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
 
     private static final String SUITE_NAME = "serializable-distribution-summary-deserialization";
     private static final BsonDeserializationTestSuite<SerializableDistributionSummary> TEST_SUITE =
@@ -33,7 +33,7 @@ public class SerializableDistributionSummaryTest {
     private final BsonDeserializationTestSuite.TestSpecWrapper<SerializableDistributionSummary>
         testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<SerializableDistributionSummary> testSpec) {
       this.testSpec = testSpec;
     }
@@ -72,7 +72,7 @@ public class SerializableDistributionSummaryTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "serializable-distribution-summary-serialization";
     private static final BsonSerializationTestSuite<SerializableDistributionSummary> TEST_SUITE =
@@ -83,7 +83,7 @@ public class SerializableDistributionSummaryTest {
 
     private final BsonSerializationTestSuite.TestSpec<SerializableDistributionSummary> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<SerializableDistributionSummary> testSpec) {
       this.testSpec = testSpec;
     }

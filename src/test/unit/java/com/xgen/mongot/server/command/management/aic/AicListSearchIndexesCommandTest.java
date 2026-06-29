@@ -10,11 +10,16 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexEntry;
 import com.xgen.mongot.catalogservice.IndexStats;
 import com.xgen.mongot.catalogservice.IndexStatsEntry;
@@ -22,6 +27,7 @@ import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerState;
 import com.xgen.mongot.catalogservice.ServerStateEntry;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.IndexInformation;
@@ -29,6 +35,7 @@ import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.server.command.management.definition.ListSearchIndexesCommandDefinition;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
@@ -107,6 +114,7 @@ public class AicListSearchIndexesCommandTest {
     return new AicListSearchIndexesCommand(
         this.mockMetadataService,
         this.mockIndexInfoProvider,
+        mock(CatalogAccessGuard.class),
         DATABASE_NAME,
         COLLECTION_UUID,
         COLLECTION_NAME,
@@ -593,6 +601,60 @@ public class AicListSearchIndexesCommandTest {
     // Verify all 100 hosts are in statusDetail
     BsonArray statusDetail = batch.getFirst().asDocument().getArray("statusDetail");
     assertEquals(100, statusDetail.size());
+  }
+
+  @Test
+  public void testTopologyMismatchExceptionReturnsCommandFailed() throws Exception {
+    var mockGuard = mock(CatalogAccessGuard.class);
+    doThrow(new TopologyMismatchException("router topology mismatch"))
+        .when(mockGuard)
+        .requireTopologyMatch();
+
+    var definition = createListDefinition();
+    var command =
+        new AicListSearchIndexesCommand(
+            this.mockMetadataService,
+            this.mockIndexInfoProvider,
+            mockGuard,
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.of(VIEW),
+            definition,
+            false);
+    var response = command.run();
+
+    assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
+    assertEquals(Errors.COMMAND_FAILED.name, response.getString("codeName").getValue());
+    assertTrue(response.getString("errmsg").getValue().contains("router topology mismatch"));
+    verify(this.mockMetadataService, never()).getAuthoritativeIndexCatalog();
+  }
+
+  @Test
+  public void testCheckedMongoExceptionReturnsCommandFailed() throws Exception {
+    var mockGuard = mock(CatalogAccessGuard.class);
+    doThrow(new CheckedMongoException(new MongoException("mongo connection failed")))
+        .when(mockGuard)
+        .requireTopologyMatch();
+
+    var definition = createListDefinition();
+    var command =
+        new AicListSearchIndexesCommand(
+            this.mockMetadataService,
+            this.mockIndexInfoProvider,
+            mockGuard,
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.of(VIEW),
+            definition,
+            false);
+    var response = command.run();
+
+    assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
+    assertEquals(Errors.COMMAND_FAILED.name, response.getString("codeName").getValue());
+    assertTrue(response.getString("errmsg").getValue().contains("mongo connection failed"));
+    verify(this.mockMetadataService, never()).getAuthoritativeIndexCatalog();
   }
 
   @Test

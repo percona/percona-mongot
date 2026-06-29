@@ -69,7 +69,7 @@
       }
     },
     {
-      "description": "with stale info",
+      "description": "with stale info without resume token",
       "value": {
         "staleStateInfo": {
           "lastOptime": {
@@ -84,7 +84,7 @@
       }
     },
     {
-      "description": "with stale info with unknown fields",
+      "description": "with stale info with resume token",
       "value": {
         "staleStateInfo": {
           "lastOptime": {
@@ -98,7 +98,7 @@
           "changeStreamResumeInfo": {
             "namespace": "database.collection",
             "resumeToken": {
-              "_data": "resume token"
+              "_data": "8200000000499602d22b0229296e"
             }
           },
           "backendIndexVersion": 6

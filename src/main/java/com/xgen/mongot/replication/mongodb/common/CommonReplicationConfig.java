@@ -15,16 +15,19 @@ public abstract sealed class CommonReplicationConfig
       boolean pauseAllInitialSyncs,
       List<ObjectId> pauseInitialSyncOnIndexIds,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup) {}
 
   public enum Type {
-    DEFAULT(""),
-    AUTO_EMBEDDING("autoEmbedding.");
+    DEFAULT("", "replication"),
+    AUTO_EMBEDDING("autoEmbedding.", "autoembedding");
     public final String metricsNamespacePrefix;
+    public final String resourceAttributionSubsystem;
 
-    Type(String metricsNamespacePrefix) {
+    Type(String metricsNamespacePrefix, String resourceAttributionSubsystem) {
       this.metricsNamespacePrefix = metricsNamespacePrefix;
+      this.resourceAttributionSubsystem = resourceAttributionSubsystem;
     }
   }
 
@@ -36,6 +39,10 @@ public abstract sealed class CommonReplicationConfig
    * that exceed 16MB limit. When enabled, events will be automatically fragmented and reassembled.
    */
   final boolean enableSplitLargeChangeStreamEvents;
+
+  /** Whether to enable support for large change stream events that exceed the 16MB limit
+   *  during initial sync. */
+  final boolean splitLargeChangeStreamEventsForInitialSync;
 
   /**
    * When pauseAllInitialSyncs is set to false, we will pause initial sync for indexes in this list.
@@ -56,17 +63,24 @@ public abstract sealed class CommonReplicationConfig
       boolean pauseAllInitialSyncs,
       List<ObjectId> pauseInitialSyncOnIndexIds,
       boolean enableSplitLargeChangeStreamEvents,
+      boolean splitLargeChangeStreamEventsForInitialSync,
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup) {
     this.pauseAllInitialSyncs = pauseAllInitialSyncs;
     this.pauseInitialSyncOnIndexIds = pauseInitialSyncOnIndexIds;
     this.enableSplitLargeChangeStreamEvents = enableSplitLargeChangeStreamEvents;
+    this.splitLargeChangeStreamEventsForInitialSync = splitLargeChangeStreamEventsForInitialSync;
     this.excludedChangestreamFields = excludedChangestreamFields;
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
   }
 
   public static GlobalReplicationConfig defaultGlobalReplicationConfig() {
-    return new GlobalReplicationConfig(false, List.of(), false, List.of(), false);
+    return new GlobalReplicationConfig(false, List.of(), false, false, List.of(), false);
+  }
+
+  public static GlobalReplicationConfig communityDefaultGlobalReplicationConfig() {
+    // Enable splitLargeChangeStreamEvents and matchCollectionUuidForUpdateLookup for community
+    return new GlobalReplicationConfig(false, List.of(), true, false, List.of(), true);
   }
 
   // Overridable parameters by subclasses.
@@ -90,6 +104,10 @@ public abstract sealed class CommonReplicationConfig
 
   public final boolean getEnableSplitLargeChangeStreamEvents() {
     return this.enableSplitLargeChangeStreamEvents;
+  }
+
+  public final boolean getSplitLargeChangeStreamEventsForInitialSync() {
+    return this.splitLargeChangeStreamEventsForInitialSync;
   }
 
   public final List<ObjectId> getPauseInitialSyncOnIndexIds() {

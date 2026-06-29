@@ -2,6 +2,9 @@ package com.xgen.mongot.index.autoembedding;
 
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.mongodb.MaterializedViewCollectionResolver;
+import com.xgen.mongot.index.definition.FieldDefinition;
+import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldDefinition;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
@@ -16,11 +19,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Utilities for {@link MaterializedViewIndexGeneration}, including detection of when two vector
- * index definitions differ only by Lucene-only parameters (e.g. indexingMethod, hnswOptions,
- * similarity, etc...). When Lucene params change, replaceGenerator updates the lease in place and
- * preserves the resume token (skipInitialSync=true). Other changes trigger full replace with
- * skipInitialSync=false.
+ * Utilities for {@link MaterializedViewIndexGeneration}, including detection of when two index
+ * definitions differ only by Lucene-only parameters (e.g. hnswOptions, analyzers). When Lucene-only
+ * params change, replaceGenerator updates the lease in place (persistLeaseForGeneration) and
+ * preserves the resume token (doInitialSync=false). Other changes trigger full replace with
+ * doInitialSync=true.
  */
 public final class MaterializedViewIndexGenerationUtil {
 
@@ -40,9 +43,36 @@ public final class MaterializedViewIndexGenerationUtil {
 
   /**
    * True if the new definition could skip resync, e.g. differ only by Lucene params (hnswOptions,
-   * numPartitions, indexFeatureVersion). When false, resync is needed.
+   * numPartitions, indexFeatureVersion, analyzers). When false, resync is needed.
    */
-  public static boolean skipInitialSync(
+  public static boolean skipInitialSync(IndexDefinition oldDef, IndexDefinition newDef) {
+    return switch (oldDef) {
+      case VectorIndexDefinition oldVector -> {
+        if (!(newDef instanceof VectorIndexDefinition newVector)) {
+          throw new IllegalArgumentException(
+              "Cannot compare definitions of different types: "
+                  + oldDef.getClass().getSimpleName()
+                  + " vs "
+                  + newDef.getClass().getSimpleName());
+        }
+        yield skipInitialSyncVector(oldVector, newVector);
+      }
+      case SearchIndexDefinition oldSearch -> {
+        if (!(newDef instanceof SearchIndexDefinition newSearch)) {
+          throw new IllegalArgumentException(
+              "Cannot compare definitions of different types: "
+                  + oldDef.getClass().getSimpleName()
+                  + " vs "
+                  + newDef.getClass().getSimpleName());
+        }
+        yield skipInitialSyncSearch(oldSearch, newSearch);
+      }
+    };
+  }
+
+  // ---- Vector index ----
+
+  private static boolean skipInitialSyncVector(
       VectorIndexDefinition oldDef, VectorIndexDefinition newDef) {
     // Conditions that REQUIRE resync (return false):
 
@@ -59,12 +89,12 @@ public final class MaterializedViewIndexGenerationUtil {
     }
 
     // 3. Lucene-only params changed (indexingMethod, hnswOptions, similarity, etc.) → reuse
-    if (luceneParamsChanged(oldDef, newDef)) {
+    if (vectorLuceneParamsChanged(oldDef, newDef)) {
       return true;
     }
 
-    // 4. Defensive logic. This should never happen because we only call skipInitialSync to
-    // determine index action when definition version changes.
+    // 4. Same definition version (e.g. Lucene rebuild, fell off oplog). No MV schema change,
+    // so we preserve the existing commit and resume steady-state replication.
     if (oldDef.getDefinitionVersion().equals(newDef.getDefinitionVersion())) {
       LOG.atInfo().log("Definition version did not change");
       return true;
@@ -82,7 +112,7 @@ public final class MaterializedViewIndexGenerationUtil {
    * BsonDocument#equals(Object)} on key-sorted copies. Top-level: numPartitions,
    * indexFeatureVersion.
    */
-  private static boolean luceneParamsChanged(
+  private static boolean vectorLuceneParamsChanged(
       VectorIndexDefinition oldDef, VectorIndexDefinition newDef) {
     var oldAutoEmbedFields =
         oldDef.getFields().stream()
@@ -208,5 +238,107 @@ public final class MaterializedViewIndexGenerationUtil {
       return true;
     }
     return false;
+  }
+
+  // ---- Search index ----
+
+  private static boolean skipInitialSyncSearch(
+      SearchIndexDefinition oldDef, SearchIndexDefinition newDef) {
+    // 1. Auto-embed fields changed -> resync
+    String oldHash = MaterializedViewCollectionResolver.computeHash(oldDef);
+    String newHash = MaterializedViewCollectionResolver.computeHash(newDef);
+    if (!oldHash.equals(newHash)) {
+      LOG.atError()
+          .log(
+              "Search AUTO_EMBED fields changed, "
+                  + "which should NOT happen in replaceGenerator path");
+      return false;
+    }
+
+    // 2. Non-auto-embed fields changed -> resync
+    if (searchNonAutoEmbedFieldsChanged(oldDef, newDef)) {
+      return false;
+    }
+
+    // 3. Lucene-only params changed -> reuse
+    if (searchLuceneParamsChanged(oldDef, newDef)) {
+      return true;
+    }
+
+    // 4. Same definition version (e.g. Lucene rebuild, fell off oplog). Step 4 trusts that
+    // steps 1-3 cover every schema-affecting field; new mapping properties must be added to
+    // step 2 (`searchNonAutoEmbedFieldsChanged`) before they can land in the def or the
+    // schema-change path will silently short-circuit here.
+    if (oldDef.getDefinitionVersion().equals(newDef.getDefinitionVersion())) {
+      LOG.atInfo().log("Definition version did not change");
+      return true;
+    }
+
+    // 5. Only definitionVersion differs -> resync
+    return false;
+  }
+
+  private static boolean searchNonAutoEmbedFieldsChanged(
+      SearchIndexDefinition oldDef, SearchIndexDefinition newDef) {
+    // TODO(CLOUDP-353553): allowlist-of-checks below misses per-field Lucene-only tweaks
+    // (analyzer/tokenization on non-auto-embed fields, hnswOptions/similarity on auto-embed
+    // fields) — forces a full re-embed when only Lucene params changed. Vector strips these
+    // per-field; search should mirror that. Also: every new top-level mapping property
+    // (typeSets, synonyms, storedSource, sort, …) has to be added below explicitly today.
+    if (!oldDef.getMappings().dynamic().equals(newDef.getMappings().dynamic())) {
+      LOG.atInfo().log("Mappings dynamic flag changed");
+      return true;
+    }
+
+    // Compare non-auto-embed fields (order-independent via sorted map)
+    var oldNonAutoEmbed = new TreeMap<String, FieldDefinition>();
+    var newNonAutoEmbed = new TreeMap<String, FieldDefinition>();
+    for (var entry : oldDef.getMappings().fields().entrySet()) {
+      if (entry.getValue().searchAutoEmbedFieldDefinition().isEmpty()) {
+        oldNonAutoEmbed.put(entry.getKey(), entry.getValue());
+      }
+    }
+    for (var entry : newDef.getMappings().fields().entrySet()) {
+      if (entry.getValue().searchAutoEmbedFieldDefinition().isEmpty()) {
+        newNonAutoEmbed.put(entry.getKey(), entry.getValue());
+      }
+    }
+    if (!oldNonAutoEmbed.equals(newNonAutoEmbed)) {
+      LOG.atInfo().log("Search non-auto-embed fields changed");
+      return true;
+    }
+    return false;
+  }
+
+  private static boolean searchLuceneParamsChanged(
+      SearchIndexDefinition oldDef, SearchIndexDefinition newDef) {
+    @Var boolean changed = false;
+    if (oldDef.getNumPartitions() != newDef.getNumPartitions()) {
+      LOG.atInfo()
+          .addKeyValue("oldNumPartitions", oldDef.getNumPartitions())
+          .addKeyValue("newNumPartitions", newDef.getNumPartitions())
+          .log("numPartitions changed");
+      changed = true;
+    }
+    if (oldDef.getParsedIndexFeatureVersion() != newDef.getParsedIndexFeatureVersion()) {
+      LOG.atInfo()
+          .addKeyValue("oldIndexFeatureVersion", oldDef.getParsedIndexFeatureVersion())
+          .addKeyValue("newIndexFeatureVersion", newDef.getParsedIndexFeatureVersion())
+          .log("indexFeatureVersion changed");
+      changed = true;
+    }
+    if (!oldDef.getAnalyzerName().equals(newDef.getAnalyzerName())) {
+      LOG.atInfo().log("analyzerName changed");
+      changed = true;
+    }
+    if (!oldDef.getSearchAnalyzerName().equals(newDef.getSearchAnalyzerName())) {
+      LOG.atInfo().log("searchAnalyzerName changed");
+      changed = true;
+    }
+    if (!oldDef.getAnalyzers().equals(newDef.getAnalyzers())) {
+      LOG.atInfo().log("custom analyzers changed");
+      changed = true;
+    }
+    return changed;
   }
 }

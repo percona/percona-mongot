@@ -64,11 +64,9 @@ public class ShingleTokenFilterDefinition extends TokenFilterDefinition
       return true;
     }
 
-    if (!(other instanceof ShingleTokenFilterDefinition)) {
+    if (!(other instanceof ShingleTokenFilterDefinition otherDefinition)) {
       return false;
     }
-
-    ShingleTokenFilterDefinition otherDefinition = (ShingleTokenFilterDefinition) other;
     return (this.minShingleSize == otherDefinition.minShingleSize)
         && (this.maxShingleSize == otherDefinition.maxShingleSize);
   }

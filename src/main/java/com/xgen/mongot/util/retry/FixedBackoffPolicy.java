@@ -39,6 +39,14 @@ public class FixedBackoffPolicy implements BackoffPolicy {
     return retryPolicy.withDelay(this.delay).withJitter(this.jitter);
   }
 
+  @Override
+  public Duration delayFor(int consecutiveFailures) {
+    if (consecutiveFailures <= 0) {
+      return Duration.ZERO;
+    }
+    return applyJitter(this.delay, this.jitter);
+  }
+
   public static class BackoffPolicyDelayBuilder {
     public BackoffPolicyBuilder delay(Duration delay) {
       return new BackoffPolicyBuilder(delay);

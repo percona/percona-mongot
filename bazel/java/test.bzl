@@ -1,7 +1,34 @@
 load("@contrib_rules_jvm//java:defs.bzl", _java_test_suite = "java_test_suite")
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
 load("@rules_jvm_external//:defs.bzl", "artifact")
-load(":deps.bzl", "TEST_ONLY_ARTIFACTS")
 load(":package.bzl", "mongot_java_package")
+
+# Maven coordinates resolved as test-only deps for every java test suite.
+# The strings are converted to @maven//... labels by mongot_java_package._transform_deps.
+# Versions are pinned via the testonly maven.artifact tags in bazel/java/maven.MODULE.bazel,
+# so they may be omitted here.
+TEST_ONLY_ARTIFACTS = [
+    "org.openjdk.jmh:jmh-core",
+    "org.openjdk.jmh:jmh-generator-annprocess",
+    "com.google.guava:guava-testlib",
+    "com.pholser:junit-quickcheck-core",
+    "com.pholser:junit-quickcheck-generators",
+    "com.github.docker-java:docker-java-core",
+    "com.github.docker-java:docker-java-api",
+    "com.github.docker-java:docker-java-transport",
+    "com.github.docker-java:docker-java-transport-httpclient5",
+    "io.projectreactor:reactor-test",
+    "com.googlecode.junit-toolbox:junit-toolbox",
+    "org.hamcrest:hamcrest-library",
+    "org.hamcrest:hamcrest-core",
+    "junit:junit",
+    "org.mockito:mockito-subclass",
+    "com.google.truth:truth",
+    "com.googlecode.json-simple:json-simple",
+    "com.puppycrawl.tools:checkstyle",
+    "com.github.spotbugs:spotbugs",
+]
 
 MOCKITO_CORE_LIB = "@maven//:org_mockito_mockito_core"
 MOCKITO_SUBCLASS_LIB = "@maven//:org_mockito_mockito_subclass"
@@ -47,7 +74,7 @@ def mongot_java_test_resources():
     )
 
     # Add dummy java library so resource files work with Intellij's 'Select Opened File'
-    native.java_library(
+    java_library(
         name = "dummy_resources_for_intellij_indexing",
         srcs = [],  # no Java sources needed
         resources = [":srcs"],
@@ -55,7 +82,7 @@ def mongot_java_test_resources():
     )
 
 def mongot_java_unit_test(name, test_class, size = "small", timeout = "short", tags = [], data = [], **kwargs):
-    native.java_test(
+    java_test(
         name = name,
         tags = tags + ["unit"],
         size = size,
@@ -118,8 +145,9 @@ def perf_java_integration_test_suite(
     )
 
 def mongot_java_integration_test(size = "small", timeout = "short", tags = [], **kwargs):
-    native.java_test(
-        tags = tags + ["integration"],
+    final_tags = tags if "integration_community_sharded" in tags else tags + ["integration"]
+    java_test(
+        tags = final_tags,
         size = size,
         timeout = timeout,
         **kwargs
@@ -153,7 +181,7 @@ def mongot_java_integration_test_suite(
     )
 
 def mongot_java_e2e_test(size = "small", timeout = "short", tags = [], **kwargs):
-    native.java_test(
+    java_test(
         tags = tags + ["e2e", "exclusive"],
         size = size,
         timeout = timeout,
@@ -203,7 +231,7 @@ def mongot_java_e2e_test_suite(
     )
 
 def mongot_java_fuzz_test(size = "small", timeout = "short", tags = [], **kwargs):
-    native.java_test(
+    java_test(
         tags = tags + ["fuzz"],
         size = size,
         timeout = timeout,
@@ -223,13 +251,14 @@ def mongot_java_fuzz_test_suite(name, deps = [], resources = False, exclude_file
         timeouts = timeouts,
     )
 
-def mongot_java_bench_suite(name, deps = [], exclude_files = [], resources = False):
+def mongot_java_bench_suite(name, deps = [], exclude_files = [], resources = False, profile_gc = True):
     # Create a package with the dependencies that can be used by the individual benchmarks.
     mongot_java_package(
         name,
         deps = deps + [artifact("org.openjdk.jmh:jmh-core")],
         plugins = ["//bazel/java:jmh_annotation_processor"],
         testonly = True,
+        javacopts = ["--enable-preview"],
     )
 
     # Create a java_binary for each file in the package not explicitly excluded.
@@ -241,15 +270,15 @@ def mongot_java_bench_suite(name, deps = [], exclude_files = [], resources = Fal
         bench_name = bench_file[:-len(".java")]
 
         test_data = _get_test_data_path("mongot") if resources else []
-
-        native.java_test(
+        java_test(
             name = bench_name,
             main_class = "org.openjdk.jmh.Main",
-            args = ["-prof gc", bench_name],
+            args = ["-prof gc", bench_name] if profile_gc else [],
             runtime_deps = [":lib"],
             classpath_resources = ["//conf/mongot/test:conf"],
             visibility = ["//visibility:public"],
             data = test_data,
+            jvm_flags = ["--enable-preview"],
         )
 
 def _mongot_java_test_suite(

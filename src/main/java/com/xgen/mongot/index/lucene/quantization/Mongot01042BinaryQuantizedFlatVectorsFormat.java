@@ -66,6 +66,7 @@ public class Mongot01042BinaryQuantizedFlatVectorsFormat extends FlatVectorsForm
 
   /** Constructs a format using the given graph construction parameters. */
   public Mongot01042BinaryQuantizedFlatVectorsFormat() {
+    super(NAME);
     this.confidenceInterval = Optional.of(1f);
 
     this.flatVectorScorer = new BinaryQuantizedFlatVectorsScorer(DefaultFlatVectorScorer.INSTANCE);

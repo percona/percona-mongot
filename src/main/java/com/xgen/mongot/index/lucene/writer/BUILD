@@ -15,7 +15,6 @@ java_library(
     ],
     deps = [
         "//src/main/java/com/xgen/mongot/featureflag",
-        "//src/main/java/com/xgen/mongot/featureflag/dynamic",
         "//src/main/java/com/xgen/mongot/index",
         "//src/main/java/com/xgen/mongot/index/definition",
         "//src/main/java/com/xgen/mongot/index/ingestion",

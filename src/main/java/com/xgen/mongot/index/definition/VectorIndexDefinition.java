@@ -119,7 +119,8 @@ public final class VectorIndexDefinition implements IndexDefinition {
         storedSourceDefinition ->
             Check.checkArg(
                 !storedSourceDefinition.isAllIncluded(),
-                "storedSource true not allowed for vector indexes"));
+                "storedSource: true is not supported for vector indexes. "
+                    + "Accepted values are include, exclude, or false."));
     this.indexIdAtCreationTime = indexIdAtCreationTime;
     this.autoEmbeddingDefinitionVersion = autoEmbeddingDefinitionVersion;
     this.materializedViewNameFormatVersion = materializedViewNameFormatVersion;
@@ -335,6 +336,12 @@ public final class VectorIndexDefinition implements IndexDefinition {
           .handleSemanticError("Vector and filter fields should have distinct paths");
     }
 
+    Optional<StoredSourceDefinition> storedSource =
+        parser.getField(IndexDefinition.Fields.STORED_SOURCE).unwrap();
+    if (storedSource.isPresent() && storedSource.get().isAllIncluded()) {
+      parser.getContext().handleSemanticError("storedSource true not allowed for vector indexes");
+    }
+
     return new VectorIndexDefinition(
         parser.getField(IndexDefinition.Fields.INDEX_ID).unwrap(),
         parser.getField(IndexDefinition.Fields.NAME).unwrap(),
@@ -349,7 +356,7 @@ public final class VectorIndexDefinition implements IndexDefinition {
         parser.getField(IndexDefinition.Fields.DEFINITION_VERSION).unwrap(),
         DateUtil.parseInstantFromString(
             parser, DATE_FORMAT, IndexDefinition.Fields.DEFINITION_VERSION_CREATED_AT),
-        parser.getField(IndexDefinition.Fields.STORED_SOURCE).unwrap(),
+        storedSource,
         parser.getField(Fields.NESTED_ROOT).unwrap(),
         parser.getField(IndexDefinition.Fields.INDEX_ID_AT_CREATION_TIME).unwrap(),
         parser.getField(IndexDefinition.Fields.AUTO_EMBEDDING_DEFINITION_VERSION).unwrap(),

@@ -2,6 +2,7 @@ package com.xgen.mongot.cursor;
 
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
 import com.xgen.mongot.index.query.Query;
+import com.xgen.mongot.index.query.QueryExecutionContext;
 
 /**
  * A sealed wrapper that carries a query through the cursor creation pipeline, abstracting over the
@@ -20,7 +21,8 @@ public sealed interface CursorQuery {
     }
   }
 
-  record Vector(MaterializedVectorSearchQuery query) implements CursorQuery {
+  record Vector(MaterializedVectorSearchQuery query, QueryExecutionContext context)
+      implements CursorQuery {
     @Override
     public Query getQuery() {
       return this.query.vectorSearchQuery();

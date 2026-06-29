@@ -27,6 +27,16 @@ public class ViewPipeline {
 
   private ViewPipeline() {}
 
+  /**
+   * Returns true if the view's effective pipeline contains any {@code $match} stage. A {@code
+   * $match} before {@code $sample} prevents the fast pseudo-random sampling path and can force a
+   * full collection scan.
+   */
+  public static boolean hasMatchStage(ViewDefinition definition) {
+    return Check.isPresent(definition.getEffectivePipeline(), "effectivePipeline").stream()
+        .anyMatch(stage -> stage.containsKey(SupportedStage.MATCH.stageName));
+  }
+
   /** Creates aggregation pipeline from a view definition. */
   public static ImmutableList<Bson> forRegularQuery(ViewDefinition definition) {
 

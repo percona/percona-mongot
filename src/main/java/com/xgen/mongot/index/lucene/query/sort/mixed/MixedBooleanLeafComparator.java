@@ -74,4 +74,9 @@ class MixedBooleanLeafComparator implements MixedLeafFieldComparator {
     // Invariant: ord(false) = ord(true) - 1
     this.bottomOrd = bottom.asBoolean().getValue() ? this.trueOrd : this.trueOrd - 1;
   }
+
+  @Override
+  public int nextDoc() throws IOException {
+    return this.dv.nextDoc();
+  }
 }

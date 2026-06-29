@@ -33,15 +33,15 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      VectorIndexDefinitionTest.TestDeserialization.class,
-      VectorIndexDefinitionTest.TestSerialization.class,
-      VectorIndexDefinitionTest.TestNestedRoot.class
+      VectorIndexDefinitionTest.DeserializationTest.class,
+      VectorIndexDefinitionTest.SerializationTest.class,
+      VectorIndexDefinitionTest.NestedRootTest.class
     })
 public class VectorIndexDefinitionTest {
 
   /** Tests for VectorIndexDefinition with nestedRoot (flat fields under an array root). */
   @RunWith(org.junit.runners.JUnit4.class)
-  public static class TestNestedRoot {
+  public static class NestedRootTest {
 
     private static final VectorFieldSpecification SIMPLE_SPEC =
         new VectorFieldSpecification(
@@ -219,6 +219,32 @@ public class VectorIndexDefinitionTest {
     }
 
     @Test
+    public void testStoredSource_roundTrip_inclusion() throws Exception {
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(INCLUSION, List.of("a", "b.c")))
+              .build();
+
+      BsonDocument bson = original.toBson();
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(bson);
+      assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testStoredSource_roundTrip_exclusion() throws Exception {
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(EXCLUSION, List.of("x", "y.z")))
+              .build();
+
+      BsonDocument bson = original.toBson();
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(bson);
+      assertEquals(original, parsed);
+    }
+
+    @Test
     public void testIndexIdAtCreationTime_sameAsIndexId_doesNotAffectEquality() {
       var indexId = new ObjectId("507f191e810c19729de860ea");
 
@@ -308,14 +334,14 @@ public class VectorIndexDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "vector-index-deserialization";
     private static final BsonDeserializationTestSuite<VectorIndexDefinition> TEST_SUITE =
         fromDocument(DefinitionTests.RESOURCES_PATH, SUITE_NAME, VectorIndexDefinition::fromBson);
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<VectorIndexDefinition> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<VectorIndexDefinition> testSpec) {
       this.testSpec = testSpec;
     }
@@ -618,7 +644,7 @@ public class VectorIndexDefinitionTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
 
     private static final String SUITE_NAME = "vector-index-serialization";
     private static final BsonSerializationTestSuite<VectorIndexDefinition> TEST_SUITE =
@@ -626,7 +652,7 @@ public class VectorIndexDefinitionTest {
 
     private final BsonSerializationTestSuite.TestSpec<VectorIndexDefinition> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<VectorIndexDefinition> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<VectorIndexDefinition> testSpec) {
       this.testSpec = testSpec;
       setupRegistry();
     }
@@ -640,6 +666,8 @@ public class VectorIndexDefinitionTest {
           withView(),
           multipleIndexPartitions(),
           customHnswOptions(),
+          withStoredDocumentInclusion(),
+          withStoredDocumentExclusion(),
           textEmbedding(),
           textEmbeddingUsingDotProduct(),
           textEmbeddingFullConfig(),
@@ -721,6 +749,26 @@ public class VectorIndexDefinitionTest {
                   VectorQuantization.NONE,
                   new VectorIndexingAlgorithm.HnswIndexingAlgorithm(
                       new VectorFieldSpecification.HnswOptions(32, 500)))
+              .build());
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<VectorIndexDefinition>
+        withStoredDocumentInclusion() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "with stored fields document inclusion",
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(INCLUSION, List.of("a", "b.c", "b.d")))
+              .build());
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<VectorIndexDefinition>
+        withStoredDocumentExclusion() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "with stored fields document exclusion",
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 2048)
+              .storedSource(StoredSourceDefinition.create(EXCLUSION, List.of("a", "b.c", "b.d")))
               .build());
     }
 

@@ -21,8 +21,8 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      ExactVectorSearchQuerySpecTest.TestDeserialization.class,
-      ExactVectorSearchQuerySpecTest.TestSerialization.class,
+      ExactVectorSearchQuerySpecTest.DeserializationTest.class,
+      ExactVectorSearchQuerySpecTest.SerializationTest.class,
     })
 public class ExactVectorSearchQuerySpecTest {
 
@@ -43,7 +43,7 @@ public class ExactVectorSearchQuerySpecTest {
           .build();
 
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "exact-vector-search-query-deserialization";
     private static final BsonDeserializationTestSuite<ExactVectorSearchQuerySpec> TEST_SUITE =
         fromDocument(
@@ -53,7 +53,7 @@ public class ExactVectorSearchQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<ExactVectorSearchQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<ExactVectorSearchQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -90,14 +90,14 @@ public class ExactVectorSearchQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "exact-vector-search-query-serialization";
     private static final BsonSerializationTestSuite<ExactVectorSearchQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<ExactVectorSearchQuerySpec> testSpec;
 
-    public TestSerialization(
+    public SerializationTest(
         BsonSerializationTestSuite.TestSpec<ExactVectorSearchQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }

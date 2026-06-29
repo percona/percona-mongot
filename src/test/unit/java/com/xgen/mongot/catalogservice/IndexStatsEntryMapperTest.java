@@ -11,6 +11,7 @@ import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.SynonymStatus;
 import com.xgen.mongot.index.synonym.SynonymDetailedStatus;
+import com.xgen.mongot.index.version.Generation;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
@@ -53,6 +54,7 @@ public class IndexStatsEntryMapperTest {
             synonymStatusMap,
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
+            Generation.CURRENT.generationId(INDEX_ID),
             Optional.of(new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L)));
 
     var indexInfo =
@@ -103,6 +105,7 @@ public class IndexStatsEntryMapperTest {
             mainSynonymStatusMap,
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
+            Generation.CURRENT.generationId(INDEX_ID),
             Optional.empty());
 
     var stagedIndexStatus =
@@ -110,6 +113,7 @@ public class IndexStatsEntryMapperTest {
             stagedSynonymStatusMap,
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.INITIAL_SYNC),
+            Generation.CURRENT.generationId(INDEX_ID),
             Optional.empty());
 
     var indexInfo =
@@ -156,6 +160,7 @@ public class IndexStatsEntryMapperTest {
             Collections.emptyMap(),
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
+            Generation.CURRENT.generationId(INDEX_ID),
             Optional.empty());
 
     var indexInfo =
@@ -195,6 +200,7 @@ public class IndexStatsEntryMapperTest {
         new IndexDetailedStatus.Vector(
             vectorDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
+            Generation.CURRENT.generationId(INDEX_ID),
             Optional.of(new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L)));
 
     var indexInfo =
@@ -232,11 +238,17 @@ public class IndexStatsEntryMapperTest {
 
     var mainIndexStatus =
         new IndexDetailedStatus.Vector(
-            vectorDef, new IndexStatus(IndexStatus.StatusCode.STEADY), Optional.empty());
+            vectorDef,
+            new IndexStatus(IndexStatus.StatusCode.STEADY),
+            Generation.CURRENT.generationId(INDEX_ID),
+            Optional.empty());
 
     var stagedIndexStatus =
         new IndexDetailedStatus.Vector(
-            vectorDef, new IndexStatus(IndexStatus.StatusCode.INITIAL_SYNC), Optional.empty());
+            vectorDef,
+            new IndexStatus(IndexStatus.StatusCode.INITIAL_SYNC),
+            Generation.CURRENT.generationId(INDEX_ID),
+            Optional.empty());
 
     var indexInfo =
         new IndexInformation.Vector(

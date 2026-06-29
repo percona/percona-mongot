@@ -14,7 +14,8 @@ public record SecurityConfig(
     Optional<String> authPassword,
     TlsMode tlsMode,
     Optional<Path> certKeyFilePath,
-    Optional<Path> certAuthFilePath) {
+    Optional<Path> certAuthFilePath,
+    Optional<Path> certKeyFilePasswordFilePath) {
   public SecurityConfig {
     Check.argNotNull(authMode, "authMode");
     Check.argNotNull(tlsMode, "tlsMode");
@@ -41,7 +42,13 @@ public record SecurityConfig(
   public static SecurityConfig create(
       AuthMode authMode, Optional<String> keyfile, Optional<String> authUser) {
     return new SecurityConfig(
-        authMode, authUser, keyfile, TlsMode.DISABLED, Optional.empty(), Optional.empty());
+        authMode,
+        authUser,
+        keyfile,
+        TlsMode.DISABLED,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty());
   }
 
   public static SecurityConfig create(
@@ -55,18 +62,23 @@ public record SecurityConfig(
         keyfile,
         tlsMode,
         certKeyFilePath,
+        Optional.empty(),
         Optional.empty());
   }
 
   public static SecurityConfig createAuthDisabled(
-      TlsMode tlsMode, Optional<Path> certKeyFilePath, Optional<Path> caFilePath) {
+      TlsMode tlsMode,
+      Optional<Path> certKeyFilePath,
+      Optional<Path> certKeyFilePasswordFilePath,
+      Optional<Path> caFilePath) {
     return new SecurityConfig(
         AuthMode.DISABLED,
         Optional.empty(),
         Optional.empty(),
         tlsMode,
         certKeyFilePath,
-        caFilePath);
+        caFilePath,
+        certKeyFilePasswordFilePath);
   }
 
   public static Optional<String> getKeyFile(Optional<Path> keyFilePath) {

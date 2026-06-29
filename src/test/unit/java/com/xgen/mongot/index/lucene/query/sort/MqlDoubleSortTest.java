@@ -67,11 +67,11 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      MqlDoubleSortTest.TestClass.class,
-      MqlDoubleSortTest.TestPruning.class,
+      MqlDoubleSortTest.ClassTest.class,
+      MqlDoubleSortTest.PruningTest.class,
     })
 public class MqlDoubleSortTest {
-  public static class TestClass {
+  public static class ClassTest {
     private Directory directory;
     private IndexSearcher searcher;
     private static final String doubleField =
@@ -359,12 +359,12 @@ public class MqlDoubleSortTest {
    * pruning tests</a>.
    */
   @RunWith(Parameterized.class)
-  public static class TestPruning {
+  public static class PruningTest {
     private static final FieldName.TypeField FIELD_TYPE = FieldName.TypeField.NUMBER_DOUBLE_V2;
 
     SortPruningTestUtils.TestRunner testRunner;
 
-    public TestPruning(
+    public PruningTest(
         CheckedBiFunction<Boolean, IndexWriter, List<TopDocs>, IOException> testFunc) {
       this.testRunner = new SortPruningTestUtils.TestRunner(testFunc);
     }
@@ -373,28 +373,28 @@ public class MqlDoubleSortTest {
     public static Iterable<CheckedBiFunction<Boolean, IndexWriter, List<TopDocs>, IOException>>
         data() {
       return List.of(
-          TestPruning::testSortOptimizationExplain,
-          TestPruning::testSortOptimizationExplainAfter,
-          TestPruning::testSortOptimizationSimpleAndAfter,
-          TestPruning::testSortOptimizationSimpleAndAfterNullsHighest,
-          TestPruning::testSortOptimizationSecondarySortScore,
-          TestPruning::testMinValueAscPruned,
-          TestPruning::testMinValueAscPrunedNullsHighest,
-          TestPruning::testMinValueDescPruned,
-          TestPruning::testSearchAfterTopNullBottomNonNullAscPruned,
-          TestPruning::testSearchAfterTopNullBottomNullAscPruned,
-          TestPruning::testSearchAfterTopNullBottomNonNullDescPrunedNullsHighest,
-          TestPruning::testSearchAfterTopNullBottomNullDescPrunedNullsHighest,
-          TestPruning::testSearchAfterDescTopNonNullBottomNull,
-          TestPruning::testSortOptimizationEqualValues,
-          TestPruning::testSortOptimizationWithNonCompetitiveMissingValue,
-          TestPruning::testSortOptimizationWithNonCompetitiveMissingValueNullsHighest,
-          TestPruning::testSortOptimizationMissingValueNonCompetitiveWhenBottomNullSingleSort,
-          TestPruning::testNoSortOptimizationMissingValueCompetitiveWhenBottomNullCompoundSort,
-          TestPruning::testNoSortOptimizationWithCompetitiveMissingValue,
-          TestPruning::testSortOptimizationWithMultipleCompetitiveMissingValue,
-          TestPruning::testNoOptimizationOnFieldNotIndexedWithPoints,
-          TestPruning::testNoOptimizationIfSecondarySort);
+          PruningTest::testSortOptimizationExplain,
+          PruningTest::testSortOptimizationExplainAfter,
+          PruningTest::testSortOptimizationSimpleAndAfter,
+          PruningTest::testSortOptimizationSimpleAndAfterNullsHighest,
+          PruningTest::testSortOptimizationSecondarySortScore,
+          PruningTest::testMinValueAscPruned,
+          PruningTest::testMinValueAscPrunedNullsHighest,
+          PruningTest::testMinValueDescPruned,
+          PruningTest::testSearchAfterTopNullBottomNonNullAscPruned,
+          PruningTest::testSearchAfterTopNullBottomNullAscPruned,
+          PruningTest::testSearchAfterTopNullBottomNonNullDescPrunedNullsHighest,
+          PruningTest::testSearchAfterTopNullBottomNullDescPrunedNullsHighest,
+          PruningTest::testSearchAfterDescTopNonNullBottomNull,
+          PruningTest::testSortOptimizationEqualValues,
+          PruningTest::testSortOptimizationWithNonCompetitiveMissingValue,
+          PruningTest::testSortOptimizationWithNonCompetitiveMissingValueNullsHighest,
+          PruningTest::testSortOptimizationMissingValueNonCompetitiveWhenBottomNullSingleSort,
+          PruningTest::testNoSortOptimizationMissingValueCompetitiveWhenBottomNullCompoundSort,
+          PruningTest::testNoSortOptimizationWithCompetitiveMissingValue,
+          PruningTest::testSortOptimizationWithMultipleCompetitiveMissingValue,
+          PruningTest::testNoOptimizationOnFieldNotIndexedWithPoints,
+          PruningTest::testNoOptimizationIfSecondarySort);
     }
 
     @Test
@@ -747,7 +747,7 @@ public class MqlDoubleSortTest {
         // Missing values after the first 3 docs are non-competitive since we are performing a
         // single sort. Only values that are strictly weaker than bottom should be considered
         // competitive.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(4);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(4);
         SortPruningTestUtils.assertNullOptimizedSort(
             topDocs, numHits, numDocs, NullEmptySortPosition.LOWEST);
       }
@@ -886,7 +886,7 @@ public class MqlDoubleSortTest {
         // Collect 3 hits into sort queue. Collecting 4th hit triggers pruning of remaining docs in
         // segment. In ascending sort with nulls: highest, docs with missing values are
         // non-competitive.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(4);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(4);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       }
       return List.of(topDocs);
@@ -951,7 +951,7 @@ public class MqlDoubleSortTest {
       if (enablePruning) {
         // In doubleSort documents with the lowest possible double (Double.NaN) are not considered
         // competitive
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7000);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7000);
         SortPruningTestUtils.assertNullOptimizedSort(
             topDocs, numHits, numDocs, NullEmptySortPosition.LOWEST);
       }
@@ -1017,7 +1017,7 @@ public class MqlDoubleSortTest {
         // < Long.MIN_VALUE instead of < Long.MAX_VALUE and all 4000 documents in the second segment
         // would be pruned. The resulting queue would be unchanged and end up as
         // [null, null, null (bottom)], which is incorrect.
-        Truth.assertThat(topDocs.totalHits.value).isEqualTo(7003);
+        Truth.assertThat(topDocs.totalHits.value()).isEqualTo(7003);
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocsContainingField);
       }
       return List.of(topDocs);

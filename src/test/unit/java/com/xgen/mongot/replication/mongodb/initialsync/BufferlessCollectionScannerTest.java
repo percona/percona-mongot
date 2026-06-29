@@ -283,7 +283,7 @@ public class BufferlessCollectionScannerTest {
       CollectionScanMongoClient<InitialSyncException> aggregateCommandMongoClient =
           mock(AggregateCommandCollectionScanMongoClient.class);
       when(aggregateCommandMongoClient.getMinValidOpTime()).thenReturn(MIN_VALID_OPTIME);
-      when(mongoClient.getCollectionAggregateCommandMongoClient(any(), any(), any()))
+      when(mongoClient.getCollectionAggregateCommandMongoClient(any(), any(), any(), any()))
           .thenReturn(aggregateCommandMongoClient);
       when(mongoClient.getSyncSourceHost()).thenReturn("testHost");
       Mocks mock =
@@ -362,7 +362,7 @@ public class BufferlessCollectionScannerTest {
         mocks.collectionScanner.scanWithTimeLimit(DEFAULT_SCAN_TIME);
     verify(mocks.mongoClient)
         .getCollectionAggregateCommandMongoClient(
-            aggregateCommandWithAfterClusterTime(), any(), any());
+            aggregateCommandWithAfterClusterTime(), any(), any(), any());
     verify(mocks.documentIndexer, times(0)).indexDocumentEvent(any());
     BsonValue expected = enableNaturalOrderScan ? new BsonDocument() : MIN_VALID_LAST_SCANNED_ID;
     Assert.assertEquals(expected, result.getLastScannedToken());
@@ -399,7 +399,7 @@ public class BufferlessCollectionScannerTest {
         mocks.collectionScanner.scanWithTimeLimit(DEFAULT_SCAN_TIME);
     verify(mocks.mongoClient)
         .getCollectionAggregateCommandMongoClient(
-            aggregateCommandWithAfterClusterTime(), any(), any());
+            aggregateCommandWithAfterClusterTime(), any(), any(), any());
     verify(mocks.documentIndexer, times(3)).indexDocumentEvent(any());
     verify(mocks.indexingWorkScheduler).schedule(any(), any(), any(), any(), any(), any(), any());
     BsonValue expected = enableNaturalOrderScan ? resumeToken : new BsonInt32(3);
@@ -438,7 +438,7 @@ public class BufferlessCollectionScannerTest {
         mocks.collectionScanner.scanWithTimeLimit(DEFAULT_SCAN_TIME);
     verify(mocks.mongoClient)
         .getCollectionAggregateCommandMongoClient(
-            aggregateCommandWithAfterClusterTime(), any(), any());
+            aggregateCommandWithAfterClusterTime(), any(), any(), any());
     verify(mocks.documentIndexer, times(1)).indexDocumentEvent(any());
     verify(mocks.indexingWorkScheduler).schedule(any(), any(), any(), any(), any(), any(), any());
     BsonValue expected = enableNaturalOrderScan ? resumeToken : new BsonInt32(2);
@@ -464,6 +464,7 @@ public class BufferlessCollectionScannerTest {
                         : aggregateCommand.getLastScannedId().isPresent()
                             && aggregateCommand.getLastScannedId().get().equals(lastScannedId)),
             any(),
+            any(),
             any());
 
     verify(mocks.documentIndexer, times(3)).indexDocumentEvent(any());
@@ -481,7 +482,7 @@ public class BufferlessCollectionScannerTest {
         mocks.collectionScanner.scanWithTimeLimit(Duration.ofSeconds(2));
     verify(mocks.mongoClient)
         .getCollectionAggregateCommandMongoClient(
-            aggregateCommandWithAfterClusterTime(), any(), any());
+            aggregateCommandWithAfterClusterTime(), any(), any(), any());
 
     verify(mocks.indexingWorkScheduler, atLeastOnce())
         .schedule(any(), any(), any(), any(), any(), any(), any());

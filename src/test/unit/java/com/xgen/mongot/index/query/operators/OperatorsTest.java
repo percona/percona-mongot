@@ -32,7 +32,7 @@ import org.junit.runners.Suite;
     value = {
       OperatorsTest.FieldPathTest.class,
       OperatorsTest.StringPathTest.class,
-      OperatorsTest.TestQuery.class,
+      OperatorsTest.QueryTest.class,
       OperatorsTest.ScoreTest.class,
     })
 public class OperatorsTest {
@@ -193,7 +193,7 @@ public class OperatorsTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestQuery {
+  public static class QueryTest {
 
     private static final String SUITE_NAME = "operators-query";
     private static final BsonDeserializationTestSuite<List<String>> TEST_SUITE =
@@ -201,7 +201,7 @@ public class OperatorsTest {
 
     private final TestSpecWrapper<List<String>> testSpec;
 
-    public TestQuery(TestSpecWrapper<List<String>> testSpec) {
+    public QueryTest(TestSpecWrapper<List<String>> testSpec) {
       this.testSpec = testSpec;
     }
 

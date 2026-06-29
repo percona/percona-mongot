@@ -67,8 +67,6 @@ public class CustomNullAwayLibraryModel implements LibraryModels {
           methodRef(
               "org.apache.lucene.index.CodecReader", "getFloatVectorValues(java.lang.String)"),
           methodRef("org.apache.lucene.index.CodecReader", "getByteVectorValues(java.lang.String)"),
-          methodRef("org.apache.lucene.index.FloatVectorValues", "scorer(float[])"),
-          methodRef("org.apache.lucene.index.ByteVectorValues", "scorer(byte[])"),
 
           // --- Other Lucene Reader APIs
           methodRef(

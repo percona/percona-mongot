@@ -17,11 +17,16 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexSorter;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
@@ -312,5 +317,393 @@ public class MqlMixedSortTest {
             BsonUtils.MIN_KEY,
             BsonUtils.MIN_KEY)
         .inOrder();
+  }
+
+  @Test
+  public void testGetComparableProviders_ranksAcrossSegmentsCorrectly() throws IOException {
+    MqlMixedSort sort =
+        new MqlMixedSort(
+            new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+            Optional.empty());
+    IndexSorter indexSorter = sort.getIndexSorter();
+    assertThat(indexSorter).isNotNull();
+
+    try (Directory dir = new ByteBuffersDirectory()) {
+      // Segment 1: string "hello"
+      try (IndexWriter w = new IndexWriter(dir, new IndexWriterConfig())) {
+        Document doc0 = new Document();
+        doc0.add(new SortedSetDocValuesField(stringField, new BytesRef("hello")));
+        w.addDocument(doc0);
+        w.commit();
+      }
+
+      // Segment 2: int 5, int 20
+      try (IndexWriter w = new IndexWriter(dir, new IndexWriterConfig())) {
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 5));
+        w.addDocument(doc0);
+
+        Document doc1 = new Document();
+        doc1.add(new SortedNumericDocValuesField(intField, 20));
+        w.addDocument(doc1);
+        w.commit();
+      }
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        assertThat(reader.leaves()).hasSize(2);
+
+        List<LeafReader> leafReaders =
+            reader.leaves().stream()
+                .map(ctx -> ctx.reader())
+                .collect(Collectors.toList());
+
+        IndexSorter.ComparableProvider[] providers =
+            indexSorter.getComparableProviders(leafReaders);
+        assertThat(providers).hasLength(2);
+
+        // seg0 doc0 = string "hello", seg1 doc0 = int 5, seg1 doc1 = int 20
+        // BSON order: int 5 < int 20 < string "hello"
+        long rankString = providers[0].getAsComparableLong(0);
+        long rankInt5 = providers[1].getAsComparableLong(0);
+        long rankInt20 = providers[1].getAsComparableLong(1);
+
+        assertThat(rankInt5).isLessThan(rankInt20);
+        assertThat(rankInt20).isLessThan(rankString);
+      }
+    }
+  }
+
+  @Test
+  public void testGetDocComparator_descendingOrder() throws IOException {
+    try (Directory dir = new ByteBuffersDirectory()) {
+      try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 10));
+        writer.addDocument(doc0);
+
+        Document doc1 = new Document();
+        doc1.add(new SortedSetDocValuesField(stringField, new BytesRef("hello")));
+        writer.addDocument(doc1);
+
+        Document doc2 = new Document();
+        doc2.add(new SortedNumericDocValuesField(intField, 5));
+        writer.addDocument(doc2);
+
+        writer.forceMerge(1);
+      }
+
+      MqlMixedSort sort =
+          new MqlMixedSort(
+              new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_DESC),
+              Optional.empty());
+      IndexSorter indexSorter = sort.getIndexSorter();
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        LeafReader leafReader = reader.leaves().get(0).reader();
+        IndexSorter.DocComparator docComparator =
+            indexSorter.getDocComparator(leafReader, leafReader.maxDoc());
+
+        // Descending: string "hello" > int 10 > int 5
+        assertThat(docComparator.compare(1, 0)).isLessThan(0); // hello before 10
+        assertThat(docComparator.compare(0, 2)).isLessThan(0); // 10 before 5
+        assertThat(docComparator.compare(1, 2)).isLessThan(0); // hello before 5
+      }
+    }
+  }
+
+  @Test
+  public void testGetComparableProviders_descendingOrder() throws IOException {
+    MqlMixedSort sort =
+        new MqlMixedSort(
+            new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_DESC),
+            Optional.empty());
+    IndexSorter indexSorter = sort.getIndexSorter();
+
+    try (Directory dir = new ByteBuffersDirectory()) {
+      // Segment 1: string "hello" (single doc, trivially sorted)
+      try (IndexWriter w = new IndexWriter(dir, new IndexWriterConfig())) {
+        Document doc0 = new Document();
+        doc0.add(new SortedSetDocValuesField(stringField, new BytesRef("hello")));
+        w.addDocument(doc0);
+        w.commit();
+      }
+
+      // Segment 2: docs in descending sort order (int 20 before int 5) to match how a
+      // sorted index stores them. getComparableProviders uses a K-way merge that relies on
+      // within-segment docID order matching the configured sort direction.
+      try (IndexWriter w = new IndexWriter(dir, new IndexWriterConfig())) {
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 20));
+        w.addDocument(doc0);
+
+        Document doc1 = new Document();
+        doc1.add(new SortedNumericDocValuesField(intField, 5));
+        w.addDocument(doc1);
+        w.commit();
+      }
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        List<LeafReader> leafReaders =
+            reader.leaves().stream()
+                .map(ctx -> ctx.reader())
+                .collect(Collectors.toList());
+
+        IndexSorter.ComparableProvider[] providers =
+            indexSorter.getComparableProviders(leafReaders);
+
+        // Descending BSON order: string "hello" > int 20 > int 5
+        long rankString = providers[0].getAsComparableLong(0);
+        long rankInt20 = providers[1].getAsComparableLong(0);
+        long rankInt5 = providers[1].getAsComparableLong(1);
+
+        assertThat(rankString).isLessThan(rankInt20);
+        assertThat(rankInt20).isLessThan(rankInt5);
+      }
+    }
+  }
+
+  @Test
+  public void testEquals_differentFieldName_returnsFalse() {
+    MqlMixedSort mixed =
+        new MqlMixedSort(
+            new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+            Optional.empty());
+
+    SortField other = new SortField("g", SortField.Type.CUSTOM, false);
+    assertThat(mixed.equals(other)).isFalse();
+  }
+
+  @Test
+  public void testEquals_differentReverse_returnsFalse() {
+    MqlMixedSort mixed =
+        new MqlMixedSort(
+            new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+            Optional.empty());
+
+    SortField other = new SortField("f", SortField.Type.CUSTOM, true);
+    assertThat(mixed.equals(other)).isFalse();
+  }
+
+  @Test
+  public void testEquals_differentType_returnsFalse() {
+    MqlMixedSort mixed =
+        new MqlMixedSort(
+            new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+            Optional.empty());
+
+    SortField other = new SortField("f", SortField.Type.LONG, false);
+    assertThat(mixed.equals(other)).isFalse();
+  }
+
+  @Test
+  public void testComputeDocValues_multiTypeOverlap_selectsMin() throws IOException {
+    try (Directory dir = new ByteBuffersDirectory()) {
+      try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+        // Doc 0: has both int (100) and string ("hello"). MIN selector picks the numerically
+        // smaller value (int 100 has bracket priority 30 < string priority 60).
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 100));
+        doc0.add(new SortedSetDocValuesField(stringField, new BytesRef("hello")));
+        writer.addDocument(doc0);
+
+        // Doc 1: only string ("aaa")
+        Document doc1 = new Document();
+        doc1.add(new SortedSetDocValuesField(stringField, new BytesRef("aaa")));
+        writer.addDocument(doc1);
+
+        writer.forceMerge(1);
+      }
+
+      MqlMixedSort sort =
+          new MqlMixedSort(
+              new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+              Optional.empty());
+      IndexSorter indexSorter = sort.getIndexSorter();
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        LeafReader leafReader = reader.leaves().get(0).reader();
+        IndexSorter.DocComparator docComparator =
+            indexSorter.getDocComparator(leafReader, leafReader.maxDoc());
+
+        // doc0 should use int 100 (bracket 30), doc1 is string "aaa" (bracket 60)
+        // numbers < strings in BSON order, so doc0 < doc1
+        assertThat(docComparator.compare(0, 1)).isLessThan(0);
+      }
+    }
+  }
+
+  @Test
+  public void testComputeDocValues_multiTypeOverlap_selectsMax() throws IOException {
+    try (Directory dir = new ByteBuffersDirectory()) {
+      try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+        // Doc 0: has both int (100) and string ("hello"). MAX selector (from DEFAULT_DESC)
+        // picks string("hello") because strings > numbers in BSON order.
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 100));
+        doc0.add(new SortedSetDocValuesField(stringField, new BytesRef("hello")));
+        writer.addDocument(doc0);
+
+        // Doc 1: only int (200)
+        Document doc1 = new Document();
+        doc1.add(new SortedNumericDocValuesField(intField, 200));
+        writer.addDocument(doc1);
+
+        writer.forceMerge(1);
+      }
+
+      MqlMixedSort sort =
+          new MqlMixedSort(
+              new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_DESC),
+              Optional.empty());
+      IndexSorter indexSorter = sort.getIndexSorter();
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        LeafReader leafReader = reader.leaves().get(0).reader();
+        IndexSorter.DocComparator docComparator =
+            indexSorter.getDocComparator(leafReader, leafReader.maxDoc());
+
+        // With MAX selector: doc0 resolves to string "hello" (not int 100).
+        // Descending comparator: string "hello" > int 200, so doc0 sorts before doc1.
+        assertThat(docComparator.compare(0, 1)).isLessThan(0);
+      }
+    }
+  }
+
+  @Test
+  public void testGetDocComparator_missingValueSortsToExpectedPosition() throws IOException {
+    try (Directory dir = new ByteBuffersDirectory()) {
+      try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+        // Doc 0: has int value
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 42));
+        writer.addDocument(doc0);
+
+        // Doc 1: no value for any sort field — triggers Arrays.fill(missingValue) default
+        writer.addDocument(new Document());
+
+        // Doc 2: has string value
+        Document doc2 = new Document();
+        doc2.add(new SortedSetDocValuesField(stringField, new BytesRef("zzz")));
+        writer.addDocument(doc2);
+
+        writer.forceMerge(1);
+      }
+
+      MqlMixedSort sort =
+          new MqlMixedSort(
+              new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+              Optional.empty());
+      IndexSorter indexSorter = sort.getIndexSorter();
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        LeafReader leafReader = reader.leaves().get(0).reader();
+        IndexSorter.DocComparator docComparator =
+            indexSorter.getDocComparator(leafReader, leafReader.maxDoc());
+
+        // DEFAULT_ASC uses LOWEST → missing gets MIN_KEY, which sorts before everything.
+        // Expected ascending order: doc1 (missing) < doc0 (int 42) < doc2 (string "zzz")
+        assertThat(docComparator.compare(1, 0)).isLessThan(0);
+        assertThat(docComparator.compare(0, 2)).isLessThan(0);
+        assertThat(docComparator.compare(1, 2)).isLessThan(0);
+      }
+    }
+  }
+
+  @Test
+  public void testGetComparableProviders_missingValueAcrossSegments() throws IOException {
+    MqlMixedSort sort =
+        new MqlMixedSort(
+            new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+            Optional.empty());
+    IndexSorter indexSorter = sort.getIndexSorter();
+
+    try (Directory dir = new ByteBuffersDirectory()) {
+      // Segment 1: doc with no sort value (missing)
+      try (IndexWriter w = new IndexWriter(dir, new IndexWriterConfig())) {
+        w.addDocument(new Document());
+        w.commit();
+      }
+
+      // Segment 2: int 10
+      try (IndexWriter w = new IndexWriter(dir, new IndexWriterConfig())) {
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(intField, 10));
+        w.addDocument(doc0);
+        w.commit();
+      }
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        assertThat(reader.leaves()).hasSize(2);
+        List<LeafReader> leafReaders =
+            reader.leaves().stream()
+                .map(ctx -> ctx.reader())
+                .collect(Collectors.toList());
+
+        IndexSorter.ComparableProvider[] providers =
+            indexSorter.getComparableProviders(leafReaders);
+
+        long rankMissing = providers[0].getAsComparableLong(0);
+        long rankInt10 = providers[1].getAsComparableLong(0);
+
+        // Missing (MIN_KEY) should have a lower rank than int 10
+        assertThat(rankMissing).isLessThan(rankInt10);
+      }
+    }
+  }
+
+  @Test
+  public void testGetDocComparator_allTypeFields() throws IOException {
+    try (Directory dir = new ByteBuffersDirectory()) {
+      try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+        // BSON ascending order: numbers < strings < uuid < objectId < booleans < dates
+        // Doc 0: double 1.5
+        Document doc0 = new Document();
+        doc0.add(new SortedNumericDocValuesField(
+            doubleField, LuceneDoubleConversionUtils.toMqlSortableLong(1.5)));
+        writer.addDocument(doc0);
+
+        // Doc 1: date 100000
+        Document doc1 = new Document();
+        doc1.add(new SortedNumericDocValuesField(dateField, 100000));
+        writer.addDocument(doc1);
+
+        // Doc 2: boolean false
+        Document doc2 = new Document();
+        doc2.add(new SortedSetDocValuesField(
+            booleanField, new BytesRef(FieldValue.BOOLEAN_FALSE_FIELD_VALUE)));
+        writer.addDocument(doc2);
+
+        // Doc 3: null
+        Document doc3 = new Document();
+        doc3.add(new SortedDocValuesField(nullField, new BytesRef(FieldValue.NULL_FIELD_VALUE)));
+        writer.addDocument(doc3);
+
+        // Doc 4: string "abc"
+        Document doc4 = new Document();
+        doc4.add(new SortedSetDocValuesField(stringField, new BytesRef("abc")));
+        writer.addDocument(doc4);
+
+        writer.forceMerge(1);
+      }
+
+      MqlMixedSort sort =
+          new MqlMixedSort(
+              new MongotSortField(FieldPath.newRoot("f"), UserFieldSortOptions.DEFAULT_ASC),
+              Optional.empty());
+      IndexSorter indexSorter = sort.getIndexSorter();
+
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        LeafReader leafReader = reader.leaves().get(0).reader();
+        IndexSorter.DocComparator cmp =
+            indexSorter.getDocComparator(leafReader, leafReader.maxDoc());
+
+        // BSON ascending: null < double 1.5 < string "abc" < boolean false < date 100000
+        // (null maps to MIN_KEY with LOWEST position, so sorts first)
+        assertThat(cmp.compare(3, 0)).isLessThan(0); // null < double
+        assertThat(cmp.compare(0, 4)).isLessThan(0); // double < string
+        assertThat(cmp.compare(4, 2)).isLessThan(0); // string < boolean
+        assertThat(cmp.compare(2, 1)).isLessThan(0); // boolean < date
+      }
+    }
   }
 }

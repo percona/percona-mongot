@@ -26,20 +26,33 @@ import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnFloatVectorQuery;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Rescorer;
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.VectorScorer;
+import org.apache.lucene.search.Weight;
+import org.apache.lucene.search.join.BitSetProducer;
+import org.apache.lucene.util.BitSet;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.quantization.QuantizedVectorsReader;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Performs two-stage rescoring of {@link TopDocs} provided after HNSW graph traversal based on
  * binary quantized vectors.
+ *
+ * <p>Supports both flat and nested (parent-child block join) vector indexes. For nested indexes,
+ * provide a {@link BitSetProducer} identifying parent documents; each parent is rescored by taking
+ * the maximum similarity across its child vectors.
  */
 public class BinaryQuantizedVectorRescorer {
 
@@ -56,19 +69,46 @@ public class BinaryQuantizedVectorRescorer {
       ApproximateVectorSearchCriteria searchCriteria,
       KnnFloatVectorQuery luceneQuery)
       throws IOException {
+    return rescore(indexSearcher, topDocs, searchCriteria, luceneQuery, Optional.empty());
+  }
+
+  /**
+   * Rescores vector search candidates using two-stage binary quantization rescoring, supporting
+   * both flat and nested (parent-child block join) indexes.
+   *
+   * <p>For nested indexes, supply a {@code parentFilter} identifying parent documents. Each parent
+   * is scored by the maximum similarity across its child vectors; the vector iterator advances
+   * through children in ascending doc-ID order, so {@code topDocs} must contain parent doc IDs (as
+   * returned by a {@code ToParentBlockJoinQuery}).
+   *
+   * @param indexSearcher the index searcher for accessing segment data
+   * @param topDocs the initial ANN candidates; for nested indexes these are parent doc IDs
+   * @param searchCriteria provides {@code limit} and {@code numCandidates} for rescoring bounds
+   * @param luceneQuery the original KNN query, used to retrieve the query vector and field name
+   * @param parentFilter for nested indexes, a {@link BitSetProducer} identifying parent documents
+   *     per segment; {@link Optional#empty()} for flat indexes
+   * @return rescored and truncated {@link TopDocs}, ordered by descending similarity
+   */
+  public TopDocs rescore(
+      IndexSearcher indexSearcher,
+      TopDocs topDocs,
+      ApproximateVectorSearchCriteria searchCriteria,
+      KnnFloatVectorQuery luceneQuery,
+      Optional<BitSetProducer> parentFilter)
+      throws IOException {
 
     if (topDocs.scoreDocs.length == 0) {
       return topDocs;
     }
 
     // Stage 1 - rescore float query against the oversampled dequantized binary vectors
-    ApproximateRescorer approximateRescorer = new ApproximateRescorer(luceneQuery);
+    ApproximateRescorer approximateRescorer = new ApproximateRescorer(luceneQuery, parentFilter);
     TopDocs approximatelyRescored =
         approximateRescorer.rescore(indexSearcher, topDocs, searchCriteria.numCandidates());
 
     // Stage 2 - rescore float query against full fidelity vectors for the limited subset of docs
     FullFidelityRescorer fullFidelityRescorer =
-        new FullFidelityRescorer(luceneQuery, this.executor);
+        new FullFidelityRescorer(luceneQuery, this.executor, parentFilter);
 
     // Use geometric mean between the limit and numCandidates to get a number in between with a bias
     // towards the lower one (limit). Using a larger number improves recall, but affects latency
@@ -106,6 +146,88 @@ public class BinaryQuantizedVectorRescorer {
     }
   }
 
+  /**
+   * Rescores parent documents in a nested index by iterating each parent's child docs and taking
+   * the maximum child similarity score. Parents are processed in ascending doc-ID order so the
+   * forward-only vector iterator advances correctly across the whole segment.
+   */
+  private static void scoreNestedSegment(
+      LeafReaderContext segment,
+      VectorScorer scorer,
+      ScoreDoc[] scoreDocs,
+      int start,
+      int end,
+      BitSetProducer parentFilter,
+      @Nullable BitSet childFilterBitSet)
+      throws IOException {
+
+    BitSet parentBitSet = parentFilter.getBitSet(segment);
+    if (parentBitSet == null) {
+      // getBitSet returns null when the parent filter matches no documents in this segment.
+      // In that case ToParentBlockJoinQuery produces no hits for this segment either, so
+      // scoreDocs[start..end] contains no entries from it and there is nothing to rescore.
+      return;
+    }
+
+    for (int i = start; i < end; i++) {
+      int localParentDoc = scoreDocs[i].doc - segment.docBase;
+      int prevParent = (localParentDoc > 0) ? parentBitSet.prevSetBit(localParentDoc - 1) : -1;
+      int firstChild = prevParent + 1;
+
+      if (firstChild >= localParentDoc) {
+        // No child documents exist between the previous parent and this parent in this segment.
+        // This should not occur in a well-formed block join index (every parent must have at least
+        // one child). Assign score 0 (the minimum for all VectorSimilarityFunction
+        // implementations) so this parent does not unfairly compete with correctly rescored
+        // parents that had their ANN score replaced by maxScore.
+        scoreDocs[i].score = 0;
+        continue;
+      }
+
+      // All Lucene VectorSimilarityFunction implementations return non-negative scores, so 0 is a
+      // safe initializer and represents the worst possible similarity value for a parent.
+      @Var float maxScore = 0;
+      @Var int docId = firstChild;
+      while (docId < localParentDoc) {
+        int found =
+            (scorer.iterator().docID() >= docId)
+                ? scorer.iterator().docID()
+                : scorer.iterator().advance(docId);
+        if (found == NO_MORE_DOCS || found >= localParentDoc) {
+          break;
+        }
+        if (childFilterBitSet == null || childFilterBitSet.get(found)) {
+          maxScore = Math.max(maxScore, scorer.score());
+        }
+        docId = found + 1;
+      }
+      scoreDocs[i].score = maxScore;
+    }
+  }
+
+  @Nullable
+  private static Weight createChildFilterWeight(
+      IndexSearcher searcher, KnnFloatVectorQuery query, boolean hasParentFilter)
+      throws IOException {
+    if (!hasParentFilter) {
+      return null;
+    }
+    @Nullable Query childFilter = query.getFilter();
+    if (childFilter == null) {
+      return null;
+    }
+    return searcher.createWeight(searcher.rewrite(childFilter), ScoreMode.COMPLETE_NO_SCORES, 1.0f);
+  }
+
+  private static BitSet computeChildFilterBitSet(
+      Weight childFilterWeight, LeafReaderContext segment)
+      throws IOException {
+    Scorer filterScorer = childFilterWeight.scorer(segment);
+    return filterScorer != null
+        ? BitSet.of(filterScorer.iterator(), segment.reader().maxDoc())
+        : new FixedBitSet(segment.reader().maxDoc());
+  }
+
   private static FieldInfo getFieldInfo(LeafReader context, KnnFloatVectorQuery query) {
     return context.getFieldInfos().fieldInfo(query.getField());
   }
@@ -125,9 +247,15 @@ public class BinaryQuantizedVectorRescorer {
     private static final FluentLogger flogger = FluentLogger.forEnclosingClass();
 
     private final KnnFloatVectorQuery query;
+    private final Optional<BitSetProducer> parentFilter;
 
     public ApproximateRescorer(KnnFloatVectorQuery query) {
+      this(query, Optional.empty());
+    }
+
+    public ApproximateRescorer(KnnFloatVectorQuery query, Optional<BitSetProducer> parentFilter) {
       this.query = query;
+      this.parentFilter = parentFilter;
     }
 
     @Override
@@ -141,6 +269,9 @@ public class BinaryQuantizedVectorRescorer {
       // sort for the sequential access
       Arrays.sort(topDocsCopy.scoreDocs, Comparator.comparingInt(hit -> hit.doc));
       List<LeafReaderContext> segments = searcher.getIndexReader().leaves();
+
+      @Nullable Weight childFilterWeight =
+          createChildFilterWeight(searcher, this.query, this.parentFilter.isPresent());
 
       @Var int i = 0;
       while (i < limit) {
@@ -177,7 +308,24 @@ public class BinaryQuantizedVectorRescorer {
                 vectorsReader.get().getQuantizedVectorValues(this.query.getField()),
                 getFieldInfo(segment.reader(), this.query).getVectorSimilarityFunction());
 
-        scoreSegment(segment, vectorValues.scorer(queryVector), topDocsCopy.scoreDocs, start, end);
+        VectorScorer scorer = vectorValues.scorer(queryVector);
+
+        if (this.parentFilter.isPresent()) {
+          @Nullable BitSet childFilterBitSet =
+              childFilterWeight != null
+                  ? computeChildFilterBitSet(childFilterWeight, segment)
+                  : null;
+          scoreNestedSegment(
+              segment,
+              scorer,
+              topDocsCopy.scoreDocs,
+              start,
+              end,
+              this.parentFilter.get(),
+              childFilterBitSet);
+        } else {
+          scoreSegment(segment, scorer, topDocsCopy.scoreDocs, start, end);
+        }
       }
 
       // sort by score
@@ -194,20 +342,18 @@ public class BinaryQuantizedVectorRescorer {
 
     private Optional<QuantizedVectorsReader> getVectorsReader(LeafReader reader) {
 
-      if (!(reader instanceof CodecReader)) {
+      if (!(reader instanceof CodecReader codecReader)) {
         return Optional.empty();
       }
 
-      @Var KnnVectorsReader vectorsReader = ((CodecReader) reader).getVectorReader();
+      @Var KnnVectorsReader vectorsReader = codecReader.getVectorReader();
 
-      if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
-        vectorsReader =
-            ((PerFieldKnnVectorsFormat.FieldsReader) vectorsReader)
-                .getFieldReader(this.query.getField());
+      if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+        vectorsReader = fieldsReader.getFieldReader(this.query.getField());
       }
 
-      if (vectorsReader instanceof QuantizedVectorsReader) {
-        return Optional.of((QuantizedVectorsReader) vectorsReader);
+      if (vectorsReader instanceof QuantizedVectorsReader quantizedVectorsReader) {
+        return Optional.of(quantizedVectorsReader);
       }
 
       return Optional.empty();
@@ -219,11 +365,20 @@ public class BinaryQuantizedVectorRescorer {
 
     private final KnnFloatVectorQuery query;
     private final Optional<TaskExecutor> executor;
+    private final Optional<BitSetProducer> parentFilter;
 
     public FullFidelityRescorer(
         KnnFloatVectorQuery query, Optional<NamedExecutorService> executorService) {
+      this(query, executorService, Optional.empty());
+    }
+
+    public FullFidelityRescorer(
+        KnnFloatVectorQuery query,
+        Optional<NamedExecutorService> executorService,
+        Optional<BitSetProducer> parentFilter) {
       this.query = query;
       this.executor = executorService.map(TaskExecutor::new);
+      this.parentFilter = parentFilter;
     }
 
     @Override
@@ -237,6 +392,9 @@ public class BinaryQuantizedVectorRescorer {
 
       List<LeafReaderContext> segments = searcher.getIndexReader().leaves();
       List<Callable<Void>> tasks = new ArrayList<>();
+
+      @Nullable Weight childFilterWeight =
+          createChildFilterWeight(searcher, this.query, this.parentFilter.isPresent());
 
       @Var int i = 0;
 
@@ -256,11 +414,25 @@ public class BinaryQuantizedVectorRescorer {
 
         VectorScorer scorer = createScorer(segment.reader());
 
-        tasks.add(
-            () -> {
-              scoreSegment(segment, scorer, topDocsCopy.scoreDocs, start, end);
-              return null;
-            });
+        if (this.parentFilter.isPresent()) {
+          BitSetProducer filter = this.parentFilter.get();
+          @Nullable BitSet childFilterBitSet =
+              childFilterWeight != null
+                  ? computeChildFilterBitSet(childFilterWeight, segment)
+                  : null;
+          tasks.add(
+              () -> {
+                scoreNestedSegment(
+                    segment, scorer, topDocsCopy.scoreDocs, start, end, filter, childFilterBitSet);
+                return null;
+              });
+        } else {
+          tasks.add(
+              () -> {
+                scoreSegment(segment, scorer, topDocsCopy.scoreDocs, start, end);
+                return null;
+              });
+        }
       }
 
       if (this.executor.isPresent()) {
@@ -284,22 +456,23 @@ public class BinaryQuantizedVectorRescorer {
     }
 
     private VectorScorer createScorer(LeafReader leafReader) throws IOException {
-
       FloatVectorValues vectorValues = leafReader.getFloatVectorValues(this.query.getField());
+      FloatVectorValues copy = vectorValues.copy();
+      FloatVectorValues.DocIndexIterator iterator = copy.iterator();
+
       VectorSimilarityFunction similarityFunction =
           getFieldInfo(leafReader, this.query).getVectorSimilarityFunction();
       float[] target = this.query.getTargetCopy();
-
       return new VectorScorer() {
 
         @Override
         public float score() throws IOException {
-          return similarityFunction.compare(target, iterator().vectorValue());
+          return similarityFunction.compare(target, copy.vectorValue(iterator.index()));
         }
 
         @Override
-        public FloatVectorValues iterator() {
-          return vectorValues;
+        public DocIdSetIterator iterator() {
+          return iterator;
         }
       };
     }

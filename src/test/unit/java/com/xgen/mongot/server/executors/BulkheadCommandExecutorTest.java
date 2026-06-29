@@ -4,8 +4,11 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.server.command.Command;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -633,6 +636,42 @@ public class BulkheadCommandExecutorTest {
               .tag("executor", "blocking-server-worker")
               .counter();
       assertThat(skippedCounter).isNotNull();
+    }
+  }
+
+  @Test
+  public void constructor_queryMemoryAttributionDisabled_doesNotRegisterResourceMetrics() {
+    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    FeatureFlags off = FeatureFlags.getDefault();
+    try (BulkheadCommandExecutor exec =
+        new BulkheadCommandExecutor(
+            meterRegistry, RegularBlockingRequestSettings.defaults(), off)) {
+      assertThat(meterRegistry.find("executor.thread.allocatedBytes").functionCounter()).isNull();
+      assertThat(meterRegistry.find("executor.thread.cpuTime").functionCounter()).isNull();
+    }
+  }
+
+  @Test
+  public void constructor_queryMemoryAttributionEnabled_registersResourceMetricsForBothPools() {
+    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    FeatureFlags on =
+        FeatureFlags.withDefaults().enable(Feature.QUERY_MEMORY_ATTRIBUTION_METRICS).build();
+    try (BulkheadCommandExecutor exec =
+        new BulkheadCommandExecutor(meterRegistry, RegularBlockingRequestSettings.defaults(), on)) {
+      FunctionCounter regular =
+          meterRegistry
+              .find("executor.thread.allocatedBytes")
+              .tag("subsystem", "query")
+              .tag("name", "blocking-server-worker")
+              .functionCounter();
+      FunctionCounter guaranteed =
+          meterRegistry
+              .find("executor.thread.allocatedBytes")
+              .tag("subsystem", "query")
+              .tag("name", "guaranteed-blocking-server-worker")
+              .functionCounter();
+      assertThat(regular).isNotNull();
+      assertThat(guaranteed).isNotNull();
     }
   }
 }

@@ -12,6 +12,7 @@ public class MockRuntimeBuilder {
 
   private Optional<Integer> numCpus = Optional.empty();
   private Optional<Bytes> maxHeapSize = Optional.empty();
+  private Optional<Bytes> totalMemory = Optional.empty();
 
   public MockRuntimeBuilder withNumCpus(int numCpus) {
     this.numCpus = Optional.of(numCpus);
@@ -23,12 +24,19 @@ public class MockRuntimeBuilder {
     return this;
   }
 
+  public MockRuntimeBuilder withTotalMemory(Bytes totalMemory) {
+    this.totalMemory = Optional.of(totalMemory);
+    return this;
+  }
+
   public Runtime build() {
     Check.isPresent(this.numCpus, "numCpus");
     Check.isPresent(this.maxHeapSize, "maxHeapSize");
     Runtime runtime = mock(Runtime.class);
     when(runtime.getNumCpus()).thenReturn(this.numCpus.get());
     when(runtime.getMaxHeapSize()).thenReturn(this.maxHeapSize.get());
+    this.totalMemory.ifPresent(
+        memory -> when(runtime.getTotalMemoryBytes()).thenReturn(memory.toBytes()));
     return runtime;
   }
 

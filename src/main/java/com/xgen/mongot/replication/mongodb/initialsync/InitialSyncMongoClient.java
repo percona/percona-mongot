@@ -3,6 +3,7 @@ package com.xgen.mongot.replication.mongodb.initialsync;
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.index.IndexMetricsUpdater.ReplicationMetricsUpdater.InitialSyncMetrics;
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoClient;
 import com.xgen.mongot.replication.mongodb.common.CollectionScanMongoClient;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncException;
@@ -45,7 +46,8 @@ interface InitialSyncMongoClient {
       ChangeStreamAggregateCommand aggregateCommand,
       MongoNamespace namespace,
       InitialSyncMetrics initialSyncMetricsUpdater,
-      Optional<Integer> batchSize)
+      Optional<Integer> batchSize,
+      GenerationId generationId)
       throws InitialSyncException;
 
   /**
@@ -54,6 +56,8 @@ interface InitialSyncMongoClient {
    * InitialSyncMongoClient::getFindCommandMongoClient.
    *
    * <p>This client will also verify that the collection name was unchanged.
+   *
+   * <p>Find and getMore use server default batching (no {@code batchSize} on the wire).
    */
   CollectionScanMongoClient<InitialSyncException> getCollectionFindCommandMongoClient(
       CollectionScanFindCommand findCommand,
@@ -64,7 +68,8 @@ interface InitialSyncMongoClient {
   CollectionScanMongoClient<InitialSyncException> getCollectionAggregateCommandMongoClient(
       CollectionScanAggregateCommand findCommand,
       IndexDefinition indexDefinition,
-      InitialSyncMetrics initialSyncMetricsUpdater)
+      InitialSyncMetrics initialSyncMetricsUpdater,
+      Optional<Integer> collectionScanGetMoreBatchSize)
       throws InitialSyncException;
 
   /**

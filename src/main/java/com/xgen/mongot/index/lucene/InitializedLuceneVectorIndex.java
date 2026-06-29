@@ -6,11 +6,13 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.IndexWriter;
 import com.xgen.mongot.index.InitializedVectorIndex;
@@ -37,6 +39,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.Directory;
 import org.slf4j.Logger;
@@ -82,14 +85,24 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
       IndexDirectoryFactory directoryFactory,
       IndexDirectoryHelper indexDirectoryHelper,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
-      FeatureFlags featureFlags)
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
         .log("Initializing index");
     try {
-      var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags);
+      var ret =
+          create(
+              index,
+              generationId,
+              directoryFactory,
+              luceneIndexSnapshotter,
+              featureFlags,
+              dynamicFeatureFlagRegistry,
+              useIdBloomFilter);
       LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
@@ -106,7 +119,15 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
         throw e;
       }
     }
-    var ret = create(index, generationId, directoryFactory, luceneIndexSnapshotter, featureFlags);
+    var ret =
+        create(
+            index,
+            generationId,
+            directoryFactory,
+            luceneIndexSnapshotter,
+            featureFlags,
+            dynamicFeatureFlagRegistry,
+            useIdBloomFilter);
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
@@ -119,7 +140,9 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
       GenerationId generationId,
       IndexDirectoryFactory directoryFactory,
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
-      FeatureFlags featureFlags)
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      BooleanSupplier useIdBloomFilter)
       throws IOException {
     var vectorIndexProperties = index.getVectorIndexProperties();
     var definition = index.getDefinition();
@@ -145,8 +168,13 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
                 SingleLuceneIndexWriter.createForVectorIndex(
                     directory,
                     vectorIndexProperties.mergeScheduler.createForIndexPartition(
-                        generationId, indexPartitionId, definition.getNumPartitions(),
-                        featureFlags.isEnabled(Feature.CANCEL_MERGE)),
+                        generationId,
+                        indexPartitionId,
+                        definition.getNumPartitions(),
+                        featureFlags.isEnabled(Feature.CANCEL_MERGE),
+                        useIdBloomFilter,
+                        IndexTypeData.getIndexTypeTag(definition).tagValue,
+                        directory),
                     vectorIndexProperties.mergePolicy,
                     vectorIndexProperties.ramBufferSizeMb,
                     vectorIndexProperties.fieldLimit,
@@ -156,12 +184,14 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
                     indexMetricsUpdaterBuilder.getIndexingMetricsUpdater(),
                     luceneIndexSnapshotter.map(
                         snapshotter -> snapshotter.getSnapshotDeletionPolicy(indexPartitionId)),
-                    featureFlags),
+                    featureFlags,
+                    useIdBloomFilter),
             luceneIndexWriter ->
                 LuceneSearcherManager.create(
                     luceneIndexWriter.getLuceneWriter(),
                     searcherFactory,
-                    vectorIndexProperties.metricsFactory));
+                    vectorIndexProperties.metricsFactory,
+                    useIdBloomFilter));
 
     IndexMetricsUpdater.QueryingMetricsUpdater metricsUpdater =
         indexMetricsUpdaterBuilder.getQueryingMetricsUpdater();
@@ -170,7 +200,7 @@ class InitializedLuceneVectorIndex implements InitializedVectorIndex {
     VectorQueryFactoryContext factoryContext =
         new VectorQueryFactoryContext(definitionResolver, featureFlags, metricsUpdater);
     var luceneVectorQueryFactoryDistributor =
-        LuceneVectorQueryFactoryDistributor.create(factoryContext);
+        LuceneVectorQueryFactoryDistributor.create(factoryContext, dynamicFeatureFlagRegistry);
 
     List<LuceneVectorIndexReader> vectorIndexReaders =
         indexResources.luceneSearcherManagers.stream()

@@ -23,12 +23,15 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoException;
 import com.mongodb.MongoWriteException;
 import com.mongodb.ServerAddress;
 import com.mongodb.WriteError;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
+import com.xgen.mongot.catalogservice.TopologyMismatchException;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexCapabilities;
@@ -38,6 +41,7 @@ import com.xgen.mongot.server.command.management.definition.common.NamedSearchIn
 import com.xgen.mongot.server.command.management.util.IndexMapper;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
+import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
@@ -65,7 +69,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     var indexesCreated = response.getArray("indexesCreated");
@@ -110,7 +120,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     var indexesCreated = response.getArray("indexesCreated");
@@ -165,7 +181,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     var indexesCreated = response.getArray("indexesCreated");
@@ -205,7 +227,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     assertEquals(Errors.INDEX_ALREADY_EXISTS.code, response.getInt32("code").getValue());
@@ -252,7 +280,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     var indexesCreated = response.getArray("indexesCreated");
@@ -298,7 +332,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     assertEquals(Errors.INDEX_ALREADY_EXISTS.code, response.getInt32("code").getValue());
@@ -323,7 +363,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     // Verify that the command fails with COMMAND_FAILED error
@@ -357,7 +403,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     // Verify that the command fails with COMMAND_FAILED error
@@ -390,7 +442,13 @@ public class AicCreateSearchIndexesCommandTest {
 
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
 
     // Verify that the entire command fails (no partial success)
@@ -425,7 +483,8 @@ public class AicCreateSearchIndexesCommandTest {
   public void mismatchedNestedRootFailsToCreate()
       throws BsonParseException, MetadataServiceException {
     this.failsWithCommandFailed(
-        "nestedRoot \"sections\" does not match any field path in the index definition",
+        "nestedRoot \"sections\" does not match any vector field path "
+            + "in the index definition",
         bson(
             """
         {
@@ -460,10 +519,66 @@ public class AicCreateSearchIndexesCommandTest {
 
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     var response = command.run();
     assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
     assertEquals(expectedMessage, response.getString("errmsg").getValue());
+  }
+
+  @Test
+  public void testTopologyMismatchExceptionReturnsCommandFailed() throws Exception {
+    var mockAic = mock(AuthoritativeIndexCatalog.class);
+    var mockGuard = mock(CatalogAccessGuard.class);
+    doThrow(new TopologyMismatchException("router topology mismatch"))
+        .when(mockGuard)
+        .requireTopologyMatch();
+
+    var definition =
+        (CreateSearchIndexesCommandDefinition)
+            ManageSearchIndexCommandDefinitionBuilder.createIndexes()
+                .withDynamicIndex()
+                .buildSearchIndexCommand();
+    var command =
+        new AicCreateSearchIndexesCommand(
+            mockAic, mockGuard, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME,
+            Optional.empty(), definition);
+    var response = command.run();
+
+    assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
+    assertEquals(Errors.COMMAND_FAILED.name, response.getString("codeName").getValue());
+    assertTrue(response.getString("errmsg").getValue().contains("router topology mismatch"));
+    verify(mockAic, never()).createIndex(any(), any(), any());
+  }
+
+  @Test
+  public void testCheckedMongoExceptionReturnsCommandFailed() throws Exception {
+    var mockAic = mock(AuthoritativeIndexCatalog.class);
+    var mockGuard = mock(CatalogAccessGuard.class);
+    doThrow(new CheckedMongoException(new MongoException("mongo connection failed")))
+        .when(mockGuard)
+        .requireTopologyMatch();
+
+    var definition =
+        (CreateSearchIndexesCommandDefinition)
+            ManageSearchIndexCommandDefinitionBuilder.createIndexes()
+                .withDynamicIndex()
+                .buildSearchIndexCommand();
+    var command =
+        new AicCreateSearchIndexesCommand(
+            mockAic, mockGuard, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME,
+            Optional.empty(), definition);
+    var response = command.run();
+
+    assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
+    assertEquals(Errors.COMMAND_FAILED.name, response.getString("codeName").getValue());
+    assertTrue(response.getString("errmsg").getValue().contains("mongo connection failed"));
+    verify(mockAic, never()).createIndex(any(), any(), any());
   }
 
   @Test
@@ -476,7 +591,13 @@ public class AicCreateSearchIndexesCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicCreateSearchIndexesCommand(
-            mockAic, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME, Optional.empty(), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.empty(),
+            definition);
     assertFalse(command.maybeLoadShed());
   }
 }

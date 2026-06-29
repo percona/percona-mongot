@@ -16,12 +16,12 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     value = {
-      DefaultQuerySpecTest.TestDeserialization.class,
-      DefaultQuerySpecTest.TestSerialization.class,
+      DefaultQuerySpecTest.DeserializationTest.class,
+      DefaultQuerySpecTest.SerializationTest.class,
     })
 public class DefaultQuerySpecTest {
   @RunWith(Parameterized.class)
-  public static class TestDeserialization {
+  public static class DeserializationTest {
     private static final String SUITE_NAME = "default-query-deserialization";
     private static final BsonDeserializationTestSuite<DefaultQuerySpec> TEST_SUITE =
         fromDocument(
@@ -29,7 +29,7 @@ public class DefaultQuerySpecTest {
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<DefaultQuerySpec> testSpec;
 
-    public TestDeserialization(
+    public DeserializationTest(
         BsonDeserializationTestSuite.TestSpecWrapper<DefaultQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
@@ -52,14 +52,14 @@ public class DefaultQuerySpecTest {
   }
 
   @RunWith(Parameterized.class)
-  public static class TestSerialization {
+  public static class SerializationTest {
     private static final String SUITE_NAME = "default-query-serialization";
     private static final BsonSerializationTestSuite<DefaultQuerySpec> TEST_SUITE =
         fromEncodable(ExplainInformationTestUtil.RESOURCES_PATH, SUITE_NAME);
 
     private final BsonSerializationTestSuite.TestSpec<DefaultQuerySpec> testSpec;
 
-    public TestSerialization(BsonSerializationTestSuite.TestSpec<DefaultQuerySpec> testSpec) {
+    public SerializationTest(BsonSerializationTestSuite.TestSpec<DefaultQuerySpec> testSpec) {
       this.testSpec = testSpec;
     }
 

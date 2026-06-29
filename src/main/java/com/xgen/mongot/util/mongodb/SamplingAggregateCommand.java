@@ -18,18 +18,21 @@ public class SamplingAggregateCommand {
   private final OptionalLong batchSize;
   private final Optional<List<Bson>> viewDefinedStages;
   private final Optional<Bson> projectStage;
+  private final OptionalLong maxTimeMs;
 
   public SamplingAggregateCommand(
       String collectionName,
       Long sampleLimit,
       OptionalLong batchSize,
       Optional<List<Bson>> viewDefinedStages,
-      Optional<Bson> projectStage) {
+      Optional<Bson> projectStage,
+      OptionalLong maxTimeMs) {
     this.collectionName = collectionName;
     this.sampleLimit = sampleLimit;
     this.batchSize = batchSize;
     this.viewDefinedStages = viewDefinedStages;
     this.projectStage = projectStage;
+    this.maxTimeMs = maxTimeMs;
   }
 
   public static class Builder {
@@ -39,13 +42,15 @@ public class SamplingAggregateCommand {
     private OptionalLong batchSize = OptionalLong.empty();
     private Optional<Bson> projectStage = Optional.empty();
     private Optional<List<Bson>> viewDefinedStages = Optional.empty();
+    private OptionalLong maxTimeMs = OptionalLong.empty();
 
     /** Builds the configured ChangeStreamAggregateCommand. */
     public SamplingAggregateCommand build() {
       var collection = Check.isPresent(this.collectionName, "collectionName");
       var limit = Check.isPresent(this.sampleLimit, "sampleLimit");
       return new SamplingAggregateCommand(
-          collection, limit, this.batchSize, this.viewDefinedStages, this.projectStage);
+          collection, limit, this.batchSize, this.viewDefinedStages, this.projectStage,
+          this.maxTimeMs);
     }
 
     /** Sets the collection name. */
@@ -77,6 +82,12 @@ public class SamplingAggregateCommand {
       this.projectStage = Optional.of(projectStage);
       return this;
     }
+
+    /** Sets the maxTimeMS budget for the sampling query. */
+    public SamplingAggregateCommand.Builder maxTimeMs(long maxTimeMs) {
+      this.maxTimeMs = OptionalLong.of(maxTimeMs);
+      return this;
+    }
   }
 
   /** Constructs the proper AggregateCommandProxy for the SampleAggregationCommand. */
@@ -87,13 +98,16 @@ public class SamplingAggregateCommand {
 
     List<Bson> pipeline =
         new AggregationPipelineBuilder()
-            // run view-defined stages first in order to filter and transform the documents
-            .addMultipleStages(this.viewDefinedStages)
-            // pick a few samples
+            // $sample first so MongoDB can use the fast pseudo-random sampling path
             .addStage(sampleStage)
+            // apply view-defined $addFields/$set only on the sampled documents
+            .addMultipleStages(this.viewDefinedStages)
             // run $project to include only required fields
             .addStage(this.projectStage)
             .build();
+
+    Optional<Long> maxTimeMsOpt =
+        this.maxTimeMs.isPresent() ? Optional.of(this.maxTimeMs.getAsLong()) : Optional.empty();
 
     return new AggregateCommandProxy(
         aggregate,
@@ -102,6 +116,7 @@ public class SamplingAggregateCommand {
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
-        Optional.empty());
+        Optional.empty(),
+        maxTimeMsOpt);
   }
 }
