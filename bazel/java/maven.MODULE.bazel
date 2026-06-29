@@ -21,14 +21,14 @@ maven.install(
     name = "maven",
     artifacts = [
         "com.google.guava:guava:33.5.0-jre",
-        # Jackson (2.18.6)
-        "com.fasterxml.jackson.core:jackson-databind:2.18.6",
-        "com.fasterxml.jackson.core:jackson-annotations:2.18.6",
-        "com.fasterxml.jackson.core:jackson-core:2.18.6",
-        "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.6",
-        "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.18.6",
-        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.6",
-        "com.fasterxml.jackson.module:jackson-module-parameter-names:2.18.6",
+        # Jackson (2.18.8) — 2.18.8 fixes jackson-databind CVE-2026-54512/54513
+        "com.fasterxml.jackson.core:jackson-databind:2.18.8",
+        "com.fasterxml.jackson.core:jackson-annotations:2.18.8",
+        "com.fasterxml.jackson.core:jackson-core:2.18.8",
+        "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.8",
+        "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.18.8",
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.8",
+        "com.fasterxml.jackson.module:jackson-module-parameter-names:2.18.8",
         # METRICS_ARTIFACTS (1.15.3)
         "io.micrometer:micrometer-core:1.15.3",
         "io.micrometer:micrometer-registry-prometheus:1.15.3",
@@ -83,20 +83,21 @@ maven.install(
         "com.carrotsearch:hppc:0.10.0",
         # PINNED_TRANSITIVE_ARTIFACTS
         "com.google.protobuf:protobuf-java:4.29.0",
-        # Force Netty transitive artifacts to 4.1.133.Final to address CVE-2026-42579,
-        # CVE-2026-42578, and to unify Netty versions.
-        "io.netty:netty-codec-http:4.1.133.Final",
-        "io.netty:netty-handler:4.1.133.Final",
-        "io.netty:netty-codec-http2:4.1.133.Final",
-        "io.netty:netty-codec-dns:4.1.133.Final",
-        "io.netty:netty-codec-socks:4.1.133.Final",
-        "io.netty:netty-handler-proxy:4.1.133.Final",
-        "io.netty:netty-resolver:4.1.133.Final",
-        "io.netty:netty-resolver-dns:4.1.133.Final",
-        "io.netty:netty-resolver-dns-classes-macos:4.1.133.Final",
-        "io.netty:netty-resolver-dns-native-macos:jar:osx-x86_64:4.1.133.Final",
-        "io.netty:netty-resolver-dns-native-macos:jar:osx-aarch_64:4.1.133.Final",
-        "io.netty:netty-transport-native-unix-common:4.1.133.Final",
+        # Force Netty transitive artifacts to 4.1.135.Final for netty-handler CVE-2026-44249/
+        # 45416/50010, and to unify Netty versions. Keep in sync with _NETTY_VERSION in
+        # maven_search_systems.MODULE.bazel.
+        "io.netty:netty-codec-http:4.1.135.Final",
+        "io.netty:netty-handler:4.1.135.Final",
+        "io.netty:netty-codec-http2:4.1.135.Final",
+        "io.netty:netty-codec-dns:4.1.135.Final",
+        "io.netty:netty-codec-socks:4.1.135.Final",
+        "io.netty:netty-handler-proxy:4.1.135.Final",
+        "io.netty:netty-resolver:4.1.135.Final",
+        "io.netty:netty-resolver-dns:4.1.135.Final",
+        "io.netty:netty-resolver-dns-classes-macos:4.1.135.Final",
+        "io.netty:netty-resolver-dns-native-macos:jar:osx-x86_64:4.1.135.Final",
+        "io.netty:netty-resolver-dns-native-macos:jar:osx-aarch_64:4.1.135.Final",
+        "io.netty:netty-transport-native-unix-common:4.1.135.Final",
         # GRPC requires this but doesn't bundle it for some reason
         "org.checkerframework:checker-qual:3.48.4",
         # Force gRPC version to 1.75.0 to address CVE-2025-55163
