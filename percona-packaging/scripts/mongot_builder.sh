@@ -154,7 +154,7 @@ get_system(){
     elif [ -f /etc/amazon-linux-release ]; then
         RHEL=$(rpm --eval %amzn)
         ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-        OS_NAME="el$RHEL"
+        OS_NAME="amzn$RHEL"
         OS="rpm"
     else
         ARCH=$(uname -m)
