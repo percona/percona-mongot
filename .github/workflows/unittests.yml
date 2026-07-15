@@ -1,0 +1,59 @@
+name: unittests
+
+on:
+  workflow_dispatch:
+
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Cleanup unnecessary software
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run unit tests
+        # Uncomment this if we want to execute only affected tests.
+        # make test.unit defaults to master; this repo uses main.
+        # Prefer origin/main so merge-base works after actions/checkout.
+        # env:
+        #   branch_name: origin/${{ github.base_ref || 'main' }}
+        run: make test.unit
+
+      - name: Publish Test Report
+        uses: mikepenz/action-junit-report@v5
+        if: success() || failure()
+        with:
+          report_paths: 'bazel-testlogs/**/test.xml'
+          follow_symlink: true
+
+      - name: Upload logs as artifact
+        uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: unittests-logs
+          path: bazel-testlogs/
+          if-no-files-found: ignore
