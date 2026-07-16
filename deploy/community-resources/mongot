@@ -42,6 +42,7 @@ run_mongot() {
     -XX:+ExitOnOutOfMemoryError \
     -XX:-UseGCOverheadLimit \
     '-Djava.security.egd=file:/dev/urandom' \
+    "-Dmongot.embeddingModelConfigFile=${DIR}/embedding-service-configs.yml" \
     '--add-modules=jdk.incubator.vector' \
     '--enable-preview' \
     '--enable-native-access=ALL-UNNAMED' \
