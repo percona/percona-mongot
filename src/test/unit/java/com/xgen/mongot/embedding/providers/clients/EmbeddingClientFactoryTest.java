@@ -82,6 +82,28 @@ public class EmbeddingClientFactoryTest {
         "voyage-3-large", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, config);
   }
 
+  private static EmbeddingModelConfig openAiCompatibleModel() {
+    EmbeddingServiceConfig.OpenAiEmbeddingCredentials creds =
+        new EmbeddingServiceConfig.OpenAiEmbeddingCredentials(Optional.empty(), Optional.empty());
+    EmbeddingServiceConfig.EmbeddingConfig config =
+        new EmbeddingServiceConfig.EmbeddingConfig(
+            Optional.empty(),
+            new EmbeddingServiceConfig.OpenAiModelConfig(
+                Optional.of(1024), Optional.of(96), Optional.of(120_000), Optional.empty()),
+            RETRY_CONFIG,
+            creds,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            true,
+            Optional.of("http://localhost:11434/v1/embeddings"),
+            false,
+            Optional.empty());
+    return EmbeddingModelConfig.create(
+        "bge-m3", EmbeddingServiceConfig.EmbeddingProvider.OPENAI_COMPATIBLE, config);
+  }
+
   private static DynamicSemaphore testSemaphore() {
     return new DynamicSemaphore(new AimdCongestionControl());
   }
@@ -183,6 +205,49 @@ public class EmbeddingClientFactoryTest {
 
     assertTrue(useFlexTierField(client));
     assertNotNull(congestionSemaphoreField(client));
+  }
+
+  @Test
+  public void openAiCompatibleProvider_buildsOpenAiCompatClient() {
+    EmbeddingModelConfig model = openAiCompatibleModel();
+    EmbeddingClientFactory factory =
+        new EmbeddingClientFactory(new SimpleMeterRegistry(), DeploymentEnvironment.COMMUNITY);
+
+    for (EmbeddingServiceConfig.ServiceTier tier : EmbeddingServiceConfig.ServiceTier.values()) {
+      EmbeddingModelConfig.ConsolidatedWorkloadParams params =
+          switch (tier) {
+            case QUERY -> model.query();
+            case CHANGE_STREAM -> model.changeStream();
+            case COLLECTION_SCAN -> model.collectionScan();
+          };
+
+      ClientInterface client = factory.createEmbeddingClient(model, tier, params);
+
+      assertTrue(
+          "Expected OPENAI_COMPATIBLE provider to build an OpenAiCompatClient for tier " + tier,
+          client instanceof OpenAiCompatClient);
+    }
+  }
+
+  @Test
+  public void openAiCompatibleProvider_ignoresFlexTierAndCongestionSemaphore() {
+    EmbeddingModelConfig model = openAiCompatibleModel();
+    EmbeddingClientFactory factory =
+        new EmbeddingClientFactory(
+            new SimpleMeterRegistry(),
+            DeploymentEnvironment.ATLAS,
+            Optional.of(Set.of(EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN)));
+
+    ClientInterface client =
+        factory.createEmbeddingClient(
+            model,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            model.collectionScan(),
+            Optional.of(testSemaphore()));
+
+    assertTrue(
+        "Voyage-only flex tier wiring must not affect OPENAI_COMPATIBLE clients",
+        client instanceof OpenAiCompatClient);
   }
 
   private static boolean useFlexTierField(ClientInterface client) throws Exception {

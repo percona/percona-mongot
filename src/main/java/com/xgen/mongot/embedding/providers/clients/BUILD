@@ -5,6 +5,7 @@ java_library(
     srcs = [
         "ClientInterface.java",
         "EmbeddingClientFactory.java",
+        "OpenAiCompatClient.java",
         "VoyageClient.java",
     ],
     visibility = ["//:__subpackages__"],
