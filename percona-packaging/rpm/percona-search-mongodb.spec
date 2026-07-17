@@ -10,7 +10,7 @@
 %{?el10:         %global systemd 1}
 %{?amzn2023:     %global systemd 1}
 
-Name:    percona-server-mongodb-mongot
+Name:    percona-search-mongodb
 Version: @@VERSION@@
 Release: @@RELEASE@@%{?dist}
 Summary: Percona Search for MongoDB (mongot)
@@ -18,8 +18,8 @@ Summary: Percona Search for MongoDB (mongot)
 Group:   Applications/Databases
 License: SSPL-1.0
 URL:     https://github.com/percona/percona-mongot
-Source0: percona-server-mongodb-mongot-%{version}.tar.gz
-Source1: percona-server-mongodb-mongot-bundle.tar.gz
+Source0: percona-search-mongodb-%{version}.tar.gz
+Source1: percona-search-mongodb-bundle.tar.gz
 
 # The bundle ships a prebuilt JDK and native .so libraries; skip auto-discovery.
 AutoReqProv: no
@@ -43,7 +43,7 @@ capabilities for MongoDB and is intended to run alongside Percona Server
 for MongoDB to serve search queries and manage search indexes.
 
 %prep
-%setup -q -n percona-server-mongodb-mongot-%{version}
+%setup -q -n percona-search-mongodb-%{version}
 
 %build
 # The mongot bundle is built externally with Bazel (see mongot_builder.sh).
@@ -51,7 +51,7 @@ for MongoDB to serve search queries and manage search indexes.
 
 %install
 rm -rf $RPM_BUILD_ROOT
-install -m 0755 -d $RPM_BUILD_ROOT/usr/lib/percona-server-mongodb-mongot
+install -m 0755 -d $RPM_BUILD_ROOT/usr/lib/percona-search-mongodb
 install -m 0755 -d $RPM_BUILD_ROOT%{_bindir}
 install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot
 install -m 0750 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot/secrets
@@ -61,7 +61,7 @@ install -m 0750 -d $RPM_BUILD_ROOT%{_sharedstatedir}/mongot
 install -m 0750 -d $RPM_BUILD_ROOT%{_localstatedir}/log/mongot
 
 # Lay out the prebuilt bundle.
-tar -xzf %{SOURCE1} -C $RPM_BUILD_ROOT/usr/lib/percona-server-mongodb-mongot --strip-components=1
+tar -xzf %{SOURCE1} -C $RPM_BUILD_ROOT/usr/lib/percona-search-mongodb --strip-components=1
 
 # Thin launcher on PATH.
 install -m 0755 percona-packaging/conf/mongot-wrapper.sh $RPM_BUILD_ROOT%{_bindir}/mongot
@@ -112,7 +112,7 @@ chmod 0750             %{_sysconfdir}/mongot
 
 %files
 %defattr(-,root,root,-)
-/usr/lib/percona-server-mongodb-mongot
+/usr/lib/percona-search-mongodb
 %{_bindir}/mongot
 %dir %attr(0750, root, mongod) %{_sysconfdir}/mongot
 %dir %attr(0750, root, mongod) %{_sysconfdir}/mongot/secrets

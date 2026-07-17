@@ -1,11 +1,11 @@
 #!/usr/bin/make -f
-# debian/rules for percona-server-mongodb-mongot.
+# debian/rules for percona-search-mongodb.
 # The mongot bundle is built externally with Bazel and shipped to debian/rules
-# as `prebuilt/percona-server-mongodb-mongot-bundle.tar.gz`. Here we just lay it out.
+# as `prebuilt/percona-search-mongodb-bundle.tar.gz`. Here we just lay it out.
 
 export DH_VERBOSE=1
 TMP=$(CURDIR)/debian/tmp
-BUNDLE=$(CURDIR)/prebuilt/percona-server-mongodb-mongot-bundle.tar.gz
+BUNDLE=$(CURDIR)/prebuilt/percona-search-mongodb-bundle.tar.gz
 
 %:
 	dh $@ --with=systemd
@@ -28,7 +28,7 @@ override_dh_strip_nondeterminism:
 
 override_dh_auto_install:
 	@echo "RULES.$@"
-	mkdir -p $(TMP)/usr/lib/percona-server-mongodb-mongot
+	mkdir -p $(TMP)/usr/lib/percona-search-mongodb
 	mkdir -p $(TMP)/usr/bin
 	mkdir -p $(TMP)/etc/mongot
 	mkdir -p $(TMP)/etc/default
@@ -36,7 +36,7 @@ override_dh_auto_install:
 	mkdir -p $(TMP)/lib/systemd/system
 	mkdir -p $(TMP)/var/lib/mongot
 	mkdir -p $(TMP)/var/log/mongot
-	tar -xzf $(BUNDLE) -C $(TMP)/usr/lib/percona-server-mongodb-mongot --strip-components=1
+	tar -xzf $(BUNDLE) -C $(TMP)/usr/lib/percona-search-mongodb --strip-components=1
 	install -m 0755 percona-packaging/conf/mongot-wrapper.sh $(TMP)/usr/bin/mongot
 	install -m 0640 percona-packaging/conf/mongot.yml       $(TMP)/etc/mongot/mongot.yml
 	install -m 0640 percona-packaging/conf/mongot.env       $(TMP)/etc/default/mongot

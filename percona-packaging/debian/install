@@ -1,4 +1,4 @@
-usr/lib/percona-server-mongodb-mongot/* /usr/lib/percona-server-mongodb-mongot/
+usr/lib/percona-search-mongodb/* /usr/lib/percona-search-mongodb/
 usr/bin/mongot /usr/bin/
 etc/mongot/mongot.yml /etc/mongot/
 etc/default/mongot /etc/default/

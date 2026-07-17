@@ -23,7 +23,7 @@ Usage: $0 [OPTIONS]
         --ps4m_release      Package release/revision number (rpm Release / deb revision; same for both)
 
         --help) usage ;;
-Example $0 --builddir=/tmp/percona-server-mongodb-mongot --get_sources=1 --build_mongot=1 --build_variant=linux-x64
+Example $0 --builddir=/tmp/percona-search-mongodb --get_sources=1 --build_mongot=1 --build_variant=linux-x64
 EOF
         exit 1
 }
@@ -89,12 +89,12 @@ get_sources(){
         echo "Sources will not be downloaded"
         return 0
     fi
-    PRODUCT=percona-server-mongodb-mongot
-    echo "PRODUCT=${PRODUCT}" > percona-server-mongodb-mongot.properties
-    echo "BUILD_NUMBER=${BUILD_NUMBER}" >> percona-server-mongodb-mongot.properties
-    echo "BUILD_ID=${BUILD_ID}" >> percona-server-mongodb-mongot.properties
-    echo "VERSION=${VERSION}" >> percona-server-mongodb-mongot.properties
-    echo "BRANCH=${BRANCH}" >> percona-server-mongodb-mongot.properties
+    PRODUCT=percona-search-mongodb
+    echo "PRODUCT=${PRODUCT}" > percona-search-mongodb.properties
+    echo "BUILD_NUMBER=${BUILD_NUMBER}" >> percona-search-mongodb.properties
+    echo "BUILD_ID=${BUILD_ID}" >> percona-search-mongodb.properties
+    echo "VERSION=${VERSION}" >> percona-search-mongodb.properties
+    echo "BRANCH=${BRANCH}" >> percona-search-mongodb.properties
     rm -rf ${PRODUCT}
     git clone "$REPO" ${PRODUCT}
     retval=$?
@@ -117,7 +117,7 @@ get_sources(){
     echo "export REVISION=${REVISION}" >> VERSION
     echo "export GITCOMMIT=${GITCOMMIT}" >> VERSION
     echo "export GITBRANCH=${GITBRANCH}" >> VERSION
-    echo "export REVISION=${REVISION}" >> ${WORKDIR}/percona-server-mongodb-mongot.properties
+    echo "export REVISION=${REVISION}" >> ${WORKDIR}/percona-search-mongodb.properties
     cd ${WORKDIR}
     rm -fr debian rpm ${PRODUCT}-${VERSION}
 
@@ -135,7 +135,7 @@ get_sources(){
         exit 1
     fi
     tar --owner=0 --group=0 --exclude=.git -czf ${PRODUCT}-${VERSION}.tar.gz ${PRODUCT}-${VERSION}
-    echo "UPLOAD=UPLOAD/experimental/BUILDS/${PRODUCT}/${PRODUCT}-${VERSION}/${BRANCH}/${REVISION}/${BUILD_ID}" >> percona-server-mongodb-mongot.properties
+    echo "UPLOAD=UPLOAD/experimental/BUILDS/${PRODUCT}/${PRODUCT}-${VERSION}/${BRANCH}/${REVISION}/${BUILD_ID}" >> percona-search-mongodb.properties
     mkdir -p $WORKDIR/source_tarball
     mkdir -p $CURDIR/source_tarball
     cp ${PRODUCT}-${VERSION}.tar.gz $WORKDIR/source_tarball
@@ -233,10 +233,10 @@ install_deps() {
 
 get_tar(){
     TARBALL=$1
-    TARFILE=$(basename $(find $WORKDIR/$TARBALL -name 'percona-server-mongodb-mongot*.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find $WORKDIR/$TARBALL -name 'percona-search-mongodb*.tar.gz' | sort | tail -n1))
     if [ -z $TARFILE ]
     then
-        TARFILE=$(basename $(find $CURDIR/$TARBALL -name 'percona-server-mongodb-mongot*.tar.gz' | sort | tail -n1))
+        TARFILE=$(basename $(find $CURDIR/$TARBALL -name 'percona-search-mongodb*.tar.gz' | sort | tail -n1))
         if [ -z $TARFILE ]
         then
             echo "There is no $TARBALL for build"
@@ -282,7 +282,7 @@ build_mongot(){
     get_tar "source_tarball"
     cd $WORKDIR
     rm -rf ${PRODUCT}-${VERSION}
-    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-search-mongodb*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
     tar xzf ${TARFILE}
     cd ${PRODUCT}-${VERSION}
     source VERSION
@@ -353,7 +353,7 @@ get_bundle(){
     BUNDLE_PLATFORM=$(host_bazel_platform)
     BUNDLE_SRC=$(find "${WORKDIR}/tarball" "${CURDIR}/tarball" -maxdepth 1 -name "${PRODUCT}-*-${BUNDLE_PLATFORM}.tar.gz" 2>/dev/null | sort | tail -n1)
     if [ -n "${BUNDLE_SRC}" ] && [ -f "${BUNDLE_SRC}" ]; then
-        cp "${BUNDLE_SRC}" "${WORKDIR}/percona-server-mongodb-mongot-bundle.tar.gz"
+        cp "${BUNDLE_SRC}" "${WORKDIR}/percona-search-mongodb-bundle.tar.gz"
     else
         echo "No mongot bundle for ${BUNDLE_PLATFORM} found in tarball/."
         echo "Run --build_mongot=1 --build_variant=$(echo ${BUNDLE_PLATFORM} | sed 's/linux_x86_64/linux-x64/;s/linux_aarch64/linux-aarch64/') on a matching-arch host first."
@@ -375,7 +375,7 @@ build_rpm(){
     get_bundle
     rm -fr rpmbuild
     mkdir -vp rpmbuild/{SOURCES,SPECS,BUILD,SRPMS,RPMS}
-    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-search-mongodb*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
     if ! tar -xzf ${TARFILE} --wildcards "*/percona-packaging" --strip=1; then
         echo "ERROR: source tarball does not contain percona-packaging/."
         exit 1
@@ -384,18 +384,18 @@ build_rpm(){
     source VERSION
     sed -e "s:@@VERSION@@:${VERSION}:g" \
         -e "s:@@RELEASE@@:${RELEASE}:g" \
-        percona-packaging/rpm/percona-server-mongodb-mongot.spec > rpmbuild/SPECS/percona-server-mongodb-mongot.spec
+        percona-packaging/rpm/percona-search-mongodb.spec > rpmbuild/SPECS/percona-search-mongodb.spec
     cp ${TARFILE} rpmbuild/SOURCES/
-    cp percona-server-mongodb-mongot-bundle.tar.gz rpmbuild/SOURCES/
+    cp percona-search-mongodb-bundle.tar.gz rpmbuild/SOURCES/
 
-    echo "RHEL=${RHEL}" >> ${WORKDIR}/percona-server-mongodb-mongot.properties
-    echo "ARCH=${ARCH}" >> ${WORKDIR}/percona-server-mongodb-mongot.properties
+    echo "RHEL=${RHEL}" >> ${WORKDIR}/percona-search-mongodb.properties
+    echo "ARCH=${ARCH}" >> ${WORKDIR}/percona-search-mongodb.properties
 
     rpmbuild -bb \
         --define "_topdir ${WORKDIR}/rpmbuild" \
         --define "dist .${OS_NAME}" \
         --define "version ${VERSION}" \
-        rpmbuild/SPECS/percona-server-mongodb-mongot.spec
+        rpmbuild/SPECS/percona-search-mongodb.spec
     return_code=$?
     if [ $return_code != 0 ]; then
         exit $return_code
@@ -418,7 +418,7 @@ build_deb(){
     get_tar "source_tarball"
     get_bundle
     rm -rf ${PRODUCT}-${VERSION}
-    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-server-mongodb-mongot*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
+    TARFILE=$(basename $(find . -maxdepth 1 -name 'percona-search-mongodb*.tar.gz' ! -name '*-bundle.tar.gz' | sort | tail -n1))
     tar -xzf ${TARFILE}
     cd ${PRODUCT}-${VERSION}
     source VERSION
@@ -428,12 +428,12 @@ build_deb(){
     rm -rf debian
     cp -r percona-packaging/debian ./debian
     mkdir -p prebuilt
-    cp ${WORKDIR}/percona-server-mongodb-mongot-bundle.tar.gz prebuilt/percona-server-mongodb-mongot-bundle.tar.gz
+    cp ${WORKDIR}/percona-search-mongodb-bundle.tar.gz prebuilt/percona-search-mongodb-bundle.tar.gz
 
     export DEBIAN=$(lsb_release -sc)
     export ARCH=$(dpkg-architecture -qDEB_BUILD_ARCH)
-    echo "DEBIAN=${DEBIAN}" >> ${WORKDIR}/percona-server-mongodb-mongot.properties
-    echo "ARCH=${ARCH}"   >> ${WORKDIR}/percona-server-mongodb-mongot.properties
+    echo "DEBIAN=${DEBIAN}" >> ${WORKDIR}/percona-search-mongodb.properties
+    echo "ARCH=${ARCH}"   >> ${WORKDIR}/percona-search-mongodb.properties
 
     dch -m -D "${DEBIAN}" --force-distribution -v "${VERSION}-${RELEASE}.${DEBIAN}" 'Build for distribution'
     dpkg-buildpackage -rfakeroot -us -uc -b
@@ -447,7 +447,7 @@ build_deb(){
 #main
 
 CURDIR=$(pwd)
-VERSION_FILE=$CURDIR/percona-server-mongodb-mongot.properties
+VERSION_FILE=$CURDIR/percona-search-mongodb.properties
 args=
 WORKDIR=
 SRPM=0
@@ -466,7 +466,7 @@ RELEASE="1"
 REVISION=0
 BRANCH="main"
 REPO="https://github.com/vorsel/percona-mongot.git"
-PRODUCT=percona-server-mongodb-mongot
+PRODUCT=percona-search-mongodb
 VARIANT="linux-x64"
 parse_arguments PICK-ARGS-FROM-ARGV "$@"
 PSM_BRANCH=${BRANCH}

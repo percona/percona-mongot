@@ -1,4 +1,4 @@
-Source: percona-server-mongodb-mongot
+Source: percona-search-mongodb
 Section: database
 Priority: optional
 Maintainer: Percona LLC <info@percona.com>
@@ -6,7 +6,7 @@ Build-Depends: debhelper (>= 9), lsb-release
 Standards-Version: 4.5.0
 Homepage: https://github.com/percona/percona-mongot
 
-Package: percona-server-mongodb-mongot
+Package: percona-search-mongodb
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, adduser
 Description: Percona Search for MongoDB (mongot).
