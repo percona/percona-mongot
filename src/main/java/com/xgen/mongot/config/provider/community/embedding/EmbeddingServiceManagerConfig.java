@@ -240,6 +240,11 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
    * Inject the {@code _provider} discriminator and community fields into the config doc. VOYAGE
    * entries get the loaded keys (so the bundled YAML stays credential-free); other providers keep
    * their own YAML credentials. {@code isDedicatedCluster: true} is set for all.
+   *
+   * <p>Also tags nested {@code modelConfig} / {@code credentials} / {@code tenantCredentials}
+   * under per-workload overrides ({@code query}, {@code collectionScan}, {@code changeStream}) so
+   * operators can write those blocks in an on-disk catalog without knowing about the internal
+   * discriminator.
    */
   private static void injectCredentials(
       BsonDocument configDoc, Optional<VoyageCredentials> credentials) {
@@ -250,20 +255,16 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     BsonDocument configField = configDoc.getDocument("config");
 
     // tag modelConfig with _provider so the polymorphic parser picks the right ModelConfig subtype
-    if (configField.containsKey("modelConfig")) {
-      BsonDocument modelConfig = configField.getDocument("modelConfig");
-      if (!modelConfig.containsKey("_provider")) {
-        modelConfig.put("_provider", new BsonString(provider));
-      }
-    }
+    tagProvider(configField, "modelConfig", provider);
 
     // callers skip VOYAGE entries when credentials are absent, so orElseThrow is safe here
     if ("VOYAGE".equals(provider)) {
       injectVoyageCredentials(configField, credentials.orElseThrow());
+      // YAML-supplied Voyage credentials also need the discriminator
+      tagProvider(configField, "credentials", provider);
     } else {
       // other providers carry their own credentials in the YAML; just ensure the doc exists +
       // tagged
-
       BsonDocument credentialsDoc =
           configField.containsKey("credentials")
               ? configField.getDocument("credentials")
@@ -274,8 +275,39 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       configField.put("credentials", credentialsDoc);
     }
 
+    // per-tier overrides use the same polymorphic parsers as the base fields
+    for (String workloadKey : List.of("query", "collectionScan", "changeStream")) {
+      tagWorkloadProviderFields(configField, workloadKey, provider);
+    }
+
     if (!configField.containsKey("isDedicatedCluster")) {
       configField.put("isDedicatedCluster", BsonBoolean.TRUE);
+    }
+  }
+
+  /**
+   * Tag polymorphic nested docs inside a workload override block ({@code query} /
+   * {@code collectionScan} / {@code changeStream}).
+   */
+  private static void tagWorkloadProviderFields(
+      BsonDocument configField, String workloadKey, String provider) {
+    if (!configField.containsKey(workloadKey) || !configField.get(workloadKey).isDocument()) {
+      return;
+    }
+    BsonDocument workload = configField.getDocument(workloadKey);
+    tagProvider(workload, "modelConfig", provider);
+    tagProvider(workload, "credentials", provider);
+    tagProvider(workload, "tenantCredentials", provider);
+  }
+
+  /** Add {@code _provider} to a nested document field when present and untagged. */
+  private static void tagProvider(BsonDocument parent, String fieldName, String provider) {
+    if (!parent.containsKey(fieldName) || !parent.get(fieldName).isDocument()) {
+      return;
+    }
+    BsonDocument doc = parent.getDocument(fieldName);
+    if (!doc.containsKey("_provider")) {
+      doc.put("_provider", new BsonString(provider));
     }
   }
 
