@@ -181,6 +181,80 @@ public class EmbeddingServiceManagerConfigTest {
   }
 
   @Test
+  public void loadEmbeddingServiceConfig_workloadOverrides_getProviderTagged() throws Exception {
+    // Operators may override per-tier modelConfig/credentials under query / collectionScan /
+    // changeStream without knowing about the internal _provider discriminator. Injection must
+    // tag those nested docs the same way as the base fields, or parsing fails.
+    String catalog =
+        """
+        configs:
+          - modelName: workload-override-model
+            embeddingProvider: OPENAI_COMPATIBLE
+            config:
+              providerEndpoint: http://localhost:9999/v1/embeddings
+              modelConfig:
+                batchSize: 8
+                batchTokenLimit: 1000
+              errorHandlingConfig:
+                maxRetries: 3
+                initialRetryWaitMs: 100
+                maxRetryWaitMs: 1000
+                jitter: 0.1
+              credentials: {}
+              query:
+                credentials:
+                  apiKey: query-only-key
+              collectionScan:
+                modelConfig:
+                  batchSize: 16
+                  batchTokenLimit: 2000
+                  outputDimensions: 768
+              changeStream:
+                credentials:
+                  apiKey: change-stream-key
+                  authHeaderName: api-key
+        """;
+    Path catalogFile = Files.createTempFile("embedding-service-configs-workload", ".yml");
+    try {
+      Files.writeString(catalogFile, catalog, StandardCharsets.UTF_8);
+
+      Optional<EmbeddingServiceManagerConfig> result =
+          EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(
+              Optional.empty(), Optional.of(catalogFile));
+
+      assertTrue("Expected workload-override catalog to parse", result.isPresent());
+      assertEquals(1, result.get().configs().size());
+
+      EmbeddingServiceConfig serviceConfig = result.get().configs().get(0);
+      assertEquals("workload-override-model", serviceConfig.modelName);
+
+      assertTrue(serviceConfig.embeddingConfig.queryParams.isPresent());
+      assertTrue(
+          serviceConfig.embeddingConfig.queryParams.get().credentialsOverride.isPresent());
+      OpenAiEmbeddingCredentials queryCreds =
+          (OpenAiEmbeddingCredentials)
+              serviceConfig.embeddingConfig.queryParams.get().credentialsOverride.get();
+      assertEquals(Optional.of("query-only-key"), queryCreds.apiKey);
+
+      assertTrue(serviceConfig.embeddingConfig.collectionScanParams.isPresent());
+      assertTrue(
+          serviceConfig.embeddingConfig.collectionScanParams.get().modelConfigOverride.isPresent());
+      assertTrue(
+          serviceConfig.embeddingConfig.collectionScanParams.get().modelConfigOverride.get()
+              instanceof OpenAiModelConfig);
+
+      assertTrue(serviceConfig.embeddingConfig.changeStreamParams.isPresent());
+      OpenAiEmbeddingCredentials changeStreamCreds =
+          (OpenAiEmbeddingCredentials)
+              serviceConfig.embeddingConfig.changeStreamParams.get().credentialsOverride.get();
+      assertEquals(Optional.of("change-stream-key"), changeStreamCreds.apiKey);
+      assertEquals(Optional.of("api-key"), changeStreamCreds.authHeaderName);
+    } finally {
+      Files.deleteIfExists(catalogFile);
+    }
+  }
+
+  @Test
   public void loadEmbeddingServiceConfig_malformedOverrideFile_fallsBackToBundledCatalog()
       throws Exception {
     // The on-disk catalog is operator-editable, so a YAML typo must NOT crash startup (SnakeYAML
