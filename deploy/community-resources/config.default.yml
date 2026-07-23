@@ -31,5 +31,6 @@ logging:
 #  # Optional path to an on-disk embedding model catalog. Defaults to the
 #  # `embedding-service-configs.yml` shipped next to mongot; set this to point at your own
 #  # file. The catalog is re-read on startup, so edit it (or mount your own) and restart to
-#  # add/override models without rebuilding mongot.
+#  # add/override models without rebuilding mongot. If this path is missing or invalid,
+#  # auto-embedding stays inactive (no silent fallback to the bundled catalog).
 #  modelConfigFile: /etc/mongot/embedding-service-configs.yml

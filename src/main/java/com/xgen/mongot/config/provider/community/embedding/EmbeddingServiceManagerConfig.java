@@ -66,46 +66,65 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
    *   <li>the catalog bundled in the JAR.
    * </ol>
    *
-   * <p>A configured-but-missing/unreadable path falls back to the bundled resource rather than
-   * disabling auto-embedding. Without Voyage credentials, {@code VOYAGE} entries are dropped while
-   * keyless providers ({@code OPENAI_COMPATIBLE}) still load.
+   * <p>An <em>explicit</em> {@code modelConfigFile} that is missing, unreadable, or malformed fails
+   * closed (empty result) so mongot does not silently fall back to the bundled catalog and route
+   * embeddings to the wrong endpoints under familiar model names. The launcher system-property path
+   * still soft-falls back to the bundled resource when that shipped file is missing or bad.
+   *
+   * <p>Without Voyage credentials, {@code VOYAGE} entries are dropped while keyless providers
+   * ({@code OPENAI_COMPATIBLE}) still load.
    *
    * @param credentials optional Voyage API credentials (query and indexing keys)
    * @param modelConfigFileOverride explicit on-disk catalog path from the community config
-   * @return empty only when the catalog is missing or fails to parse
+   * @return empty when the chosen catalog cannot be loaded (or, for an explicit override, when it
+   *     is missing/unreadable/malformed)
    */
   public static Optional<EmbeddingServiceManagerConfig> loadEmbeddingServiceConfig(
       Optional<VoyageCredentials> credentials, Optional<Path> modelConfigFileOverride) {
 
-    Optional<Path> externalPath = resolveExternalCatalogPath(modelConfigFileOverride);
-    if (externalPath.isPresent()) {
-      return loadFromFile(externalPath.get(), credentials);
+    if (modelConfigFileOverride.isPresent()) {
+      return loadExplicitCatalog(modelConfigFileOverride.get(), credentials);
     }
+
+    Optional<Path> systemPropertyPath = catalogPathFromSystemProperty();
+    if (systemPropertyPath.isPresent()) {
+      return loadSystemPropertyCatalog(systemPropertyPath.get(), credentials);
+    }
+
     return loadFromResource(credentials);
   }
 
   /**
-   * On-disk catalog path from the override or system property; skips a path that isn't a readable
-   * file.
+   * Load an operator-chosen {@code embedding.modelConfigFile}. Missing/unreadable/malformed → empty
+   * (no bundled fallback).
    */
-  private static Optional<Path> resolveExternalCatalogPath(
-      Optional<Path> modelConfigFileOverride) {
-    Optional<Path> configured =
-        modelConfigFileOverride.or(EmbeddingServiceManagerConfig::catalogPathFromSystemProperty);
-
-    if (configured.isEmpty()) {
-      return Optional.empty();
-    }
-
-    Path path = configured.get();
+  private static Optional<EmbeddingServiceManagerConfig> loadExplicitCatalog(
+      Path path, Optional<VoyageCredentials> credentials) {
     if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
-      LOG.warn(
-          "Embedding model catalog '{}' is missing or not readable; falling back to the bundled "
-              + "catalog.",
+      LOG.error(
+          "Explicit embedding.modelConfigFile '{}' is missing or not readable; not falling back "
+              + "to the bundled catalog (auto-embedding will be inactive).",
           path);
       return Optional.empty();
     }
-    return configured;
+    return loadFromFile(path, credentials, /* failClosed= */ true);
+  }
+
+  /**
+   * Load the launcher-shipped catalog from {@value #MODEL_CONFIG_FILE_PROPERTY}. Soft-falls back to
+   * the bundled resource when the file is missing, unreadable, or malformed.
+   */
+  private static Optional<EmbeddingServiceManagerConfig> loadSystemPropertyCatalog(
+      Path path, Optional<VoyageCredentials> credentials) {
+    if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+      LOG.warn(
+          "Embedding model catalog '{}' from {} is missing or not readable; falling back to the "
+              + "bundled catalog.",
+          path,
+          MODEL_CONFIG_FILE_PROPERTY);
+      return loadFromResource(credentials);
+    }
+    return loadFromFile(path, credentials, /* failClosed= */ false);
   }
 
   private static Optional<Path> catalogPathFromSystemProperty() {
@@ -116,8 +135,14 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     return Optional.of(Path.of(property.trim()));
   }
 
+  /**
+   * Read and parse an on-disk embedding catalog YAML file.
+   *
+   * @param failClosed when true (explicit override), return empty on load/parse failure; when false
+   *     (launcher system property), fall back to the bundled catalog
+   */
   private static Optional<EmbeddingServiceManagerConfig> loadFromFile(
-      Path path, Optional<VoyageCredentials> credentials) {
+      Path path, Optional<VoyageCredentials> credentials, boolean failClosed) {
     try {
       LOG.atInfo()
           .addKeyValue("modelConfigFile", path.toString())
@@ -126,8 +151,15 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       return Optional.of(fromBson(YamlCodec.fromYaml(yaml), credentials));
     } catch (Exception e) {
       // catch broadly: the file is operator-editable, and SnakeYAML throws unchecked
-      // YAMLException on bad YAML on top of the declared IOException/BsonParseException. a typo
-      // mustn't crash startup — fall back to the bundled catalog.
+      // YAMLException on bad YAML on top of the declared IOException/BsonParseException.
+      if (failClosed) {
+        LOG.error(
+            "Failed to load embedding configuration from explicit modelConfigFile {}; not falling "
+                + "back to the bundled catalog (auto-embedding will be inactive).",
+            path,
+            e);
+        return Optional.empty();
+      }
       LOG.error(
           "Failed to load embedding configuration from on-disk catalog {}; falling back to the "
               + "bundled catalog.",
