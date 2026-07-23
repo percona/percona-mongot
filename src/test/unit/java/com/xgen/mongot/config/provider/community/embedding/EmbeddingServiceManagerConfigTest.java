@@ -5,6 +5,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiEmbeddingCredentials;
@@ -17,8 +20,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.junit.Test;
+import org.slf4j.LoggerFactory;
 
 public class EmbeddingServiceManagerConfigTest {
+
+  private static final ch.qos.logback.classic.Logger CONFIG_LOGGER =
+      (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(EmbeddingServiceManagerConfig.class);
 
   private static EmbeddingServiceManagerConfig loadWithTestCredentials() {
     EmbeddingServiceManagerConfig.VoyageCredentials credentials =
@@ -169,15 +176,46 @@ public class EmbeddingServiceManagerConfigTest {
   }
 
   @Test
-  public void loadEmbeddingServiceConfig_missingOverrideFile_fallsBackToBundledCatalog() {
-    // A configured-but-missing override must not disable auto-embedding: we fall back to the
-    // bundled catalog rather than returning empty.
-    Optional<EmbeddingServiceManagerConfig> result =
-        EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(
-            Optional.empty(), Optional.of(Path.of("/nonexistent/embedding-service-configs.yml")));
+  public void loadEmbeddingServiceConfig_missingOverrideFile_failsClosed() {
+    // An explicit embedding.modelConfigFile must not silently fall back to the bundled catalog
+    // (which can point at localhost endpoints under the same model names). Fail closed so
+    // auto-embedding stays inactive instead of routing to the wrong place.
+    Path missingPath = Path.of("/nonexistent/embedding-service-configs.yml");
+    ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+    listAppender.start();
+    CONFIG_LOGGER.addAppender(listAppender);
+    try {
+      Optional<EmbeddingServiceManagerConfig> result =
+          EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(
+              Optional.empty(), Optional.of(missingPath));
 
-    assertTrue("Expected fallback to the bundled catalog", result.isPresent());
-    assertFalse("Expected bundled models to load", result.get().configs().isEmpty());
+      assertTrue(
+          "Expected empty result when explicit modelConfigFile is missing", result.isEmpty());
+
+      ILoggingEvent error =
+          listAppender.list.stream()
+              .filter(event -> event.getLevel() == Level.ERROR)
+              .filter(
+                  event ->
+                      event.getFormattedMessage().contains("Explicit embedding.modelConfigFile"))
+              .filter(
+                  event ->
+                      event
+                          .getFormattedMessage()
+                          .contains("not falling back to the bundled catalog"))
+              .filter(
+                  event -> event.getFormattedMessage().contains("auto-embedding will be inactive"))
+              .filter(event -> event.getFormattedMessage().contains(missingPath.toString()))
+              .findFirst()
+              .orElseThrow(
+                  () ->
+                      new AssertionError(
+                          "expected ERROR naming the missing modelConfigFile and fail-closed"
+                              + " behavior"));
+      assertNotNull(error);
+    } finally {
+      CONFIG_LOGGER.detachAppender(listAppender);
+    }
   }
 
   @Test
@@ -229,8 +267,7 @@ public class EmbeddingServiceManagerConfigTest {
       assertEquals("workload-override-model", serviceConfig.modelName);
 
       assertTrue(serviceConfig.embeddingConfig.queryParams.isPresent());
-      assertTrue(
-          serviceConfig.embeddingConfig.queryParams.get().credentialsOverride.isPresent());
+      assertTrue(serviceConfig.embeddingConfig.queryParams.get().credentialsOverride.isPresent());
       OpenAiEmbeddingCredentials queryCreds =
           (OpenAiEmbeddingCredentials)
               serviceConfig.embeddingConfig.queryParams.get().credentialsOverride.get();
@@ -255,12 +292,13 @@ public class EmbeddingServiceManagerConfigTest {
   }
 
   @Test
-  public void loadEmbeddingServiceConfig_malformedOverrideFile_fallsBackToBundledCatalog()
-      throws Exception {
-    // The on-disk catalog is operator-editable, so a YAML typo must NOT crash startup (SnakeYAML
-    // throws an unchecked exception) nor disable auto-embedding: we fall back to the bundled
-    // catalog and keep mongot starting with the shipped models.
+  public void loadEmbeddingServiceConfig_malformedOverrideFile_failsClosed() throws Exception {
+    // An explicit embedding.modelConfigFile with bad YAML must not crash startup, but also must
+    // not silently fall back to the bundled catalog (wrong endpoints under familiar model names).
     Path catalogFile = Files.createTempFile("embedding-service-configs-malformed", ".yml");
+    ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+    listAppender.start();
+    CONFIG_LOGGER.addAppender(listAppender);
     try {
       Files.writeString(
           catalogFile, "configs: [unterminated flow sequence\n", StandardCharsets.UTF_8);
@@ -269,18 +307,90 @@ public class EmbeddingServiceManagerConfigTest {
           EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(
               Optional.empty(), Optional.of(catalogFile));
 
+      assertTrue(
+          "Expected empty result when explicit modelConfigFile is malformed", result.isEmpty());
+
+      ILoggingEvent error =
+          listAppender.list.stream()
+              .filter(event -> event.getLevel() == Level.ERROR)
+              .filter(
+                  event ->
+                      event
+                          .getFormattedMessage()
+                          .contains(
+                              "Failed to load embedding configuration from explicit"
+                                  + " modelConfigFile"))
+              .filter(
+                  event ->
+                      event
+                          .getFormattedMessage()
+                          .contains("not falling back to the bundled catalog"))
+              .filter(
+                  event -> event.getFormattedMessage().contains("auto-embedding will be inactive"))
+              .filter(event -> event.getFormattedMessage().contains(catalogFile.toString()))
+              .findFirst()
+              .orElseThrow(
+                  () ->
+                      new AssertionError(
+                          "expected ERROR naming the malformed modelConfigFile and fail-closed"
+                              + " behavior"));
+      assertNotNull(error);
+    } finally {
+      CONFIG_LOGGER.detachAppender(listAppender);
+      Files.deleteIfExists(catalogFile);
+    }
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_missingSystemPropertyFile_fallsBackToBundledCatalog() {
+    // The launcher always sets -Dmongot.embeddingModelConfigFile to the shipped file next to the
+    // JAR. If that path is missing (unusual packaging), soft-fallback to the bundled resource is
+    // fine — unlike an operator-chosen embedding.modelConfigFile.
+    String previous = System.getProperty(EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY);
+    try {
+      System.setProperty(
+          EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY,
+          "/nonexistent/embedding-service-configs.yml");
+
+      Optional<EmbeddingServiceManagerConfig> result =
+          EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(Optional.empty());
+
+      assertTrue("Expected fallback to the bundled catalog", result.isPresent());
+      assertFalse("Expected bundled models to load", result.get().configs().isEmpty());
+    } finally {
+      if (previous == null) {
+        System.clearProperty(EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY);
+      } else {
+        System.setProperty(EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY, previous);
+      }
+    }
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_malformedSystemPropertyFile_fallsBackToBundledCatalog()
+      throws Exception {
+    String previous = System.getProperty(EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY);
+    Path catalogFile = Files.createTempFile("embedding-service-configs-sysprop-malformed", ".yml");
+    try {
+      Files.writeString(
+          catalogFile, "configs: [unterminated flow sequence\n", StandardCharsets.UTF_8);
+      System.setProperty(
+          EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY, catalogFile.toString());
+
+      Optional<EmbeddingServiceManagerConfig> result =
+          EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(Optional.empty());
+
       assertTrue("Expected fallback to the bundled catalog on malformed YAML", result.isPresent());
-      Map<String, EmbeddingProvider> actualModels =
-          result.get().configs().stream()
-              .collect(
-                  Collectors.toMap(
-                      serviceConfig -> serviceConfig.modelName,
-                      serviceConfig -> serviceConfig.embeddingProvider));
       assertTrue(
           "Expected bundled OPENAI_COMPATIBLE model after fallback",
-          actualModels.containsKey("bge-m3"));
+          result.get().configs().stream().anyMatch(c -> c.modelName.equals("bge-m3")));
     } finally {
       Files.deleteIfExists(catalogFile);
+      if (previous == null) {
+        System.clearProperty(EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY);
+      } else {
+        System.setProperty(EmbeddingServiceManagerConfig.MODEL_CONFIG_FILE_PROPERTY, previous);
+      }
     }
   }
 }
