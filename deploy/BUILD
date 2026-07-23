@@ -92,6 +92,10 @@ package_deploy_tar(
         ":community-resources/README.md",
         ":community-resources/mongot.example.logrotate",
         ":generate_community_version_file",
+        # Default embedding model catalog, shipped on-disk next to the JAR so operators can edit it
+        # (or mount their own) and restart to add/override models without rebuilding mongot. The
+        # launcher points -Dmongot.embeddingModelConfigFile at this file.
+        "//src/main/resources/config/community:embedding-service-configs",
     ],
     with_tags = False,
 )

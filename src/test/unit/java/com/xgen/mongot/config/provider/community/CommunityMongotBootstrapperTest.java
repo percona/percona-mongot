@@ -46,6 +46,7 @@ import org.junit.rules.TemporaryFolder;
 public class CommunityMongotBootstrapperTest {
 
   private static final String CUSTOM_ENDPOINT = "https://custom-api.example.com/v1/embeddings";
+  private static final String LOCAL_OPENAI_COMPATIBLE_ENDPOINT = "http://localhost:11434/v1/embeddings";
   private static final String TEST_QUERY_KEY = "test-query-key";
   private static final String TEST_INDEXING_KEY = "test-indexing-key";
 
@@ -118,6 +119,7 @@ public class CommunityMongotBootstrapperTest {
             Optional.empty(),
             Optional.of(this.queryKeyFile),
             Optional.of(this.indexingKeyFile),
+            Optional.empty(),
             false);
     CommunityConfig config = this.createMinimalConfigWithEmbedding(Optional.of(embeddingConfig));
 
@@ -138,12 +140,14 @@ public class CommunityMongotBootstrapperTest {
     assertTrue("Missing voyage-4-large", supportedModels.contains("voyage-4-large"));
     assertTrue("Missing voyage-code-3", supportedModels.contains("voyage-code-3"));
 
-    // Confirm default endpoint from internal config for the expected models
-    for (String modelName : supportedModels) {
+    // Confirm no endpoint override leaks into the Voyage models (which carry no default endpoint in
+    // the bundled catalog). OPENAI_COMPATIBLE models are excluded here since they legitimately
+    // ship a default providerEndpoint in the catalog.
+    for (String modelName :
+        List.of("voyage-4-lite", "voyage-4", "voyage-4-large", "voyage-code-3")) {
       var modelConfig = EmbeddingModelCatalog.getModelConfig(modelName);
       assertNotNull("Model config should not be null for " + modelName, modelConfig);
 
-      // All workloads should have empty provider endpoint (no override)
       assertEquals(
           "Query workload should not have endpoint override for " + modelName,
           Optional.empty(),
@@ -167,6 +171,7 @@ public class CommunityMongotBootstrapperTest {
             Optional.of(CUSTOM_ENDPOINT),
             Optional.of(this.queryKeyFile),
             Optional.of(this.indexingKeyFile),
+            Optional.empty(),
             false);
     CommunityConfig config = this.createMinimalConfigWithEmbedding(Optional.of(embeddingConfig));
 
@@ -185,8 +190,9 @@ public class CommunityMongotBootstrapperTest {
         "Query compatible models should contain at least 1 after endpoint overrides",
         queryCompatibleModels.isEmpty());
 
-    // Verify that the endpoint override was applied to the expected models
-    for (String modelName : supportedModels) {
+    // The global providerEndpoint override applies to VOYAGE models only.
+    for (String modelName :
+        List.of("voyage-4-lite", "voyage-4", "voyage-4-large", "voyage-code-3")) {
       var modelConfig = EmbeddingModelCatalog.getModelConfig(modelName);
       assertNotNull("Model config should not be null for " + modelName, modelConfig);
 
@@ -217,6 +223,26 @@ public class CommunityMongotBootstrapperTest {
           "rpsPerProvider should be empty (default) after endpoint override for " + modelName,
           Optional.empty(),
           modelConfig.collectionScan().rpsPerProvider());
+    }
+
+    // OPENAI_COMPATIBLE models must NOT inherit the global override: each keeps its own per-model
+    // endpoint from the catalog (a single global endpoint cannot serve both Voyage and Ollama).
+    for (String modelName : List.of("bge-m3", "nomic-embed-text")) {
+      var modelConfig = EmbeddingModelCatalog.getModelConfig(modelName);
+      assertNotNull("Model config should not be null for " + modelName, modelConfig);
+
+      assertEquals(
+          "OPENAI_COMPATIBLE query endpoint must not be overridden for " + modelName,
+          LOCAL_OPENAI_COMPATIBLE_ENDPOINT,
+          modelConfig.query().providerEndpoint().orElse(null));
+      assertEquals(
+          "OPENAI_COMPATIBLE change stream endpoint must not be overridden for " + modelName,
+          LOCAL_OPENAI_COMPATIBLE_ENDPOINT,
+          modelConfig.changeStream().providerEndpoint().orElse(null));
+      assertEquals(
+          "OPENAI_COMPATIBLE collection scan endpoint must not be overridden for " + modelName,
+          LOCAL_OPENAI_COMPATIBLE_ENDPOINT,
+          modelConfig.collectionScan().providerEndpoint().orElse(null));
     }
   }
 

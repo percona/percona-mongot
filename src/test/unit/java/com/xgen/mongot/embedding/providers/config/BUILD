@@ -5,6 +5,7 @@ java_test_suite(
     srcs = [
         "EmbeddingModelConfigTest.java",
         "EmbeddingServiceConfigTest.java",
+        "OpenAiApiSchemaTest.java",
         "VoyageApiSchemaTest.java",
         "VoyageModelConfigTest.java",
     ],

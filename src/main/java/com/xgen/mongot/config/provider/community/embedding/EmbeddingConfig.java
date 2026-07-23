@@ -15,6 +15,7 @@ import org.bson.BsonDocument;
  * Supports:
  * - Overriding the provider endpoint URL
  * - Specifying file paths for Voyage API credentials
+ * - Overriding the embedding model catalog with an on-disk file
  * - Configuring whether this instance is the auto-embedding view writer (leader).
  * The advanced embedding configs are defined in {@code CommunityAutoEmbeddingConfig}
  */
@@ -22,6 +23,7 @@ public record EmbeddingConfig(
     Optional<String> providerEndpoint,
     Optional<Path> queryKeyFile,
     Optional<Path> indexingKeyFile,
+    Optional<Path> modelConfigFile,
     boolean isAutoEmbeddingViewWriter)
     implements DocumentEncodable {
 
@@ -41,6 +43,12 @@ public record EmbeddingConfig(
             .optional()
             .noDefault();
 
+    public static final Field.Optional<Path> MODEL_CONFIG_FILE =
+        Field.builder("modelConfigFile")
+            .classField(PathField.PARSER, PathField.ENCODER)
+            .optional()
+            .noDefault();
+
     public static final Field.WithDefault<Boolean> IS_AUTO_EMBEDDING_VIEW_WRITER =
         Field.builder("isAutoEmbeddingViewWriter").booleanField().optional().withDefault(false);
   }
@@ -50,6 +58,7 @@ public record EmbeddingConfig(
         parser.getField(Fields.PROVIDER_ENDPOINT).unwrap(),
         parser.getField(Fields.QUERY_KEY_FILE).unwrap(),
         parser.getField(Fields.INDEXING_KEY_FILE).unwrap(),
+        parser.getField(Fields.MODEL_CONFIG_FILE).unwrap(),
         parser.getField(Fields.IS_AUTO_EMBEDDING_VIEW_WRITER).unwrap());
   }
 
@@ -59,8 +68,8 @@ public record EmbeddingConfig(
         .field(Fields.PROVIDER_ENDPOINT, this.providerEndpoint)
         .field(Fields.QUERY_KEY_FILE, this.queryKeyFile)
         .field(Fields.INDEXING_KEY_FILE, this.indexingKeyFile)
+        .field(Fields.MODEL_CONFIG_FILE, this.modelConfigFile)
         .field(Fields.IS_AUTO_EMBEDDING_VIEW_WRITER, this.isAutoEmbeddingViewWriter)
         .build();
   }
 }
-
