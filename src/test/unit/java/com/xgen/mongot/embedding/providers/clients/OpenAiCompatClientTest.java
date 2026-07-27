@@ -611,6 +611,38 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void renewHttpClientAfterConnectionFailure_cooldownSuppressesRepeatedRenewals()
+      throws Exception {
+    OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
+    HttpClient original = mockHttpClient(200, "{}");
+    OpenAiCompatClient.injectHttpClient(client, original);
+
+    // First failure during the outage -> renews immediately (no prior connection-failure renewal).
+    client.renewHttpClientAfterConnectionFailureForTesting(
+        new IOException("connection reset"), original);
+    HttpClient afterFirstRenewal = httpClientField(client);
+    assertTrue(
+        "First connection failure must renew immediately", afterFirstRenewal != original);
+
+    // Sustained outage: the new client also fails right away -> within the cooldown, so the
+    // client must NOT be renewed again (avoids a shutdown thread per failed request).
+    client.renewHttpClientAfterConnectionFailureForTesting(
+        new IOException("connection reset"), afterFirstRenewal);
+    assertTrue(
+        "Renewal within the cooldown window must be suppressed",
+        httpClientField(client) == afterFirstRenewal);
+
+    // Cooldown has elapsed -> the next failure renews again.
+    setLastConnectionFailureRenewalEpochMs(
+        client, System.currentTimeMillis() - Duration.ofSeconds(6).toMillis());
+    client.renewHttpClientAfterConnectionFailureForTesting(
+        new IOException("connection reset"), afterFirstRenewal);
+    assertTrue(
+        "Renewal must resume once the cooldown has elapsed",
+        httpClientField(client) != afterFirstRenewal);
+  }
+
+  @Test
   public void updateConfig_appliesNewCredentialsPrefixAndDimensions() throws Exception {
     String body =
         String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
@@ -711,6 +743,13 @@ public class OpenAiCompatClientTest {
   private static void setHttpClientCreatedEpochMs(OpenAiCompatClient client, long epochMs)
       throws Exception {
     Field field = OpenAiCompatClient.class.getDeclaredField("httpClientCreatedEpochMs");
+    field.setAccessible(true);
+    field.setLong(client, epochMs);
+  }
+
+  private static void setLastConnectionFailureRenewalEpochMs(
+      OpenAiCompatClient client, long epochMs) throws Exception {
+    Field field = OpenAiCompatClient.class.getDeclaredField("lastConnectionFailureRenewalEpochMs");
     field.setAccessible(true);
     field.setLong(client, epochMs);
   }

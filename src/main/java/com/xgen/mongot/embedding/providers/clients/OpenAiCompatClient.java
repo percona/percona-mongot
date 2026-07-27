@@ -58,6 +58,13 @@ public class OpenAiCompatClient implements ClientInterface {
   /** Wall-clock interval after which the {@link HttpClient} is replaced to refresh connections. */
   private static final Duration HTTP_CLIENT_REFRESH_INTERVAL = Duration.ofMinutes(10);
 
+  /**
+   * Minimum interval between connection-failure-triggered renewals. Without this, a sustained
+   * outage (e.g. a down local engine) renews on every single failed request, spawning a shutdown
+   * thread each time for a client that never got a chance to succeed.
+   */
+  private static final Duration CONNECTION_FAILURE_RENEWAL_COOLDOWN = Duration.ofSeconds(5);
+
   private static final Duration HTTP_CLIENT_SHUTDOWN_AWAIT = Duration.ofSeconds(5);
   private static final Duration HTTP_CLIENT_SHUTDOWN_NOW_AWAIT = Duration.ofSeconds(2);
 
@@ -100,6 +107,14 @@ public class OpenAiCompatClient implements ClientInterface {
    * #HTTP_CLIENT_REFRESH_INTERVAL} for renewal.
    */
   private volatile long httpClientCreatedEpochMs;
+
+  /**
+   * Epoch millis of the last connection-failure-triggered renewal. Guarded by {@code
+   * synchronized(this)}: every read and write happens inside {@link
+   * #renewHttpClientAfterConnectionFailure} / {@link #replaceHttpClientLocked}, so no {@code
+   * volatile} is needed. 0 means "never" — the first failure always renews immediately.
+   */
+  private long lastConnectionFailureRenewalEpochMs;
 
   OpenAiCompatClient(
       EmbeddingModelConfig embeddingModelConfig,
@@ -449,11 +464,18 @@ public class OpenAiCompatClient implements ClientInterface {
 
   /**
    * Replace the client after a connection/TLS failure so retries don't reuse bad state. If another
-   * thread already renewed, {@link #httpClient} differs and we skip the duplicate.
+   * thread already renewed, {@link #httpClient} differs and we skip the duplicate. During a
+   * sustained outage, {@link #CONNECTION_FAILURE_RENEWAL_COOLDOWN} also skips renewing again too
+   * soon after the last connection-failure renewal, so every failed request doesn't spawn its own
+   * shutdown thread.
    */
   private void renewHttpClientAfterConnectionFailure(Throwable cause, HttpClient culpritClient) {
     synchronized (this) {
       if (this.httpClient != culpritClient) {
+        return;
+      }
+      if (System.currentTimeMillis() - this.lastConnectionFailureRenewalEpochMs
+          < CONNECTION_FAILURE_RENEWAL_COOLDOWN.toMillis()) {
         return;
       }
       replaceHttpClientLocked(true, cause);
@@ -465,6 +487,7 @@ public class OpenAiCompatClient implements ClientInterface {
     this.httpClient = newHttpClient();
     this.httpClientCreatedEpochMs = System.currentTimeMillis();
     if (afterConnectionFailure) {
+      this.lastConnectionFailureRenewalEpochMs = this.httpClientCreatedEpochMs;
       LOG.warn(
           "Renewed OpenAI-compatible HttpClient for model {} after connection/TLS failure: {}",
           this.modelId,
