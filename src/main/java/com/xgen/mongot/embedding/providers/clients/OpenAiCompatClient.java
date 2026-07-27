@@ -65,7 +65,13 @@ public class OpenAiCompatClient implements ClientInterface {
    */
   private static final Duration CONNECTION_FAILURE_RENEWAL_COOLDOWN = Duration.ofSeconds(5);
 
-  private static final Duration HTTP_CLIENT_SHUTDOWN_AWAIT = Duration.ofSeconds(5);
+  /**
+   * Graceful-shutdown grace period for a replaced client, matching {@link #DEFAULT_TIMEOUT}: any
+   * request still in flight on it will either succeed or hit its own request-level timeout within
+   * this window, so a legitimate slow-but-successful request is never force-cancelled by renewal.
+   */
+  private static final Duration HTTP_CLIENT_SHUTDOWN_AWAIT = DEFAULT_TIMEOUT;
+
   private static final Duration HTTP_CLIENT_SHUTDOWN_NOW_AWAIT = Duration.ofSeconds(2);
 
   @VisibleForTesting
