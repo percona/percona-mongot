@@ -1,6 +1,7 @@
 package com.xgen.mongot.embedding.providers.clients;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.MongotMetadata;
 import com.xgen.mongot.embedding.VectorOrError;
@@ -12,6 +13,7 @@ import com.xgen.mongot.embedding.providers.configs.OpenAiApiSchema;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.bson.JsonCodec;
+import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.concurrent.OneShotSingleThreadExecutor;
@@ -27,8 +29,10 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import javax.net.ssl.SSLException;
 import org.bson.BsonDocument;
@@ -196,8 +200,7 @@ public class OpenAiCompatClient implements ClientInterface {
   }
 
   /** Whether this model opts into forwarding the {@code dimensions} field. */
-  private static boolean extractForwardDimensions(
-      EmbeddingServiceConfig.ModelConfig modelConfig) {
+  private static boolean extractForwardDimensions(EmbeddingServiceConfig.ModelConfig modelConfig) {
     return modelConfig instanceof EmbeddingServiceConfig.OpenAiModelConfig openAiConfig
         && openAiConfig.shouldForwardDimensions();
   }
@@ -263,10 +266,7 @@ public class OpenAiCompatClient implements ClientInterface {
         this.forwardDimensions ? Optional.of(context.outputDimension()) : Optional.empty();
     BsonDocument body =
         new OpenAiApiSchema.EmbedRequest(
-                this.modelId,
-                prefixedInputs,
-                OpenAiApiSchema.DEFAULT_ENCODING_FORMAT,
-                dimensions)
+                this.modelId, prefixedInputs, OpenAiApiSchema.DEFAULT_ENCODING_FORMAT, dimensions)
             .toBson();
 
     return requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body.toJson())).build();
@@ -319,20 +319,32 @@ public class OpenAiCompatClient implements ClientInterface {
               BsonDocumentParser.fromRoot(JsonCodec.fromJson(response.body()))
                   .allowUnknownFields(true)
                   .build());
-      embedResponse.usage
+      embedResponse
+          .usage
           .flatMap(usage -> usage.totalTokens.or(() -> usage.promptTokens))
           .ifPresent(tokens -> this.inputTokenDistribution.record(tokens));
+
+      // Match vectors back to inputs by the response's own `index` field, not array order: some
+      // OpenAI-compatible backends (batching/parallelizing proxies) return `data[]` out of
+      // request order.
+      Map<Integer, Vector> vectorsByRequestIndex = new HashMap<>();
+      for (OpenAiApiSchema.EmbedVector vector : embedResponse.data) {
+        vectorsByRequestIndex.put(vector.index, vector.embedding);
+      }
+
       List<VectorOrError> results = new ArrayList<>();
-      var iterator = embedResponse.data.iterator();
+      @Var int requestIndex = 0;
       for (String input : inputs) {
         if (input.isEmpty()) {
           results.add(VectorOrError.EMPTY_INPUT_ERROR);
         } else {
-          if (!iterator.hasNext()) {
+          Vector vector = vectorsByRequestIndex.get(requestIndex);
+          if (vector == null) {
             throw new EmbeddingProviderTransientException(
-                "Embedding response returned fewer vectors than non-empty inputs");
+                "Embedding response is missing a vector for request index " + requestIndex);
           }
-          results.add(new VectorOrError(iterator.next().embedding));
+          results.add(new VectorOrError(vector));
+          requestIndex++;
         }
       }
       return results;

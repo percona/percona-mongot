@@ -18,6 +18,7 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
+import com.xgen.mongot.util.bson.FloatVector;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -194,8 +195,7 @@ public class OpenAiCompatClientTest {
     withKey.embed(List.of("hello"), floatContext());
     HttpRequest withKeyRequest = captureRequest(withKeyHttp);
     assertTrue(withKeyRequest.headers().firstValue("Authorization").isPresent());
-    assertEquals(
-        "Bearer secret-key", withKeyRequest.headers().firstValue("Authorization").get());
+    assertEquals("Bearer secret-key", withKeyRequest.headers().firstValue("Authorization").get());
 
     // Without API key -> no Authorization header (keyless local engine).
     OpenAiCompatClient withoutKey = newClient(openAiModel(Optional.empty()));
@@ -233,7 +233,10 @@ public class OpenAiCompatClientTest {
     // serves many indexes, so the per-request dimension must win.
     EmbeddingServiceConfig.OpenAiModelConfig withForward =
         new EmbeddingServiceConfig.OpenAiModelConfig(
-            Optional.of(1536), Optional.of(96), Optional.of(120_000), Optional.empty(),
+            Optional.of(1536),
+            Optional.of(96),
+            Optional.of(120_000),
+            Optional.empty(),
             Optional.of(true));
     OpenAiCompatClient forwardClient =
         newClient(openAiModel(Optional.empty(), Optional.empty(), withForward));
@@ -363,6 +366,35 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void embed_outOfOrderResponseData_matchesVectorsByIndexNotArrayOrder() throws Exception {
+    OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
+    // The backend returns the second input's vector first: array order != request order. Vectors
+    // must be matched by `index`, not by position in `data[]`.
+    String body =
+        String.format(
+            "{\"data\":["
+                + "{\"embedding\":\"%s\",\"index\":1},"
+                + "{\"embedding\":\"%s\",\"index\":0}"
+                + "]}",
+            base64Floats(4f, 5f, 6f), base64Floats(1f, 2f, 3f));
+    OpenAiCompatClient.injectHttpClient(client, mockHttpClient(200, body));
+
+    List<VectorOrError> results = client.embed(List.of("first", "second"), floatContext());
+
+    assertEquals(2, results.size());
+    assertEquals(
+        "input 'first' (request index 0) must get the vector tagged index 0",
+        1f,
+        ((FloatVector) results.get(0).vector.orElseThrow()).getFloatVector()[0],
+        0f);
+    assertEquals(
+        "input 'second' (request index 1) must get the vector tagged index 1",
+        4f,
+        ((FloatVector) results.get(1).vector.orElseThrow()).getFloatVector()[0],
+        0f);
+  }
+
+  @Test
   public void embed_mixedEmptyAndNonEmptyInputs_backfillsEmptyInputErrors() throws Exception {
     OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
     // One embedding for the single non-empty input; the empty input gets a back-filled error.
@@ -453,8 +485,7 @@ public class OpenAiCompatClientTest {
         EmbeddingProviderTransientException.class,
         () -> client.embed(List.of("hello"), floatContext()));
 
-    assertTrue(
-        "Expected a fresh HttpClient after a TLS failure", httpClientField(client) != http);
+    assertTrue("Expected a fresh HttpClient after a TLS failure", httpClientField(client) != http);
   }
 
   @Test
@@ -551,8 +582,7 @@ public class OpenAiCompatClientTest {
     // A non-OpenAI (Voyage) config exercises the defensive fallbacks: no key, default
     // Authorization header, no prefix, and the default endpoint.
     EmbeddingServiceConfig.VoyageEmbeddingCredentials voyageCreds =
-        new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
-            "token", "2024-10-15T22:32:20.925Z");
+        new EmbeddingServiceConfig.VoyageEmbeddingCredentials("token", "2024-10-15T22:32:20.925Z");
     EmbeddingServiceConfig.EmbeddingConfig voyageConfig =
         new EmbeddingServiceConfig.EmbeddingConfig(
             Optional.empty(),
