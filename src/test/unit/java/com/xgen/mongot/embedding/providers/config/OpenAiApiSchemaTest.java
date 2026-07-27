@@ -125,4 +125,12 @@ public class OpenAiApiSchemaTest {
         String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64);
     assertThrows(BsonParseException.class, () -> parse(json));
   }
+
+  @Test
+  public void responseDeserialization_emptyEmbeddingThrows() {
+    // A misbehaving server returning an empty embedding string must fail to parse rather than
+    // silently produce a valid-looking zero-dimension vector.
+    String json = "{\"data\":[{\"embedding\":\"\",\"index\":0}]}";
+    assertThrows(BsonParseException.class, () -> parse(json));
+  }
 }

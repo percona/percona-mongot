@@ -203,6 +203,9 @@ public class OpenAiApiSchema {
         String base64Vector = value.asString().getValue();
         try {
           byte[] decoded = Base64.getDecoder().decode(base64Vector);
+          if (decoded.length == 0) {
+            return context.handleSemanticError("empty float embedding (0 bytes)");
+          }
           ByteBuffer byteBuffer = ByteBuffer.wrap(decoded).order(ByteOrder.LITTLE_ENDIAN);
           if (byteBuffer.remaining() % Float.BYTES != 0) {
             return context.handleSemanticError(
