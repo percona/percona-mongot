@@ -72,18 +72,26 @@ public class OpenAiCompatClient implements ClientInterface {
 
   private static final String DEFAULT_AUTH_HEADER_NAME = "Authorization";
 
-  private URI endpoint;
-  private Optional<String> apiKey;
-  private String authHeaderName;
+  /**
+   * Snapshot of the fields {@link #updateConfig} can change. Held behind a single {@code volatile}
+   * reference and swapped atomically so a config reload (e.g. key rotation) can't be observed by a
+   * concurrent {@link #embed} call as a torn combination (new endpoint with an old key) or go
+   * unseen entirely.
+   */
+  private record RequestConfig(
+      URI endpoint,
+      Optional<String> apiKey,
+      String authHeaderName,
+      // whether to send the OpenAI `dimensions` field (Matryoshka shrink on OpenAI/Azure). off for
+      // local engines, which reject it. the value sent is the index's resolved numDimensions,
+      // taken per request from the context — not the catalog default (one client serves many
+      // indexes).
+      boolean forwardDimensions,
+      // prepended to each input; query and document tiers differ (queryPrefix/documentPrefix).
+      // empty = no prefix.
+      String inputPrefix) {}
 
-  // whether to send the OpenAI `dimensions` field (Matryoshka shrink on OpenAI/Azure). off for
-  // local engines, which reject it. the value sent is the index's resolved numDimensions, taken
-  // per request from the context — not the catalog default (one client serves many indexes).
-  private boolean forwardDimensions;
-
-  // prepended to each input; query and document tiers differ (queryPrefix/documentPrefix). empty =
-  // no prefix.
-  private String inputPrefix;
+  private volatile RequestConfig requestConfig;
 
   private volatile HttpClient httpClient;
 
@@ -106,20 +114,16 @@ public class OpenAiCompatClient implements ClientInterface {
     this.invalidRequestCounter = metricsFactory.counter("invalidRequestCounter");
     this.httpClient = newHttpClient();
     this.httpClientCreatedEpochMs = System.currentTimeMillis();
-    // assign directly, not via updateConfig, so NullAway sees the @NonNull fields set on every path
-    this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
-    this.apiKey = extractApiKey(workloadParams.credentials());
-    this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
-    this.forwardDimensions = extractForwardDimensions(workloadParams.modelConfig());
-    this.inputPrefix = extractInputPrefix(workloadParams.modelConfig(), tier);
+    // assign directly, not via updateConfig, so NullAway sees the @NonNull field set on every path
+    this.requestConfig = buildRequestConfig(workloadParams, tier);
     LOG.debug(
         "Initialized OpenAI-compatible client: model={}, endpoint={}, tier={}, apiKey={},"
             + " authHeader={}",
         this.modelId,
-        this.endpoint,
+        this.requestConfig.endpoint(),
         tier,
-        this.apiKey.isPresent() ? "set" : "none",
-        this.authHeaderName);
+        this.requestConfig.apiKey().isPresent() ? "set" : "none",
+        this.requestConfig.authHeaderName());
   }
 
   @Override
@@ -139,21 +143,26 @@ public class OpenAiCompatClient implements ClientInterface {
       return inputs.stream().map(ignored -> VectorOrError.EMPTY_INPUT_ERROR).toList();
     }
 
+    // One snapshot for this call: a concurrent updateConfig() must not be observed as a torn
+    // combination (e.g. new endpoint with an old key) partway through building/sending a request.
+    RequestConfig requestConfig = this.requestConfig;
+
     LOG.debug(
         "Sending OpenAI-compatible embedding request: model={}, endpoint={}, inputCount={},"
             + " database={}, collection={}",
         this.modelId,
-        this.endpoint,
+        requestConfig.endpoint(),
         filteredInput.size(),
         context.database(),
         context.collectionName());
 
     HttpRequest request;
     try {
-      request = buildRequest(filteredInput, context);
+      request = buildRequest(filteredInput, context, requestConfig);
     } catch (IllegalArgumentException e) {
       String message = e.getMessage();
-      String cleanedMessage = message != null ? redactApiKey(message) : null;
+      String cleanedMessage =
+          message != null ? redactApiKey(message, requestConfig.apiKey()) : null;
       IllegalArgumentException cleanedException =
           new IllegalArgumentException(cleanedMessage, e.getCause());
       LOG.error("HTTP Request Error", cleanedException);
@@ -170,7 +179,7 @@ public class OpenAiCompatClient implements ClientInterface {
           this.modelId,
           response.statusCode(),
           filteredInput.size());
-      return extractVectorsFromResponse(response, inputs);
+      return extractVectorsFromResponse(response, inputs, requestConfig.apiKey());
     } catch (HttpTimeoutException e) {
       if (e instanceof HttpConnectTimeoutException) {
         renewHttpClientAfterConnectionFailure(e, clientForRequest);
@@ -192,11 +201,19 @@ public class OpenAiCompatClient implements ClientInterface {
 
   @Override
   public void updateConfig(EmbeddingModelConfig.ConsolidatedWorkloadParams workloadParams) {
-    this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
-    this.apiKey = extractApiKey(workloadParams.credentials());
-    this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
-    this.forwardDimensions = extractForwardDimensions(workloadParams.modelConfig());
-    this.inputPrefix = extractInputPrefix(workloadParams.modelConfig(), this.serviceTier);
+    // single atomic swap: readers of this.requestConfig never see a partially-updated snapshot
+    this.requestConfig = buildRequestConfig(workloadParams, this.serviceTier);
+  }
+
+  private static RequestConfig buildRequestConfig(
+      EmbeddingModelConfig.ConsolidatedWorkloadParams workloadParams,
+      EmbeddingServiceConfig.ServiceTier tier) {
+    return new RequestConfig(
+        URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT)),
+        extractApiKey(workloadParams.credentials()),
+        extractAuthHeaderName(workloadParams.credentials()),
+        extractForwardDimensions(workloadParams.modelConfig()),
+        extractInputPrefix(workloadParams.modelConfig(), tier));
   }
 
   /** Whether this model opts into forwarding the {@code dimensions} field. */
@@ -234,15 +251,21 @@ public class OpenAiCompatClient implements ClientInterface {
     return DEFAULT_AUTH_HEADER_NAME;
   }
 
-  private HttpRequest buildRequest(List<String> inputs, EmbeddingRequestContext context) {
+  private HttpRequest buildRequest(
+      List<String> inputs, EmbeddingRequestContext context, RequestConfig requestConfig) {
     HttpRequest.Builder requestBuilder =
         HttpRequest.newBuilder()
-            .uri(this.endpoint)
+            .uri(requestConfig.endpoint())
             .timeout(DEFAULT_TIMEOUT)
             .header("Content-Type", "application/json");
 
-    this.apiKey.ifPresent(
-        key -> requestBuilder.header(this.authHeaderName, formatAuthHeaderValue(key)));
+    requestConfig
+        .apiKey()
+        .ifPresent(
+            key ->
+                requestBuilder.header(
+                    requestConfig.authHeaderName(),
+                    formatAuthHeaderValue(key, requestConfig.authHeaderName())));
 
     String userAgent =
         this.mongotMetadata
@@ -255,15 +278,17 @@ public class OpenAiCompatClient implements ClientInterface {
 
     // prepend the tier prefix when set (e.g. nomic "search_query: "). inputs are already non-empty.
     List<String> prefixedInputs =
-        this.inputPrefix.isEmpty()
+        requestConfig.inputPrefix().isEmpty()
             ? inputs
-            : inputs.stream().map(text -> this.inputPrefix + text).toList();
+            : inputs.stream().map(text -> requestConfig.inputPrefix() + text).toList();
 
     // only send `dimensions` when forwardDimensions is on; local engines reject it. the value is
     // the index's resolved numDimensions (per request), so Matryoshka models shrink to the size
     // the index actually wants — not the catalog default.
     Optional<Integer> dimensions =
-        this.forwardDimensions ? Optional.of(context.outputDimension()) : Optional.empty();
+        requestConfig.forwardDimensions()
+            ? Optional.of(context.outputDimension())
+            : Optional.empty();
     BsonDocument body =
         new OpenAiApiSchema.EmbedRequest(
                 this.modelId, prefixedInputs, OpenAiApiSchema.DEFAULT_ENCODING_FORMAT, dimensions)
@@ -275,19 +300,19 @@ public class OpenAiCompatClient implements ClientInterface {
   /**
    * Authorization uses the Bearer scheme; other headers (Azure {@code api-key}) send the raw key.
    */
-  private String formatAuthHeaderValue(String key) {
-    return this.authHeaderName.equalsIgnoreCase(DEFAULT_AUTH_HEADER_NAME) ? "Bearer " + key : key;
+  private static String formatAuthHeaderValue(String key, String authHeaderName) {
+    return authHeaderName.equalsIgnoreCase(DEFAULT_AUTH_HEADER_NAME) ? "Bearer " + key : key;
   }
 
   private List<VectorOrError> extractVectorsFromResponse(
-      HttpResponse<String> response, List<String> inputs)
+      HttpResponse<String> response, List<String> inputs, Optional<String> apiKey)
       throws EmbeddingProviderTransientException, HttpTimeoutException {
     int statusCode = response.statusCode();
     if (statusCode == 400 || statusCode == 422) {
       String errorMessage =
           String.format(
               "Got invalid request, fail fast and give up retries. Response body: %s.",
-              redactApiKey(response.body()));
+              redactApiKey(response.body(), apiKey));
       LOG.warn(errorMessage);
       this.invalidRequestCounter.increment();
       return inputs.stream().map(ignored -> new VectorOrError(errorMessage)).toList();
@@ -295,12 +320,14 @@ public class OpenAiCompatClient implements ClientInterface {
     if (statusCode == 429) {
       throw new EmbeddingProviderTransientException(
           String.format(
-              "Rate limit exceeded (HTTP 429). Response body: %s", redactApiKey(response.body())));
+              "Rate limit exceeded (HTTP 429). Response body: %s",
+              redactApiKey(response.body(), apiKey)));
     }
     if (statusCode == 408) {
       throw new HttpTimeoutException(
           String.format(
-              "Timeout exception (HTTP 408). Response body: %s", redactApiKey(response.body())));
+              "Timeout exception (HTTP 408). Response body: %s",
+              redactApiKey(response.body(), apiKey)));
     }
     if (statusCode == 401 || statusCode == 403) {
       // bad/missing key or no access — retrying won't help, so fail fast instead of burning retries
@@ -309,7 +336,7 @@ public class OpenAiCompatClient implements ClientInterface {
           String.format(
               "Authentication failed (HTTP %d): check the API key and authHeaderName"
                   + " (Authorization: Bearer vs Azure api-key). Response body: %s",
-              statusCode, redactApiKey(response.body())));
+              statusCode, redactApiKey(response.body(), apiKey)));
     }
     if (statusCode < 200 || statusCode >= 300) {
       throw new EmbeddingProviderTransientException(
@@ -356,9 +383,9 @@ public class OpenAiCompatClient implements ClientInterface {
   }
 
   /** Redact the API key from error messages: both the {@code Bearer <key>} form and the raw key. */
-  private String redactApiKey(String message) {
+  private static String redactApiKey(String message, Optional<String> apiKey) {
     String bearerRedacted = message.replaceAll("Bearer [^\"\\s]+", "Bearer <REDACTED-API-KEY>");
-    return this.apiKey
+    return apiKey
         .map(key -> bearerRedacted.replace(key, "<REDACTED-API-KEY>"))
         .orElse(bearerRedacted);
   }
