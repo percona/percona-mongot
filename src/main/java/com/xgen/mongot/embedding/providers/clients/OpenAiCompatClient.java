@@ -287,18 +287,20 @@ public class OpenAiCompatClient implements ClientInterface {
       String errorMessage =
           String.format(
               "Got invalid request, fail fast and give up retries. Response body: %s.",
-              response.body());
+              redactApiKey(response.body()));
       LOG.warn(errorMessage);
       this.invalidRequestCounter.increment();
       return inputs.stream().map(ignored -> new VectorOrError(errorMessage)).toList();
     }
     if (statusCode == 429) {
       throw new EmbeddingProviderTransientException(
-          String.format("Rate limit exceeded (HTTP 429). Response body: %s", response.body()));
+          String.format(
+              "Rate limit exceeded (HTTP 429). Response body: %s", redactApiKey(response.body())));
     }
     if (statusCode == 408) {
       throw new HttpTimeoutException(
-          String.format("Timeout exception (HTTP 408). Response body: %s", response.body()));
+          String.format(
+              "Timeout exception (HTTP 408). Response body: %s", redactApiKey(response.body())));
     }
     if (statusCode == 401 || statusCode == 403) {
       // bad/missing key or no access — retrying won't help, so fail fast instead of burning retries
@@ -307,7 +309,7 @@ public class OpenAiCompatClient implements ClientInterface {
           String.format(
               "Authentication failed (HTTP %d): check the API key and authHeaderName"
                   + " (Authorization: Bearer vs Azure api-key). Response body: %s",
-              statusCode, response.body()));
+              statusCode, redactApiKey(response.body())));
     }
     if (statusCode < 200 || statusCode >= 300) {
       throw new EmbeddingProviderTransientException(

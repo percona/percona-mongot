@@ -353,6 +353,59 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void embed_errorResponseEchoesAuthHeader_redactsApiKeyInAllStatusPaths() throws Exception {
+    // Simulates a misconfigured gateway/proxy that echoes request headers (including
+    // Authorization) back in its error body -- a real gateway-misconfiguration pattern. The API
+    // key must be redacted from every status-code error path, not just the buildRequest failure.
+    String echoedKeyBody =
+        "{\"error\":\"upstream rejected\",\"headers\":{\"Authorization\":\"Bearer secret-key\"}}";
+
+    // 400/422: fails fast as a per-input error (not thrown).
+    OpenAiCompatClient badRequestClient = newClient(openAiModel(Optional.of("secret-key")));
+    OpenAiCompatClient.injectHttpClient(badRequestClient, mockHttpClient(400, echoedKeyBody));
+    String badRequestMessage =
+        badRequestClient.embed(List.of("hello"), floatContext()).get(0).errorMessage.orElseThrow();
+    assertFalse(
+        "API key must be redacted from 400 error message: " + badRequestMessage,
+        badRequestMessage.contains("secret-key"));
+
+    // 429: thrown directly as EmbeddingProviderTransientException.
+    OpenAiCompatClient rateLimitClient = newClient(openAiModel(Optional.of("secret-key")));
+    OpenAiCompatClient.injectHttpClient(rateLimitClient, mockHttpClient(429, echoedKeyBody));
+    EmbeddingProviderTransientException rateLimitException =
+        org.junit.Assert.assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> rateLimitClient.embed(List.of("hello"), floatContext()));
+    assertFalse(
+        "API key must be redacted from 429 error message: " + rateLimitException.getMessage(),
+        rateLimitException.getMessage().contains("secret-key"));
+
+    // 408: rethrown as HttpTimeoutException, wrapped as EmbeddingProviderTransientException.
+    OpenAiCompatClient timeoutClient = newClient(openAiModel(Optional.of("secret-key")));
+    OpenAiCompatClient.injectHttpClient(timeoutClient, mockHttpClient(408, echoedKeyBody));
+    EmbeddingProviderTransientException timeoutException =
+        org.junit.Assert.assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> timeoutClient.embed(List.of("hello"), floatContext()));
+    String timeoutMessage =
+        timeoutException.getCause() != null ? timeoutException.getCause().getMessage() : "";
+    assertFalse(
+        "API key must be redacted from 408 error message: " + timeoutMessage,
+        timeoutMessage.contains("secret-key"));
+
+    // 401/403: thrown directly as EmbeddingProviderNonTransientException.
+    OpenAiCompatClient authClient = newClient(openAiModel(Optional.of("secret-key")));
+    OpenAiCompatClient.injectHttpClient(authClient, mockHttpClient(401, echoedKeyBody));
+    EmbeddingProviderNonTransientException authException =
+        org.junit.Assert.assertThrows(
+            EmbeddingProviderNonTransientException.class,
+            () -> authClient.embed(List.of("hello"), floatContext()));
+    assertFalse(
+        "API key must be redacted from 401 error message: " + authException.getMessage(),
+        authException.getMessage().contains("secret-key"));
+  }
+
+  @Test
   public void embed_fewerVectorsThanInputs_throwsTransient() throws Exception {
     OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
     // Two non-empty inputs but the engine returns a single embedding.
