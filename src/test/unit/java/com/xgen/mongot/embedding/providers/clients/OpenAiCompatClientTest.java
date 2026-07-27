@@ -353,6 +353,22 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void embed_otherClientErrors_throwNonTransient() throws Exception {
+    // A misconfigured providerEndpoint (wrong path/port) is a permanent error: retrying the
+    // identical request would only get the identical result, so these must fail fast rather than
+    // burn retries as if they were transient.
+    for (int statusCode : new int[] {404, 405, 410}) {
+      OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
+      OpenAiCompatClient.injectHttpClient(client, mockHttpClient(statusCode, "not found"));
+
+      org.junit.Assert.assertThrows(
+          "HTTP " + statusCode + " should be non-transient",
+          EmbeddingProviderNonTransientException.class,
+          () -> client.embed(List.of("hello"), floatContext()));
+    }
+  }
+
+  @Test
   public void embed_errorResponseEchoesAuthHeader_redactsApiKeyInAllStatusPaths() throws Exception {
     // Simulates a misconfigured gateway/proxy that echoes request headers (including
     // Authorization) back in its error body -- a real gateway-misconfiguration pattern. The API

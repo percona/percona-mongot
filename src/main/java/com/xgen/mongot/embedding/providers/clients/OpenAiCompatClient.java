@@ -338,6 +338,16 @@ public class OpenAiCompatClient implements ClientInterface {
                   + " (Authorization: Bearer vs Azure api-key). Response body: %s",
               statusCode, redactApiKey(response.body(), apiKey)));
     }
+    if (statusCode >= 400 && statusCode < 500) {
+      // Any other 4xx (e.g. 404 wrong endpoint path, 405, 410) is a permanent misconfiguration:
+      // retrying the identical request gets the identical result, so fail fast instead of burning
+      // retries.
+      this.invalidRequestCounter.increment();
+      throw new EmbeddingProviderNonTransientException(
+          String.format(
+              "Got client error from response (check the providerEndpoint path), status code: %s",
+              statusCode));
+    }
     if (statusCode < 200 || statusCode >= 300) {
       throw new EmbeddingProviderTransientException(
           String.format("Got non OK status from response, status code: %s", statusCode));
