@@ -2,6 +2,7 @@ package com.xgen.mongot.embedding.providers.clients;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
@@ -167,6 +168,22 @@ public class OpenAiCompatClientTest {
     assertEquals(1, results.size());
     assertTrue(results.get(0).errorMessage.isPresent());
     assertTrue(results.get(0).vector.isEmpty());
+  }
+
+  @Test
+  public void embed_invalidRequestKeepsEmptyInputAsEmptyInputErrorSingleton() throws Exception {
+    // Empty inputs are a local validation error, not a provider error: on a 400/422 the returned
+    // per-input results must still map an originally-empty input to the EMPTY_INPUT_ERROR
+    // singleton (as on the success path), not a fresh VectorOrError wrapping the batch error.
+    OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
+    OpenAiCompatClient.injectHttpClient(
+        client, mockHttpClient(400, "{\"error\":{\"message\":\"bad model\"}}"));
+
+    List<VectorOrError> results = client.embed(List.of("", "hello"), floatContext());
+
+    assertEquals(2, results.size());
+    assertSame(VectorOrError.EMPTY_INPUT_ERROR, results.get(0));
+    assertTrue(results.get(1).errorMessage.isPresent());
   }
 
   @Test

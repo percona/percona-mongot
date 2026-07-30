@@ -341,7 +341,16 @@ public class OpenAiCompatClient implements ClientInterface {
               redactApiKey(response.body(), apiKey));
       LOG.warn(errorMessage);
       this.invalidRequestCounter.increment();
-      return inputs.stream().map(ignored -> new VectorOrError(errorMessage)).toList();
+      // Empty inputs are a local validation error, not a provider error: keep them mapped to the
+      // EMPTY_INPUT_ERROR singleton so callers that check for it by identity see the same result
+      // as on the success path.
+      return inputs.stream()
+          .map(
+              input ->
+                  input.isEmpty()
+                      ? VectorOrError.EMPTY_INPUT_ERROR
+                      : new VectorOrError(errorMessage))
+          .toList();
     }
     if (statusCode == 429) {
       throw new EmbeddingProviderTransientException(
