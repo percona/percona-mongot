@@ -734,6 +734,27 @@ public class OpenAiCompatClientTest {
     assertFalse("API key must be redacted: " + message, message.contains("secret-key"));
   }
 
+  @Test
+  public void embed_invalidAuthHeaderValue_doesNotLeakApiKeyViaCauseChain() throws Exception {
+    // A control character in the API key makes HttpRequest.Builder reject the header *value*; the
+    // JDK's own IllegalArgumentException message embeds the raw value (e.g. "invalid header value:
+    // \"Bearer secret-api-key\""). The client must not surface that unredacted message
+    // anywhere in the thrown exception's cause chain, even though it's out of its control.
+    String apiKey = "secret-api-key" + (char) 1;
+    OpenAiCompatClient client = newClient(openAiModel(Optional.of(apiKey)));
+    OpenAiCompatClient.injectHttpClient(client, mockHttpClient(200, "{}"));
+
+    EmbeddingProviderTransientException e =
+        org.junit.Assert.assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> client.embed(List.of("hello"), floatContext()));
+
+    for (Throwable t = e; t != null; t = t.getCause()) {
+      String message = String.valueOf(t.getMessage());
+      assertFalse("API key must not leak via cause chain: " + message, message.contains(apiKey));
+    }
+  }
+
   private static HttpClient httpClientField(OpenAiCompatClient client) throws Exception {
     Field field = OpenAiCompatClient.class.getDeclaredField("httpClient");
     field.setAccessible(true);

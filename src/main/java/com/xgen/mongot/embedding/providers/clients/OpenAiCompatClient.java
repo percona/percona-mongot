@@ -184,8 +184,13 @@ public class OpenAiCompatClient implements ClientInterface {
       String message = e.getMessage();
       String cleanedMessage =
           message != null ? redactApiKey(message, requestConfig.apiKey()) : null;
+      // e's own message may contain the raw header value (e.g. the API key), so it must not be
+      // attached as a cause; copy only the stack trace to preserve where the failure occurred.
+      // e.getCause() is always null here (HttpRequest.Builder throws IllegalArgumentException
+      // directly, never wrapping another exception).
       IllegalArgumentException cleanedException =
           new IllegalArgumentException(cleanedMessage, e.getCause());
+      cleanedException.setStackTrace(e.getStackTrace());
       LOG.error("HTTP Request Error", cleanedException);
       throw new EmbeddingProviderTransientException(cleanedException);
     }
