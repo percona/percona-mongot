@@ -1,0 +1,51 @@
+name: dev-docker-image-cleanup
+
+# When a PR is closed (merged or not), delete the per-PR dev image tag
+# (perconalab/percona-search-mongodb:pr-<number>) from Docker Hub so stale
+# dev tags don't accumulate. GitHub artifacts are left to expire on their own
+# retention window.
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+env:
+  REPO: perconalab/percona-search-mongodb
+
+jobs:
+  delete-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Delete pr-<number> tag from Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        run: |
+          set -e
+          TAG="pr-${{ github.event.pull_request.number }}"
+          echo "Deleting ${REPO}:${TAG}"
+
+          JWT=$(curl -sS -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_TOKEN}\"}" \
+            https://hub.docker.com/v2/users/login/ | jq -r .token)
+
+          if [ -z "${JWT}" ] || [ "${JWT}" = "null" ]; then
+            echo "Failed to obtain Docker Hub auth token" >&2
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -X DELETE \
+            -H "Authorization: JWT ${JWT}" \
+            "https://hub.docker.com/v2/repositories/${REPO}/tags/${TAG}/")
+
+          case "${HTTP_CODE}" in
+            204) echo "Deleted ${REPO}:${TAG}" ;;
+            404) echo "Tag ${REPO}:${TAG} not found (already gone or never pushed); nothing to do" ;;
+            *)   echo "Unexpected response deleting tag: HTTP ${HTTP_CODE}" >&2; exit 1 ;;
+          esac

@@ -1,0 +1,128 @@
+name: dev-docker-image
+
+# Builds mongot from source on every PR, packages it into docker image and:
+#   * ALWAYS uploads the image as a GitHub artifact (docker save tarball)
+#   * ADDITIONALLY pushes to perconalab/percona-search-mongodb:pr-<number>
+#     when Docker Hub credentials are available
+# The pr-<number> tag is removed when the PR closes (see dev-docker-image-cleanup.yml).
+
+on:
+  workflow_dispatch:
+
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: perconalab/percona-search-mongodb
+  PLATFORM: linux_x86_64
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Cleanup unnecessary software
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG="pr-${{ github.event.pull_request.number }}"
+          else
+            TAG="dev-${GITHUB_SHA::8}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image will be tagged: ${IMAGE}:${TAG}"
+
+      - name: Build mongot community bundle
+        run: |
+          ./scripts/tools/bazelisk/run.sh build \
+            --platforms=//bazel/platforms:${PLATFORM} \
+            --//bazel/config:version=${{ steps.meta.outputs.tag }} \
+            --embed_label=${{ steps.meta.outputs.tag }} \
+            //deploy:mongot-community
+
+      - name: Assemble Docker build context
+        run: |
+          mkdir -p docker-context
+          cp -L bazel-bin/deploy/mongot-community.tgz docker-context/mongot-community.tgz
+          cp percona-packaging/docker/Dockerfile        docker-context/Dockerfile
+          cp percona-packaging/docker/mongot-entry.sh   docker-context/mongot-entry.sh
+          cp percona-packaging/conf/mongot.yml          docker-context/mongot.yml
+          ls -l docker-context
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker build docker-context \
+            -t "${IMAGE}:${{ steps.meta.outputs.tag }}"
+
+      - name: Save image as artifact tarball
+        run: |
+          docker save "${IMAGE}:${{ steps.meta.outputs.tag }}" \
+            | gzip > percona-search-mongodb-${{ steps.meta.outputs.tag }}.tar.gz
+          ls -lh percona-search-mongodb-${{ steps.meta.outputs.tag }}.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: percona-search-mongodb-${{ steps.meta.outputs.tag }}
+          path: percona-search-mongodb-${{ steps.meta.outputs.tag }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      # The steps below run only when Docker Hub credentials are present.
+      # Fork PRs never receive secrets, so these steps are skipped automatically
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push image to perconalab
+        if: env.DOCKERHUB_TOKEN != ''
+        run: |
+          docker push "${IMAGE}:${{ steps.meta.outputs.tag }}"
+          echo "Pushed ${IMAGE}:${{ steps.meta.outputs.tag }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### mongot dev image"
+            echo ""
+            echo "- Tag: \`${IMAGE}:${{ steps.meta.outputs.tag }}\`"
+            echo "- Artifact: \`percona-search-mongodb-${{ steps.meta.outputs.tag }}\` (load with \`docker load < *.tar.gz\`)"
+            if [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo "- Pushed to Docker Hub: yes (\`docker pull ${IMAGE}:${{ steps.meta.outputs.tag }}\`)"
+            else
+              echo "- Pushed to Docker Hub: no (credentials unavailable, e.g. fork PR)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
