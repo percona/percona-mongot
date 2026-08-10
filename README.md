@@ -14,6 +14,11 @@ Packages for Percona Search for MongoDB are created by the Percona team and are
 available at the Percona website. You can also build from source — see
 [docs/building.md](docs/building.md).
 
+## Documentation
+
+- [docs/azure-openai-embeddings.md](docs/azure-openai-embeddings.md) — using Azure
+  OpenAI as an embedding provider for automatic embedding generation
+
 ## Community
 
 Find answers to Percona Search for MongoDB-related questions on the

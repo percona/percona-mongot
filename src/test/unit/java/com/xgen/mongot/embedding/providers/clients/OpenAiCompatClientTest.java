@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
+import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
@@ -33,11 +34,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLException;
+import org.bson.BsonDocument;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -241,6 +244,90 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void embed_azureShapedEndpoint_uriRoundTripsWithApiVersionQueryString() throws Exception {
+    // Azure's per-deployment URL carries a required `api-version` query parameter.
+    // buildRequestConfig builds the URI once via URI.create() and buildRequest passes that same
+    // URI straight into HttpRequest.Builder with no re-parsing, so the query string must survive
+    // untouched end to end.
+    String azureEndpoint =
+        "https://my-resource.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings"
+            + "?api-version=2024-02-01";
+    EmbeddingServiceConfig.OpenAiEmbeddingCredentials creds =
+        new EmbeddingServiceConfig.OpenAiEmbeddingCredentials(
+            Optional.of("secret-key"), Optional.of("api-key"));
+    EmbeddingServiceConfig.EmbeddingConfig config =
+        new EmbeddingServiceConfig.EmbeddingConfig(
+            Optional.empty(),
+            new EmbeddingServiceConfig.OpenAiModelConfig(
+                Optional.of(1536), Optional.of(96), Optional.of(120_000), Optional.empty()),
+            RETRY_CONFIG,
+            creds,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            true,
+            Optional.of(azureEndpoint),
+            false,
+            Optional.empty());
+    EmbeddingModelConfig model =
+        EmbeddingModelConfig.create(
+            "text-embedding-3-small", EmbeddingProvider.OPENAI_COMPATIBLE, config);
+    OpenAiCompatClient client = newClient(model);
+
+    String body =
+        String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
+    HttpClient http = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(client, http);
+    client.embed(List.of("hello"), floatContext());
+
+    HttpRequest request = captureRequest(http);
+    assertEquals(azureEndpoint, request.uri().toString());
+  }
+
+  @Test
+  public void embed_modelIdSentVerbatimAsWireModelField_regardlessOfDeploymentPathSegment()
+      throws Exception {
+    // The wire `model` field is always the catalog key (this.modelId), independent of whatever
+    // deployment segment appears in the URL path. This pins today's behavior: if manual Azure
+    // verification finds the wire model must instead match the deployment name, update this test
+    // alongside the fix rather than discovering the gap from scratch.
+    String azureEndpoint =
+        "https://my-resource.openai.azure.com/openai/deployments/my-embed-deploy/embeddings"
+            + "?api-version=2024-02-01";
+    EmbeddingServiceConfig.OpenAiEmbeddingCredentials creds =
+        new EmbeddingServiceConfig.OpenAiEmbeddingCredentials(
+            Optional.of("secret-key"), Optional.of("api-key"));
+    EmbeddingServiceConfig.EmbeddingConfig config =
+        new EmbeddingServiceConfig.EmbeddingConfig(
+            Optional.empty(),
+            new EmbeddingServiceConfig.OpenAiModelConfig(
+                Optional.of(1536), Optional.of(96), Optional.of(120_000), Optional.empty()),
+            RETRY_CONFIG,
+            creds,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            true,
+            Optional.of(azureEndpoint),
+            false,
+            Optional.empty());
+    EmbeddingModelConfig model =
+        EmbeddingModelConfig.create("my-catalog-key", EmbeddingProvider.OPENAI_COMPATIBLE, config);
+    OpenAiCompatClient client = newClient(model);
+
+    String body =
+        String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
+    HttpClient http = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(client, http);
+    client.embed(List.of("hello"), floatContext());
+
+    BsonDocument sentBody = BsonDocument.parse(requestBody(captureRequest(http)));
+    assertEquals("my-catalog-key", sentBody.getString("model").getValue());
+  }
+
+  @Test
   public void embed_forwardsDimensionsOnlyWhenOptedIn() throws Exception {
     String body =
         String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
@@ -332,6 +419,37 @@ public class OpenAiCompatClientTest {
     org.junit.Assert.assertThrows(
         EmbeddingProviderTransientException.class,
         () -> client.embed(List.of("hello"), floatContext()));
+  }
+
+  @Test
+  public void embed_rateLimited429WithRetryAfterHeader_ignoresHeaderAndThrowsTransient()
+      throws Exception {
+    // Regression test documenting CURRENT intentional behavior: 429 handling here is shared
+    // OPENAI_COMPATIBLE/EmbeddingProviderManager retry-loop behavior, not Azure-specific, and does
+    // not parse Retry-After -- retries use fixed exponential backoff from ErrorHandlingConfig
+    // regardless of what the server suggests. If a future change adds real Retry-After handling,
+    // update this test as part of that change rather than treating a failure here as a regression.
+    OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(429).when(mockResponse).statusCode();
+    doReturn("{\"error\":\"rate limit\"}").when(mockResponse).body();
+    doReturn(HttpHeaders.of(Map.of("Retry-After", List.of("120")), (name, value) -> true))
+        .when(mockResponse)
+        .headers();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    doReturn(true).when(mockClient).awaitTermination(any(Duration.class));
+    OpenAiCompatClient.injectHttpClient(client, mockClient);
+
+    org.junit.Assert.assertThrows(
+        EmbeddingProviderTransientException.class,
+        () -> client.embed(List.of("hello"), floatContext()));
+
+    // Discriminating assertion: proves the header is never inspected, not just "still throws
+    // transient" -- which would pass trivially even after Retry-After parsing was added.
+    org.mockito.Mockito.verify(mockResponse, org.mockito.Mockito.never()).headers();
   }
 
   @Test

@@ -176,6 +176,80 @@ public class EmbeddingServiceManagerConfigTest {
   }
 
   @Test
+  public void loadEmbeddingServiceConfig_azureOpenAiExample_parsesEndToEnd() throws Exception {
+    // Mirrors the shipped catalog's commented Azure example verbatim (uncommented) -- see
+    // src/main/resources/config/community/embedding-service-configs.yml. Keep these two in sync:
+    // if you edit one, edit the other. It's a separate copy rather than a read of the real
+    // resource because loadEmbeddingServiceConfig_withValidCredentials_returnsConfig asserts an
+    // exact Map.of of catalog models, which uncommenting the shipped block would break.
+    String catalog =
+        """
+        configs:
+          - modelName: text-embedding-3-small
+            embeddingProvider: OPENAI_COMPATIBLE
+            config:
+              providerEndpoint: https://my-resource.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-02-01
+              modelConfig:
+                batchSize: 96
+                batchTokenLimit: 120000
+                outputDimensions: 1536
+                quantization: float
+                forwardDimensions: true
+              errorHandlingConfig:
+                maxRetries: 10
+                initialRetryWaitMs: 200
+                maxRetryWaitMs: 10000
+                jitter: 0.1
+              credentials:
+                apiKey: "test-azure-key"
+                authHeaderName: api-key
+        """;
+    Path catalogFile = Files.createTempFile("embedding-service-configs-azure", ".yml");
+    try {
+      Files.writeString(catalogFile, catalog, StandardCharsets.UTF_8);
+
+      Optional<EmbeddingServiceManagerConfig> result =
+          EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(
+              Optional.empty(), Optional.of(catalogFile));
+
+      assertTrue("Expected the Azure catalog to load", result.isPresent());
+      EmbeddingServiceConfig azureConfig =
+          result.get().configs().stream()
+              .filter(c -> c.modelName.equals("text-embedding-3-small"))
+              .findFirst()
+              .orElseThrow();
+
+      assertEquals(EmbeddingProvider.OPENAI_COMPATIBLE, azureConfig.embeddingProvider);
+      assertTrue(
+          "Expected OpenAiModelConfig for OPENAI_COMPATIBLE model",
+          azureConfig.embeddingConfig.modelConfigBase instanceof OpenAiModelConfig);
+      assertTrue(
+          "Expected OpenAiEmbeddingCredentials for OPENAI_COMPATIBLE model",
+          azureConfig.embeddingConfig.credentialsBase instanceof OpenAiEmbeddingCredentials);
+
+      OpenAiModelConfig modelConfig =
+          (OpenAiModelConfig) azureConfig.embeddingConfig.modelConfigBase;
+      assertEquals(Optional.of(1536), modelConfig.outputDimensions);
+      assertTrue(modelConfig.shouldForwardDimensions());
+
+      assertTrue(
+          "Expected the per-deployment endpoint's api-version query string to survive parsing",
+          azureConfig.embeddingConfig.providerEndpoint.orElseThrow().contains("?api-version="));
+
+      OpenAiEmbeddingCredentials creds =
+          (OpenAiEmbeddingCredentials) azureConfig.embeddingConfig.credentialsBase;
+      assertEquals(Optional.of("api-key"), creds.authHeaderName);
+      // Load-bearing: every other OPENAI_COMPATIBLE entry in the shipped catalog is keyless
+      // (credentials: {}), so nothing else in this suite proves a catalog-supplied apiKey
+      // actually survives parsing for this provider. If this comes back empty, that's an
+      // in-scope bug, not a test mistake.
+      assertEquals(Optional.of("test-azure-key"), creds.apiKey);
+    } finally {
+      Files.deleteIfExists(catalogFile);
+    }
+  }
+
+  @Test
   public void loadEmbeddingServiceConfig_missingOverrideFile_failsClosed() {
     // An explicit embedding.modelConfigFile must not silently fall back to the bundled catalog
     // (which can point at localhost endpoints under the same model names). Fail closed so
