@@ -329,8 +329,27 @@ build_mongot(){
     # the release artifact and the input consumed by the RPM/DEB packaging stages.
     OUT_NAME="${PRODUCT}-${VERSION}-${PLATFORM}.tar.gz"
     mkdir -p ${WORKDIR}/tarball ${CURDIR}/tarball
-    cp "${BUILT_TGZ}" "${WORKDIR}/tarball/${OUT_NAME}"
-    cp "${BUILT_TGZ}" "${CURDIR}/tarball/${OUT_NAME}"
+
+    REPACK_DIR=$(mktemp -d "${WORKDIR}/tarball/repack.XXXXXX")
+    if ! tar -xzpf "${BUILT_TGZ}" -C "${REPACK_DIR}"; then
+        echo "Failed to unpack ${BUILT_TGZ}"
+        rm -rf "${REPACK_DIR}"
+        exit 1
+    fi
+    if [ ! -d "${REPACK_DIR}/mongot-community" ]; then
+        echo "Unexpected bundle layout: no mongot-community/ at the top level"
+        ls -la "${REPACK_DIR}"
+        rm -rf "${REPACK_DIR}"
+        exit 1
+    fi
+    mv "${REPACK_DIR}/mongot-community" "${REPACK_DIR}/${PRODUCT}"
+    if ! tar --owner=0 --group=0 -czf "${WORKDIR}/tarball/${OUT_NAME}" -C "${REPACK_DIR}" "${PRODUCT}"; then
+        echo "Failed to repack ${OUT_NAME}"
+        rm -rf "${REPACK_DIR}"
+        exit 1
+    fi
+    rm -rf "${REPACK_DIR}"
+    cp "${WORKDIR}/tarball/${OUT_NAME}" "${CURDIR}/tarball/${OUT_NAME}"
 
     # Release the bazel server so its cache locks are dropped before exit.
     ${BAZELISK} --output_user_root="${BAZEL_OUTPUT_USER_ROOT}" shutdown || true
