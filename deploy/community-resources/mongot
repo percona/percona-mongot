@@ -32,6 +32,15 @@ else
   export JAVA_HOME="${DIR}/bin/jdk"
 fi
 
+# bc-fips 2.1 extracts its JNI probe under java.io.tmpdir and dlopens it, which
+# a noexec /tmp (RHEL 8 default) fails with UnsatisfiedLinkError. systemd passes
+# TMPDIR for package installs; /var/tmp covers tarball and Docker.
+JNI_TMPDIR="${TMPDIR:-/var/tmp}"
+if ! mkdir -p "${JNI_TMPDIR}"; then
+  echo "mongot: cannot create '${JNI_TMPDIR}' -- point TMPDIR at a writable, exec-allowed dir" >&2
+  exit 1
+fi
+
 # Wrapper for running mongot
 run_mongot() {
     # Specifying lib/* first in the classpath ensures that
@@ -42,6 +51,7 @@ run_mongot() {
     -XX:+ExitOnOutOfMemoryError \
     -XX:-UseGCOverheadLimit \
     '-Djava.security.egd=file:/dev/urandom' \
+    "-Djava.io.tmpdir=${JNI_TMPDIR}" \
     "-Dmongot.embeddingModelConfigFile=${DIR}/embedding-service-configs.yml" \
     '--add-modules=jdk.incubator.vector' \
     '--enable-preview' \
