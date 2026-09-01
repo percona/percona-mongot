@@ -3,11 +3,25 @@ set -e
 
 install -d -m 0750 -o root -g mongod /etc/mongot/secrets
 
-chown -R mongod:mongod /var/lib/mongot
+chown mongod:mongod /var/lib/mongot /var/lib/mongot/tmp
+chmod 0750 /var/lib/mongot /var/lib/mongot/tmp
 chown -R mongod:mongod /var/log/mongot
-chown -R root:mongod   /etc/mongot
-chmod 0750             /etc/mongot
-chmod 0640             /etc/mongot/mongot.yml || true
+
+chown root:mongod /etc/mongot /etc/mongot/secrets
+chmod 0750 /etc/mongot /etc/mongot/secrets
+if [ -f /etc/mongot/mongot.yml ]; then
+    chown root:mongod /etc/mongot/mongot.yml
+    chmod 0640 /etc/mongot/mongot.yml
+fi
+
+# mongot reads these as mongod, and SecretsParser rejects any group or other
+# bit, so the owner has to be mongod. Repairs installs where the earlier
+# chown -R root:mongod left them unreadable.
+for f in /etc/mongot/secrets/*; do
+    if [ -f "$f" ]; then
+        chown mongod:mongod "$f"
+    fi
+done
 
 #DEBHELPER#
 

@@ -95,11 +95,25 @@ if [ $1 -eq 1 ]; then
     /usr/bin/systemctl enable mongot.service >/dev/null 2>&1 || :
 fi
 %endif
-chown -R mongod:mongod %{_sharedstatedir}/mongot
+chown mongod:mongod %{_sharedstatedir}/mongot %{_sharedstatedir}/mongot/tmp
 chown -R mongod:mongod %{_localstatedir}/log/mongot
 install -d -m 0750 -o root -g mongod %{_sysconfdir}/mongot/secrets
-chown -R root:mongod   %{_sysconfdir}/mongot
-chmod 0750             %{_sysconfdir}/mongot
+
+chown root:mongod %{_sysconfdir}/mongot %{_sysconfdir}/mongot/secrets
+chmod 0750 %{_sysconfdir}/mongot %{_sysconfdir}/mongot/secrets
+if [ -f %{_sysconfdir}/mongot/mongot.yml ]; then
+    chown root:mongod %{_sysconfdir}/mongot/mongot.yml
+    chmod 0640 %{_sysconfdir}/mongot/mongot.yml
+fi
+
+# mongot reads these as mongod, and SecretsParser rejects any group or other
+# bit, so the owner has to be mongod. Repairs installs where the earlier
+# chown -R root:mongod left them unreadable.
+for f in %{_sysconfdir}/mongot/secrets/*; do
+    if [ -f "$f" ]; then
+        chown mongod:mongod "$f"
+    fi
+done
 
 %preun
 %if 0%{?systemd}
