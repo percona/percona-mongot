@@ -58,6 +58,7 @@ install -m 0750 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot/secrets
 install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig
 install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d
 install -m 0750 -d $RPM_BUILD_ROOT%{_sharedstatedir}/mongot
+install -m 0750 -d $RPM_BUILD_ROOT%{_sharedstatedir}/mongot/tmp
 install -m 0750 -d $RPM_BUILD_ROOT%{_localstatedir}/log/mongot
 
 # Lay out the prebuilt bundle.
@@ -123,6 +124,7 @@ chmod 0750             %{_sysconfdir}/mongot
 %{_unitdir}/mongot.service
 %endif
 %dir %attr(0750, mongod, mongod) %{_sharedstatedir}/mongot
+%dir %attr(0750, mongod, mongod) %{_sharedstatedir}/mongot/tmp
 %dir %attr(0750, mongod, mongod) %{_localstatedir}/log/mongot
 
 %changelog

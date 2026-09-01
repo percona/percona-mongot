@@ -5,6 +5,10 @@ After=network.target time-sync.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/sysconfig/mongot
+# Duplicated from mongot.env: that file is %config(noreplace), so an upgrade may
+# keep a copy with no TMPDIR. EnvironmentFile= overrides Environment=, so an
+# operator's own value still takes effect.
+Environment=TMPDIR=/var/lib/mongot/tmp
 User=mongod
 Group=mongod
 ExecStart=/usr/bin/mongot --config /etc/mongot/mongot.yml $MONGOT_OPTS

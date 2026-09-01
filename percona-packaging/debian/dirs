@@ -1,3 +1,4 @@
 etc/mongot/secrets
 var/lib/mongot
+var/lib/mongot/tmp
 var/log/mongot
