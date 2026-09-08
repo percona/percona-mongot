@@ -70,13 +70,22 @@ engines and non-Matryoshka models, which reject the `dimensions` request field.
 
 ## modelName vs. Azure deployment name
 
-> **Pending verification.** Whether Azure requires the wire `model` field (sent as the
-> catalog's `modelName`) to match the deployment name in the URL path, or ignores it
-> entirely, has not yet been confirmed against a real Azure deployment — see
-> [PS4M-14](https://perconadev.atlassian.net/browse/PS4M-14). Until that's resolved,
-> the safest choice is to give the catalog entry's `modelName` the same value as your
-> Azure deployment name. This section will be updated with the confirmed behavior once
-> PS4M-14 completes.
+Azure resolves the model purely from the deployment name embedded in the
+`providerEndpoint` URL path — it ignores the wire `model` field entirely. This was
+confirmed against a real Azure OpenAI deployment: `text-embedding-3-small` was
+deployed under a deliberately different Azure deployment name (`my-embed-deploy`),
+then tested with two catalog entries against the same `providerEndpoint` — one with
+`modelName: my-embed-deploy` (matching the deployment) and one with
+`modelName: random-name` (matching neither the deployment name nor the underlying
+model). Both produced a `READY` `autoEmbed` index and working queries (see
+[PS4M-14](https://perconadev.atlassian.net/browse/PS4M-14)).
+
+In practice this means the catalog's `modelName` — the key an `autoEmbed` index
+references and the `canonicalModel` metrics tag — can be whatever value is most
+meaningful to you; it does not need to match the Azure deployment name or the
+underlying model name. The only thing that must be correct is the deployment name in
+`providerEndpoint`'s URL path, since that's what Azure actually uses to select the
+model.
 
 ## Troubleshooting
 
