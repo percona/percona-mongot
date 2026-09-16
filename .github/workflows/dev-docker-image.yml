@@ -1,0 +1,210 @@
+name: dev-docker-image
+
+# Builds mongot from source and packages it into a multi-arch (amd64 + arm64)
+# Docker image. For every event it:
+#   * ALWAYS uploads a per-arch image as a GitHub artifact (docker save tarball)
+#   * ADDITIONALLY, when Docker Hub credentials are available, pushes each arch
+#     by digest and assembles a multi-arch manifest tag:
+#       - pull_request               -> perconalab/percona-search-mongodb:pr-<number>
+#       - push to main / dispatch    -> perconalab/percona-search-mongodb:dev
+# The pr-<number> tag is removed when the PR closes (see dev-docker-image-cleanup.yml).
+
+on:
+  workflow_dispatch:
+
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches:
+      - main
+
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: perconalab/percona-search-mongodb
+
+jobs:
+  # Resolve the target tag once so every arch and the manifest agree.
+  tag:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Compute image tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG="pr-${{ github.event.pull_request.number }}"
+          else
+            # push to main (post-merge) or manual dispatch both refresh :dev
+            TAG="dev"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image will be tagged: ${IMAGE}:${TAG}"
+
+  build:
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            bazel_platform: linux_x86_64
+            docker_platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            bazel_platform: linux_aarch64
+            docker_platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.tag.outputs.tag }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Cleanup unnecessary software
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Native per-arch bundle: amd64 builds on x86, arm64 builds on an arm
+      # runner, so the bundled JDK and native libs are the correct architecture.
+      - name: Build mongot community bundle
+        run: |
+          ./scripts/tools/bazelisk/run.sh build \
+            --platforms=//bazel/platforms:${{ matrix.bazel_platform }} \
+            --//bazel/config:version=${TAG} \
+            --embed_label=${TAG} \
+            //deploy:mongot-community
+
+      - name: Assemble Docker build context
+        run: |
+          mkdir -p docker-context
+          cp -L bazel-bin/deploy/mongot-community.tgz docker-context/mongot-community.tgz
+          cp percona-packaging/docker/Dockerfile        docker-context/Dockerfile
+          cp percona-packaging/docker/mongot-entry.sh   docker-context/mongot-entry.sh
+          cp percona-packaging/conf/mongot.yml          docker-context/mongot.yml
+          ls -l docker-context
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Single-arch, docker-loadable tarball. Always produced so PRs (including
+      # forks without credentials) still get a usable image per architecture.
+      - name: Build image tarball
+        run: |
+          docker buildx build docker-context \
+            --platform ${{ matrix.docker_platform }} \
+            --tag "${IMAGE}:${TAG}-${{ matrix.arch }}" \
+            --output type=docker,dest=image.tar
+          gzip -c image.tar > "percona-search-mongodb-${TAG}-${{ matrix.arch }}.tar.gz"
+          ls -lh "percona-search-mongodb-${TAG}-${{ matrix.arch }}.tar.gz"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: percona-search-mongodb-${{ needs.tag.outputs.tag }}-${{ matrix.arch }}
+          path: percona-search-mongodb-${{ needs.tag.outputs.tag }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      # The steps below run only when Docker Hub credentials are present.
+      # Fork PRs never receive secrets, so these steps are skipped automatically.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Push the arch image by digest (no per-arch tag); the manifest job stitches
+      # the digests together into the final tag.
+      - name: Push image by digest
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
+        run: |
+          docker buildx build docker-context \
+            --platform ${{ matrix.docker_platform }} \
+            --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file metadata.json
+          digest="$(jq -r '."containerimage.digest"' metadata.json)"
+          echo "Pushed ${IMAGE}@${digest} (${{ matrix.arch }})"
+          mkdir -p digests
+          echo "${digest}" > "digests/${{ matrix.arch }}"
+
+      - name: Upload digest
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the multi-arch manifest from the per-arch digests. Only runs when
+  # credentials are configured; a no-op (still green) otherwise, so fork PRs pass.
+  manifest:
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.tag.outputs.tag }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Download digests
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
+        run: |
+          refs=""
+          for f in digests/*; do
+            refs="${refs} ${IMAGE}@$(cat "${f}")"
+          done
+          echo "Combining:${refs} -> ${IMAGE}:${TAG}"
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" ${refs}
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### mongot dev image (multi-arch: amd64 + arm64)"
+            echo ""
+            echo "- Tag: \`${IMAGE}:${TAG}\`"
+            echo "- Artifacts: \`percona-search-mongodb-${TAG}-amd64\`, \`percona-search-mongodb-${TAG}-arm64\` (load with \`docker load < *.tar.gz\`)"
+            if [ -n "${DOCKERHUB_TOKEN}" ] && [ -n "${DOCKERHUB_USERNAME}" ]; then
+              echo "- Pushed to Docker Hub: yes (\`docker pull ${IMAGE}:${TAG}\`)"
+            else
+              echo "- Pushed to Docker Hub: no (credentials unavailable, e.g. fork PR)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
