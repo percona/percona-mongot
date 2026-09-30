@@ -7,6 +7,7 @@ java_test_suite(
         "DrillSidewaysInfoBuilderTest.java",
         "FacetCollectorTest.java",
         "GenericDrillSidewaysFacetOperatorBuilderTest.java",
+        "MetricsCollectorTest.java",
     ],
     data = ["//src/test/unit/resources/index/query/collectors:srcs"],
     tags = ["unit"],

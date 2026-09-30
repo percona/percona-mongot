@@ -34,6 +34,10 @@ public abstract class ShardedSearchPlanBuilder {
     return new CollectorMetaPipelineBuilder();
   }
 
+  public static MetricsMetaPipelineBuilder metrics() {
+    return new MetricsMetaPipelineBuilder();
+  }
+
   public static class OperatorMetaPipelineBuilder extends ShardedSearchPlanBuilder {
 
     @Override
@@ -138,6 +142,77 @@ public abstract class ShardedSearchPlanBuilder {
                               this.countType.get(),
                               new BsonDocument("$first", new BsonString("$count.value"))))
                       .append("facet", this.bucketDoc.get())));
+
+      return new PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan(
+          metaPipeline, this.sortSpec);
+    }
+  }
+
+  public static class MetricsMetaPipelineBuilder extends ShardedSearchPlanBuilder {
+
+    private Optional<List<BsonDocument>> facetDocs = Optional.empty();
+    private Optional<BsonDocument> metricsDoc = Optional.empty();
+
+    /** Each doc is a single-key {@code {<metric>_<component>: [pipeline]}} $facet entry. */
+    public MetricsMetaPipelineBuilder facetDocs(List<BsonDocument> facetDocs) {
+      this.facetDocs = Optional.of(facetDocs);
+      return this;
+    }
+
+    /** The {@code metrics} document of the $replaceWith stage. */
+    public MetricsMetaPipelineBuilder metricsDoc(BsonDocument metricsDoc) {
+      this.metricsDoc = Optional.of(metricsDoc);
+      return this;
+    }
+
+    @Override
+    public PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan build() {
+      Check.isPresent(this.countType, "countType");
+      Check.isPresent(this.facetDocs, "facetDocs");
+      Check.isPresent(this.metricsDoc, "metricsDoc");
+
+      BsonDocument facetStageDoc =
+          new BsonDocument(
+              "count",
+              new BsonArray(
+                  List.of(
+                      new BsonDocument(
+                          "$match",
+                          new BsonDocument(
+                              "_id.type", new BsonDocument("$eq", new BsonString("count")))))));
+      this.facetDocs
+          .get()
+          .forEach(
+              facetDoc -> {
+                String key = facetDoc.getFirstKey();
+                facetStageDoc.append(key, facetDoc.getArray(key));
+              });
+
+      List<BsonDocument> metaPipeline =
+          List.of(
+              new BsonDocument(
+                  "$group",
+                  new BsonDocument()
+                      .append(
+                          "_id",
+                          new BsonDocument()
+                              .append("type", new BsonString("$type"))
+                              .append("tag", new BsonString("$tag"))
+                              .append("bucket", new BsonString("$bucket")))
+                      .append("value", new BsonDocument("$sum", new BsonString("$count")))
+                      .append("metricSum", new BsonDocument("$sum", new BsonString("$value")))
+                      .append("metricMin", new BsonDocument("$min", new BsonString("$value")))
+                      .append("metricMax", new BsonDocument("$max", new BsonString("$value")))),
+              new BsonDocument("$facet", facetStageDoc),
+              new BsonDocument(
+                  "$replaceWith",
+                  new BsonDocument()
+                      .append(
+                          "count",
+                          new BsonDocument(
+                              this.countType.get(),
+                              new BsonDocument("$first", new BsonString("$count.value"))))
+                      .append("metrics", this.metricsDoc.get())));
 
       return new PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan(
           metaPipeline, this.sortSpec);

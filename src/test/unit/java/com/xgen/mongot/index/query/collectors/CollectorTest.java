@@ -7,6 +7,7 @@ import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonSerializationTestSuite;
 import com.xgen.testing.mongot.index.query.collectors.CollectorBuilder;
 import com.xgen.testing.mongot.index.query.collectors.FacetDefinitionBuilder;
+import com.xgen.testing.mongot.index.query.collectors.MetricDefinitionBuilder;
 import com.xgen.testing.mongot.index.query.operators.OperatorBuilder;
 import java.util.Calendar;
 import java.util.List;
@@ -41,7 +42,7 @@ public class CollectorTest {
 
     @Parameterized.Parameters(name = "{0}")
     public static Iterable<BsonDeserializationTestSuite.TestSpecWrapper<Collector>> data() {
-      return TEST_SUITE.withExamples(facets());
+      return TEST_SUITE.withExamples(facets(), metrics());
     }
 
     @Test
@@ -85,6 +86,10 @@ public class CollectorTest {
                           .build()))
               .build());
     }
+
+    private static BsonDeserializationTestSuite.ValidSpec<Collector> metrics() {
+      return BsonDeserializationTestSuite.TestSpec.valid("metrics", metricsCollector());
+    }
   }
 
   @RunWith(Parameterized.class)
@@ -101,7 +106,7 @@ public class CollectorTest {
 
     @Parameterized.Parameters(name = "{0}")
     public static Iterable<BsonSerializationTestSuite.TestSpec<Collector>> data() {
-      return List.of(compound());
+      return List.of(compound(), metrics());
     }
 
     @Test
@@ -145,5 +150,27 @@ public class CollectorTest {
                           .build()))
               .build());
     }
+
+    private static BsonSerializationTestSuite.TestSpec<Collector> metrics() {
+      return BsonSerializationTestSuite.TestSpec.create("metrics", metricsCollector());
+    }
+  }
+
+  private static Collector metricsCollector() {
+    return CollectorBuilder.metrics()
+        .operator(OperatorBuilder.text().path("review").query("good").build())
+        .metricDefinitions(
+            Map.of(
+                "avgRating",
+                MetricDefinitionBuilder.builder()
+                    .type(MetricDefinition.Type.AVG)
+                    .path("rating")
+                    .build(),
+                "maxPrice",
+                MetricDefinitionBuilder.builder()
+                    .type(MetricDefinition.Type.MAX)
+                    .path("price")
+                    .build()))
+        .build();
   }
 }

@@ -5,6 +5,7 @@ import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITI
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_NAME;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
@@ -24,10 +25,12 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.BatchProducer;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.MetaResults;
 import com.xgen.mongot.index.MeteredIndexWriter;
 import com.xgen.mongot.index.SearchIndexReader.SearchProducerAndMetaResults;
 import com.xgen.mongot.index.analyzer.wrapper.LuceneAnalyzer;
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.NumberFieldDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryFactory;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryHelper;
@@ -39,6 +42,7 @@ import com.xgen.mongot.index.lucene.searcher.LuceneSearcherFactory;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.lucene.util.LuceneDocumentIdEncoder;
+import com.xgen.mongot.index.lucene.util.LuceneDoubleConversionUtils;
 import com.xgen.mongot.index.lucene.writer.SingleLuceneIndexWriter;
 import com.xgen.mongot.index.query.CollectorQuery;
 import com.xgen.mongot.index.query.InvalidQueryException;
@@ -49,7 +53,11 @@ import com.xgen.mongot.index.query.SearchQuery;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo.QueryOptimizationStatus;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
+import com.xgen.mongot.index.query.collectors.MetricDefinition;
+import com.xgen.mongot.index.query.counts.Count;
 import com.xgen.mongot.util.AtomicDirectoryRemover;
+import com.xgen.mongot.util.Bytes;
+import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
@@ -57,9 +65,16 @@ import com.xgen.testing.ConcurrencyTestUtils;
 import com.xgen.testing.TestUtils;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.analyzer.AnalyzerRegistryBuilder;
+import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.NumericFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.lucene.LuceneConfigBuilder;
 import com.xgen.testing.mongot.index.lucene.synonym.SynonymRegistryBuilder;
+import com.xgen.testing.mongot.index.query.CollectorQueryBuilder;
 import com.xgen.testing.mongot.index.query.OperatorQueryBuilder;
+import com.xgen.testing.mongot.index.query.collectors.CollectorBuilder;
+import com.xgen.testing.mongot.index.query.collectors.MetricDefinitionBuilder;
+import com.xgen.testing.mongot.index.query.counts.CountBuilder;
 import com.xgen.testing.mongot.index.query.operators.OperatorBuilder;
 import com.xgen.testing.mongot.index.query.scores.ScoreBuilder;
 import com.xgen.testing.mongot.mock.index.IndexGeneration;
@@ -73,6 +88,7 @@ import java.util.Set;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetField;
@@ -80,8 +96,12 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.TieredMergePolicy;
+import org.bson.BsonArray;
 import org.bson.BsonDocument;
+import org.bson.BsonDouble;
 import org.bson.BsonInt32;
+import org.bson.BsonNull;
+import org.bson.BsonValue;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.theories.DataPoints;
@@ -116,6 +136,10 @@ public class LuceneSearchIndexReaderTest {
           .returnStoredSource(false)
           .build();
   private LuceneSearcherFactory searcherFactory;
+
+  private static final String RATING_FIELD =
+      FieldName.TypeField.NUMBER_DOUBLE_V2.getLuceneFieldName(
+          FieldPath.parse("rating"), Optional.empty());
 
   @DataPoints("allQueryTypes")
   public static Set<QueryType> intermediateOrRegularQuery() {
@@ -823,6 +847,226 @@ public class LuceneSearchIndexReaderTest {
 
     // Should return 5 (max cardinality from "size" field)
     assertEquals(5, readerWithFacets.getMaxStringFacetCardinality());
+  }
+
+  /** Indexes a document with the given _id and, unless NaN, a "rating" number field. */
+  private void addRatingDocument(int id, double rating) throws IOException {
+    BsonDocument bson = new BsonDocument().append("_id", new BsonInt32(id));
+    Document doc = new Document();
+    doc.add(
+        LuceneDocumentIdEncoder.documentIdField(LuceneDocumentIdEncoder.encodeDocumentId(bson)));
+    if (!Double.isNaN(rating)) {
+      doc.add(
+          new LongField(
+              RATING_FIELD, LuceneDoubleConversionUtils.toMqlSortableLong(rating), Field.Store.NO));
+    }
+    this.writer.addDocument(doc);
+  }
+
+  private static CollectorQuery ratingMetricsQuery() {
+    return CollectorQueryBuilder.builder()
+        .index(MOCK_INDEX_NAME)
+        .collector(
+            CollectorBuilder.metrics()
+                .metricDefinitions(
+                    Map.of(
+                        "avgRating",
+                        MetricDefinitionBuilder.builder()
+                            .type(MetricDefinition.Type.AVG)
+                            .path("rating")
+                            .build(),
+                        "sumRating",
+                        MetricDefinitionBuilder.builder()
+                            .type(MetricDefinition.Type.SUM)
+                            .path("rating")
+                            .build(),
+                        "minRating",
+                        MetricDefinitionBuilder.builder()
+                            .type(MetricDefinition.Type.MIN)
+                            .path("rating")
+                            .build(),
+                        "maxRating",
+                        MetricDefinitionBuilder.builder()
+                            .type(MetricDefinition.Type.MAX)
+                            .path("rating")
+                            .build()))
+                .build())
+        .count(CountBuilder.builder().type(Count.Type.TOTAL).build())
+        .returnStoredSource(false)
+        .build();
+  }
+
+  @Test
+  public void testMetricsCollectorQuery() throws Exception {
+    addRatingDocument(1, 1.0);
+    addRatingDocument(2, 2.0);
+    addRatingDocument(3, 6.0);
+    addRatingDocument(4, Double.NaN); // no rating field
+    this.writer.commit();
+    this.reader.refresh();
+
+    CollectorQuery query = ratingMetricsQuery();
+    MetaResults metaResults =
+        this.reader.query(
+                query,
+                QueryCursorOptions.empty(),
+                BatchSizeStrategySelector.forQuery(query, QueryCursorOptions.empty()),
+                QueryOptimizationFlags.DEFAULT_OPTIONS)
+            .metaResults;
+
+    assertEquals(Optional.of(4L), metaResults.count().getTotal());
+    assertEquals(Optional.empty(), metaResults.facet());
+    Map<String, BsonValue> metrics = metaResults.metrics().orElseThrow();
+    assertEquals(new BsonDouble(3.0), metrics.get("avgRating"));
+    assertEquals(new BsonDouble(9.0), metrics.get("sumRating"));
+    assertEquals(new BsonDouble(1.0), metrics.get("minRating"));
+    assertEquals(new BsonDouble(6.0), metrics.get("maxRating"));
+  }
+
+  @Test
+  public void testMetricsCollectorQueryWithoutValuesReturnsNulls() throws Exception {
+    addRatingDocument(1, Double.NaN);
+    this.writer.commit();
+    this.reader.refresh();
+
+    CollectorQuery query = ratingMetricsQuery();
+    Map<String, BsonValue> metrics =
+        this.reader
+            .query(
+                query,
+                QueryCursorOptions.empty(),
+                BatchSizeStrategySelector.forQuery(query, QueryCursorOptions.empty()),
+                QueryOptimizationFlags.DEFAULT_OPTIONS)
+            .metaResults
+            .metrics()
+            .orElseThrow();
+
+    assertEquals(BsonNull.VALUE, metrics.get("avgRating"));
+    assertEquals(new BsonDouble(0.0), metrics.get("sumRating"));
+    assertEquals(BsonNull.VALUE, metrics.get("minRating"));
+    assertEquals(BsonNull.VALUE, metrics.get("maxRating"));
+  }
+
+  @Test
+  public void testMetricsCollectorIntermediateQuery() throws Exception {
+    addRatingDocument(1, 1.0);
+    addRatingDocument(2, 5.0);
+    this.writer.commit();
+    this.reader.refresh();
+
+    CollectorQuery query = ratingMetricsQuery();
+    BatchProducer metaProducer =
+        this.reader.intermediateQuery(
+                query,
+                QueryCursorOptions.empty(),
+                BatchSizeStrategySelector.forQuery(query, QueryCursorOptions.empty()),
+                QueryOptimizationFlags.DEFAULT_OPTIONS)
+            .metaBatchProducer;
+    assertEquals(LuceneMetricsCollectorMetaBatchProducer.class, metaProducer.getClass());
+
+    BsonArray batch = metaProducer.getNextBatch(Bytes.ofBytes(1 << 20));
+    BsonDocument countDoc = batch.get(0).asDocument();
+    assertEquals("count", countDoc.getString("type").getValue());
+    assertEquals(2L, countDoc.getInt64("count").getValue());
+    // Four metrics, four buckets each (sum, count, min, max), after the count document.
+    assertEquals(1 + 4 * 4, batch.size());
+    BsonDocument avgSum = batch.get(1).asDocument();
+    assertEquals("metric", avgSum.getString("type").getValue());
+    assertEquals("avgRating", avgSum.getString("tag").getValue());
+    assertEquals("sum", avgSum.getString("bucket").getValue());
+    assertEquals(6.0, avgSum.getDouble("value").getValue(), 1e-9);
+    assertEquals(2L, batch.get(2).asDocument().getInt64("count").getValue());
+  }
+
+  @Test
+  public void testMetricsCollectorRejectsPathNotIndexedAsNumber() throws Exception {
+    // The facet mock index has static mappings without a "rating" number field.
+    LuceneSearchIndexReader staticMappingReader =
+        createReaderWithFeatureFlags(
+            IndexGeneration.mockDefinitionGeneration(SearchIndex.MOCK_FACET_INDEX_DEFINITION),
+            null,
+            FeatureFlags.getDefault());
+    CollectorQuery query = ratingMetricsQuery();
+
+    InvalidQueryException e =
+        assertThrows(
+            InvalidQueryException.class,
+            () ->
+                staticMappingReader.query(
+                    query,
+                    QueryCursorOptions.empty(),
+                    BatchSizeStrategySelector.forQuery(query, QueryCursorOptions.empty()),
+                    QueryOptimizationFlags.DEFAULT_OPTIONS));
+    assertTrue(e.getMessage().contains("was not indexed as a \"number\" field"));
+  }
+
+  /** A reader over a static mapping that indexes only "rating", as the given number field. */
+  private LuceneSearchIndexReader staticRatingReader(NumberFieldDefinition rating)
+      throws Exception {
+    return createReaderWithFeatureFlags(
+        IndexGeneration.mockDefinitionGeneration(
+            SearchIndex.mockDefinitionBuilder(
+                    DocumentFieldDefinitionBuilder.builder()
+                        .dynamic(false)
+                        .field("rating", FieldDefinitionBuilder.builder().number(rating).build())
+                        .build())
+                .build()),
+        null,
+        FeatureFlags.getDefault());
+  }
+
+  private InvalidQueryException assertRatingMetricsRejected(NumberFieldDefinition rating)
+      throws Exception {
+    LuceneSearchIndexReader staticMappingReader = staticRatingReader(rating);
+    CollectorQuery query = ratingMetricsQuery();
+    return assertThrows(
+        InvalidQueryException.class,
+        () ->
+            staticMappingReader.query(
+                query,
+                QueryCursorOptions.empty(),
+                BatchSizeStrategySelector.forQuery(query, QueryCursorOptions.empty()),
+                QueryOptimizationFlags.DEFAULT_OPTIONS));
+  }
+
+  @Test
+  public void testMetricsCollectorAcceptsStaticNumberField() throws Exception {
+    LuceneSearchIndexReader staticMappingReader =
+        staticRatingReader(NumericFieldDefinitionBuilder.builder().buildNumberField());
+    addRatingDocument(1, 2.0);
+    addRatingDocument(2, 4.0);
+    this.writer.commit();
+    staticMappingReader.refresh();
+
+    CollectorQuery query = ratingMetricsQuery();
+    Map<String, BsonValue> metrics =
+        staticMappingReader
+            .query(
+                query,
+                QueryCursorOptions.empty(),
+                BatchSizeStrategySelector.forQuery(query, QueryCursorOptions.empty()),
+                QueryOptimizationFlags.DEFAULT_OPTIONS)
+            .metaResults
+            .metrics()
+            .orElseThrow();
+    assertEquals(new BsonDouble(3.0), metrics.get("avgRating"));
+  }
+
+  @Test
+  public void testMetricsCollectorRejectsNumberFieldWithoutIntegersIndexed() throws Exception {
+    // Whole numbers stored as int32/int64 would be missing from the metric.
+    InvalidQueryException e =
+        assertRatingMetricsRejected(
+            NumericFieldDefinitionBuilder.builder().indexIntegers(false).buildNumberField());
+    assertTrue(e.getMessage(), e.getMessage().contains("\"indexIntegers\": false"));
+  }
+
+  @Test
+  public void testMetricsCollectorRejectsNumberFieldWithoutDoublesIndexed() throws Exception {
+    InvalidQueryException e =
+        assertRatingMetricsRejected(
+            NumericFieldDefinitionBuilder.builder().indexDoubles(false).buildNumberField());
+    assertTrue(e.getMessage(), e.getMessage().contains("\"indexDoubles\": false"));
   }
 
   private LuceneSearchIndexReader createReaderWithFeatureFlags(

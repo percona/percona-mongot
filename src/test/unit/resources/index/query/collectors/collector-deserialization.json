@@ -38,6 +38,29 @@
           }
         }
       }
+    },
+    {
+      "description": "metrics",
+      "value": {
+        "metrics": {
+          "operator": {
+            "text": {
+              "path": "review",
+              "query": "good"
+            }
+          },
+          "metrics": {
+            "avgRating": {
+              "type": "avg",
+              "path": "rating"
+            },
+            "maxPrice": {
+              "type": "max",
+              "path": "price"
+            }
+          }
+        }
+      }
     }
   ],
   "invalid": [

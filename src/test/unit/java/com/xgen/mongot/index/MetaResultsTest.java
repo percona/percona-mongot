@@ -12,6 +12,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import org.bson.BsonDouble;
+import org.bson.BsonNull;
 import org.bson.BsonString;
 import org.junit.Assert;
 import org.junit.Test;
@@ -42,7 +44,7 @@ public class MetaResultsTest {
     /** Test data. */
     @Parameterized.Parameters(name = "{0}")
     public static Iterable<BsonDeserializationTestSuite.TestSpecWrapper<MetaResults>> data() {
-      return TEST_SUITE.withExamples(simple(), withFacet());
+      return TEST_SUITE.withExamples(simple(), withFacet(), withMetrics());
     }
 
     @Test
@@ -109,6 +111,15 @@ public class MetaResultsTest {
                           .build()))
               .build());
     }
+
+    private static BsonDeserializationTestSuite.ValidSpec<MetaResults> withMetrics() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "withMetrics",
+          MetaResultsBuilder.builder()
+              .count(CountResult.lowerBoundCount(1000))
+              .metrics(Map.of("avgRating", new BsonDouble(4.5), "maxPrice", BsonNull.VALUE))
+              .build());
+    }
   }
 
   @RunWith(Parameterized.class)
@@ -126,7 +137,7 @@ public class MetaResultsTest {
     /** Test data. */
     @Parameterized.Parameters(name = "{0}")
     public static Iterable<BsonSerializationTestSuite.TestSpec<MetaResults>> data() {
-      return Arrays.asList(simple(), withFacet());
+      return Arrays.asList(simple(), withFacet(), withMetrics());
     }
 
     @Test
@@ -156,6 +167,15 @@ public class MetaResultsTest {
                                       .count(2147483648L)
                                       .build()))
                           .build()))
+              .build());
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<MetaResults> withMetrics() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "withMetrics",
+          MetaResultsBuilder.builder()
+              .count(CountResult.lowerBoundCount(2147483648L))
+              .metrics(Map.of("avgRating", new BsonDouble(4.5), "maxPrice", BsonNull.VALUE))
               .build());
     }
   }

@@ -25,6 +25,18 @@
           }
         }
       }
+    },
+    {
+      "description": "withMetrics",
+      "value": {
+        "count": {
+          "lowerBound": 2147483648
+        },
+        "metrics": {
+          "avgRating": 4.5,
+          "maxPrice": null
+        }
+      }
     }
   ]
 }

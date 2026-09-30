@@ -44,6 +44,34 @@
           }
         }
       }
+    },
+    {
+      "description": "metrics",
+      "value": {
+        "metrics": {
+          "operator": {
+            "text": {
+              "score": {
+                "boost": {
+                  "value": 1.0
+                }
+              },
+              "path": "review",
+              "query": "good"
+            }
+          },
+          "metrics": {
+            "avgRating": {
+              "type": "avg",
+              "path": "rating"
+            },
+            "maxPrice": {
+              "type": "max",
+              "path": "price"
+            }
+          }
+        }
+      }
     }
   ]
 }

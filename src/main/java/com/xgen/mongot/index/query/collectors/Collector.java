@@ -13,7 +13,8 @@ import java.util.Optional;
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
 
-public sealed interface Collector extends DocumentEncodable permits FacetCollector {
+public sealed interface Collector extends DocumentEncodable
+    permits FacetCollector, MetricsCollector {
 
   class Fields {
     public static final Field.Optional<FacetCollector> FACET =
@@ -31,6 +32,13 @@ public sealed interface Collector extends DocumentEncodable permits FacetCollect
             .disallowUnknownFields()
             .optional()
             .noDefault();
+
+    public static final Field.Optional<MetricsCollector> METRICS =
+        Field.builder("metrics")
+            .classField(MetricsCollector::fromBson, MetricsCollector::collectorToBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
   }
 
   public static final String ALL_COLLECTORS =
@@ -41,12 +49,12 @@ public sealed interface Collector extends DocumentEncodable permits FacetCollect
    *
    * <p>Please keep Type enumeration in alphabetical order.
    *
-   * <p>Although currently facet is the only existing collector, we'll follow a structure parallel
-   * to that in Operator.java (see it for reference)
+   * <p>We follow a structure parallel to that in Operator.java (see it for reference)
    */
   enum Type {
     /** All collector types (with their associated name in MQL) */
-    FACET("facet");
+    FACET("facet"),
+    METRICS("metrics");
 
     private final String name;
 
@@ -80,6 +88,8 @@ public sealed interface Collector extends DocumentEncodable permits FacetCollect
     return switch (this) {
       case FacetCollector facetCollector ->
           builder.field(Fields.FACET_10K_ALLOWED, Optional.of(facetCollector)).build();
+      case MetricsCollector metricsCollector ->
+          builder.field(Fields.METRICS, Optional.of(metricsCollector)).build();
     };
   }
 
@@ -89,7 +99,9 @@ public sealed interface Collector extends DocumentEncodable permits FacetCollect
       throws BsonParseException {
     return parser
         .getGroup()
-        .atMostOneOf(parser.getField(allow10k ? Fields.FACET_10K_ALLOWED : Fields.FACET))
+        .atMostOneOf(
+            parser.getField(allow10k ? Fields.FACET_10K_ALLOWED : Fields.FACET),
+            parser.getField(Fields.METRICS))
         .map(c -> (Collector) c);
   }
 
