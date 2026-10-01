@@ -1,5 +1,6 @@
 package com.xgen.mongot.embedding.providers.config;
 
+import static com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider.HUGGINGFACE_INFERENCE;
 import static com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider.VOYAGE;
 import static com.xgen.testing.BsonDeserializationTestSuite.fromDocument;
 import static com.xgen.testing.BsonSerializationTestSuite.fromEncodable;
@@ -7,11 +8,14 @@ import static com.xgen.testing.BsonSerializationTestSuite.fromEncodable;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ErrorHandlingConfig;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.TruncationOption;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageEmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.WorkloadParams;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonDeserializationTestSuite.TestSpecWrapper;
 import com.xgen.testing.BsonSerializationTestSuite;
@@ -41,6 +45,42 @@ public class EmbeddingServiceConfigTest {
       new ErrorHandlingConfig(50, 50L, 10L, 0.1);
   static final EmbeddingServiceConfig.EmbeddingCredentials CREDENTIALS =
       new VoyageEmbeddingCredentials("token123", "2024-10-15T22:32:20.925Z");
+  static final HuggingFaceModelConfig HF_MODEL_CONFIG =
+      new HuggingFaceModelConfig(
+          Optional.of("BAAI/bge-small-en-v1.5"),
+          Optional.of(384),
+          Optional.of(32),
+          Optional.of(120_000),
+          Optional.of(VectorAutoEmbedQuantization.FLOAT),
+          Optional.of(true),
+          Optional.of(false),
+          Optional.of("query: "),
+          Optional.of("passage: "));
+
+  static EmbeddingServiceConfig huggingFaceConfig(String endpoint) {
+    return new EmbeddingServiceConfig(
+        HUGGINGFACE_INFERENCE,
+        "bge-small-en-v1.5",
+        Optional.empty(),
+        new EmbeddingConfig(
+            Optional.empty(),
+            HF_MODEL_CONFIG,
+            ERROR_HANDLING_CONFIG,
+            new HuggingFaceEmbeddingCredentials(Optional.of("hf_token123")),
+            Optional.of(
+                new WorkloadParams(
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.of(new HuggingFaceEmbeddingCredentials(Optional.of("hf_query_token"))),
+                    Optional.empty())),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            true,
+            Optional.of(endpoint),
+            true,
+            Optional.empty()));
+  }
 
   @RunWith(Parameterized.class)
   public static class DeserializationTest {
@@ -64,12 +104,22 @@ public class EmbeddingServiceConfigTest {
           fullConfig(),
           configsWithOptionalFields(),
           configWithDedicatedClusterFalse(),
-          configWithUseFlexTierFalse());
+          configWithUseFlexTierFalse(),
+          huggingFaceInferenceConfig());
     }
 
     @Test
     public void runTest() throws Exception {
       TEST_SUITE.runTest(this.testSpec);
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<EmbeddingServiceConfig>
+        huggingFaceInferenceConfig() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "bge-small-en-v1.5 hugging face inference config",
+          huggingFaceConfig(
+              "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5"
+                  + "/pipeline/feature-extraction"));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<EmbeddingServiceConfig> fullConfig() {
@@ -226,12 +276,20 @@ public class EmbeddingServiceConfigTest {
           fullConfig(),
           defaultConfig(),
           configWithDedicatedClusterFalse(),
-          configWithUseFlexTierFalse());
+          configWithUseFlexTierFalse(),
+          huggingFaceSanitizedConfig());
     }
 
     @Test
     public void runTest() throws Exception {
       TEST_SUITE.runTest(this.testSpec);
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<EmbeddingServiceConfig>
+        huggingFaceSanitizedConfig() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "bge-small-en-v1.5 hugging face sanitized secret",
+          huggingFaceConfig("http://tei:80/embed").copySanitized("xxx-sanitized-xxx"));
     }
 
     private static BsonSerializationTestSuite.TestSpec<EmbeddingServiceConfig> sanitizedConfig() {

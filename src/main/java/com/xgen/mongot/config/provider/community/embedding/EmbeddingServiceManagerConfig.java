@@ -72,7 +72,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
    * still soft-falls back to the bundled resource when that shipped file is missing or bad.
    *
    * <p>Without Voyage credentials, {@code VOYAGE} entries are dropped while keyless providers
-   * ({@code OPENAI_COMPATIBLE}) still load.
+   * ({@code OPENAI_COMPATIBLE}) still load. {@code HUGGINGFACE_INFERENCE} entries without an
+   * {@code apiToken} (and without a custom {@code providerEndpoint}) are dropped too.
    *
    * @param credentials optional Voyage API credentials (query and indexing keys)
    * @param modelConfigFileOverride explicit on-disk catalog path from the community config
@@ -242,6 +243,14 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
             modelNameOf(configDoc));
         continue;
       }
+      if ("HUGGINGFACE_INFERENCE".equals(provider) && !hasHuggingFaceTokenOrEndpoint(configDoc)) {
+        LOG.warn(
+            "Skipping Hugging Face embedding model '{}': no credentials.apiToken configured "
+                + "(the hosted Inference API requires a Hugging Face access token; set "
+                + "providerEndpoint instead for a keyless self-hosted TEI server).",
+            modelNameOf(configDoc));
+        continue;
+      }
 
       // Inject credentials into each config
       injectCredentials(configDoc, credentials);
@@ -260,6 +269,28 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
             && configDoc.get("embeddingProvider").isString()
         ? configDoc.getString("embeddingProvider").getValue()
         : "VOYAGE";
+  }
+
+  /**
+   * The hosted router needs a token; a custom {@code providerEndpoint} (e.g. self-hosted TEI) may
+   * legitimately run keyless.
+   */
+  private static boolean hasHuggingFaceTokenOrEndpoint(BsonDocument configDoc) {
+    if (!configDoc.containsKey("config") || !configDoc.get("config").isDocument()) {
+      // let the parser report the missing/invalid config
+      return true;
+    }
+    BsonDocument configField = configDoc.getDocument("config");
+    if (configField.containsKey("providerEndpoint")) {
+      return true;
+    }
+    if (!configField.containsKey("credentials") || !configField.get("credentials").isDocument()) {
+      return false;
+    }
+    BsonDocument credentials = configField.getDocument("credentials");
+    return credentials.containsKey("apiToken")
+        && credentials.get("apiToken").isString()
+        && !credentials.getString("apiToken").getValue().isBlank();
   }
 
   private static String modelNameOf(BsonDocument configDoc) {

@@ -5,6 +5,7 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.Embedd
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ErrorHandlingConfig;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.TenantWorkloadCredentials;
@@ -169,6 +170,10 @@ public record EmbeddingModelConfig(
               case OPENAI_COMPATIBLE ->
                   consolidateOpenAiModelConfig(
                       (OpenAiModelConfig) baseModelConfig, (OpenAiModelConfig) overrideModelConfig);
+              case HUGGINGFACE_INFERENCE ->
+                  consolidateHuggingFaceModelConfig(
+                      (HuggingFaceModelConfig) baseModelConfig,
+                      (HuggingFaceModelConfig) overrideModelConfig);
               case AWS_BEDROCK, COHERE ->
                   throw new IllegalArgumentException(
                       "Unsupported model provider: " + baseModelConfig.getModelProvider());
@@ -194,7 +199,8 @@ public record EmbeddingModelConfig(
                   + baseCredentials.getCredentialProvider());
         }
         switch (baseCredentials.getCredentialProvider()) {
-          case VOYAGE, OPENAI_COMPATIBLE -> consolidatedCredentials = overrideCredentials;
+          case VOYAGE, OPENAI_COMPATIBLE, HUGGINGFACE_INFERENCE ->
+              consolidatedCredentials = overrideCredentials;
           case AWS_BEDROCK, COHERE ->
               throw new IllegalArgumentException(
                   "Unsupported credential provider: " + baseCredentials.getCredentialProvider());
@@ -262,6 +268,20 @@ public record EmbeddingModelConfig(
         overrideModelConfig.documentPrefix.isPresent()
             ? overrideModelConfig.documentPrefix
             : baseModelConfig.documentPrefix);
+  }
+
+  private static ModelConfig consolidateHuggingFaceModelConfig(
+      HuggingFaceModelConfig baseModelConfig, HuggingFaceModelConfig overrideModelConfig) {
+    return new HuggingFaceModelConfig(
+        overrideModelConfig.modelId.or(() -> baseModelConfig.modelId),
+        overrideModelConfig.outputDimensions.or(() -> baseModelConfig.outputDimensions),
+        overrideModelConfig.batchSize.or(() -> baseModelConfig.batchSize),
+        overrideModelConfig.batchTokenLimit.or(() -> baseModelConfig.batchTokenLimit),
+        overrideModelConfig.quantization.or(() -> baseModelConfig.quantization),
+        overrideModelConfig.normalize.or(() -> baseModelConfig.normalize),
+        overrideModelConfig.truncate.or(() -> baseModelConfig.truncate),
+        overrideModelConfig.queryPrefix.or(() -> baseModelConfig.queryPrefix),
+        overrideModelConfig.documentPrefix.or(() -> baseModelConfig.documentPrefix));
   }
 
   @Override

@@ -18,6 +18,9 @@ available at the Percona website. You can also build from source — see
 
 - [docs/azure-openai-embeddings.md](docs/azure-openai-embeddings.md) — using Azure
   OpenAI as an embedding provider for automatic embedding generation
+- [docs/huggingface-inference-embeddings.md](docs/huggingface-inference-embeddings.md) —
+  using the Hugging Face Inference API (or self-hosted TEI) as an embedding provider for
+  automatic embedding generation
 
 ## Community
 

@@ -6,6 +6,8 @@ import static org.junit.Assert.assertThrows;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingCredentials;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageEmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.WorkloadParams;
@@ -463,6 +465,135 @@ public class EmbeddingModelConfigTest {
     assertEquals(Optional.empty(), result.query().rpsPerProvider());
     assertEquals(Optional.empty(), result.changeStream().rpsPerProvider());
     assertEquals(Optional.empty(), result.collectionScan().rpsPerProvider());
+  }
+
+  private static final HuggingFaceModelConfig BASE_HF_MODEL_CONFIG =
+      new HuggingFaceModelConfig(
+          Optional.of("BAAI/bge-small-en-v1.5"),
+          Optional.of(384),
+          Optional.of(32),
+          Optional.of(120_000),
+          Optional.of(VectorAutoEmbedQuantization.FLOAT),
+          Optional.of(true),
+          Optional.empty(),
+          Optional.of("query: "),
+          Optional.of("passage: "));
+
+  private static EmbeddingModelConfig huggingFaceModel(Optional<WorkloadParams> queryParams) {
+    return EmbeddingModelConfig.create(
+        "bge-small-en-v1.5",
+        EmbeddingServiceConfig.EmbeddingProvider.HUGGINGFACE_INFERENCE,
+        new EmbeddingServiceConfig.EmbeddingConfig(
+            Optional.empty(),
+            BASE_HF_MODEL_CONFIG,
+            BASE_ERROR_CONFIG,
+            new HuggingFaceEmbeddingCredentials(Optional.of("hf_base")),
+            queryParams,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            true,
+            Optional.empty(),
+            false,
+            Optional.empty()));
+  }
+
+  @Test
+  public void testConsolidateHuggingFaceModelConfig_onlyOverrideFieldsChange() {
+    HuggingFaceModelConfig override =
+        new HuggingFaceModelConfig(
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(8),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(false),
+            Optional.of(false),
+            Optional.empty(),
+            Optional.empty());
+
+    EmbeddingModelConfig result =
+        huggingFaceModel(
+            Optional.of(
+                new WorkloadParams(
+                    Optional.of(override), Optional.empty(), Optional.empty(), Optional.empty())));
+
+    HuggingFaceModelConfig query = (HuggingFaceModelConfig) result.query().modelConfig();
+    assertEquals(Optional.of("BAAI/bge-small-en-v1.5"), query.modelId);
+    assertEquals(Optional.of(384), query.outputDimensions);
+    assertEquals(Optional.of(8), query.batchSize);
+    assertEquals(Optional.of(120_000), query.batchTokenLimit);
+    assertEquals(Optional.of(VectorAutoEmbedQuantization.FLOAT), query.quantization);
+    assertEquals(Optional.of(false), query.normalize);
+    assertEquals(Optional.of(false), query.truncate);
+    assertEquals(Optional.of("query: "), query.queryPrefix);
+    assertEquals(Optional.of("passage: "), query.documentPrefix);
+    // tiers without an override keep the base config untouched
+    assertEquals(BASE_HF_MODEL_CONFIG, result.collectionScan().modelConfig());
+    assertEquals(BASE_HF_MODEL_CONFIG, result.changeStream().modelConfig());
+  }
+
+  @Test
+  public void testConsolidateHuggingFaceModelConfig_fullOverrideReplacesEveryField() {
+    HuggingFaceModelConfig override =
+        new HuggingFaceModelConfig(
+            Optional.of("intfloat/e5-small-v2"),
+            Optional.of(512),
+            Optional.of(4),
+            Optional.of(1000),
+            Optional.of(VectorAutoEmbedQuantization.FLOAT),
+            Optional.of(false),
+            Optional.of(true),
+            Optional.of("q: "),
+            Optional.of("d: "));
+
+    EmbeddingModelConfig result =
+        huggingFaceModel(
+            Optional.of(
+                new WorkloadParams(
+                    Optional.of(override), Optional.empty(), Optional.empty(), Optional.empty())));
+
+    assertEquals(override, result.query().modelConfig());
+  }
+
+  @Test
+  public void testConsolidateWorkloadParams_huggingFaceCredentialOverride() {
+    HuggingFaceEmbeddingCredentials overrideCreds =
+        new HuggingFaceEmbeddingCredentials(Optional.of("hf_query"));
+
+    EmbeddingModelConfig result =
+        huggingFaceModel(
+            Optional.of(
+                new WorkloadParams(
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.of(overrideCreds),
+                    Optional.empty())));
+
+    assertEquals(overrideCreds, result.query().credentials());
+    assertEquals(
+        new HuggingFaceEmbeddingCredentials(Optional.of("hf_base")),
+        result.collectionScan().credentials());
+  }
+
+  @Test
+  public void testConsolidateWorkloadParams_huggingFaceModelProviderMismatch_throws() {
+    WorkloadParams voyageOverride =
+        new WorkloadParams(
+            Optional.of(BASE_MODEL_CONFIG), Optional.empty(), Optional.empty(), Optional.empty());
+
+    assertThrows(
+        IllegalArgumentException.class, () -> huggingFaceModel(Optional.of(voyageOverride)));
+  }
+
+  @Test
+  public void testConsolidateWorkloadParams_huggingFaceCredentialProviderMismatch_throws() {
+    WorkloadParams voyageCredsOverride =
+        new WorkloadParams(
+            Optional.empty(), Optional.empty(), Optional.of(BASE_CREDENTIALS), Optional.empty());
+
+    assertThrows(
+        IllegalArgumentException.class, () -> huggingFaceModel(Optional.of(voyageCredsOverride)));
   }
 
   private static void assertQuantizationParseFails(String wire) {

@@ -679,6 +679,89 @@
           "useFlexTier": false
         }
       }
+    },
+    {
+      "description": "bge-small-en-v1.5 hugging face sanitized secret",
+      "json": {
+        "embeddingProvider": "HUGGINGFACE_INFERENCE",
+        "modelName": "bge-small-en-v1.5",
+        "config": {
+          "modelConfig": {
+            "modelId": "BAAI/bge-small-en-v1.5",
+            "outputDimensions": 384,
+            "batchSize": 32,
+            "batchTokenLimit": 120000,
+            "quantization": "float",
+            "normalize": true,
+            "truncate": false,
+            "queryPrefix": "query: ",
+            "documentPrefix": "passage: "
+          },
+          "errorHandlingConfig": {
+            "initialRetryWaitMs": 50,
+            "jitter": 0.1,
+            "maxRetries": 50,
+            "maxRetryWaitMs": 10
+          },
+          "credentials": {
+            "apiToken": "xxx-sanitized-xxx"
+          },
+          "query": {
+            "credentials": {
+              "apiToken": "xxx-sanitized-xxx"
+            }
+          },
+          "isDedicatedCluster": true,
+          "providerEndpoint": "http://tei:80/embed"
+        }
+      },
+      "bson": {
+        "embeddingProvider": "HUGGINGFACE_INFERENCE",
+        "modelName": "bge-small-en-v1.5",
+        "config": {
+          "modelConfig": {
+            "modelId": "BAAI/bge-small-en-v1.5",
+            "outputDimensions": {
+              "$numberInt": "384"
+            },
+            "batchSize": {
+              "$numberInt": "32"
+            },
+            "batchTokenLimit": {
+              "$numberInt": "120000"
+            },
+            "quantization": "float",
+            "normalize": true,
+            "truncate": false,
+            "queryPrefix": "query: ",
+            "documentPrefix": "passage: "
+          },
+          "errorHandlingConfig": {
+            "maxRetries": {
+              "$numberInt": "50"
+            },
+            "initialRetryWaitMs": {
+              "$numberLong": "50"
+            },
+            "maxRetryWaitMs": {
+              "$numberLong": "10"
+            },
+            "jitter": {
+              "$numberDouble": "0.1"
+            }
+          },
+          "credentials": {
+            "apiToken": "xxx-sanitized-xxx"
+          },
+          "query": {
+            "credentials": {
+              "apiToken": "xxx-sanitized-xxx"
+            }
+          },
+          "isDedicatedCluster": true,
+          "providerEndpoint": "http://tei:80/embed"
+        }
+      }
     }
   ]
 }

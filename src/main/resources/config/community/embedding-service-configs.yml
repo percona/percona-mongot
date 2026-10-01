@@ -165,3 +165,47 @@ configs:
   #     credentials:
   #       apiKey: "<your-azure-openai-api-key>"
   #       authHeaderName: api-key
+
+  # ---------------------------------------------------------------------------
+  # Hugging Face Inference API via the HUGGINGFACE_INFERENCE provider (commented
+  # example template). See docs/huggingface-inference-embeddings.md.
+  #
+  # Uncomment and set your Hugging Face access token to enable. It is left
+  # disabled by default because the hosted API rejects requests without a token;
+  # an HUGGINGFACE_INFERENCE entry with no apiToken (and no providerEndpoint) is
+  # skipped at startup with a warning.
+  #
+  # Requests go to the hf-inference feature-extraction pipeline:
+  #   https://router.huggingface.co/hf-inference/models/{modelId}/pipeline/feature-extraction
+  # with `Authorization: Bearer <token>`. Use a fine-grained token with the
+  # "Make calls to Inference Providers" permission.
+  #
+  # - modelId is the exact, case-sensitive Hub repo id. modelName is the name
+  #   used in index definitions (lowercased); modelId defaults to modelName.
+  # - outputDimensions MUST equal the model's native dimension (384 for
+  #   bge-small-en-v1.5); it sizes the auto-embed index.
+  # - truncate (default true) cuts over-long inputs to the model's max sequence
+  #   length instead of failing the batch. normalize is sent only when set
+  #   (otherwise the server default applies).
+  # - queryPrefix / documentPrefix work as for OPENAI_COMPATIBLE models.
+  # - providerEndpoint (optional) replaces the router URL verbatim, e.g. a
+  #   dedicated Inference Endpoint or a self-hosted TEI server's /embed route.
+  # - Free accounts get a small monthly credit allowance; once it is exhausted
+  #   requests are typically rejected with HTTP 402. Float vectors only.
+  #
+  # - modelName: bge-small-en-v1.5
+  #   embeddingProvider: HUGGINGFACE_INFERENCE
+  #   config:
+  #     modelConfig:
+  #       modelId: BAAI/bge-small-en-v1.5
+  #       batchSize: 32
+  #       batchTokenLimit: 120000
+  #       outputDimensions: 384
+  #       quantization: float
+  #     errorHandlingConfig:
+  #       maxRetries: 10
+  #       initialRetryWaitMs: 500
+  #       maxRetryWaitMs: 30000
+  #       jitter: 0.1
+  #     credentials:
+  #       apiToken: "<your-hugging-face-access-token>"

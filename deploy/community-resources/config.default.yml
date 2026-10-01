@@ -25,8 +25,8 @@ logging:
 #  queryKeyFile: /etc/mongot/voyage-api-query-key
 #  indexingKeyFile: /etc/mongot/voyage-api-indexing-key
 #  # providerEndpoint overrides the endpoint for VOYAGE models only. OPENAI_COMPATIBLE engines
-#  # (Ollama/vLLM/TEI) each have their own URL, so set their endpoint per-model in the catalog
-#  # file below, not here.
+#  # (Ollama/vLLM/TEI) and HUGGINGFACE_INFERENCE models each have their own URL, so set their
+#  # endpoint per-model in the catalog file below, not here.
 #  providerEndpoint: https://ai.mongodb.com/v1/embeddings
 #  # Optional path to an on-disk embedding model catalog. Defaults to the
 #  # `embedding-service-configs.yml` shipped next to mongot; set this to point at your own

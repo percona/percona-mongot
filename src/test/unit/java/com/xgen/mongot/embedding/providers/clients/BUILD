@@ -4,6 +4,7 @@ java_test_suite(
     name = "clients",
     srcs = [
         "EmbeddingClientFactoryTest.java",
+        "HuggingFaceClientTest.java",
         "OpenAiCompatClientTest.java",
         "VoyageClientTest.java",
     ],

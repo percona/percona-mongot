@@ -1,6 +1,8 @@
 package com.xgen.mongot.embedding.providers.configs;
 
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiEmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageEmbeddingCredentials;
@@ -44,6 +46,7 @@ public class EmbeddingConfigFactory {
     return switch (provider) {
       case VOYAGE -> VoyageEmbeddingCredentials.fromBson(parser);
       case OPENAI_COMPATIBLE -> OpenAiEmbeddingCredentials.fromBson(parser);
+      case HUGGINGFACE_INFERENCE -> HuggingFaceEmbeddingCredentials.fromBson(parser);
       case AWS_BEDROCK, COHERE ->
           throw new IllegalStateException("Unsupported provider: " + provider);
     };
@@ -56,6 +59,7 @@ public class EmbeddingConfigFactory {
     return switch (provider) {
       case VOYAGE -> VoyageModelConfig.fromBson(parser);
       case OPENAI_COMPATIBLE -> OpenAiModelConfig.fromBson(parser);
+      case HUGGINGFACE_INFERENCE -> HuggingFaceModelConfig.fromBson(parser);
       case AWS_BEDROCK, COHERE ->
           throw new IllegalStateException("Unsupported provider: " + provider);
     };
