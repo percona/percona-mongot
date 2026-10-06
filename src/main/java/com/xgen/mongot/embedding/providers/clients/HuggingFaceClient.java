@@ -16,7 +16,6 @@ import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.concurrent.OneShotSingleThreadExecutor;
 import io.micrometer.core.instrument.Counter;
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
@@ -27,7 +26,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import javax.net.ssl.SSLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -158,7 +156,7 @@ public class HuggingFaceClient implements ClientInterface {
       Thread.currentThread().interrupt();
       throw new EmbeddingProviderTransientException(e);
     } catch (IOException e) {
-      if (indicatesConnectionLayerFailure(e)) {
+      if (ConnectionFailures.indicatesConnectionLayerFailure(e)) {
         renewHttpClientAfterConnectionFailure(e, clientForRequest);
       }
       LOG.error("Got an error sending Hugging Face embedding request", e);
@@ -353,16 +351,6 @@ public class HuggingFaceClient implements ClientInterface {
       }
       replaceHttpClientLocked();
     }
-  }
-
-  @VisibleForTesting
-  static boolean indicatesConnectionLayerFailure(Throwable throwable) {
-    for (Throwable t = throwable; t != null; t = t.getCause()) {
-      if (t instanceof SSLException || t instanceof ConnectException) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private void renewHttpClientAfterConnectionFailure(Throwable cause, HttpClient culpritClient) {

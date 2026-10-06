@@ -20,7 +20,6 @@ import com.xgen.mongot.util.concurrent.OneShotSingleThreadExecutor;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
@@ -31,10 +30,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import javax.net.ssl.SSLException;
 import org.bson.BsonDocument;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -217,7 +214,7 @@ public class OpenAiCompatClient implements ClientInterface {
       LOG.error("Got an error when sending OpenAI-compatible embedding request", e);
       throw new EmbeddingProviderTransientException(e);
     } catch (IOException e) {
-      if (indicatesConnectionLayerFailure(e)) {
+      if (ConnectionFailures.indicatesConnectionLayerFailure(e)) {
         renewHttpClientAfterConnectionFailure(e, clientForRequest);
       }
       LOG.error("Got an error when sending OpenAI-compatible embedding request", e);
@@ -454,32 +451,6 @@ public class OpenAiCompatClient implements ClientInterface {
       }
       replaceHttpClientLocked(false, null);
     }
-  }
-
-  /**
-   * True if the error (or a cause) is a TLS/connection failure where a fresh client may help the
-   * retry.
-   */
-  private static boolean indicatesConnectionLayerFailure(Throwable throwable) {
-    for (Throwable t = throwable; t != null; t = t.getCause()) {
-      if (t instanceof SSLException || t instanceof ConnectException) {
-        return true;
-      }
-      if (t instanceof IOException) {
-        String message = t.getMessage();
-        if (message != null) {
-          String lower = message.toLowerCase(Locale.ROOT);
-          if (lower.contains("connection reset")
-              || lower.contains("broken pipe")
-              || lower.contains("connection refused")
-              || lower.contains("forcibly closed")
-              || lower.contains("unexpected end of stream")) {
-            return true;
-          }
-        }
-      }
-    }
-    return false;
   }
 
   /**

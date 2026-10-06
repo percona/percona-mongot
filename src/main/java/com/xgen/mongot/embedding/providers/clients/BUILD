@@ -4,6 +4,7 @@ java_library(
     name = "clients",
     srcs = [
         "ClientInterface.java",
+        "ConnectionFailures.java",
         "EmbeddingClientFactory.java",
         "HuggingFaceClient.java",
         "OpenAiCompatClient.java",

@@ -45,7 +45,6 @@ import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
-import javax.net.ssl.SSLException;
 import org.bson.BsonDocument;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -485,25 +484,21 @@ public class HuggingFaceClientTest {
   // ---- transport failures ----
 
   @Test
-  public void embed_connectException_transientAndRenewsClient() throws Exception {
-    HuggingFaceClient client = newClient(hfModel());
-    HttpClient failing = throwingHttpClient(new IOException("wrapped", new ConnectException("no")));
-    HuggingFaceClient.injectHttpClient(client, failing);
+  public void embed_connectionLayerFailure_transientAndRenewsClient() throws Exception {
+    for (IOException failure :
+        List.of(
+            new IOException("wrapped", new ConnectException("no")),
+            new HttpConnectTimeoutException("timeout"),
+            new IOException("Connection reset by peer"))) {
+      HuggingFaceClient client = newClient(hfModel());
+      HttpClient failing = throwingHttpClient(failure);
+      HuggingFaceClient.injectHttpClient(client, failing);
 
-    assertThrows(
-        EmbeddingProviderTransientException.class, () -> client.embed(List.of("a"), context(3)));
-    assertNotSame(failing, client.httpClientForTesting());
-  }
-
-  @Test
-  public void embed_connectTimeout_transientAndRenewsClient() throws Exception {
-    HuggingFaceClient client = newClient(hfModel());
-    HttpClient failing = throwingHttpClient(new HttpConnectTimeoutException("timeout"));
-    HuggingFaceClient.injectHttpClient(client, failing);
-
-    assertThrows(
-        EmbeddingProviderTransientException.class, () -> client.embed(List.of("a"), context(3)));
-    assertNotSame(failing, client.httpClientForTesting());
+      assertThrows(
+          EmbeddingProviderTransientException.class,
+          () -> client.embed(List.of("a"), context(3)));
+      assertNotSame(failure.getMessage(), failing, client.httpClientForTesting());
+    }
   }
 
   @Test
@@ -563,15 +558,6 @@ public class HuggingFaceClientTest {
     client.expireHttpClientForTesting();
     client.renewHttpClientIfStaleForTesting();
     assertNotSame(fresh, client.httpClientForTesting());
-  }
-
-  @Test
-  public void indicatesConnectionLayerFailure_walksCauseChain() {
-    assertTrue(HuggingFaceClient.indicatesConnectionLayerFailure(new SSLException("tls")));
-    assertTrue(
-        HuggingFaceClient.indicatesConnectionLayerFailure(
-            new IOException("outer", new ConnectException("refused"))));
-    assertFalse(HuggingFaceClient.indicatesConnectionLayerFailure(new IOException("other")));
   }
 
   @Test

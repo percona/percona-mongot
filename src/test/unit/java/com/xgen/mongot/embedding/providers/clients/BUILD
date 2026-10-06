@@ -3,6 +3,7 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "clients",
     srcs = [
+        "ConnectionFailuresTest.java",
         "EmbeddingClientFactoryTest.java",
         "HuggingFaceClientTest.java",
         "OpenAiCompatClientTest.java",
