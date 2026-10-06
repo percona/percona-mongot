@@ -217,6 +217,10 @@ public class HuggingFaceClientTest {
                     Optional.of(3),
                     Optional.empty(),
                     Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
                     Optional.empty())));
     assertEquals(
         URI.create(HuggingFaceClient.defaultEndpoint("bge-small-en-v1.5")),

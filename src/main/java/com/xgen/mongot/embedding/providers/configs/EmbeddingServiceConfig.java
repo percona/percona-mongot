@@ -938,24 +938,6 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
         Optional<Integer> outputDimensions,
         Optional<Integer> batchSize,
         Optional<Integer> batchTokenLimit,
-        Optional<VectorAutoEmbedQuantization> quantization) {
-      this(
-          modelId,
-          outputDimensions,
-          batchSize,
-          batchTokenLimit,
-          quantization,
-          Optional.empty(),
-          Optional.empty(),
-          Optional.empty(),
-          Optional.empty());
-    }
-
-    public HuggingFaceModelConfig(
-        Optional<String> modelId,
-        Optional<Integer> outputDimensions,
-        Optional<Integer> batchSize,
-        Optional<Integer> batchTokenLimit,
         Optional<VectorAutoEmbedQuantization> quantization,
         Optional<Boolean> normalize,
         Optional<Boolean> truncate,
