@@ -191,7 +191,8 @@ public class HuggingFaceClient implements ClientInterface {
     Optional<String> apiToken =
         workloadParams.credentials()
                 instanceof EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials hfCreds
-            ? hfCreds.apiToken.filter(token -> !token.isBlank())
+                && hfCreds.hasToken()
+            ? hfCreds.apiToken
             : Optional.empty();
     return new RequestConfig(
         URI.create(workloadParams.providerEndpoint().orElseGet(() -> defaultEndpoint(modelId))),
