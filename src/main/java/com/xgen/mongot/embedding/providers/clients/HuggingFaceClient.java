@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +55,8 @@ public class HuggingFaceClient implements ClientInterface {
   @VisibleForTesting static final String ROUTER_BASE_URL = "https://router.huggingface.co";
 
   private static final String REDACTED = "<REDACTED-API-TOKEN>";
+  private static final Pattern BEARER_TOKEN = Pattern.compile("Bearer [^\"\\s]+");
+  private static final Pattern HF_TOKEN = Pattern.compile("hf_[A-Za-z0-9]+");
 
   private final String catalogModelName;
   private final EmbeddingServiceConfig.ServiceTier serviceTier;
@@ -234,7 +237,11 @@ public class HuggingFaceClient implements ClientInterface {
           EmbeddingProviderNonTransientException,
           HttpTimeoutException {
     int statusCode = response.statusCode();
-    String body = redactToken(response.body(), config.apiToken());
+    // only error bodies end up in messages; a 2xx body is the whole embedding array
+    String body =
+        statusCode >= 200 && statusCode < 300
+            ? ""
+            : redactToken(response.body(), config.apiToken());
     if (statusCode == 400 || statusCode == 422) {
       String errorMessage =
           String.format(
@@ -330,9 +337,9 @@ public class HuggingFaceClient implements ClientInterface {
   @VisibleForTesting
   static String redactToken(String message, Optional<String> apiToken) {
     String patternRedacted =
-        message
-            .replaceAll("Bearer [^\"\\s]+", "Bearer " + REDACTED)
-            .replaceAll("hf_[A-Za-z0-9]+", REDACTED);
+        HF_TOKEN
+            .matcher(BEARER_TOKEN.matcher(message).replaceAll("Bearer " + REDACTED))
+            .replaceAll(REDACTED);
     return apiToken.map(token -> patternRedacted.replace(token, REDACTED)).orElse(patternRedacted);
   }
 
