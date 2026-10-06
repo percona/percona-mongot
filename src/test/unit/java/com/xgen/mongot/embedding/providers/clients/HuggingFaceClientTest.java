@@ -413,6 +413,9 @@ public class HuggingFaceClientTest {
               EmbeddingProviderNonTransientException.class,
               () -> client.embed(List.of("a"), context(3)));
       assertTrue(e.getMessage().contains("HTTP " + status));
+      // exception text can surface beyond logs; the endpoint may carry credentials
+      assertFalse(
+          e.getMessage().contains(client.requestConfigForTesting().endpoint().toString()));
     }
   }
 

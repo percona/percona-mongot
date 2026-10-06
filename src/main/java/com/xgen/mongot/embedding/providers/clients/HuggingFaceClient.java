@@ -281,9 +281,9 @@ public class HuggingFaceClient implements ClientInterface {
       this.invalidRequestCounter.increment();
       throw new EmbeddingProviderNonTransientException(
           String.format(
-              "Got client error (HTTP %d) from %s: check modelId/providerEndpoint (404) or lower"
+              "Got client error (HTTP %d): check modelId/providerEndpoint (404) or lower"
                   + " batchSize (413). Response body: %s",
-              statusCode, config.endpoint(), body));
+              statusCode, body));
     }
     if (statusCode < 200 || statusCode >= 300) {
       // 5xx, including 503 while a cold model loads
