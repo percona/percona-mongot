@@ -349,6 +349,17 @@ public class EmbeddingServiceManagerConfigTest {
                     initialRetryWaitMs: 200
                     maxRetryWaitMs: 10000
                     jitter: 0.1
+              - modelName: blank-endpoint
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  providerEndpoint: ""
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
             """;
 
     ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -367,7 +378,7 @@ public class EmbeddingServiceManagerConfigTest {
         result.get().configs().stream()
             .collect(Collectors.toMap(c -> c.modelName, c -> c.embeddingProvider)));
     assertEquals(
-        2,
+        3,
         appender.list.stream()
             .filter(e -> e.getLevel() == Level.WARN)
             .filter(e -> e.getFormattedMessage().contains("Skipping Hugging Face embedding model"))

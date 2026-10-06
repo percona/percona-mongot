@@ -281,7 +281,9 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       return true;
     }
     BsonDocument configField = configDoc.getDocument("config");
-    if (configField.containsKey("providerEndpoint")) {
+    if (configField.containsKey("providerEndpoint")
+        && configField.get("providerEndpoint").isString()
+        && !configField.getString("providerEndpoint").getValue().isBlank()) {
       return true;
     }
     if (!configField.containsKey("credentials") || !configField.get("credentials").isDocument()) {
