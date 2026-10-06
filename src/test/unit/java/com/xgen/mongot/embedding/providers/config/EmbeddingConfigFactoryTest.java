@@ -88,6 +88,8 @@ public class EmbeddingConfigFactoryTest {
     ModelConfig config = modelConfig(tagged("OPENAI_COMPATIBLE", "{outputDimensions: 768}"));
     assertTrue(config instanceof OpenAiModelConfig);
     assertEquals(768, config.getOutputDimensions());
+    assertEquals(
+        Optional.of(VectorAutoEmbedQuantization.FLOAT), config.getConfiguredQuantization());
   }
 
   @Test
@@ -122,7 +124,8 @@ public class EmbeddingConfigFactoryTest {
     assertEquals(120_000, config.getBatchTokenLimit());
     assertEquals(1024, config.getOutputDimensions());
     assertEquals(Optional.empty(), config.getConfiguredOutputDimensions());
-    assertEquals(Optional.empty(), config.getConfiguredQuantization());
+    assertEquals(
+        Optional.of(VectorAutoEmbedQuantization.FLOAT), config.getConfiguredQuantization());
     assertEquals(Optional.empty(), config.getConfiguredSimilarityByQuantization());
     assertTrue(config.shouldTruncate());
     assertEquals("my-model", config.modelIdOrDefault("my-model"));

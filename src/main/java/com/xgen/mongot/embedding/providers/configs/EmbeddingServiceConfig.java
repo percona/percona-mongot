@@ -820,7 +820,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     @Override
     public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
-      return this.quantization;
+      // float is the only quantization the client supports, so it is the default
+      return this.quantization.or(() -> Optional.of(VectorAutoEmbedQuantization.FLOAT));
     }
 
     @Override
@@ -1016,7 +1017,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     @Override
     public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
-      return this.quantization;
+      // float is the only quantization the client supports, so it is the default
+      return this.quantization.or(() -> Optional.of(VectorAutoEmbedQuantization.FLOAT));
     }
 
     @Override
