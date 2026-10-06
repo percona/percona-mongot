@@ -360,6 +360,19 @@ public class EmbeddingServiceManagerConfigTest {
                     initialRetryWaitMs: 200
                     maxRetryWaitMs: 10000
                     jitter: 0.1
+              - modelName: query-token-only
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  query:
+                    credentials:
+                      apiToken: hf_query_only
             """;
 
     ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -378,11 +391,43 @@ public class EmbeddingServiceManagerConfigTest {
         result.get().configs().stream()
             .collect(Collectors.toMap(c -> c.modelName, c -> c.embeddingProvider)));
     assertEquals(
-        3,
+        4,
         appender.list.stream()
             .filter(e -> e.getLevel() == Level.WARN)
             .filter(e -> e.getFormattedMessage().contains("Skipping Hugging Face embedding model"))
             .count());
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_huggingFaceTokensOnEveryWorkload_loads() throws Exception {
+    String catalog =
+        """
+        configs:
+          - modelName: bge-small-en-v1.5
+            embeddingProvider: HUGGINGFACE_INFERENCE
+            config:
+              modelConfig:
+                outputDimensions: 384
+              errorHandlingConfig:
+                maxRetries: 10
+                initialRetryWaitMs: 200
+                maxRetryWaitMs: 10000
+                jitter: 0.1
+              query:
+                credentials:
+                  apiToken: hf_query
+              collectionScan:
+                credentials:
+                  apiToken: hf_indexing
+              changeStream:
+                credentials:
+                  apiToken: hf_indexing
+        """;
+
+    Optional<EmbeddingServiceManagerConfig> result = loadCatalog(catalog);
+
+    assertTrue(result.isPresent());
+    assertEquals(1, result.get().configs().size());
   }
 
   @Test

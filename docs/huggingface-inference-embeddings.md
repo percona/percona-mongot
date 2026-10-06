@@ -89,9 +89,11 @@ configs:
         apiToken: "<your-hugging-face-access-token>"
 ```
 
-Restart mongot after editing the catalog. A `HUGGINGFACE_INFERENCE` entry without an
-`apiToken`, and without a custom `providerEndpoint`, is skipped at startup with a
-`Skipping Hugging Face embedding model` warning; the other models still load.
+Restart mongot after editing the catalog. A `HUGGINGFACE_INFERENCE` entry without a custom
+`providerEndpoint` needs an `apiToken` for every workload: either the base
+`credentials.apiToken`, or one in each of the `query`, `collectionScan` and `changeStream`
+overrides. Otherwise it is skipped at startup with a `Skipping Hugging Face embedding model`
+warning; the other models still load.
 
 ### Fields
 

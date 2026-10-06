@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
@@ -246,7 +247,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       if ("HUGGINGFACE_INFERENCE".equals(provider) && !hasHuggingFaceTokenOrEndpoint(configDoc)) {
         LOG.warn(
             "Skipping Hugging Face embedding model '{}': no credentials.apiToken configured "
-                + "(the hosted Inference API requires a Hugging Face access token; set "
+                + "for every workload (the hosted Inference API requires a Hugging Face access "
+                + "token on query, collectionScan and changeStream traffic; set "
                 + "providerEndpoint instead for a keyless self-hosted TEI server).",
             modelNameOf(configDoc));
         continue;
@@ -272,8 +274,9 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   }
 
   /**
-   * The hosted router needs a token; a custom {@code providerEndpoint} (e.g. self-hosted TEI) may
-   * legitimately run keyless.
+   * The hosted router needs a token on every workload: the base {@code credentials.apiToken}, or a
+   * per-workload override on each of query/collectionScan/changeStream. A custom {@code
+   * providerEndpoint} (e.g. self-hosted TEI) may legitimately run keyless.
    */
   private static boolean hasHuggingFaceTokenOrEndpoint(BsonDocument configDoc) {
     if (!configDoc.containsKey("config") || !configDoc.get("config").isDocument()) {
@@ -281,18 +284,24 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       return true;
     }
     BsonDocument configField = configDoc.getDocument("config");
-    if (configField.containsKey("providerEndpoint")
-        && configField.get("providerEndpoint").isString()
-        && !configField.getString("providerEndpoint").getValue().isBlank()) {
+    if (isNonBlankString(configField, "providerEndpoint")) {
       return true;
     }
-    if (!configField.containsKey("credentials") || !configField.get("credentials").isDocument()) {
-      return false;
-    }
-    BsonDocument credentials = configField.getDocument("credentials");
-    return credentials.containsKey("apiToken")
-        && credentials.get("apiToken").isString()
-        && !credentials.getString("apiToken").getValue().isBlank();
+    return hasApiToken(configField)
+        || Stream.of("query", "collectionScan", "changeStream")
+            .allMatch(
+                workload ->
+                    configField.get(workload) instanceof BsonDocument override
+                        && hasApiToken(override));
+  }
+
+  private static boolean hasApiToken(BsonDocument doc) {
+    return doc.get("credentials") instanceof BsonDocument credentials
+        && isNonBlankString(credentials, "apiToken");
+  }
+
+  private static boolean isNonBlankString(BsonDocument doc, String key) {
+    return doc.get(key) instanceof BsonString value && !value.getValue().isBlank();
   }
 
   private static String modelNameOf(BsonDocument configDoc) {
