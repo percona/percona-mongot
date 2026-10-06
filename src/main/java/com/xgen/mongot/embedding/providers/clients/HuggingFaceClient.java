@@ -52,7 +52,7 @@ public class HuggingFaceClient implements ClientInterface {
   /** Minimum interval between connection-failure-triggered renewals during a sustained outage. */
   private static final Duration CONNECTION_FAILURE_RENEWAL_COOLDOWN = Duration.ofSeconds(5);
 
-  @VisibleForTesting static final String ROUTER_BASE_URL = "https://router.huggingface.co";
+  private static final String ROUTER_BASE_URL = "https://router.huggingface.co";
 
   private static final String REDACTED = "<REDACTED-API-TOKEN>";
   private static final Pattern BEARER_TOKEN = Pattern.compile("Bearer [^\"\\s]+");
