@@ -420,7 +420,10 @@ public class OpenAiCompatClient implements ClientInterface {
       }
       return results;
     } catch (BsonParseException e) {
-      throw new EmbeddingProviderTransientException(e);
+      // e's message can quote the whole response body (JsonCodec.fromJson), which a misbehaving
+      // server may use to echo the API key: redact it and don't attach e as the cause.
+      throw new EmbeddingProviderTransientException(
+          "Malformed embedding response: " + redactApiKey(String.valueOf(e.getMessage()), apiKey));
     }
   }
 
