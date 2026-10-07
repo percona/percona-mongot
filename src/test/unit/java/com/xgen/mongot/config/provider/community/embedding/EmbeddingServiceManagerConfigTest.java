@@ -373,6 +373,35 @@ public class EmbeddingServiceManagerConfigTest {
                   query:
                     credentials:
                       apiToken: hf_query_only
+              - modelName: empty-query-override
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  credentials:
+                    apiToken: hf_base
+                  query:
+                    credentials: {}
+              - modelName: blank-changestream-override
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  credentials:
+                    apiToken: hf_base
+                  changeStream:
+                    credentials:
+                      apiToken: " "
             """;
 
     ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -391,7 +420,7 @@ public class EmbeddingServiceManagerConfigTest {
         result.get().configs().stream()
             .collect(Collectors.toMap(c -> c.modelName, c -> c.embeddingProvider)));
     assertEquals(
-        4,
+        6,
         appender.list.stream()
             .filter(e -> e.getLevel() == Level.WARN)
             .filter(e -> e.getFormattedMessage().contains("Skipping Hugging Face embedding model"))
@@ -422,12 +451,28 @@ public class EmbeddingServiceManagerConfigTest {
               changeStream:
                 credentials:
                   apiToken: hf_indexing
+          # a workload override without a credentials block keeps the base token
+          - modelName: base-token-model-override
+            embeddingProvider: HUGGINGFACE_INFERENCE
+            config:
+              modelConfig:
+                outputDimensions: 384
+              errorHandlingConfig:
+                maxRetries: 10
+                initialRetryWaitMs: 200
+                maxRetryWaitMs: 10000
+                jitter: 0.1
+              credentials:
+                apiToken: hf_base
+              query:
+                modelConfig:
+                  batchSize: 4
         """;
 
     Optional<EmbeddingServiceManagerConfig> result = loadCatalog(catalog);
 
     assertTrue(result.isPresent());
-    assertEquals(1, result.get().configs().size());
+    assertEquals(2, result.get().configs().size());
   }
 
   @Test

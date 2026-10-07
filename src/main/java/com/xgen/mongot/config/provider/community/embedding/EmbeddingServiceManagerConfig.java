@@ -274,9 +274,10 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   }
 
   /**
-   * The hosted router needs a token on every workload: the base {@code credentials.apiToken}, or a
-   * per-workload override on each of query/collectionScan/changeStream. A custom {@code
-   * providerEndpoint} (e.g. self-hosted TEI) may legitimately run keyless.
+   * The hosted router needs a token on every workload (query/collectionScan/changeStream). A
+   * workload's {@code credentials} override replaces the base credentials entirely, so each
+   * workload's effective credentials are its override if present, otherwise the base. A custom
+   * {@code providerEndpoint} (e.g. self-hosted TEI) may legitimately run keyless.
    */
   private static boolean hasHuggingFaceTokenOrEndpoint(BsonDocument configDoc) {
     if (!configDoc.containsKey("config") || !configDoc.get("config").isDocument()) {
@@ -287,12 +288,14 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     if (isNonBlankString(configField, "providerEndpoint")) {
       return true;
     }
-    return hasApiToken(configField)
-        || Stream.of("query", "collectionScan", "changeStream")
-            .allMatch(
-                workload ->
+    return Stream.of("query", "collectionScan", "changeStream")
+        .allMatch(
+            workload ->
+                hasApiToken(
                     configField.get(workload) instanceof BsonDocument override
-                        && hasApiToken(override));
+                            && override.containsKey("credentials")
+                        ? override
+                        : configField));
   }
 
   private static boolean hasApiToken(BsonDocument doc) {

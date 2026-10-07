@@ -90,10 +90,11 @@ configs:
 ```
 
 Restart mongot after editing the catalog. A `HUGGINGFACE_INFERENCE` entry without a custom
-`providerEndpoint` needs an `apiToken` for every workload: either the base
-`credentials.apiToken`, or one in each of the `query`, `collectionScan` and `changeStream`
-overrides. Otherwise it is skipped at startup with a `Skipping Hugging Face embedding model`
-warning; the other models still load.
+`providerEndpoint` needs an `apiToken` for every workload (`query`, `collectionScan` and
+`changeStream`). A workload's `credentials` override replaces the base `credentials` entirely,
+so a workload uses its override's `apiToken` if it has a `credentials` block, otherwise the base
+`credentials.apiToken`. Otherwise the entry is skipped at startup with a `Skipping Hugging Face
+embedding model` warning; the other models still load.
 
 ### Fields
 
