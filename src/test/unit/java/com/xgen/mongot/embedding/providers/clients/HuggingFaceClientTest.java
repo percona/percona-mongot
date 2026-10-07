@@ -572,6 +572,11 @@ public class HuggingFaceClientTest {
             Optional.of("secret-abc"));
     assertFalse(redacted.contains("secret-abc"));
     assertFalse(redacted.contains("hf_SomeOtherToken9"));
+    // a custom token the hf_ pattern only partially matches must not leave its suffix behind
+    assertEquals(
+        "error: <REDACTED-API-TOKEN>",
+        HuggingFaceClient.redactToken(
+            "error: hf_custom-api-key-123", Optional.of("hf_custom-api-key-123")));
     assertEquals(
         "no secrets here", HuggingFaceClient.redactToken("no secrets here", Optional.empty()));
   }

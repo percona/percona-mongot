@@ -337,11 +337,12 @@ public class HuggingFaceClient implements ClientInterface {
   /** Redact both the raw token and anything shaped like an HF token from provider messages. */
   @VisibleForTesting
   static String redactToken(String message, Optional<String> apiToken) {
-    String patternRedacted =
-        HF_TOKEN
-            .matcher(BEARER_TOKEN.matcher(message).replaceAll("Bearer " + REDACTED))
-            .replaceAll(REDACTED);
-    return apiToken.map(token -> patternRedacted.replace(token, REDACTED)).orElse(patternRedacted);
+    // exact token first: the patterns can match just a prefix of a custom token (hf_x-y), leaving
+    // the rest unmatched by the exact replacement
+    String tokenRedacted = apiToken.map(token -> message.replace(token, REDACTED)).orElse(message);
+    return HF_TOKEN
+        .matcher(BEARER_TOKEN.matcher(tokenRedacted).replaceAll("Bearer " + REDACTED))
+        .replaceAll(REDACTED);
   }
 
   private static HttpClient newHttpClient() {
