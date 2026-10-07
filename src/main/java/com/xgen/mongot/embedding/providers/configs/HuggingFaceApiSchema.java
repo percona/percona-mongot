@@ -81,8 +81,9 @@ public class HuggingFaceApiSchema {
     } catch (JsonParseException | BSONException e) {
       // JsonParseException: not JSON at all (e.g. an HTML error page from a proxy);
       // BSONException (BsonInvalidOperationException): valid JSON but an object root.
-      throw new MalformedResponseException(
-          "Embedding response is not a JSON array: " + e.getMessage(), false);
+      // The parser message quotes response text (e.g. "found 'hf_...'"), which bypasses token
+      // redaction, so it is left out.
+      throw new MalformedResponseException("Embedding response is not a JSON array", false);
     }
     List<Vector> vectors = new ArrayList<>(outer.size());
     for (int i = 0; i < outer.size(); i++) {

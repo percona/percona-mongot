@@ -73,4 +73,14 @@ public class HuggingFaceApiSchemaTest {
       assertFalse(e.isTokenLevelOutput());
     }
   }
+
+  @Test
+  public void decodeEmbeddings_parseError_doesNotEchoResponseText() {
+    // the JSON parser quotes unquoted tokens in its message ("found 'hf_...'")
+    MalformedResponseException e =
+        assertThrows(
+            MalformedResponseException.class,
+            () -> HuggingFaceApiSchema.decodeEmbeddings("[1, hf_SecretToken123]"));
+    assertFalse(e.getMessage().contains("hf_SecretToken123"));
+  }
 }
