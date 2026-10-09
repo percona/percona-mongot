@@ -2,6 +2,7 @@ package com.xgen.mongot.embedding.providers.clients;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -622,6 +623,21 @@ public class OpenAiCompatClientTest {
     org.junit.Assert.assertThrows(
         EmbeddingProviderTransientException.class,
         () -> client.embed(List.of("hello"), floatContext()));
+  }
+
+  @Test
+  public void embed_malformedResponseEchoingKey_redactsKeyAndDropsCause() throws Exception {
+    OpenAiCompatClient client = newClient(openAiModel(Optional.of("secret-key")));
+    // JsonCodec.fromJson puts the whole unparseable body into its exception message
+    OpenAiCompatClient.injectHttpClient(
+        client, mockHttpClient(200, "<html>bad key secret-key</html>"));
+
+    EmbeddingProviderTransientException e =
+        org.junit.Assert.assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> client.embed(List.of("hello"), floatContext()));
+    assertFalse(e.getMessage().contains("secret-key"));
+    assertNull(e.getCause());
   }
 
   @Test

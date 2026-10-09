@@ -580,8 +580,9 @@ public class CommunityMongotBootstrapper {
     if (embeddingConfigOpt.isEmpty() || embeddingConfigOpt.get().configs().isEmpty()) {
       LOG.info(
           "Auto-embedding is enabled but no usable embedding models are configured; the "
-              + "subsystem will be inactive. Configure Voyage credentials or a reachable "
-              + "OPENAI_COMPATIBLE endpoint to activate models.");
+              + "subsystem will be inactive. Configure Voyage credentials, a reachable "
+              + "OPENAI_COMPATIBLE endpoint, or a HUGGINGFACE_INFERENCE apiToken to activate "
+              + "models.");
       return emptyEmbeddingServiceManager(meterRegistry, mongotConfigs);
     }
 

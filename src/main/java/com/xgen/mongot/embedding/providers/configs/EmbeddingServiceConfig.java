@@ -117,7 +117,10 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     VOYAGE,
     // any server speaking the OpenAI /v1/embeddings protocol (OpenAI, Ollama, vLLM, HF TEI, ...);
     // endpoint via providerEndpoint, API key optional
-    OPENAI_COMPATIBLE
+    OPENAI_COMPATIBLE,
+    // Hugging Face Inference Providers, hf-inference feature-extraction pipeline (also self-hosted
+    // TEI /embed via providerEndpoint); HF access token as Bearer
+    HUGGINGFACE_INFERENCE
   }
 
   public enum ServiceTier {
@@ -817,7 +820,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     @Override
     public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
-      return this.quantization;
+      // float is the only quantization the client supports, so it is the default
+      return this.quantization.or(() -> Optional.of(VectorAutoEmbedQuantization.FLOAT));
     }
 
     @Override
@@ -861,7 +865,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           parser.getField(Fields.DOCUMENT_PREFIX).unwrap());
     }
 
-    private static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
+    static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
         throws BsonParseException {
       Optional<String> quantization =
           parser.getField(VoyageModelConfig.Fields.QUANTIZATION).unwrap();
@@ -902,6 +906,179 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           this.batchTokenLimit.orElse(null),
           this.quantization.orElse(null),
           this.forwardDimensions.orElse(null),
+          this.queryPrefix.orElse(null),
+          this.documentPrefix.orElse(null));
+    }
+  }
+
+  /**
+   * Model config for {@link EmbeddingProvider#HUGGINGFACE_INFERENCE}.
+   *
+   * <p>{@code modelId} is the exact Hub repo id (e.g. {@code BAAI/bge-small-en-v1.5}). Hub ids are
+   * case-sensitive in API paths, while catalog model names are lowercased, so the id is kept
+   * separately; it defaults to the catalog model name.
+   */
+  public static class HuggingFaceModelConfig implements ModelConfig {
+    public final Optional<String> modelId;
+    public final Optional<Integer> outputDimensions;
+    public final Optional<Integer> batchSize;
+    public final Optional<Integer> batchTokenLimit;
+    public final Optional<VectorAutoEmbedQuantization> quantization;
+    // sent as `normalize` only when set; the server default applies otherwise
+    public final Optional<Boolean> normalize;
+    // sent as `truncate`; default true so over-long documents are cut to the model's max length
+    // instead of failing the whole batch
+    public final Optional<Boolean> truncate;
+    // same semantics as OpenAiModelConfig: prepended to query vs document inputs
+    public final Optional<String> queryPrefix;
+    public final Optional<String> documentPrefix;
+
+    public HuggingFaceModelConfig(
+        Optional<String> modelId,
+        Optional<Integer> outputDimensions,
+        Optional<Integer> batchSize,
+        Optional<Integer> batchTokenLimit,
+        Optional<VectorAutoEmbedQuantization> quantization,
+        Optional<Boolean> normalize,
+        Optional<Boolean> truncate,
+        Optional<String> queryPrefix,
+        Optional<String> documentPrefix) {
+      this.modelId = modelId;
+      this.outputDimensions = outputDimensions;
+      this.batchSize = batchSize;
+      this.batchTokenLimit = batchTokenLimit;
+      this.quantization = quantization;
+      this.normalize = normalize;
+      this.truncate = truncate;
+      this.queryPrefix = queryPrefix;
+      this.documentPrefix = documentPrefix;
+    }
+
+    @Override
+    public EmbeddingProvider getModelProvider() {
+      return EmbeddingProvider.HUGGINGFACE_INFERENCE;
+    }
+
+    /** Hub repo id to call, falling back to the (lowercased) catalog model name. */
+    public String modelIdOrDefault(String catalogModelName) {
+      return this.modelId.filter(id -> !id.isBlank()).orElse(catalogModelName);
+    }
+
+    public boolean shouldTruncate() {
+      return this.truncate.orElse(true);
+    }
+
+    /**
+     * queryPrefix for the query tier, documentPrefix for the indexing tiers; empty string if unset.
+     */
+    public String inputPrefixForTier(ServiceTier tier) {
+      Optional<String> prefix = tier == ServiceTier.QUERY ? this.queryPrefix : this.documentPrefix;
+      return prefix.orElse("");
+    }
+
+    @Override
+    public int getBatchSize() {
+      // TEI's default max client batch size; hf-inference serves CPU models, keep batches small
+      return this.batchSize.orElse(32);
+    }
+
+    @Override
+    public int getBatchTokenLimit() {
+      return this.batchTokenLimit.orElse(120_000);
+    }
+
+    @Override
+    public int getOutputDimensions() {
+      return this.outputDimensions.orElse(1024);
+    }
+
+    @Override
+    public Optional<Integer> getConfiguredOutputDimensions() {
+      return this.outputDimensions;
+    }
+
+    @Override
+    public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
+      // float is the only quantization the client supports, so it is the default
+      return this.quantization.or(() -> Optional.of(VectorAutoEmbedQuantization.FLOAT));
+    }
+
+    @Override
+    public Optional<Map<String, String>> getConfiguredSimilarityByQuantization() {
+      // no MMS conf-call, so no per-quantization similarity defaults
+      return Optional.empty();
+    }
+
+    public static class Fields {
+      static final Field.Optional<String> MODEL_ID =
+          Field.builder("modelId").stringField().optional().noDefault();
+      static final Field.Optional<Boolean> NORMALIZE =
+          Field.builder("normalize").booleanField().optional().noDefault();
+      static final Field.Optional<Boolean> TRUNCATE =
+          Field.builder("truncate").booleanField().optional().noDefault();
+    }
+
+    @Override
+    public BsonDocument toBson() {
+      return BsonDocumentBuilder.builder()
+          .field(Fields.MODEL_ID, this.modelId)
+          .field(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS, this.outputDimensions)
+          .field(VoyageModelConfig.Fields.BATCH_SIZE, this.batchSize)
+          .field(VoyageModelConfig.Fields.BATCH_TOKEN_LIMIT, this.batchTokenLimit)
+          .field(
+              VoyageModelConfig.Fields.QUANTIZATION,
+              this.quantization.map(VectorAutoEmbedQuantization::getName))
+          .field(Fields.NORMALIZE, this.normalize)
+          .field(Fields.TRUNCATE, this.truncate)
+          .field(OpenAiModelConfig.Fields.QUERY_PREFIX, this.queryPrefix)
+          .field(OpenAiModelConfig.Fields.DOCUMENT_PREFIX, this.documentPrefix)
+          .build();
+    }
+
+    public static HuggingFaceModelConfig fromBson(DocumentParser parser)
+        throws BsonParseException {
+      return new HuggingFaceModelConfig(
+          parser.getField(Fields.MODEL_ID).unwrap(),
+          parser.getField(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS).unwrap(),
+          parser.getField(VoyageModelConfig.Fields.BATCH_SIZE).unwrap(),
+          parser.getField(VoyageModelConfig.Fields.BATCH_TOKEN_LIMIT).unwrap(),
+          OpenAiModelConfig.parseQuantization(parser),
+          parser.getField(Fields.NORMALIZE).unwrap(),
+          parser.getField(Fields.TRUNCATE).unwrap(),
+          parser.getField(OpenAiModelConfig.Fields.QUERY_PREFIX).unwrap(),
+          parser.getField(OpenAiModelConfig.Fields.DOCUMENT_PREFIX).unwrap());
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      HuggingFaceModelConfig that = (HuggingFaceModelConfig) o;
+      return Objects.equals(this.modelId.orElse(null), that.modelId.orElse(null))
+          && Objects.equals(this.outputDimensions.orElse(null), that.outputDimensions.orElse(null))
+          && Objects.equals(this.batchSize.orElse(null), that.batchSize.orElse(null))
+          && Objects.equals(this.batchTokenLimit.orElse(null), that.batchTokenLimit.orElse(null))
+          && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null))
+          && Objects.equals(this.normalize.orElse(null), that.normalize.orElse(null))
+          && Objects.equals(this.truncate.orElse(null), that.truncate.orElse(null))
+          && Objects.equals(this.queryPrefix.orElse(null), that.queryPrefix.orElse(null))
+          && Objects.equals(this.documentPrefix.orElse(null), that.documentPrefix.orElse(null));
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          this.modelId.orElse(null),
+          this.outputDimensions.orElse(null),
+          this.batchSize.orElse(null),
+          this.batchTokenLimit.orElse(null),
+          this.quantization.orElse(null),
+          this.normalize.orElse(null),
+          this.truncate.orElse(null),
           this.queryPrefix.orElse(null),
           this.documentPrefix.orElse(null));
     }
@@ -1073,6 +1250,76 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     @Override
     public int hashCode() {
       return Objects.hash(this.apiKey.orElse(null), this.authHeaderName.orElse(null));
+    }
+  }
+
+  /**
+   * Credentials for {@link EmbeddingProvider#HUGGINGFACE_INFERENCE}: a Hugging Face user access
+   * token ({@code hf_...}) with the "Make calls to Inference Providers" permission, sent as {@code
+   * Authorization: Bearer <token>}. Optional at parse time so a self-hosted TEI endpoint can run
+   * keyless; the hosted router rejects requests without one (HTTP 401).
+   */
+  public static class HuggingFaceEmbeddingCredentials implements EmbeddingCredentials {
+    public final Optional<String> apiToken;
+
+    public HuggingFaceEmbeddingCredentials(Optional<String> apiToken) {
+      this.apiToken = apiToken;
+    }
+
+    public static HuggingFaceEmbeddingCredentials fromBson(DocumentParser parser)
+        throws BsonParseException {
+      return new HuggingFaceEmbeddingCredentials(parser.getField(Fields.API_TOKEN).unwrap());
+    }
+
+    /** True when a non-blank token is configured. */
+    public boolean hasToken() {
+      return this.apiToken.filter(token -> !token.isBlank()).isPresent();
+    }
+
+    @Override
+    public BsonDocument toBson() {
+      return BsonDocumentBuilder.builder().field(Fields.API_TOKEN, this.apiToken).build();
+    }
+
+    @Override
+    public EmbeddingProvider getCredentialProvider() {
+      return EmbeddingProvider.HUGGINGFACE_INFERENCE;
+    }
+
+    @Override
+    public EmbeddingCredentials copySanitized(String placeholder) {
+      return new HuggingFaceEmbeddingCredentials(this.apiToken.map(ignored -> placeholder));
+    }
+
+    @Override
+    public String getCredentialsUuID() {
+      return UUID.nameUUIDFromBytes(
+              Hashing.sha256()
+                  .hashString(this.apiToken.orElse("huggingface-no-token"), StandardCharsets.UTF_8)
+                  .asBytes())
+          .toString();
+    }
+
+    public static class Fields {
+      static final Field.Optional<String> API_TOKEN =
+          Field.builder("apiToken").stringField().optional().noDefault();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      HuggingFaceEmbeddingCredentials that = (HuggingFaceEmbeddingCredentials) o;
+      return Objects.equals(this.apiToken.orElse(null), that.apiToken.orElse(null));
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hashCode(this.apiToken.orElse(null));
     }
   }
 

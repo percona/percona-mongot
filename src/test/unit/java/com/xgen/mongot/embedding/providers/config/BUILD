@@ -3,8 +3,10 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "config",
     srcs = [
+        "EmbeddingConfigFactoryTest.java",
         "EmbeddingModelConfigTest.java",
         "EmbeddingServiceConfigTest.java",
+        "HuggingFaceApiSchemaTest.java",
         "OpenAiApiSchemaTest.java",
         "VoyageApiSchemaTest.java",
         "VoyageModelConfigTest.java",

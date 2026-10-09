@@ -153,6 +153,13 @@ public class EmbeddingClientFactory {
               workloadParams,
               metricsFactory,
               this.mongotMetadata);
+      case EmbeddingProvider.HUGGINGFACE_INFERENCE ->
+          new HuggingFaceClient(
+              embeddingModelConfig,
+              serviceTier,
+              workloadParams,
+              metricsFactory,
+              this.mongotMetadata);
     };
   }
 }

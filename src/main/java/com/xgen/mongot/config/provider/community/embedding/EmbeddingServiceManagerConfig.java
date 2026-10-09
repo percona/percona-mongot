@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
@@ -72,7 +73,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
    * still soft-falls back to the bundled resource when that shipped file is missing or bad.
    *
    * <p>Without Voyage credentials, {@code VOYAGE} entries are dropped while keyless providers
-   * ({@code OPENAI_COMPATIBLE}) still load.
+   * ({@code OPENAI_COMPATIBLE}) still load. {@code HUGGINGFACE_INFERENCE} entries without an
+   * {@code apiToken} (and without a custom {@code providerEndpoint}) are dropped too.
    *
    * @param credentials optional Voyage API credentials (query and indexing keys)
    * @param modelConfigFileOverride explicit on-disk catalog path from the community config
@@ -242,6 +244,15 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
             modelNameOf(configDoc));
         continue;
       }
+      if ("HUGGINGFACE_INFERENCE".equals(provider) && !hasHuggingFaceTokenOrEndpoint(configDoc)) {
+        LOG.warn(
+            "Skipping Hugging Face embedding model '{}': no credentials.apiToken configured "
+                + "for every workload (the hosted Inference API requires a Hugging Face access "
+                + "token on query, collectionScan and changeStream traffic; set "
+                + "providerEndpoint instead for a keyless self-hosted TEI server).",
+            modelNameOf(configDoc));
+        continue;
+      }
 
       // Inject credentials into each config
       injectCredentials(configDoc, credentials);
@@ -260,6 +271,40 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
             && configDoc.get("embeddingProvider").isString()
         ? configDoc.getString("embeddingProvider").getValue()
         : "VOYAGE";
+  }
+
+  /**
+   * The hosted router needs a token on every workload (query/collectionScan/changeStream). A
+   * workload's {@code credentials} override replaces the base credentials entirely, so each
+   * workload's effective credentials are its override if present, otherwise the base. A custom
+   * {@code providerEndpoint} (e.g. self-hosted TEI) may legitimately run keyless.
+   */
+  private static boolean hasHuggingFaceTokenOrEndpoint(BsonDocument configDoc) {
+    if (!configDoc.containsKey("config") || !configDoc.get("config").isDocument()) {
+      // let the parser report the missing/invalid config
+      return true;
+    }
+    BsonDocument configField = configDoc.getDocument("config");
+    if (isNonBlankString(configField, "providerEndpoint")) {
+      return true;
+    }
+    return Stream.of("query", "collectionScan", "changeStream")
+        .allMatch(
+            workload ->
+                hasApiToken(
+                    configField.get(workload) instanceof BsonDocument override
+                            && override.containsKey("credentials")
+                        ? override
+                        : configField));
+  }
+
+  private static boolean hasApiToken(BsonDocument doc) {
+    return doc.get("credentials") instanceof BsonDocument credentials
+        && isNonBlankString(credentials, "apiToken");
+  }
+
+  private static boolean isNonBlankString(BsonDocument doc, String key) {
+    return doc.get(key) instanceof BsonString value && !value.getValue().isBlank();
   }
 
   private static String modelNameOf(BsonDocument configDoc) {

@@ -10,12 +10,17 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiEmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageEmbeddingCredentials;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -247,6 +252,267 @@ public class EmbeddingServiceManagerConfigTest {
     } finally {
       Files.deleteIfExists(catalogFile);
     }
+  }
+
+  /**
+   * Uncomments the shipped catalog's Hugging Face example, so this test can't drift from the
+   * template users copy. The block starts at its {@code # - modelName:} line and runs while lines
+   * stay commented.
+   */
+  private static String shippedHuggingFaceExample() throws Exception {
+    String catalog;
+    try (InputStream in =
+        EmbeddingServiceManagerConfigTest.class
+            .getClassLoader()
+            .getResourceAsStream("config/community/embedding-service-configs.yml")) {
+      assertNotNull("bundled catalog must be on the classpath", in);
+      catalog = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    }
+    List<String> lines = List.of(catalog.split("\n"));
+    int start = lines.indexOf("  # - modelName: bge-small-en-v1.5");
+    assertTrue("Hugging Face example block not found in the shipped catalog", start >= 0);
+    List<String> block = new ArrayList<>();
+    for (String line : lines.subList(start, lines.size())) {
+      if (!line.startsWith("  # ")) {
+        break;
+      }
+      block.add("  " + line.substring("  # ".length()));
+    }
+    return "configs:\n" + String.join("\n", block) + "\n";
+  }
+
+  private static Optional<EmbeddingServiceManagerConfig> loadCatalog(String yaml)
+      throws Exception {
+    Path catalogFile = Files.createTempFile("embedding-service-configs-hf", ".yml");
+    try {
+      Files.writeString(catalogFile, yaml, StandardCharsets.UTF_8);
+      return EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(
+          Optional.empty(), Optional.of(catalogFile));
+    } finally {
+      Files.deleteIfExists(catalogFile);
+    }
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_huggingFaceShippedExample_parsesEndToEnd()
+      throws Exception {
+    String catalog =
+        shippedHuggingFaceExample()
+            .replace("\"<your-hugging-face-access-token>\"", "\"hf_test_token\"");
+
+    Optional<EmbeddingServiceManagerConfig> result = loadCatalog(catalog);
+
+    assertTrue("Expected the Hugging Face catalog example to load", result.isPresent());
+    assertEquals(1, result.get().configs().size());
+    EmbeddingServiceConfig hf = result.get().configs().get(0);
+    assertEquals(EmbeddingProvider.HUGGINGFACE_INFERENCE, hf.embeddingProvider);
+    assertEquals("bge-small-en-v1.5", hf.modelName);
+
+    HuggingFaceModelConfig modelConfig =
+        (HuggingFaceModelConfig) hf.embeddingConfig.modelConfigBase;
+    assertEquals(Optional.of("BAAI/bge-small-en-v1.5"), modelConfig.modelId);
+    assertEquals(Optional.of(384), modelConfig.outputDimensions);
+    assertEquals(32, modelConfig.getBatchSize());
+    assertTrue(modelConfig.shouldTruncate());
+    assertEquals(Optional.empty(), hf.embeddingConfig.providerEndpoint);
+
+    HuggingFaceEmbeddingCredentials creds =
+        (HuggingFaceEmbeddingCredentials) hf.embeddingConfig.credentialsBase;
+    assertEquals(Optional.of("hf_test_token"), creds.apiToken);
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_huggingFaceWithoutToken_skippedOthersKept()
+      throws Exception {
+    String catalog =
+        shippedHuggingFaceExample().replace("\"<your-hugging-face-access-token>\"", "\"\"")
+            + """
+              - modelName: bge-m3
+                embeddingProvider: OPENAI_COMPATIBLE
+                config:
+                  providerEndpoint: http://localhost:11434/v1/embeddings
+                  modelConfig:
+                    outputDimensions: 1024
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  credentials: {}
+              - modelName: no-credentials-block
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+              - modelName: blank-endpoint
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  providerEndpoint: ""
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+              - modelName: query-token-only
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  query:
+                    credentials:
+                      apiToken: hf_query_only
+              - modelName: empty-query-override
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  credentials:
+                    apiToken: hf_base
+                  query:
+                    credentials: {}
+              - modelName: blank-changestream-override
+                embeddingProvider: HUGGINGFACE_INFERENCE
+                config:
+                  modelConfig:
+                    outputDimensions: 384
+                  errorHandlingConfig:
+                    maxRetries: 10
+                    initialRetryWaitMs: 200
+                    maxRetryWaitMs: 10000
+                    jitter: 0.1
+                  credentials:
+                    apiToken: hf_base
+                  changeStream:
+                    credentials:
+                      apiToken: " "
+            """;
+
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    CONFIG_LOGGER.addAppender(appender);
+    Optional<EmbeddingServiceManagerConfig> result;
+    try {
+      result = loadCatalog(catalog);
+    } finally {
+      CONFIG_LOGGER.detachAppender(appender);
+    }
+
+    assertTrue(result.isPresent());
+    assertEquals(
+        Map.of("bge-m3", EmbeddingProvider.OPENAI_COMPATIBLE),
+        result.get().configs().stream()
+            .collect(Collectors.toMap(c -> c.modelName, c -> c.embeddingProvider)));
+    assertEquals(
+        6,
+        appender.list.stream()
+            .filter(e -> e.getLevel() == Level.WARN)
+            .filter(e -> e.getFormattedMessage().contains("Skipping Hugging Face embedding model"))
+            .count());
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_huggingFaceTokensOnEveryWorkload_loads() throws Exception {
+    String catalog =
+        """
+        configs:
+          - modelName: bge-small-en-v1.5
+            embeddingProvider: HUGGINGFACE_INFERENCE
+            config:
+              modelConfig:
+                outputDimensions: 384
+              errorHandlingConfig:
+                maxRetries: 10
+                initialRetryWaitMs: 200
+                maxRetryWaitMs: 10000
+                jitter: 0.1
+              query:
+                credentials:
+                  apiToken: hf_query
+              collectionScan:
+                credentials:
+                  apiToken: hf_indexing
+              changeStream:
+                credentials:
+                  apiToken: hf_indexing
+          # a workload override without a credentials block keeps the base token
+          - modelName: base-token-model-override
+            embeddingProvider: HUGGINGFACE_INFERENCE
+            config:
+              modelConfig:
+                outputDimensions: 384
+              errorHandlingConfig:
+                maxRetries: 10
+                initialRetryWaitMs: 200
+                maxRetryWaitMs: 10000
+                jitter: 0.1
+              credentials:
+                apiToken: hf_base
+              query:
+                modelConfig:
+                  batchSize: 4
+        """;
+
+    Optional<EmbeddingServiceManagerConfig> result = loadCatalog(catalog);
+
+    assertTrue(result.isPresent());
+    assertEquals(2, result.get().configs().size());
+  }
+
+  @Test
+  public void loadEmbeddingServiceConfig_huggingFaceKeylessWithEndpoint_loads() throws Exception {
+    String catalog =
+        """
+        configs:
+          - modelName: bge-small-en-v1.5
+            embeddingProvider: HUGGINGFACE_INFERENCE
+            config:
+              providerEndpoint: http://tei:80/embed
+              modelConfig:
+                outputDimensions: 384
+              errorHandlingConfig:
+                maxRetries: 10
+                initialRetryWaitMs: 200
+                maxRetryWaitMs: 10000
+                jitter: 0.1
+              query:
+                modelConfig:
+                  batchSize: 4
+                credentials:
+                  apiToken: hf_query_only
+        """;
+
+    Optional<EmbeddingServiceManagerConfig> result = loadCatalog(catalog);
+
+    assertTrue(result.isPresent());
+    EmbeddingServiceConfig hf = result.get().configs().get(0);
+    assertEquals(Optional.of("http://tei:80/embed"), hf.embeddingConfig.providerEndpoint);
+    assertFalse(
+        ((HuggingFaceEmbeddingCredentials) hf.embeddingConfig.credentialsBase).hasToken());
+    // per-tier overrides get the provider discriminator too
+    EmbeddingServiceConfig.WorkloadParams query = hf.embeddingConfig.queryParams.orElseThrow();
+    assertEquals(
+        Optional.of(4),
+        ((HuggingFaceModelConfig) query.modelConfigOverride.orElseThrow()).batchSize);
+    assertEquals(
+        Optional.of("hf_query_only"),
+        ((HuggingFaceEmbeddingCredentials) query.credentialsOverride.orElseThrow()).apiToken);
   }
 
   @Test
