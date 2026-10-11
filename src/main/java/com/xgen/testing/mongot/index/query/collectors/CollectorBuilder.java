@@ -8,5 +8,9 @@ public abstract class CollectorBuilder {
     return new FacetCollectorBuilder();
   }
 
+  public static MetricsCollectorBuilder metrics() {
+    return new MetricsCollectorBuilder();
+  }
+
   public abstract Collector build();
 }

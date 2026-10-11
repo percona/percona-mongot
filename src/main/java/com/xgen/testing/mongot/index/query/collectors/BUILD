@@ -7,6 +7,8 @@ java_library(
         "CollectorBuilder.java",
         "FacetCollectorBuilder.java",
         "FacetDefinitionBuilder.java",
+        "MetricDefinitionBuilder.java",
+        "MetricsCollectorBuilder.java",
     ],
     visibility = ["//visibility:public"],
     exports = ["//src/main/java/com/xgen/mongot/index/query/collectors"],

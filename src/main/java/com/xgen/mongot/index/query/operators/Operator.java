@@ -221,6 +221,15 @@ public sealed interface Operator extends DocumentEncodable
     return exactlyOneFromBson(parser);
   }
 
+  static Operator parseForMetricsCollector(DocumentParser parser) throws BsonParseException {
+    if (parser.hasField(Fields.VECTOR_SEARCH)) {
+      return parser
+          .getContext()
+          .handleSemanticError("Metrics are not supported with the 'vectorSearch' operator.");
+    }
+    return exactlyOneFromBson(parser);
+  }
+
   static Operator exactlyOneFromBson(DocumentParser parser) throws BsonParseException {
     return parser.getGroup().exactlyOneOf(parseAllFields(parser));
   }

@@ -24,6 +24,7 @@ import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.lucene.LuceneFacetCollectorSearchManager.FacetCollectorQueryInfo;
+import com.xgen.mongot.index.lucene.LuceneMetricsCollectorSearchManager.MetricsCollectorQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneSearchManager.QueryInfo;
 import com.xgen.mongot.index.lucene.explain.explainers.FacetFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
@@ -51,6 +52,7 @@ import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo.QueryOptimizationStatus;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.counts.Count;
 import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.sort.SequenceToken;
@@ -687,6 +689,34 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
           }
         }
       }
+      case MetricsCollector metricsCollector -> {
+        MetricsSearch metricsSearch =
+            runMetricsSearch(
+                metricsCollector,
+                query,
+                luceneQuery,
+                searcherReference,
+                batchSizeStrategy,
+                luceneSort,
+                searchAfter);
+        return new SearchProducerAndMetaResults(
+            searchBatchProducer(
+                query,
+                metricsSearch.searchManager,
+                metricsSearch.queryInfo.topDocs,
+                metricsSearch.queryInfo.luceneExhausted,
+                batchSizeStrategy,
+                searcherReference,
+                unifiedHighlighter,
+                scoreDetailsManager,
+                queryCursorOptions,
+                queryOptimizationFlags),
+            LuceneMetaResultsBuilder.buildMetricsMetaResults(
+                metricsSearch.queryInfo.topDocs.totalHits.value(),
+                query.count().type(),
+                metricsCollector,
+                metricsSearch.accumulatorsByMetricName));
+      }
     }
 
     return facetCollectorQuery(
@@ -865,6 +895,42 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
             facetName -> Optional.ofNullable(collectorQueryInfo.drillSidewaysResult)));
   }
 
+  /** Artifacts of the single Lucene search behind a metrics collector query. */
+  private record MetricsSearch(
+      LuceneSearchManager<MetricsCollectorQueryInfo> searchManager,
+      MetricsCollectorQueryInfo queryInfo,
+      Map<String, NumericMetricAccumulator> accumulatorsByMetricName) {}
+
+  /**
+   * Validates the metrics collector against the index definition, runs the search that collects
+   * the first batch of top docs together with every metric's accumulator, and re-keys the
+   * accumulators from Lucene field name to metric name.
+   */
+  private MetricsSearch runMetricsSearch(
+      MetricsCollector metricsCollector,
+      CollectorQuery query,
+      org.apache.lucene.search.Query luceneQuery,
+      LuceneIndexSearcherReference searcherReference,
+      BatchSizeStrategy batchSizeStrategy,
+      Optional<Sort> luceneSort,
+      Optional<SequenceToken> searchAfter)
+      throws IOException, InvalidQueryException {
+    Map<String, String> luceneFieldByMetricName =
+        this.facetContext.getMetricLuceneFields(metricsCollector, query.returnScope());
+    LuceneSearchManager<MetricsCollectorQueryInfo> searchManager =
+        this.luceneSearchManagerFactory.newMetricsCollectorManager(
+            luceneQuery, luceneSort, searchAfter, luceneFieldByMetricName.values());
+    MetricsCollectorQueryInfo queryInfo =
+        searchManager.initialSearch(searcherReference, batchSizeStrategy.adviseNextBatchSize());
+
+    Map<String, NumericMetricAccumulator> accumulatorsByMetricName = new HashMap<>();
+    luceneFieldByMetricName.forEach(
+        (name, luceneField) ->
+            accumulatorsByMetricName.put(
+                name, queryInfo.accumulatorsByLuceneField.get(luceneField)));
+    return new MetricsSearch(searchManager, queryInfo, accumulatorsByMetricName);
+  }
+
   @VisibleForTesting
   SearchProducerAndMetaResults facetCollectorQuery(
       CollectorQuery query,
@@ -1002,6 +1068,34 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
                 queryOptimizationFlags);
           }
         }
+      }
+      case MetricsCollector metricsCollector -> {
+        MetricsSearch metricsSearch =
+            runMetricsSearch(
+                metricsCollector,
+                query,
+                luceneQuery,
+                searcherReference,
+                batchSizeStrategy,
+                luceneSort,
+                searchAfter);
+        // The SearchProducer is the owner of the searcherReference and in charge of closing it.
+        return new SearchProducerAndMetaProducer(
+            searchBatchProducer(
+                query,
+                metricsSearch.searchManager,
+                metricsSearch.queryInfo.topDocs,
+                metricsSearch.queryInfo.luceneExhausted,
+                batchSizeStrategy,
+                searcherReference,
+                unifiedHighlighter,
+                scoreDetailsManager,
+                queryCursorOptions,
+                queryOptimizationFlags),
+            new LuceneMetricsCollectorMetaBatchProducer(
+                metricsSearch.queryInfo.topDocs.totalHits.value(),
+                metricsCollector,
+                metricsSearch.accumulatorsByMetricName));
       }
     }
     return intermediateFacetCollectorQuery(
@@ -1370,6 +1464,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
   private static Operator getCollectorOperator(Collector collector) {
     return switch (collector) {
       case FacetCollector facetCollector -> facetCollector.operator();
+      case MetricsCollector metricsCollector -> metricsCollector.operator();
     };
   }
 

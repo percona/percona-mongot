@@ -1,0 +1,182 @@
+{
+  "valid": [
+    {
+      "description": "simple avg metric",
+      "value": {
+        "operator": {
+          "text": {
+            "path": "review",
+            "query": "good"
+          }
+        },
+        "metrics": {
+          "avgRating": {
+            "type": "avg",
+            "path": "rating"
+          }
+        }
+      }
+    },
+    {
+      "description": "all metric types",
+      "value": {
+        "operator": {
+          "text": {
+            "path": "review",
+            "query": "good"
+          }
+        },
+        "metrics": {
+          "avgRating": {
+            "type": "avg",
+            "path": "rating"
+          },
+          "sumRating": {
+            "type": "sum",
+            "path": "rating"
+          },
+          "minRating": {
+            "type": "min",
+            "path": "rating"
+          },
+          "maxPrice": {
+            "type": "max",
+            "path": "price"
+          }
+        }
+      }
+    },
+    {
+      "description": "no operator",
+      "value": {
+        "metrics": {
+          "avgRating": {
+            "type": "avg",
+            "path": "rating"
+          }
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "description": "no metrics",
+      "value": {
+        "operator": {
+          "text": {
+            "path": "review",
+            "query": "good"
+          }
+        }
+      }
+    },
+    {
+      "description": "empty metrics",
+      "value": {
+        "operator": {
+          "text": {
+            "path": "review",
+            "query": "good"
+          }
+        },
+        "metrics": {
+        }
+      }
+    },
+    {
+      "description": "no metric type specified",
+      "value": {
+        "metrics": {
+          "avgRating": {
+            "path": "rating"
+          }
+        }
+      }
+    },
+    {
+      "description": "unknown metric type",
+      "value": {
+        "metrics": {
+          "avgRating": {
+            "type": "median",
+            "path": "rating"
+          }
+        }
+      }
+    },
+    {
+      "description": "no path specified",
+      "value": {
+        "metrics": {
+          "avgRating": {
+            "type": "avg"
+          }
+        }
+      }
+    },
+    {
+      "description": "unknown field in metric definition",
+      "value": {
+        "metrics": {
+          "avgRating": {
+            "type": "avg",
+            "path": "rating",
+            "boundaries": [1, 2]
+          }
+        }
+      }
+    },
+    {
+      "description": "empty metric name",
+      "value": {
+        "metrics": {
+          "": {
+            "type": "avg",
+            "path": "rating"
+          }
+        }
+      }
+    },
+    {
+      "description": "metric name containing a dot",
+      "value": {
+        "metrics": {
+          "avg.rating": {
+            "type": "avg",
+            "path": "rating"
+          }
+        }
+      }
+    },
+    {
+      "description": "metric name starting with a dollar sign",
+      "value": {
+        "metrics": {
+          "$avgRating": {
+            "type": "avg",
+            "path": "rating"
+          }
+        }
+      }
+    },
+    {
+      "description": "vectorSearch operator is not supported",
+      "value": {
+        "operator": {
+          "vectorSearch": {
+            "path": "embedding",
+            "queryVector": [1.0, 2.0],
+            "numCandidates": 10,
+            "limit": 5
+          }
+        },
+        "metrics": {
+          "avgRating": {
+            "type": "avg",
+            "path": "rating"
+          }
+        }
+      }
+    }
+  ]
+}
