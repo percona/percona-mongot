@@ -32,10 +32,21 @@ else
   export JAVA_HOME="${DIR}/bin/jdk"
 fi
 
+# JNA (oshi) and bc-fips both extract native libs under java.io.tmpdir and dlopen them, which a
+# noexec /tmp (RHEL 8 default) breaks. The JVM ignores TMPDIR and always uses /tmp, so point it at
+# TMPDIR explicitly. The packages set TMPDIR to /var/lib/mongot/tmp, /var/tmp covers tarball and
+# Docker.
+JNI_TMPDIR="${TMPDIR:-/var/tmp}"
+if ! mkdir -p "${JNI_TMPDIR}"; then
+  echo "mongot: cannot create '${JNI_TMPDIR}' -- point TMPDIR at a writable, exec-allowed dir" >&2
+  exit 1
+fi
+
 # BouncyCastle FIPS extracts native crypto libraries at startup and dlopen()s them, which fails
 # on noexec mounts. bc_fips_configure picks a directory that works on this host and sets
-# BC_FIPS_FLAGS accordingly.
+# BC_FIPS_FLAGS accordingly. Its default is where bc-fips extracts to, which is now JNI_TMPDIR.
 source "${DIR}/bc-fips-env.sh"
+BC_FIPS_DEFAULT_TMPDIR="${JNI_TMPDIR}"
 bc_fips_configure "${DIR}/lib"
 
 # Wrapper for running mongot
@@ -53,6 +64,8 @@ run_mongot() {
     -XX:+ExitOnOutOfMemoryError \
     -XX:-UseGCOverheadLimit \
     '-Djava.security.egd=file:/dev/urandom' \
+    "-Djava.io.tmpdir=${JNI_TMPDIR}" \
+    "-Djna.tmpdir=${JNI_TMPDIR}" \
     ${BC_FIPS_FLAGS[@]+"${BC_FIPS_FLAGS[@]}"} \
     "-Dmongot.embeddingModelConfigFile=${DIR}/embedding-service-configs.yml" \
     '--add-modules=jdk.incubator.vector' \
