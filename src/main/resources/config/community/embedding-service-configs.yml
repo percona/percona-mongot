@@ -190,8 +190,9 @@ configs:
   # - queryPrefix / documentPrefix work as for OPENAI_COMPATIBLE models.
   # - providerEndpoint (optional) replaces the router URL verbatim, e.g. a
   #   dedicated Inference Endpoint or a self-hosted TEI server's /embed route.
-  # - Free accounts get a small monthly credit allowance; once it is exhausted
-  #   requests are typically rejected with HTTP 402. Float vectors only.
+  # - Billing is pay-as-you-go: free accounts must buy credits, PRO and
+  #   Team/Enterprise plans include a monthly allowance. Once credits are
+  #   exhausted, requests are typically rejected with HTTP 402. Float vectors only.
   #
   # - modelName: bge-small-en-v1.5
   #   embeddingProvider: HUGGINGFACE_INFERENCE
