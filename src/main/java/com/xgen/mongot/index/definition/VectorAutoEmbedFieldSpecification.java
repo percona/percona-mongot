@@ -48,7 +48,10 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
                         : Optional.of("must be '" + DEFAULT_MODALITY + "'"))
             .required();
 
-    /** Omitted in BSON → model {@code outputDimensions} → default NUM_DIMENSIONS of 1024. */
+    /**
+     * Omitted in BSON → model {@code outputDimensions}; if the model config doesn't set it either,
+     * parsing fails ("numDimensions cannot be resolved from model config").
+     */
     static final Field.Optional<Integer> NUM_DIMENSIONS =
         Field.builder("numDimensions")
             .intField()

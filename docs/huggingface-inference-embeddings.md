@@ -48,14 +48,14 @@ Inference Endpoint or a self-hosted TEI server by setting `providerEndpoint` (se
 4. **The model's native output dimension.** Look for `hidden_size` in the model's
    `config.json`. For example, `BAAI/bge-small-en-v1.5` has 384 dimensions.
 
-## Free tier and billing
+## Billing
 
-Inference Providers is pay-as-you-go, with a monthly allowance of included credits.
-When this page was written, the allowance was **$0.10/month for free accounts** (Hugging
-Face says this is subject to change) and $2.00/month for PRO users and per seat for
-Team/Enterprise organizations. `hf-inference` bills by compute time × hardware price.
-CPU embedding requests for small models are cheap, but an initial sync of a large
-collection can still use up a free allowance quickly. Check
+Inference Providers is pay-as-you-go. When this page was written, PRO users got
+$2.00/month of included credits and Team/Enterprise organizations $2.00/month per seat.
+**Free accounts get no included credits** and must buy credits before using the API.
+`hf-inference` bills by compute time × hardware price. CPU embedding requests for small
+models are cheap, but an initial sync of a large collection can still use up a monthly
+allowance quickly. Check
 <https://huggingface.co/docs/inference-providers/pricing> for current numbers, and track
 your usage at <https://huggingface.co/settings/billing>.
 
