@@ -20,11 +20,14 @@ import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.LongField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.store.ByteBuffersDirectory;
@@ -44,19 +47,23 @@ public class LuceneMetricsCollectorSearchManagerTest {
 
   private final Directory directory = new ByteBuffersDirectory();
   private final IndexWriter indexWriter;
+  private final ExecutorService executor = Executors.newFixedThreadPool(2);
 
   public LuceneMetricsCollectorSearchManagerTest() throws IOException {
+    // No merges, so every commit stays its own segment and slice layouts are deterministic.
     this.indexWriter =
         new IndexWriter(
             this.directory,
             new IndexWriterConfig(
                     LuceneAnalyzer.indexAnalyzer(
                         SearchIndex.MOCK_INDEX_DEFINITION, AnalyzerRegistryBuilder.empty()))
-                .setCodec(new LuceneCodec()));
+                .setCodec(new LuceneCodec())
+                .setMergePolicy(NoMergePolicy.INSTANCE));
   }
 
   @After
   public void after() throws IOException {
+    this.executor.shutdownNow();
     this.indexWriter.close();
     this.directory.close();
   }
@@ -72,21 +79,33 @@ public class LuceneMetricsCollectorSearchManagerTest {
     return doc;
   }
 
-  private LuceneIndexSearcherReference searcherReference() throws IOException {
+  private LuceneSearcherManager searcherManager() throws IOException {
     this.indexWriter.commit();
-    var searcherManager =
-        LuceneSearcherManager.create(
-            this.indexWriter,
-            new LuceneSearcherFactory(
-                SearchIndex.MOCK_INDEX_DEFINITION,
-                false,
-                new QueryCacheProvider.DefaultQueryCacheProvider(),
-                Optional.empty(),
-                SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory(),
-            () -> false);
+    return LuceneSearcherManager.create(
+        this.indexWriter,
+        new LuceneSearcherFactory(
+            SearchIndex.MOCK_INDEX_DEFINITION,
+            false,
+            new QueryCacheProvider.DefaultQueryCacheProvider(),
+            Optional.empty(),
+            SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
+        SearchIndex.mockMetricsFactory(),
+        () -> false);
+  }
+
+  /** A searcher without an executor: every segment is collected in one slice. */
+  private LuceneIndexSearcherReference searcherReference() throws IOException {
     return LuceneIndexSearcherReference.create(
-        searcherManager,
+        searcherManager(),
+        SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),
+        FeatureFlags.getDefault());
+  }
+
+  /** A concurrent searcher: segments are grouped into slices, each with its own collector. */
+  private LuceneIndexSearcherReference concurrentSearcherReference() throws IOException {
+    return LuceneIndexSearcherReference.create(
+        searcherManager(),
+        this.executor,
         SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH),
         FeatureFlags.getDefault());
   }
@@ -195,24 +214,30 @@ public class LuceneMetricsCollectorSearchManagerTest {
 
   @Test
   public void testConcurrentSegmentSearchMergesAccumulators() throws IOException {
-    // Several commits produce several segments; the metrics collector manager must reduce them.
-    for (int i = 1; i <= 5; i++) {
-      this.indexWriter.addDocument(numericDoc(RATING, i));
+    // One document per segment. Lucene groups at most 5 segments into a slice, so 6 segments give
+    // 2 slices, each collected by its own collector that reduce() must merge. 1e16 and 1.0 land in
+    // the first slice and -1e16 in the second: the 1.0 survives only if the merge keeps the sum's
+    // compensation.
+    double[] values = {1e16, 1.0, 0.0, 0.0, 0.0, -1e16};
+    for (double value : values) {
+      this.indexWriter.addDocument(numericDoc(RATING, value));
       this.indexWriter.commit();
     }
-    LuceneIndexSearcherReference searcherReference = searcherReference();
+    LuceneIndexSearcherReference searcherReference = concurrentSearcherReference();
     LuceneIndexSearcher searcher = searcherReference.getIndexSearcher();
-    assertTrue(searcher.getIndexReader().leaves().size() > 1);
+    assertEquals(values.length, searcher.getIndexReader().leaves().size());
+    assertTrue(searcher.getSlices().length > 1);
 
     var manager =
         new LuceneMetricsCollectorSearchManager(
             new MatchAllDocsQuery(), Optional.empty(), Optional.empty(), List.of(RATING));
     var queryInfo = manager.initialSearch(searcherReference, 10);
 
+    assertEquals(values.length, queryInfo.topDocs.totalHits.value());
     NumericMetricAccumulator rating = queryInfo.accumulatorsByLuceneField.get(RATING);
-    assertEquals(5, rating.count());
-    assertEquals(15.0, rating.sum(), DELTA);
-    assertEquals(1.0, rating.min(), DELTA);
-    assertEquals(5.0, rating.max(), DELTA);
+    assertEquals(values.length, rating.count());
+    assertEquals(1.0, rating.sum(), 0.0);
+    assertEquals(-1e16, rating.min(), 0.0);
+    assertEquals(1e16, rating.max(), 0.0);
   }
 }
