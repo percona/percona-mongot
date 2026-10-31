@@ -34,7 +34,11 @@ final class NumericMetricAccumulator {
     if (other.count == 0) {
       return;
     }
-    addToSum(other.sum());
+    // Fold the raw sum and the compensation separately: other.sum() would round the compensation
+    // away and lose cancellation across slices and partitions. A non-finite partial makes the
+    // compensation NaN while the running sum stays infinite, which sum() already handles.
+    addToSum(other.sum);
+    this.compensation += other.compensation;
     this.count += other.count;
     this.min = Math.min(this.min, other.min);
     this.max = Math.max(this.max, other.max);

@@ -157,7 +157,8 @@ public class LuceneMetricsCollectorSearchManagerTest {
 
   @Test
   public void testInfinityIsAccumulatedAcrossSegments() throws IOException {
-    // Unlike NaN, infinity is indexed as an ordinary value; the separate segments exercise reduce().
+    // Unlike NaN, infinity is indexed as an ordinary value. Separate segments make the collector
+    // switch leaves mid-search.
     this.indexWriter.addDocument(numericDoc(RATING, 1.0));
     this.indexWriter.commit();
     this.indexWriter.addDocument(numericDoc(RATING, Double.POSITIVE_INFINITY));
