@@ -6,10 +6,12 @@ import com.xgen.mongot.index.MetaResults;
 import com.xgen.mongot.util.Check;
 import java.util.Map;
 import java.util.Optional;
+import org.bson.BsonValue;
 
 public class MetaResultsBuilder {
   private Optional<CountResult> count = Optional.empty();
   private Optional<Map<String, FacetInfo>> facet = Optional.empty();
+  private Optional<Map<String, BsonValue>> metrics = Optional.empty();
 
   public static MetaResultsBuilder builder() {
     return new MetaResultsBuilder();
@@ -25,11 +27,16 @@ public class MetaResultsBuilder {
     return this;
   }
 
+  public MetaResultsBuilder metrics(Map<String, BsonValue> metrics) {
+    this.metrics = Optional.of(metrics);
+    return this;
+  }
+
   /** Builds MetaResults from an MetaResultsBuilder. */
   public MetaResults build() {
     Check.isPresent(this.count, "count");
 
-    return new MetaResults(this.count.get(), this.facet);
+    return new MetaResults(this.count.get(), this.facet, this.metrics);
   }
 
   /** Create a MetaResults with the given lowerBound count. */
