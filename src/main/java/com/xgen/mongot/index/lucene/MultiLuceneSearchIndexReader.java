@@ -115,7 +115,9 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
                 queryOptimizationFlags,
                 searchBatchProducers,
                 extraBatchProducersToClose,
-                metaResultsList));
+                metaResultsList),
+        searchBatchProducers,
+        extraBatchProducersToClose);
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -139,14 +141,17 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     // intermediateQuery() to get _all_ instead of top string facet buckets.
     SearchProducerAndMetaProducer result =
         intermediateQuery(query, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
-    if (!(result.metaBatchProducer instanceof FacetMergingBatchProducer)) {
-      throw new IllegalStateException(
-          "metaProducer from intermediateOperatorQuery() must be a "
-              + "LuceneFacetCollectorMetaBatchProducer.");
-    }
     MetaResults metaResults =
-        ((FacetMergingBatchProducer) result.metaBatchProducer)
-            .getMetaResultsAndClose(query.count().type());
+        switch (result.metaBatchProducer) {
+          case FacetMergingBatchProducer facetMergingBatchProducer ->
+              facetMergingBatchProducer.getMetaResultsAndClose(query.count().type());
+          case MetricsMergingBatchProducer metricsMergingBatchProducer ->
+              metricsMergingBatchProducer.getMetaResultsAndClose(query.count().type());
+          default ->
+              throw new IllegalStateException(
+                  "metaProducer from intermediateQuery() must be a FacetMergingBatchProducer or a "
+                      + "MetricsMergingBatchProducer.");
+        };
     return new SearchProducerAndMetaResults(result.searchBatchProducer, metaResults);
   }
 
@@ -165,6 +170,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
     List<CountMetaBatchProducer> countBatchProducers =
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
+    List<LuceneMetricsCollectorMetaBatchProducer> metricsBatchProducers =
+        java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
 
     executeOnAllPartitions(
         query,
@@ -178,7 +185,10 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
                 searchBatchProducers,
                 extraBatchProducersToClose,
                 facetBatchProducers,
-                countBatchProducers));
+                countBatchProducers,
+                metricsBatchProducers),
+        searchBatchProducers,
+        extraBatchProducersToClose);
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -190,11 +200,14 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     BatchProducer mergedMetaProducer;
     if (!facetBatchProducers.isEmpty()) {
       mergedMetaProducer = FacetMergingBatchProducer.create(facetBatchProducers);
+    } else if (!metricsBatchProducers.isEmpty()) {
+      mergedMetaProducer = new MetricsMergingBatchProducer(metricsBatchProducers);
     } else if (!countBatchProducers.isEmpty()) {
       mergedMetaProducer = new CountMergingBatchProducer(countBatchProducers);
     } else {
       return Check.unreachable(
-          "Either facetBatchProducers or countBatchProducers must be non-empty");
+          "One of facetBatchProducers, metricsBatchProducers or countBatchProducers must be "
+              + "non-empty");
     }
     return new SearchProducerAndMetaProducer(searchBatchProducer, mergedMetaProducer);
   }
@@ -352,6 +365,27 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         throws IOException, InvalidQueryException, InterruptedException;
   }
 
+  /**
+   * Runs {@code partitionExecutor} on every partition. If any partition fails, the search producers
+   * already collected from the others are closed before rethrowing, so their searcher references
+   * are released instead of pinning old index readers.
+   */
+  private void executeOnAllPartitions(
+      Query query,
+      PartitionExecutor partitionExecutor,
+      List<LuceneSearchBatchProducer> searchBatchProducers,
+      List<BatchProducer> extraBatchProducersToClose)
+      throws IOException, InvalidQueryException, InterruptedException {
+    try {
+      // The two-argument overload below runs the partitions; this one only adds cleanup.
+      executeOnAllPartitions(query, partitionExecutor);
+    } catch (Exception e) {
+      closeAll(searchBatchProducers, e);
+      closeAll(extraBatchProducersToClose, e);
+      throw e;
+    }
+  }
+
   private void executeOnAllPartitions(Query query, PartitionExecutor partitionExecutor)
       throws IOException, InvalidQueryException, InterruptedException {
     if (query.concurrent() && this.taskExecutor.isPresent()) {
@@ -381,6 +415,22 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     } else {
       for (int i = 0; i < this.readers.size(); i++) {
         partitionExecutor.execute(i);
+      }
+    }
+  }
+
+  // ponytail: when the query thread is interrupted, Lucene's TaskExecutor stops waiting for the
+  // partition task it was blocked on without cancelling it, so that task can add a producer after
+  // this snapshot and leak it. Closing the gap needs partition tasks to close their own producer
+  // when they finish after cleanup has run.
+  private static void closeAll(List<? extends BatchProducer> producers, Exception failure) {
+    // Copy first because a still-running task may be appending. List.copyOf reads through
+    // toArray(), which Collections.synchronizedList locks like add(), so the copy cannot race.
+    for (BatchProducer producer : List.copyOf(producers)) {
+      try {
+        producer.close();
+      } catch (IOException | RuntimeException e) {
+        failure.addSuppressed(e);
       }
     }
   }
@@ -417,7 +467,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       List<LuceneSearchBatchProducer> searchBatchProducers,
       List<BatchProducer> extraBatchProducersToClose,
       List<LuceneFacetCollectorMetaBatchProducer> facetBatchProducers,
-      List<CountMetaBatchProducer> countBatchProducers)
+      List<CountMetaBatchProducer> countBatchProducers,
+      List<LuceneMetricsCollectorMetaBatchProducer> metricsBatchProducers)
       throws IOException, InvalidQueryException, InterruptedException {
     try (var indexPartitionResourceManager = Explain.maybeEnterIndexPartitionQueryContext(i)) {
       var reader = this.readers.get(i);
@@ -433,6 +484,9 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       } else if (result.metaBatchProducer
           instanceof CountMetaBatchProducer countMetaBatchProducer) {
         countBatchProducers.add(countMetaBatchProducer);
+      } else if (result.metaBatchProducer
+          instanceof LuceneMetricsCollectorMetaBatchProducer metricsMetaBatchProducer) {
+        metricsBatchProducers.add(metricsMetaBatchProducer);
       } else {
         throw new IllegalStateException(
             String.format(

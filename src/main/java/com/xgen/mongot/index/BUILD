@@ -40,6 +40,7 @@ java_library(
         "InitializedSearchIndex.java",
         "InitializedVectorIndex.java",
         "IntermediateFacetBucket.java",
+        "IntermediateMetricBucket.java",
         "MetaResults.java",
         "MeteredBatchProducer.java",
         "MeteredIndexWriter.java",

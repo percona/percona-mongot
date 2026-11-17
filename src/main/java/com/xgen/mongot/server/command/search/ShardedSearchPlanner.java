@@ -2,12 +2,16 @@ package com.xgen.mongot.server.command.search;
 
 import static com.xgen.mongot.util.Check.checkState;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.xgen.mongot.index.IntermediateMetricBucket.Component;
 import com.xgen.mongot.index.query.CollectorQuery;
 import com.xgen.mongot.index.query.OperatorQuery;
 import com.xgen.mongot.index.query.SearchQuery;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
+import com.xgen.mongot.index.query.collectors.MetricDefinition;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.counts.Count;
 import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.Sort;
@@ -20,17 +24,28 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.bson.BsonArray;
 import org.bson.BsonDocument;
+import org.bson.BsonDouble;
 import org.bson.BsonElement;
 import org.bson.BsonInt32;
+import org.bson.BsonNull;
 import org.bson.BsonString;
+import org.bson.BsonValue;
 
 public class ShardedSearchPlanner {
 
   public static final String FACET_TYPE = "facet";
+
+  private static final String METRIC_TYPE = "metric";
+
+  // Names of the extra $group accumulators that merge the payloads of intermediate metric buckets.
+  private static final String METRIC_SUM_PARTS_ACCUMULATOR = "metricSumParts";
+  private static final String METRIC_MIN_ACCUMULATOR = "metricMin";
+  private static final String METRIC_MAX_ACCUMULATOR = "metricMax";
 
   /**
    * Accepts a deserialized query and the supported searchFeatures of a MongoDB deployment and
@@ -92,6 +107,9 @@ public class ShardedSearchPlanner {
             Map<String, FacetDefinition> facetDefinitions = facetCollector.facetDefinitions();
             yield buildMetaPipeline(countType, Optional.of(facetDefinitions));
           }
+          case MetricsCollector metricsCollector -> {
+            yield buildMetricsMetaPipeline(countType, metricsCollector.metricDefinitions());
+          }
         }
       }
       case OperatorQuery operatorQuery -> buildMetaPipeline(countType, Optional.empty());
@@ -118,6 +136,211 @@ public class ShardedSearchPlanner {
         getGroupStage(),
         getFacetStage(facetDefinitions),
         getReplaceWithStage(countType, facetDefinitions));
+  }
+
+  /**
+   * Builds the pipeline merging intermediate metric buckets (see {@link IntermediateMetricBucket})
+   * from every shard: the $group stage totals each metric component, the $facet stage selects each
+   * component a metric needs, and the $replaceWith stage combines them into the final value.
+   */
+  private static List<BsonDocument> buildMetricsMetaPipeline(
+      String countType, Map<String, MetricDefinition> metricDefinitions) {
+    // Sort by metric name so the generated pipeline is deterministic.
+    Map<String, MetricDefinition> sortedDefinitions = new TreeMap<>(metricDefinitions);
+    return List.of(
+        getMetricsGroupStage(),
+        getMetricsFacetStage(sortedDefinitions),
+        getMetricsReplaceWithStage(countType, sortedDefinitions));
+  }
+
+  /**
+   * The metrics $group stage additionally collects / mins / maxes each bucket's double payload. Sum
+   * parts are collected rather than {@code $sum}-ed because {@code $sum} rounds away low-order bits
+   * (in mongod 9.0 it returns 0 for [1e16, 1, -1e16]); {@link #compensatedSum} adds them up.
+   */
+  private static BsonDocument getMetricsGroupStage() {
+    BsonDocument stage = getGroupStage();
+    BsonString valueRef = new BsonString("$value");
+    stage
+        .getDocument("$group")
+        .append(METRIC_SUM_PARTS_ACCUMULATOR, new BsonDocument("$push", valueRef))
+        .append(METRIC_MIN_ACCUMULATOR, new BsonDocument("$min", valueRef))
+        .append(METRIC_MAX_ACCUMULATOR, new BsonDocument("$max", valueRef));
+    return stage;
+  }
+
+  /** The metrics $facet stage isolates every (metric, component) group the metric needs. */
+  private static BsonDocument getMetricsFacetStage(Map<String, MetricDefinition> definitions) {
+    BsonDocument stage = getFacetStage(Optional.empty());
+    BsonDocument facets = stage.getDocument("$facet");
+    definitions.forEach(
+        (name, definition) -> {
+          for (Component component : componentsFor(definition.type())) {
+            facets.append(
+                metricFacetKey(name, component),
+                new BsonArray(
+                    List.of(
+                        new BsonDocument(
+                            "$match",
+                            new BsonDocument()
+                                .append(
+                                    "_id.type",
+                                    new BsonDocument("$eq", new BsonString(METRIC_TYPE)))
+                                .append("_id.tag", new BsonDocument("$eq", new BsonString(name)))
+                                .append(
+                                    "_id.bucket",
+                                    new BsonDocument(
+                                        "$eq", new BsonString(component.getName())))))));
+          }
+        });
+    return stage;
+  }
+
+  /** The metrics $replaceWith stage computes each metric's final value from its components. */
+  private static BsonDocument getMetricsReplaceWithStage(
+      String countType, Map<String, MetricDefinition> definitions) {
+    BsonDocument stage = getReplaceWithStage(countType, Optional.empty());
+    BsonDocument metrics = new BsonDocument();
+    definitions.forEach(
+        (name, definition) -> metrics.append(name, metricExpression(name, definition.type())));
+    stage.getDocument("$replaceWith").append("metrics", metrics);
+    return stage;
+  }
+
+  private static List<Component> componentsFor(MetricDefinition.Type type) {
+    return switch (type) {
+      case AVG -> List.of(Component.SUM, Component.COUNT);
+      case SUM -> List.of(Component.SUM);
+      case MIN -> List.of(Component.MIN);
+      case MAX -> List.of(Component.MAX);
+    };
+  }
+
+  /**
+   * avg/min/max resolve to null when no shard saw a value (mirroring MQL); sum resolves to 0.0,
+   * also when no shard emitted a sum bucket.
+   */
+  private static BsonValue metricExpression(String name, MetricDefinition.Type type) {
+    return switch (type) {
+      case SUM -> compensatedSum(firstOf(name, Component.SUM, METRIC_SUM_PARTS_ACCUMULATOR));
+      case MIN -> nullIfMissing(firstOf(name, Component.MIN, METRIC_MIN_ACCUMULATOR));
+      case MAX -> nullIfMissing(firstOf(name, Component.MAX, METRIC_MAX_ACCUMULATOR));
+      case AVG -> {
+        BsonDocument count = firstOf(name, Component.COUNT, "value");
+        BsonDocument sum =
+            compensatedSum(firstOf(name, Component.SUM, METRIC_SUM_PARTS_ACCUMULATOR));
+        yield new BsonDocument(
+            "$cond",
+            new BsonDocument()
+                .append(
+                    "if", new BsonDocument("$gt", new BsonArray(List.of(count, new BsonInt32(0)))))
+                .append("then", new BsonDocument("$divide", new BsonArray(List.of(sum, count))))
+                .append("else", BsonNull.VALUE));
+      }
+    };
+  }
+
+  /**
+   * Shards emit min/max buckets only when they saw a value, so with no values anywhere the $facet
+   * branch is empty and $first yields missing, which $replaceWith drops from the output. This turns
+   * missing into an explicit null, matching the unsharded result.
+   */
+  private static BsonDocument nullIfMissing(BsonDocument expression) {
+    return new BsonDocument("$ifNull", new BsonArray(List.of(expression, BsonNull.VALUE)));
+  }
+
+  /**
+   * Neumaier-sums an array of doubles, mirroring {@code NumericMetricAccumulator}: shards send
+   * their raw sum and its compensation as separate parts, so cancellation across shards keeps the
+   * low-order bits and the result depends as little as possible on the order the parts arrive in. A
+   * missing array sums to 0.0.
+   */
+  @VisibleForTesting
+  static BsonDocument compensatedSum(BsonValue parts) {
+    BsonString runningSum = new BsonString("$$value.s");
+    BsonString part = new BsonString("$$this");
+    BsonString t = new BsonString("$$t");
+    // The low-order bits lost when adding the smaller-magnitude operand to the larger one.
+    BsonDocument lostBits =
+        new BsonDocument(
+            "$cond",
+            new BsonArray(
+                List.of(
+                    new BsonDocument(
+                        "$gte",
+                        new BsonArray(
+                            List.of(
+                                new BsonDocument("$abs", runningSum),
+                                new BsonDocument("$abs", part)))),
+                    add(subtract(runningSum, t), part),
+                    add(subtract(part, t), runningSum))));
+    BsonDocument step =
+        new BsonDocument(
+            "$let",
+            new BsonDocument()
+                .append("vars", new BsonDocument("t", add(runningSum, part)))
+                .append(
+                    "in",
+                    new BsonDocument()
+                        .append("s", t)
+                        .append("c", add(new BsonString("$$value.c"), lostBits))));
+    BsonDocument reduce =
+        new BsonDocument(
+            "$reduce",
+            new BsonDocument()
+                .append("input", parts)
+                .append(
+                    "initialValue",
+                    new BsonDocument()
+                        .append("s", new BsonDouble(0))
+                        .append("c", new BsonDouble(0)))
+                .append("in", step));
+    // Once the running sum is infinite the compensation is NaN (inf - inf); the running sum is then
+    // the IEEE result.
+    BsonString sum = new BsonString("$$r.s");
+    BsonDocument result =
+        new BsonDocument(
+            "$cond",
+            new BsonArray(
+                List.of(
+                    new BsonDocument(
+                        "$in",
+                        new BsonArray(
+                            List.of(
+                                sum,
+                                new BsonArray(
+                                    List.of(
+                                        new BsonDouble(Double.POSITIVE_INFINITY),
+                                        new BsonDouble(Double.NEGATIVE_INFINITY)))))),
+                    sum,
+                    add(sum, new BsonString("$$r.c")))));
+    return new BsonDocument(
+        "$ifNull",
+        new BsonArray(
+            List.of(
+                new BsonDocument(
+                    "$let",
+                    new BsonDocument()
+                        .append("vars", new BsonDocument("r", reduce))
+                        .append("in", result)),
+                new BsonDouble(0))));
+  }
+
+  private static BsonDocument add(BsonValue left, BsonValue right) {
+    return new BsonDocument("$add", new BsonArray(List.of(left, right)));
+  }
+
+  private static BsonDocument subtract(BsonValue left, BsonValue right) {
+    return new BsonDocument("$subtract", new BsonArray(List.of(left, right)));
+  }
+
+  private static BsonDocument firstOf(String name, Component component, String accumulator) {
+    return new BsonDocument(
+        "$first", new BsonString("$" + metricFacetKey(name, component) + "." + accumulator));
+  }
+
+  private static String metricFacetKey(String name, Component component) {
+    return name + "_" + component.getName();
   }
 
   /** The $group stage aggregates counts for each (type, path, bucket) combination. */

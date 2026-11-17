@@ -185,7 +185,8 @@
                 "embedded": 0.0
               },
               "collectorTypeCount": {
-                "facet": 0.0
+                "facet": 0.0,
+                "metrics": 0.0
               },
               "vectorQueryTypeCount": {
                 "exact": 0.0,
