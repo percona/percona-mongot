@@ -115,7 +115,9 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
                 queryOptimizationFlags,
                 searchBatchProducers,
                 extraBatchProducersToClose,
-                metaResultsList));
+                metaResultsList),
+        searchBatchProducers,
+        extraBatchProducersToClose);
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -184,7 +186,9 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
                 extraBatchProducersToClose,
                 facetBatchProducers,
                 countBatchProducers,
-                metricsBatchProducers));
+                metricsBatchProducers),
+        searchBatchProducers,
+        extraBatchProducersToClose);
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -361,6 +365,27 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         throws IOException, InvalidQueryException, InterruptedException;
   }
 
+  /**
+   * Runs {@code partitionExecutor} on every partition. If any partition fails, the search producers
+   * already collected from the others are closed before rethrowing, so their searcher references
+   * are released instead of pinning old index readers.
+   */
+  private void executeOnAllPartitions(
+      Query query,
+      PartitionExecutor partitionExecutor,
+      List<LuceneSearchBatchProducer> searchBatchProducers,
+      List<BatchProducer> extraBatchProducersToClose)
+      throws IOException, InvalidQueryException, InterruptedException {
+    try {
+      // The two-argument overload below runs the partitions; this one only adds cleanup.
+      executeOnAllPartitions(query, partitionExecutor);
+    } catch (Exception e) {
+      closeAll(searchBatchProducers, e);
+      closeAll(extraBatchProducersToClose, e);
+      throw e;
+    }
+  }
+
   private void executeOnAllPartitions(Query query, PartitionExecutor partitionExecutor)
       throws IOException, InvalidQueryException, InterruptedException {
     if (query.concurrent() && this.taskExecutor.isPresent()) {
@@ -390,6 +415,22 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     } else {
       for (int i = 0; i < this.readers.size(); i++) {
         partitionExecutor.execute(i);
+      }
+    }
+  }
+
+  // ponytail: when the query thread is interrupted, Lucene's TaskExecutor stops waiting for the
+  // partition task it was blocked on without cancelling it, so that task can add a producer after
+  // this snapshot and leak it. Closing the gap needs partition tasks to close their own producer
+  // when they finish after cleanup has run.
+  private static void closeAll(List<? extends BatchProducer> producers, Exception failure) {
+    // Copy first because a still-running task may be appending. List.copyOf reads through
+    // toArray(), which Collections.synchronizedList locks like add(), so the copy cannot race.
+    for (BatchProducer producer : List.copyOf(producers)) {
+      try {
+        producer.close();
+      } catch (IOException | RuntimeException e) {
+        failure.addSuppressed(e);
       }
     }
   }

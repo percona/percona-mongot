@@ -26,6 +26,7 @@ import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.BatchProducer;
+import com.xgen.mongot.index.CountMetaBatchProducer;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.FacetBucket;
@@ -1651,6 +1652,72 @@ public class MultiLuceneSearchIndexReaderTest {
                     QueryOptimizationFlags.DEFAULT_OPTIONS));
 
     Assert.assertSame(originalException, thrown);
+  }
+
+  /**
+   * When one partition fails, the search producers already returned by the others hold searcher
+   * references and must be closed, or the old index readers stay pinned until restart.
+   */
+  @Test
+  public void testFailedPartitionClosesOtherPartitionsSearchProducers() throws Exception {
+    IOException failure = new IOException("partition failed");
+    LuceneSearchBatchProducer survivor = mock(LuceneSearchBatchProducer.class);
+    LuceneSearchIndexReader mockReader1 = mock(LuceneSearchIndexReader.class);
+    LuceneSearchIndexReader mockReader2 = mock(LuceneSearchIndexReader.class);
+    Mockito.when(mockReader1.query(any(), any(), any(), any()))
+        .thenReturn(new SearchProducerAndMetaResults(survivor, MetaResults.EMPTY));
+    Mockito.when(mockReader2.query(any(), any(), any(), any())).thenThrow(failure);
+
+    // No executor: partitions run in order, so the first succeeds before the second fails.
+    MultiLuceneSearchIndexReader multiReader =
+        new MultiLuceneSearchIndexReader(
+            List.of(mockReader1, mockReader2), drillSidewaysEnabledRegistry(), Optional.empty());
+
+    IOException thrown =
+        Assert.assertThrows(
+            IOException.class,
+            () ->
+                multiReader.query(
+                    QUERY_DEFINITION,
+                    QueryCursorOptions.empty(),
+                    BatchSizeStrategySelector.forQuery(
+                        QUERY_DEFINITION, QueryCursorOptions.empty()),
+                    QueryOptimizationFlags.DEFAULT_OPTIONS));
+
+    Assert.assertSame(failure, thrown);
+    verify(survivor).close();
+  }
+
+  @Test
+  public void testFailedConcurrentIntermediateQueryClosesOtherPartitionsSearchProducers()
+      throws Exception {
+    IOException failure = new IOException("partition failed");
+    LuceneSearchBatchProducer survivor = mock(LuceneSearchBatchProducer.class);
+    LuceneSearchIndexReader mockReader1 = mock(LuceneSearchIndexReader.class);
+    LuceneSearchIndexReader mockReader2 = mock(LuceneSearchIndexReader.class);
+    Mockito.when(mockReader1.intermediateQuery(any(), any(), any(), any()))
+        .thenReturn(new SearchProducerAndMetaProducer(survivor, new CountMetaBatchProducer(1)));
+    Mockito.when(mockReader2.intermediateQuery(any(), any(), any(), any())).thenThrow(failure);
+
+    MultiLuceneSearchIndexReader multiReader =
+        new MultiLuceneSearchIndexReader(
+            List.of(mockReader1, mockReader2),
+            drillSidewaysEnabledRegistry(),
+            Optional.of(this.concurrentSearchExecutor));
+
+    IOException thrown =
+        Assert.assertThrows(
+            IOException.class,
+            () ->
+                multiReader.intermediateQuery(
+                    QUERY_DEFINITION,
+                    QueryCursorOptions.empty(),
+                    BatchSizeStrategySelector.forQuery(
+                        QUERY_DEFINITION, QueryCursorOptions.empty()),
+                    QueryOptimizationFlags.DEFAULT_OPTIONS));
+
+    Assert.assertSame(failure, thrown);
+    verify(survivor).close();
   }
 
   /**
