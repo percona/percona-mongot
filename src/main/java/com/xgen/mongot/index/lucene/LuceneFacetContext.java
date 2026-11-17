@@ -82,6 +82,14 @@ class LuceneFacetContext {
   private String getMetricLuceneField(MetricDefinition definition, Optional<FieldPath> returnScope)
       throws InvalidQueryException {
     FieldPath path = FieldPath.parse(definition.path());
+    // Without this, a path outside the scope resolves through the embedded root's dynamic mapping
+    // to a field no child document has, and the metric silently comes back null or 0.0.
+    if (returnScope.isPresent() && !path.isChildOf(returnScope.get())) {
+      throw new InvalidQueryException(
+          String.format(
+              "metric path '%s' must be a descendant of returnScope.path '%s'",
+              path, returnScope.get()));
+    }
     if (returnScope.isPresent()
         && !this.searchIndexCapabilities.supportsEmbeddedNumericAndDateV2()) {
       throw new InvalidQueryException(
