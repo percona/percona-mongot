@@ -200,7 +200,7 @@ public abstract class ShardedSearchPlanBuilder {
                               .append("tag", new BsonString("$tag"))
                               .append("bucket", new BsonString("$bucket")))
                       .append("value", new BsonDocument("$sum", new BsonString("$count")))
-                      .append("metricSum", new BsonDocument("$sum", new BsonString("$value")))
+                      .append("metricSumParts", new BsonDocument("$push", new BsonString("$value")))
                       .append("metricMin", new BsonDocument("$min", new BsonString("$value")))
                       .append("metricMax", new BsonDocument("$max", new BsonString("$value")))),
               new BsonDocument("$facet", facetStageDoc),

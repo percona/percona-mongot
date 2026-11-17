@@ -2,6 +2,7 @@ package com.xgen.mongot.server.command.search;
 
 import static com.xgen.mongot.util.Check.checkState;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.index.IntermediateMetricBucket.Component;
 import com.xgen.mongot.index.query.CollectorQuery;
@@ -28,6 +29,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.bson.BsonArray;
 import org.bson.BsonDocument;
+import org.bson.BsonDouble;
 import org.bson.BsonElement;
 import org.bson.BsonInt32;
 import org.bson.BsonNull;
@@ -41,7 +43,7 @@ public class ShardedSearchPlanner {
   private static final String METRIC_TYPE = "metric";
 
   // Names of the extra $group accumulators that merge the payloads of intermediate metric buckets.
-  private static final String METRIC_SUM_ACCUMULATOR = "metricSum";
+  private static final String METRIC_SUM_PARTS_ACCUMULATOR = "metricSumParts";
   private static final String METRIC_MIN_ACCUMULATOR = "metricMin";
   private static final String METRIC_MAX_ACCUMULATOR = "metricMax";
 
@@ -151,13 +153,17 @@ public class ShardedSearchPlanner {
         getMetricsReplaceWithStage(countType, sortedDefinitions));
   }
 
-  /** The metrics $group stage additionally sums / mins / maxes each bucket's double payload. */
+  /**
+   * The metrics $group stage additionally collects / mins / maxes each bucket's double payload. Sum
+   * parts are collected rather than {@code $sum}-ed because {@code $sum} rounds away low-order bits
+   * (in mongod 9.0 it returns 0 for [1e16, 1, -1e16]); {@link #compensatedSum} adds them up.
+   */
   private static BsonDocument getMetricsGroupStage() {
     BsonDocument stage = getGroupStage();
     BsonString valueRef = new BsonString("$value");
     stage
         .getDocument("$group")
-        .append(METRIC_SUM_ACCUMULATOR, new BsonDocument("$sum", valueRef))
+        .append(METRIC_SUM_PARTS_ACCUMULATOR, new BsonDocument("$push", valueRef))
         .append(METRIC_MIN_ACCUMULATOR, new BsonDocument("$min", valueRef))
         .append(METRIC_MAX_ACCUMULATOR, new BsonDocument("$max", valueRef));
     return stage;
@@ -211,17 +217,18 @@ public class ShardedSearchPlanner {
   }
 
   /**
-   * avg/min/max resolve to null when no shard saw a value (mirroring MQL); sum resolves to 0.0
-   * because every shard always emits a sum bucket.
+   * avg/min/max resolve to null when no shard saw a value (mirroring MQL); sum resolves to 0.0,
+   * also when no shard emitted a sum bucket.
    */
   private static BsonValue metricExpression(String name, MetricDefinition.Type type) {
     return switch (type) {
-      case SUM -> firstOf(name, Component.SUM, METRIC_SUM_ACCUMULATOR);
+      case SUM -> compensatedSum(firstOf(name, Component.SUM, METRIC_SUM_PARTS_ACCUMULATOR));
       case MIN -> nullIfMissing(firstOf(name, Component.MIN, METRIC_MIN_ACCUMULATOR));
       case MAX -> nullIfMissing(firstOf(name, Component.MAX, METRIC_MAX_ACCUMULATOR));
       case AVG -> {
         BsonDocument count = firstOf(name, Component.COUNT, "value");
-        BsonDocument sum = firstOf(name, Component.SUM, METRIC_SUM_ACCUMULATOR);
+        BsonDocument sum =
+            compensatedSum(firstOf(name, Component.SUM, METRIC_SUM_PARTS_ACCUMULATOR));
         yield new BsonDocument(
             "$cond",
             new BsonDocument()
@@ -240,6 +247,91 @@ public class ShardedSearchPlanner {
    */
   private static BsonDocument nullIfMissing(BsonDocument expression) {
     return new BsonDocument("$ifNull", new BsonArray(List.of(expression, BsonNull.VALUE)));
+  }
+
+  /**
+   * Neumaier-sums an array of doubles, mirroring {@code NumericMetricAccumulator}: shards send
+   * their raw sum and its compensation as separate parts, so cancellation across shards keeps the
+   * low-order bits and the result depends as little as possible on the order the parts arrive in. A
+   * missing array sums to 0.0.
+   */
+  @VisibleForTesting
+  static BsonDocument compensatedSum(BsonValue parts) {
+    BsonString runningSum = new BsonString("$$value.s");
+    BsonString part = new BsonString("$$this");
+    BsonString t = new BsonString("$$t");
+    // The low-order bits lost when adding the smaller-magnitude operand to the larger one.
+    BsonDocument lostBits =
+        new BsonDocument(
+            "$cond",
+            new BsonArray(
+                List.of(
+                    new BsonDocument(
+                        "$gte",
+                        new BsonArray(
+                            List.of(
+                                new BsonDocument("$abs", runningSum),
+                                new BsonDocument("$abs", part)))),
+                    add(subtract(runningSum, t), part),
+                    add(subtract(part, t), runningSum))));
+    BsonDocument step =
+        new BsonDocument(
+            "$let",
+            new BsonDocument()
+                .append("vars", new BsonDocument("t", add(runningSum, part)))
+                .append(
+                    "in",
+                    new BsonDocument()
+                        .append("s", t)
+                        .append("c", add(new BsonString("$$value.c"), lostBits))));
+    BsonDocument reduce =
+        new BsonDocument(
+            "$reduce",
+            new BsonDocument()
+                .append("input", parts)
+                .append(
+                    "initialValue",
+                    new BsonDocument()
+                        .append("s", new BsonDouble(0))
+                        .append("c", new BsonDouble(0)))
+                .append("in", step));
+    // Once the running sum is infinite the compensation is NaN (inf - inf); the running sum is then
+    // the IEEE result.
+    BsonString sum = new BsonString("$$r.s");
+    BsonDocument result =
+        new BsonDocument(
+            "$cond",
+            new BsonArray(
+                List.of(
+                    new BsonDocument(
+                        "$in",
+                        new BsonArray(
+                            List.of(
+                                sum,
+                                new BsonArray(
+                                    List.of(
+                                        new BsonDouble(Double.POSITIVE_INFINITY),
+                                        new BsonDouble(Double.NEGATIVE_INFINITY)))))),
+                    sum,
+                    add(sum, new BsonString("$$r.c")))));
+    return new BsonDocument(
+        "$ifNull",
+        new BsonArray(
+            List.of(
+                new BsonDocument(
+                    "$let",
+                    new BsonDocument()
+                        .append("vars", new BsonDocument("r", reduce))
+                        .append("in", result)),
+                new BsonDouble(0))));
+  }
+
+  private static BsonDocument add(BsonValue left, BsonValue right) {
+    return new BsonDocument("$add", new BsonArray(List.of(left, right)));
+  }
+
+  private static BsonDocument subtract(BsonValue left, BsonValue right) {
+    return new BsonDocument("$subtract", new BsonArray(List.of(left, right)));
   }
 
   private static BsonDocument firstOf(String name, Component component, String accumulator) {

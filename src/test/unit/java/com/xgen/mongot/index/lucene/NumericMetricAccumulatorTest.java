@@ -2,7 +2,11 @@ package com.xgen.mongot.index.lucene;
 
 import static org.junit.Assert.assertEquals;
 
+import com.xgen.mongot.index.IntermediateMetricBucket;
+import com.xgen.mongot.index.IntermediateMetricBucket.Component;
 import com.xgen.mongot.index.query.collectors.MetricDefinition;
+import java.util.List;
+import java.util.Optional;
 import org.bson.BsonDouble;
 import org.junit.Test;
 
@@ -50,6 +54,60 @@ public class NumericMetricAccumulatorTest {
 
     assertEquals(0.875, expected, 0.0);
     assertEquals(expected, merged.sum(), 0.0);
+  }
+
+  @Test
+  public void testDecomposeSendsCompensationAsSecondSumBucket() {
+    // sum() would round 1e16 + 1.0 to 1e16; the sharded merge needs the 1.0 to cancel against a
+    // -1e16 on another shard.
+    assertEquals(
+        List.of(
+            sumBucket(1e16),
+            sumBucket(1.0),
+            countBucket(2),
+            valueBucket(Component.MIN, 1.0),
+            valueBucket(Component.MAX, 1e16)),
+        accumulate(1e16, 1.0).decompose("t"));
+  }
+
+  @Test
+  public void testDecomposeOmitsZeroCompensation() {
+    assertEquals(
+        List.of(
+            sumBucket(3.0),
+            countBucket(2),
+            valueBucket(Component.MIN, 1.0),
+            valueBucket(Component.MAX, 2.0)),
+        accumulate(1.0, 2.0).decompose("t"));
+  }
+
+  @Test
+  public void testDecomposeSendsOnlyInfiniteSum() {
+    assertEquals(
+        List.of(
+            sumBucket(INF),
+            countBucket(2),
+            valueBucket(Component.MIN, 1.0),
+            valueBucket(Component.MAX, INF)),
+        accumulate(1.0, INF).decompose("t"));
+  }
+
+  @Test
+  public void testDecomposeEmptyAccumulator() {
+    assertEquals(
+        List.of(sumBucket(0.0), countBucket(0)), new NumericMetricAccumulator().decompose("t"));
+  }
+
+  private static IntermediateMetricBucket sumBucket(double value) {
+    return valueBucket(Component.SUM, value);
+  }
+
+  private static IntermediateMetricBucket valueBucket(Component component, double value) {
+    return new IntermediateMetricBucket("t", component, Optional.of(value), Optional.empty());
+  }
+
+  private static IntermediateMetricBucket countBucket(long count) {
+    return new IntermediateMetricBucket("t", Component.COUNT, Optional.empty(), Optional.of(count));
   }
 
   @Test

@@ -105,7 +105,15 @@ final class NumericMetricAccumulator {
     };
   }
 
+  /**
+   * Sends the raw sum and its compensation separately so the sharded merge keeps the low-order bits
+   * that {@link #sum()} would round away. A non-finite sum makes the compensation meaningless (NaN
+   * or infinite), so only {@link #sum()} is sent then.
+   */
   List<IntermediateMetricBucket> decompose(String tag) {
-    return IntermediateMetricBucket.decompose(tag, sum(), this.count, this.min, this.max);
+    return Double.isFinite(this.sum)
+        ? IntermediateMetricBucket.decompose(
+            tag, this.sum, this.compensation, this.count, this.min, this.max)
+        : IntermediateMetricBucket.decompose(tag, sum(), 0, this.count, this.min, this.max);
   }
 }
