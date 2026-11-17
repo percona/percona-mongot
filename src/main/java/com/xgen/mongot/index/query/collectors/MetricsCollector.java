@@ -15,6 +15,11 @@ import org.bson.BsonValue;
  * matched by {@code operator}, using the numeric doc values that {@code number} fields already
  * index. Results are returned in {@link com.xgen.mongot.index.MetaResults#metrics()}.
  *
+ * <p>Metrics are computed in double precision and always return doubles. Integer values (int32 and
+ * int64) are indexed as doubles, so integers beyond 2^53 and integer sums beyond 2^53 are rounded
+ * to the nearest double. MQL {@code $group} keeps such values exact as NumberLong, so results can
+ * differ for very large integers such as nanosecond timestamps or generated IDs.
+ *
  * @param metricDefinitions Keyed by metric name.
  */
 public record MetricsCollector(Operator operator, Map<String, MetricDefinition> metricDefinitions)

@@ -66,8 +66,9 @@ class LuceneFacetContext {
    * {@code number} fields with the (default) double representation index for every document.
    *
    * @throws InvalidQueryException if a path is not indexed as a {@code number} field, uses the
-   *     int64 representation (which truncates non-integral values), or targets embedded documents
-   *     on an index that predates numeric V2 fields in embedded documents.
+   *     int64 representation (which has no double doc values to read; metrics are computed in
+   *     double precision regardless), or targets embedded documents on an index that predates
+   *     numeric V2 fields in embedded documents.
    */
   Map<String, String> getMetricLuceneFields(
       MetricsCollector collector, Optional<ReturnScope> returnScope) throws InvalidQueryException {
@@ -116,7 +117,10 @@ class LuceneFacetContext {
       throw new InvalidQueryException(
           String.format(
               "Cannot compute metric \"%s\" on field \"%s\" because it is indexed with "
-                  + "representation \"%s\"; metrics require representation \"double\".",
+                  + "representation \"%s\". Metrics read the double-precision doc values that "
+                  + "representation \"double\" indexes and always compute in double precision, "
+                  + "so integers beyond 2^53 are rounded either way; index the field with "
+                  + "representation \"double\" to use it in metrics.",
               definition.type().name().toLowerCase(Locale.ROOT),
               definition.path(),
               options.representation().name().toLowerCase(Locale.ROOT)));

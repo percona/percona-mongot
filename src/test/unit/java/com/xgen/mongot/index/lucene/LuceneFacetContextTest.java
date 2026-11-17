@@ -2,7 +2,9 @@ package com.xgen.mongot.index.lucene;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
+import com.xgen.mongot.index.definition.NumericFieldOptions;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.lucene.field.FieldName;
@@ -15,6 +17,7 @@ import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.EmbeddedDocumentsFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.NumericFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.query.collectors.MetricsCollectorBuilder;
 import java.util.Map;
@@ -82,5 +85,36 @@ public class LuceneFacetContextTest {
     assertThrows(
         InvalidQueryException.class,
         () -> dynamicItemsContext().getMetricLuceneFields(avgOf("items"), ITEMS_SCOPE));
+  }
+
+  @Test
+  public void testInt64RepresentationIsRejectedWithPrecisionExplanation() {
+    SearchIndexDefinition indexDefinition =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexFeatureVersion(SearchIndexCapabilities.CURRENT_FEATURE_VERSION)
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .field(
+                        "count",
+                        FieldDefinitionBuilder.builder()
+                            .number(
+                                NumericFieldDefinitionBuilder.builder()
+                                    .representation(NumericFieldOptions.Representation.INT64)
+                                    .buildNumberField())
+                            .build())
+                    .build())
+            .build();
+    LuceneFacetContext context =
+        new LuceneFacetContext(
+            indexDefinition.createFieldDefinitionResolver(IndexFormatVersion.CURRENT),
+            indexDefinition.getIndexCapabilities(IndexFormatVersion.CURRENT));
+
+    InvalidQueryException e =
+        assertThrows(
+            InvalidQueryException.class,
+            () -> context.getMetricLuceneFields(avgOf("count"), Optional.empty()));
+    assertTrue(e.getMessage(), e.getMessage().contains("representation \"int64\""));
+    assertTrue(e.getMessage(), e.getMessage().contains("integers beyond 2^53 are rounded"));
   }
 }
