@@ -902,9 +902,9 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
       Map<String, NumericMetricAccumulator> accumulatorsByMetricName) {}
 
   /**
-   * Validates the metrics collector against the index definition, runs the search that collects
-   * the first batch of top docs together with every metric's accumulator, and re-keys the
-   * accumulators from Lucene field name to metric name.
+   * Validates the metrics collector against the index definition, runs the search that collects the
+   * first batch of top docs together with every metric's accumulator, and re-keys the accumulators
+   * from Lucene field name to metric name.
    */
   private MetricsSearch runMetricsSearch(
       MetricsCollector metricsCollector,

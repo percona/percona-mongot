@@ -26,6 +26,7 @@ class LuceneMetricsCollectorMetaBatchProducer implements BatchProducer {
 
   private final long totalHits;
   private final MetricsCollector metricsCollector;
+
   /** Keyed by metric name. */
   private final Map<String, NumericMetricAccumulator> accumulatorsByMetricName;
 

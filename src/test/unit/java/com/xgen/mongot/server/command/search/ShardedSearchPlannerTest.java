@@ -417,8 +417,7 @@ public class ShardedSearchPlannerTest {
                                 "$gt",
                                 new BsonArray(
                                     List.of(
-                                        first("avgRating", "count", "value"),
-                                        new BsonInt32(0)))))
+                                        first("avgRating", "count", "value"), new BsonInt32(0)))))
                         .append(
                             "then",
                             new BsonDocument(
@@ -428,7 +427,8 @@ public class ShardedSearchPlannerTest {
                                         first("avgRating", "sum", "metricSum"),
                                         first("avgRating", "count", "value")))))
                         .append("else", BsonNull.VALUE)))
-            // min/max buckets are absent when no shard saw a value; $ifNull keeps the field as null.
+            // min/max buckets are absent when no shard saw a value; $ifNull keeps the field as
+            // null.
             .append("maxPrice", nullIfMissing(first("maxPrice", "max", "metricMax")))
             .append("minPrice", nullIfMissing(first("minPrice", "min", "metricMin")));
     PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan expected =

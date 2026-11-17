@@ -226,8 +226,7 @@ public class ShardedSearchPlanner {
             "$cond",
             new BsonDocument()
                 .append(
-                    "if",
-                    new BsonDocument("$gt", new BsonArray(List.of(count, new BsonInt32(0)))))
+                    "if", new BsonDocument("$gt", new BsonArray(List.of(count, new BsonInt32(0)))))
                 .append("then", new BsonDocument("$divide", new BsonArray(List.of(sum, count))))
                 .append("else", BsonNull.VALUE));
       }
@@ -236,8 +235,8 @@ public class ShardedSearchPlanner {
 
   /**
    * Shards emit min/max buckets only when they saw a value, so with no values anywhere the $facet
-   * branch is empty and $first yields missing, which $replaceWith drops from the output. This
-   * turns missing into an explicit null, matching the unsharded result.
+   * branch is empty and $first yields missing, which $replaceWith drops from the output. This turns
+   * missing into an explicit null, matching the unsharded result.
    */
   private static BsonDocument nullIfMissing(BsonDocument expression) {
     return new BsonDocument("$ifNull", new BsonArray(List.of(expression, BsonNull.VALUE)));

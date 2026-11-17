@@ -20,8 +20,8 @@ import org.apache.lucene.search.SimpleCollector;
  * com.xgen.mongot.index.lucene.field.FieldName.TypeField#NUMBER_DOUBLE_V2}. Values are decoded with
  * {@link LuceneDoubleConversionUtils#fromMqlSortableLong} and every value of a multi-valued
  * document contributes. NaN values are skipped, unlike MQL {@code $sum}/{@code $avg}/{@code $min},
- * which return NaN once one is present. Safe for concurrent segment search: each slice gets its
- * own collector and {@link #reduce} merges them.
+ * which return NaN once one is present. Safe for concurrent segment search: each slice gets its own
+ * collector and {@link #reduce} merges them.
  */
 final class LuceneMetricsCollectorManager
     implements CollectorManager<
