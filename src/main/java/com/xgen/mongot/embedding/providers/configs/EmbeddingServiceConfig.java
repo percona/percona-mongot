@@ -1040,8 +1040,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           .build();
     }
 
-    public static HuggingFaceModelConfig fromBson(DocumentParser parser)
-        throws BsonParseException {
+    public static HuggingFaceModelConfig fromBson(DocumentParser parser) throws BsonParseException {
       return new HuggingFaceModelConfig(
           parser.getField(Fields.MODEL_ID).unwrap(),
           parser.getField(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS).unwrap(),

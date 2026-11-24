@@ -60,7 +60,8 @@ import org.junit.rules.TemporaryFolder;
 public class OnPremMongotBootstrapperTest {
 
   private static final String CUSTOM_ENDPOINT = "https://custom-api.example.com/v1/embeddings";
-  private static final String LOCAL_OPENAI_COMPATIBLE_ENDPOINT = "http://localhost:11434/v1/embeddings";
+  private static final String LOCAL_OPENAI_COMPATIBLE_ENDPOINT =
+      "http://localhost:11434/v1/embeddings";
   private static final String TEST_QUERY_KEY = "test-query-key";
   private static final String TEST_INDEXING_KEY = "test-indexing-key";
 

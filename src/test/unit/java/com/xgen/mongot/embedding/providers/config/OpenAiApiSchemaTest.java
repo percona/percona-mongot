@@ -100,9 +100,7 @@ public class OpenAiApiSchemaTest {
   @Test
   public void responseDeserialization_toleratesMissingUsageAndObject() throws Exception {
     // Some local engines (certain Ollama builds) omit usage and object.
-    String json =
-        String.format(
-            "{\"data\":[{\"embedding\":\"%s\"}]}", base64Floats(1f, 1f));
+    String json = String.format("{\"data\":[{\"embedding\":\"%s\"}]}", base64Floats(1f, 1f));
 
     EmbedResponse response = parse(json);
 
@@ -112,8 +110,7 @@ public class OpenAiApiSchemaTest {
 
   @Test
   public void responseDeserialization_invalidBase64Throws() {
-    String json =
-        "{\"object\":\"list\",\"data\":[{\"embedding\":\"not-base-64!!!\",\"index\":0}]}";
+    String json = "{\"object\":\"list\",\"data\":[{\"embedding\":\"not-base-64!!!\",\"index\":0}]}";
     assertThrows(BsonParseException.class, () -> parse(json));
   }
 
@@ -121,8 +118,7 @@ public class OpenAiApiSchemaTest {
   public void responseDeserialization_oddByteLengthThrows() {
     // 3 bytes is not a multiple of Float.BYTES (4).
     String base64 = Base64.getEncoder().encodeToString(new byte[] {1, 2, 3});
-    String json =
-        String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64);
+    String json = String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64);
     assertThrows(BsonParseException.class, () -> parse(json));
   }
 
