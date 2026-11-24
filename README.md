@@ -31,6 +31,12 @@ Welcome to MongoDB Search!
 
   Technical questions about using Mongo Search.
 
+## Security
+
+If you start `mongot` with your own `java` command instead of the bundled
+launcher, add `-XX:-UseBASE64Intrinsics` to your JVM arguments to avoid
+CVE-2026-114938.
+
 ## LICENSE
 
 MongoDB is free and the source is available. All versions are published
