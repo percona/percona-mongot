@@ -219,13 +219,16 @@ public class IndexMetricsUpdaterTest {
       var supplier = IndexMetricsSupplier.mockEmptyIndexMetricsSupplier();
       Mockito.doReturn(
               new VectorliteIndexMetrics(
-                  new VectorliteIndexMetrics.TieredStorageMetrics(1, 2, 3, 4), 5))
+                  new VectorliteIndexMetrics.TieredStorageMetrics(1, 13, 6, 7, 3, 4), 5))
           .when(supplier)
           .getVectorliteIndexMetrics();
       IndexMetrics result = buildUpdater(supplier).getMetrics();
 
       Assert.assertEquals(1, result.indexingMetrics().coldStorageSizeBytes());
-      Assert.assertEquals(2, result.indexingMetrics().warmCacheSizeBytes());
+      // The warm total is derived from the split (6 + 7).
+      Assert.assertEquals(13, result.indexingMetrics().warmCacheSizeBytes());
+      Assert.assertEquals(6, result.indexingMetrics().pinnedWarmCacheSizeBytes());
+      Assert.assertEquals(7, result.indexingMetrics().dynamicWarmCacheSizeBytes());
       Assert.assertEquals(3, result.queryingMetrics().warmQueriesCount());
       Assert.assertEquals(4, result.queryingMetrics().coldQueriesCount());
     }
@@ -238,6 +241,8 @@ public class IndexMetricsUpdaterTest {
 
       Assert.assertEquals(0, result.indexingMetrics().coldStorageSizeBytes());
       Assert.assertEquals(0, result.indexingMetrics().warmCacheSizeBytes());
+      Assert.assertEquals(0, result.indexingMetrics().pinnedWarmCacheSizeBytes());
+      Assert.assertEquals(0, result.indexingMetrics().dynamicWarmCacheSizeBytes());
       Assert.assertEquals(0, result.queryingMetrics().warmQueriesCount());
       Assert.assertEquals(0, result.queryingMetrics().coldQueriesCount());
     }
@@ -252,6 +257,64 @@ public class IndexMetricsUpdaterTest {
     }
 
     public static class TestIndexingMetricsUpdater {
+      @Test
+      public void recordChangeStreamUpdateToDeleteConversions_exportsPerIndexReasonsToFtdc() {
+        var registries = MeterAndFtdcRegistry.createWithCompositeMeterRegistry();
+        registries.getCompositeMeterRegistry().add(registries.ftdcRegistry());
+        var firstFactory =
+            new PerIndexMetricsFactory(
+                IndexingMetricsUpdater.NAMESPACE, registries, "generation1", "index1");
+        var firstUpdater =
+            IndexMetricsUpdaterBuilder.IndexingMetricsUpdaterBuilder.builder()
+                .metricsFactory(firstFactory)
+                .build();
+        var secondUpdater =
+            IndexMetricsUpdaterBuilder.IndexingMetricsUpdaterBuilder.builder()
+                .metricsFactory(
+                    new PerIndexMetricsFactory(
+                        IndexingMetricsUpdater.NAMESPACE, registries, "generation2", "index2"))
+                .build();
+
+        firstUpdater.recordChangeStreamUpdateToDeleteConversions(2, 5);
+        firstUpdater.recordChangeStreamUpdateToDeleteConversions(1, 0);
+        secondUpdater.recordChangeStreamUpdateToDeleteConversions(0, 4);
+
+        var metricName = IndexingMetricsUpdater.NAMESPACE + ".changeStreamUpdateToDelete";
+        assertThat(
+                registries
+                    .ftdcRegistry()
+                    .get(metricName)
+                    .tags(
+                        "generationId logString", "generation1", "reason", "missing_full_document")
+                    .counter()
+                    .count())
+            .isEqualTo(3);
+        assertThat(
+                registries
+                    .ftdcRegistry()
+                    .get(metricName)
+                    .tags("indexId logString", "index1", "reason", "missing_document_id")
+                    .counter()
+                    .count())
+            .isEqualTo(5);
+        assertThat(
+                registries
+                    .meterRegistry()
+                    .get(metricName)
+                    .tags("indexId logString", "index2", "reason", "missing_full_document")
+                    .counter()
+                    .count())
+            .isEqualTo(0);
+        assertThat(
+                registries
+                    .meterRegistry()
+                    .get(metricName)
+                    .tags("generationId logString", "generation2", "reason", "missing_document_id")
+                    .counter()
+                    .count())
+            .isEqualTo(4);
+      }
+
       @Test
       public void testIndexingMetricsSuppliers() {
         var mockedIndexMetricsSupplier = mock(IndexMetricValuesSupplier.class);
@@ -856,6 +919,7 @@ public class IndexMetricsUpdaterTest {
         queryingMetricsUpdater.getTotalQueryCounter().increment();
         queryingMetricsUpdater.getFailedQueryCounter().increment();
         queryingMetricsUpdater.getSearchAndGetMoreCommandCounter().increment();
+        queryingMetricsUpdater.getSearchVectorSearchQueryCounter().increment();
         queryingMetricsUpdater.getSearchResultBatchLatencyTimer().record(Duration.ofMillis(100));
 
         Tags perIndexTags = Tags.of("indexId logString", indexId.toHexString());
@@ -879,6 +943,13 @@ public class IndexMetricsUpdaterTest {
                 metricsFactory
                     .get("getMoreCommandCalls")
                     .tags(perIndexTags)
+                    .tag(INDEX_TYPE_TAG_NAME, "search_auto_embedding")
+                    .counter()
+                    .count())
+            .isEqualTo(1);
+        assertThat(
+                metricsFactory
+                    .get("searchVectorSearchQueries")
                     .tag(INDEX_TYPE_TAG_NAME, "search_auto_embedding")
                     .counter()
                     .count())

@@ -3,6 +3,7 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "search",
     srcs = [
+        "AutoEmbedQueryPathValidatorTest.java",
         "DeprecatedVectorSearchCommandTest.java",
         "GetMoreCommandTest.java",
         "KillCursorsCommandTest.java",
@@ -17,6 +18,7 @@ java_test_suite(
         "VectorSearchCommandIndexSizeMetricsTest.java",
         "VectorSearchCommandOfflineServeTest.java",
         "VectorSearchCommandTest.java",
+        "VectorSearchStageAutoEmbedValidatorTest.java",
     ],
     tags = ["unit"],
     deps = [

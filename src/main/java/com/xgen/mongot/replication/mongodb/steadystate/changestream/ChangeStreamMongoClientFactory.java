@@ -9,12 +9,14 @@ import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamAggregateOperationBuilder.AggregateOperationTemplate;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamAggregateOperationFactory;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector;
-import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector.ChangeStreamMode;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoClient;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoCursorClient;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamPartition;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamThrottlingRetry;
+import com.xgen.mongot.replication.mongodb.common.OverloadRejectionMetrics;
 import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamClient;
+import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
 import com.xgen.mongot.replication.mongodb.common.SplitEventChangeStreamClient;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
@@ -28,11 +30,15 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class ChangeStreamMongoClientFactory {
+  private static final Logger LOG = LoggerFactory.getLogger(ChangeStreamMongoClientFactory.class);
+
   private final BatchMongoClient mongoClient;
   private final SessionRefresher sessionRefresher;
   private final ChangeStreamModeSelector modeSelector;
@@ -44,9 +50,12 @@ class ChangeStreamMongoClientFactory {
   private final MeterRegistry ftdcRegistry;
   private final MetricsFactory meterMetricsFactory;
   private final boolean enableSplitLargeChangeStreamEvents;
-  private final boolean enableParallelChangeStreamReaders;
   private final int numParallelChangeStreamReaders;
   private final Optional<Executor> partitionReaderExecutor;
+  /* Counts every overload rejection, independent of the retry flag */
+  private final OverloadRejectionMetrics overloadRejections;
+  /* Present only when RETRY_THROTTLED_GETMORE_ON_SAME_CURSOR is on */
+  private final Optional<ChangeStreamThrottlingRetry> changeStreamThrottlingRetry;
 
   private ChangeStreamMongoClientFactory(
       BatchMongoClient mongoClient,
@@ -70,10 +79,17 @@ class ChangeStreamMongoClientFactory {
         new MetricsFactory("changestream", meterAndFtdcRegistry.meterRegistry());
     this.enableSplitLargeChangeStreamEvents =
         replicationConfig.getEnableSplitLargeChangeStreamEvents();
-    this.enableParallelChangeStreamReaders =
-        replicationConfig.getEnableParallelChangeStreamReaders();
     this.numParallelChangeStreamReaders = replicationConfig.getNumParallelChangeStreamReaders();
     this.partitionReaderExecutor = partitionReaderExecutor;
+    this.overloadRejections =
+        OverloadRejectionMetrics.create(
+            meterAndFtdcRegistry.meterRegistry(), OverloadRejectionMetrics.Phase.STEADY_STATE);
+    this.changeStreamThrottlingRetry =
+        replicationConfig.getRetryThrottledGetMoreOnSameCursor()
+            ? Optional.of(
+                ChangeStreamThrottlingRetry.create(
+                    meterAndFtdcRegistry.meterRegistry(), replicationConfig.getReplicationType()))
+            : Optional.empty();
   }
 
   static ChangeStreamMongoClientFactory create(
@@ -101,7 +117,9 @@ class ChangeStreamMongoClientFactory {
    * AggregateOperationTemplate}. Uses the default batch size.
    */
   ChangeStreamMongoClient<SteadyStateException> resumeDefaultChangeStream(
-      GenerationId generationId, AggregateOperationTemplate aggregateTemplate) {
+      GenerationId generationId,
+      AggregateOperationTemplate aggregateTemplate,
+      BooleanSupplier stopRetrying) {
 
     ChangeStreamMongoClient<SteadyStateException> client =
         new ChangeStreamMongoCursorClient<>(
@@ -112,7 +130,9 @@ class ChangeStreamMongoClientFactory {
             this.ftdcRegistry,
             SteadyStateException::wrapIfThrows,
             Optional.empty(),
-            Optional.of(this.changeStreamQueryMaxTimeMs));
+            Optional.of(this.changeStreamQueryMaxTimeMs),
+            Optional.of(this.overloadRejections),
+            this.changeStreamThrottlingRetry.map(retry -> retry.withStopCondition(stopRetrying)));
 
     if (this.enableSplitLargeChangeStreamEvents) {
       return new SplitEventChangeStreamClient<>(
@@ -127,7 +147,9 @@ class ChangeStreamMongoClientFactory {
    * AggregateOperationTemplate}. Sets the batch size to the value specified in replication configs.
    */
   ChangeStreamMongoClient<SteadyStateException> resumeBatchSizeConfiguredChangeStream(
-      GenerationId generationId, AggregateOperationTemplate aggregateTemplate) {
+      GenerationId generationId,
+      AggregateOperationTemplate aggregateTemplate,
+      BooleanSupplier stopRetrying) {
     ChangeStreamMongoClient<SteadyStateException> client =
         new ChangeStreamMongoCursorClient<>(
             generationId,
@@ -137,7 +159,9 @@ class ChangeStreamMongoClientFactory {
             this.ftdcRegistry,
             SteadyStateException::wrapIfThrows,
             this.embeddingGetMoreBatchSize,
-            Optional.of(this.changeStreamQueryMaxTimeMs));
+            Optional.of(this.changeStreamQueryMaxTimeMs),
+            Optional.of(this.overloadRejections),
+            this.changeStreamThrottlingRetry.map(retry -> retry.withStopCondition(stopRetrying)));
 
     if (this.enableSplitLargeChangeStreamEvents) {
       return new SplitEventChangeStreamClient<>(
@@ -155,14 +179,15 @@ class ChangeStreamMongoClientFactory {
       GenerationId generationId,
       ChangeStreamResumeInfo resumeInfo,
       IndexDefinition indexDefinition,
-      boolean removeMatchCollectionUuid) {
+      boolean removeMatchCollectionUuid,
+      BooleanSupplier stopRetrying) {
 
     var operationFactory = operationFactoryFor(indexDefinition, removeMatchCollectionUuid);
 
     return new ModeAwareChangeStreamClient(
         this.modeSelector,
         operationFactory,
-        cursorFactoryFor(indexDefinition),
+        cursorFactoryFor(indexDefinition, stopRetrying),
         resumeInfo,
         generationId);
   }
@@ -178,60 +203,89 @@ class ChangeStreamMongoClientFactory {
         this.enableSplitLargeChangeStreamEvents);
   }
 
-  private ChangeStreamClientFactory cursorFactoryFor(IndexDefinition indexDefinition) {
+  private ChangeStreamClientFactory cursorFactoryFor(
+      IndexDefinition indexDefinition, BooleanSupplier stopRetrying) {
     return indexDefinition.isAutoEmbeddingIndex()
-        ? this::resumeBatchSizeConfiguredChangeStream
-        : this::resumeDefaultChangeStream;
+        ? (id, template) -> resumeBatchSizeConfiguredChangeStream(id, template, stopRetrying)
+        : (id, template) -> resumeDefaultChangeStream(id, template, stopRetrying);
   }
 
   /**
-   * Starts a change stream which might be restarted when {@link ChangeStreamMode} needs to be
-   * switched or passed TTL. When {@link Feature#PARALLEL_CHANGE_STREAM_READERS} is enabled, one
-   * reader per partition is started instead; otherwise behavior is unchanged.
+   * Starts a change stream that restarts when its mode changes or its TTL expires. The caller
+   * selects parallel readers using the same per-generation decision as partition checkpoint
+   * tracking.
+   *
+   * <p>Throttled getMores are retried on the same cursor until {@code stopRetrying} is true, so the
+   * caller can stop retries when it shuts down.
    */
   ChangeStreamMongoClient<SteadyStateException> resumeTimedModeAwareChangeStream(
       GenerationId generationId,
       ChangeStreamResumeInfo resumeInfo,
       IndexDefinition indexDefinition,
-      boolean removeMatchCollectionUuid)
+      boolean removeMatchCollectionUuid,
+      boolean useParallelChangeStreamReaders,
+      BooleanSupplier stopRetrying)
       throws SteadyStateException {
-    if (this.enableParallelChangeStreamReaders) {
+    if (useParallelChangeStreamReaders) {
       return resumePartitionedChangeStream(
-          generationId, resumeInfo, indexDefinition, removeMatchCollectionUuid);
+          generationId, resumeInfo, indexDefinition, removeMatchCollectionUuid, stopRetrying);
     }
 
+    MongoNamespace namespace = resumeInfo.getNamespace();
     TimedChangeStreamClientFactory clientFactory =
-        (GenerationId id, ChangeStreamResumeInfo info) ->
-            this.resumeModeAwareChangeStream(id, info, indexDefinition, removeMatchCollectionUuid);
+        (id, resumeToken) ->
+            this.resumeModeAwareChangeStream(
+                id,
+                ChangeStreamResumeInfo.create(namespace, resumeToken),
+                indexDefinition,
+                removeMatchCollectionUuid,
+                stopRetrying);
 
     // randomly distribute given ttl by 10% to avoid restarting all cursors in a short period
     Duration timeToLive =
         DurationUtils.getRandomlyDistributionDuration(this.changeStreamCursorMaxTime, 0.1);
 
-    return new TimedChangeStreamClient(clientFactory, resumeInfo, generationId, timeToLive);
+    return new TimedChangeStreamClient(
+        clientFactory.resumeChangeStream(generationId, resumeInfo.getResumeToken()),
+        clientFactory,
+        generationId,
+        timeToLive);
   }
 
-  /** Starts a {@link PartitionedChangeStreamClient} with one reader per partition. */
+  /** Starts one change stream reader per partition. */
   private ChangeStreamMongoClient<SteadyStateException> resumePartitionedChangeStream(
       GenerationId generationId,
       ChangeStreamResumeInfo resumeInfo,
       IndexDefinition indexDefinition,
-      boolean removeMatchCollectionUuid)
+      boolean removeMatchCollectionUuid,
+      BooleanSupplier stopRetrying)
       throws SteadyStateException {
 
     var operationFactory = operationFactoryFor(indexDefinition, removeMatchCollectionUuid);
-    ChangeStreamClientFactory cursorFactory = cursorFactoryFor(indexDefinition);
+    ChangeStreamClientFactory cursorFactory = cursorFactoryFor(indexDefinition, stopRetrying);
+    var prefix = ResumeTokenUtils.tryParseResumeTokenPrefix(resumeInfo.getResumeToken());
+    if (prefix.isEmpty()) {
+      LOG.warn("Cannot determine partitioned resume policy from token prefix; resyncing index");
+      throw SteadyStateException.createRequiresResync(
+          "Cannot determine partitioned resume policy from resume token");
+    }
+    boolean resumeAfterInvalidate = prefix.orElseThrow().fromInvalidate();
 
-    // cursorFactory closes over this.mongoClient, so the client argument is unused here.
+    // Partition readers normally start inclusively at the shared token's timestamp. An invalidate
+    // token must instead use startAfter; replaying it would repeat the lifecycle transition and
+    // resume from the same invalidate token indefinitely.
     PartitionedChangeStreamClient.ReaderFactory<SteadyStateException> readerFactory =
         (unusedMongoClient, partition, start) ->
-            newPartitionReader(
-                generationId,
-                resumeInfo.getNamespace(),
-                operationFactory,
-                cursorFactory,
-                partition,
-                start);
+            resumeAfterInvalidate
+                ? newPartitionReaderAfterInvalidate(
+                    generationId, resumeInfo, operationFactory, cursorFactory, partition)
+                : newPartitionReader(
+                    generationId,
+                    resumeInfo.getNamespace(),
+                    operationFactory,
+                    cursorFactory,
+                    partition,
+                    start);
 
     return PartitionedChangeStreamClient.resume(
         this.numParallelChangeStreamReaders,
@@ -239,58 +293,87 @@ class ChangeStreamMongoClientFactory {
         this.mongoClient,
         readerFactory,
         this.partitionReaderExecutor.orElseThrow(),
-        SteadyStateException::wrapIfThrows);
+        SteadyStateException::wrapIfThrows,
+        this.meterMetricsFactory);
   }
 
   /**
-   * Builds one partition's reader. The first open uses {@code start} because a shared resume token
-   * is not valid with {@code startAfter} on a filtered per-partition stream; restarts use the
-   * partition's own post-batch resume token (see {@link #partitionClientFactory}).
+   * Opens a partition with startAtOperationTime at the shared checkpoint's timestamp. Using
+   * startAfter with the shared token can fail if this partition filters out that token's event. TTL
+   * restarts use startAfter with this partition's own latest post-batch resume token.
    */
-  private TimeableChangeStreamMongoClient<SteadyStateException> newPartitionReader(
+  @VisibleForTesting
+  TimeableChangeStreamMongoClient<SteadyStateException> newPartitionReader(
       GenerationId generationId,
       MongoNamespace namespace,
       ChangeStreamAggregateOperationFactory operationFactory,
       ChangeStreamClientFactory cursorFactory,
       ChangeStreamPartition partition,
-      BsonTimestamp start)
-      throws SteadyStateException {
+      BsonTimestamp start) {
 
     // Jitter the TTL so N partitions of one index don't all restart at once.
     Duration timeToLive =
         DurationUtils.getRandomlyDistributionDuration(this.changeStreamCursorMaxTime, 0.1);
-    TimedChangeStreamClientFactory clientFactory =
-        partitionClientFactory(operationFactory, cursorFactory, namespace, start, partition);
-
-    // TimedChangeStreamClient requires a token, but the first open ignores it (opens by operation
-    // time) and later restarts replace it with the partition's own.
-    ChangeStreamResumeInfo placeholderResumeInfo =
-        ChangeStreamResumeInfo.create(namespace, new BsonDocument());
+    var initialClient =
+        new ModeAwareChangeStreamClient(
+            this.modeSelector,
+            operationFactory,
+            cursorFactory,
+            namespace,
+            start,
+            partition,
+            generationId);
 
     return new TimedChangeStreamClient(
-        clientFactory, placeholderResumeInfo, generationId, timeToLive);
+        initialClient,
+        partitionClientFactory(operationFactory, cursorFactory, namespace, partition),
+        generationId,
+        timeToLive);
   }
 
-  /**
-   * Restart factory for one partition: the first invocation opens by operation time with the
-   * partition filter; later ones resume from the partition's own resume token in {@code info}.
-   */
+  /** Opens after an invalidate token so the lifecycle event is not replayed. */
+  @VisibleForTesting
+  TimeableChangeStreamMongoClient<SteadyStateException> newPartitionReaderAfterInvalidate(
+      GenerationId generationId,
+      ChangeStreamResumeInfo resumeInfo,
+      ChangeStreamAggregateOperationFactory operationFactory,
+      ChangeStreamClientFactory cursorFactory,
+      ChangeStreamPartition partition) {
+    // Jitter the TTL so N partitions of one index don't all restart at once.
+    Duration timeToLive =
+        DurationUtils.getRandomlyDistributionDuration(this.changeStreamCursorMaxTime, 0.1);
+    var initialClient =
+        new ModeAwareChangeStreamClient(
+            this.modeSelector,
+            operationFactory,
+            cursorFactory,
+            resumeInfo,
+            partition,
+            generationId);
+
+    return new TimedChangeStreamClient(
+        initialClient,
+        partitionClientFactory(
+            operationFactory, cursorFactory, resumeInfo.getNamespace(), partition),
+        generationId,
+        timeToLive);
+  }
+
+  /** Creates TTL replacements using startAfter with this partition's post-batch resume token. */
   @VisibleForTesting
   TimedChangeStreamClientFactory partitionClientFactory(
       ChangeStreamAggregateOperationFactory operationFactory,
       ChangeStreamClientFactory cursorFactory,
       MongoNamespace namespace,
-      BsonTimestamp start,
       ChangeStreamPartition partition) {
-    AtomicBoolean isFirstOpen = new AtomicBoolean(true);
-    return (id, info) -> {
-      if (isFirstOpen.getAndSet(false)) {
-        return new ModeAwareChangeStreamClient(
-            this.modeSelector, operationFactory, cursorFactory, namespace, start, partition, id);
-      }
-      return new ModeAwareChangeStreamClient(
-          this.modeSelector, operationFactory, cursorFactory, info, partition, id);
-    };
+    return (id, resumeToken) ->
+        new ModeAwareChangeStreamClient(
+            this.modeSelector,
+            operationFactory,
+            cursorFactory,
+            ChangeStreamResumeInfo.create(namespace, resumeToken),
+            partition,
+            id);
   }
 
   @FunctionalInterface
@@ -300,10 +383,11 @@ class ChangeStreamMongoClientFactory {
         GenerationId generationId, AggregateOperationTemplate aggregateTemplate);
   }
 
+  /** Creates a client in its captured namespace using the supplied resume token. */
   @FunctionalInterface
   interface TimedChangeStreamClientFactory {
 
     TimeableChangeStreamMongoClient<SteadyStateException> resumeChangeStream(
-        GenerationId generationId, ChangeStreamResumeInfo resumeInfo);
+        GenerationId generationId, BsonDocument resumeToken);
   }
 }

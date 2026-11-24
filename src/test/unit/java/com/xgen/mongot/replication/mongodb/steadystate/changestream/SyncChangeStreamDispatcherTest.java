@@ -11,11 +11,14 @@ import static com.xgen.testing.mongot.mock.index.VectorIndex.mockAutoEmbeddingVe
 import static com.xgen.testing.mongot.mock.replication.mongodb.common.DocumentIndexer.mockDocumentIndexer;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,16 +36,19 @@ import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamBatch;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamDocumentUtils;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoClient;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamPartition;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
+import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamClient;
+import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamProgressTracker;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateSchedulingMethod;
 import com.xgen.mongot.util.Condition;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.concurrent.Executors;
-import com.xgen.mongot.util.concurrent.Sleeper;
+import com.xgen.mongot.util.mongodb.BatchMongoClient;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
@@ -58,12 +64,14 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
@@ -72,6 +80,7 @@ import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
 public class SyncChangeStreamDispatcherTest {
 
@@ -186,7 +195,8 @@ public class SyncChangeStreamDispatcherTest {
     ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
     when(mongoClient.getNext()).thenReturn(changeStreamBatch);
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
     ChangeStreamIndexManager indexManager =
         spy(
@@ -271,7 +281,8 @@ public class SyncChangeStreamDispatcherTest {
         mockIndexGeneration(embeddingDefinition).getDefinitionGeneration();
 
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mock(ChangeStreamMongoClient.class));
 
     AtomicReference<ChangeStreamResumeInfo> resumeInfoReference = new AtomicReference<>();
@@ -330,7 +341,8 @@ public class SyncChangeStreamDispatcherTest {
         .thenThrow(SteadyStateException.createTransient(new RuntimeException("closed"), "closed"));
 
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
 
     ChangeStreamIndexManager indexManager =
@@ -384,7 +396,8 @@ public class SyncChangeStreamDispatcherTest {
 
     ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
 
     ChangeStreamIndexManager indexManager =
@@ -442,7 +455,8 @@ public class SyncChangeStreamDispatcherTest {
         mockIndexGeneration(definition).getDefinitionGeneration();
 
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mock(ChangeStreamMongoClient.class));
     ChangeStreamIndexManager indexManager =
         DecodingExecutorChangeStreamIndexManager.createWithDecodingScheduler(
@@ -525,7 +539,8 @@ public class SyncChangeStreamDispatcherTest {
                 new RuntimeException("stop after 3rd getMore"), "test-terminate"));
 
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
 
     ChangeStreamIndexManager indexManager =
@@ -603,7 +618,8 @@ public class SyncChangeStreamDispatcherTest {
                 new RuntimeException("stop after 3rd getMore"), "test-terminate"));
 
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
 
     IndexMetricsUpdater metrics =
@@ -662,114 +678,134 @@ public class SyncChangeStreamDispatcherTest {
   }
 
   @Test
-  public void getNext_throttled_retriesSameCursorBeforeFailingLifecycle() throws Exception {
+  public void getNext_partitionedInitialReadFailure_failsLifecycle() throws Exception {
     var definition = SearchIndex.mockSearchDefinition(new ObjectId());
-    IndexDefinitionGeneration generation =
-        mockIndexGeneration(definition).getDefinitionGeneration();
+    var generation = mockIndexGeneration(definition).getDefinitionGeneration();
+    var rejection = throttled(Errors.ADMISSION_QUEUE_OVERFLOW.code);
+    ChangeStreamMongoClient<SteadyStateException> reader = mock(ChangeStreamMongoClient.class);
+    when(reader.getNext()).thenThrow(rejection);
+    var tracker =
+        new PartitionedChangeStreamProgressTracker(
+            Map.of(
+                new ChangeStreamPartition(0, 1),
+                ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getResumeToken()));
+    var indexManager =
+        spy(indexManager(definition, generation, new CompletableFuture<>(), Optional.of(tracker)));
+    var meterRegistry = new SimpleMeterRegistry();
 
-    // Two throttled getMores, then an unrelated transient failure that is not retried in place.
-    ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
-    when(mongoClient.getNext())
-        .thenThrow(throttled(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code))
-        .thenThrow(throttled(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code))
-        .thenThrow(
-            SteadyStateException.createTransient(
-                new RuntimeException("not throttling"), "test-terminate"));
+    try (var readerExecutor =
+            Executors.fixedSizeThreadPool("partition-reader", 1, new SimpleMeterRegistry());
+        var client =
+            PartitionedChangeStreamClient.resume(
+                1,
+                ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getResumeToken(),
+                mock(BatchMongoClient.class),
+                (mongoClient, partition, start) -> reader,
+                readerExecutor,
+                SteadyStateException::wrapIfThrows)) {
+      var mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
+      when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+              any(), any(), any(), anyBoolean(), eq(true), any()))
+          .thenReturn(client);
+      // Throttling retries happen inside the low-level readers; the dispatcher never retries.
+      var dispatcher =
+          new SyncChangeStreamDispatcher(
+              meterRegistry,
+              mongoClientFactory,
+              new FifoExecutor(
+                  Executors.fixedSizeThreadScheduledExecutor(
+                      "executor", 1, new SimpleMeterRegistry())),
+              CommonReplicationConfig.Type.DEFAULT);
+      try {
+        dispatcher.add(
+            definition,
+            generation.getGenerationId(),
+            ChangeStreamUtils.PRE_BATCH_RESUME_INFO,
+            indexManager,
+            false);
 
-    ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
-        .thenReturn(mongoClient);
-
-    ChangeStreamIndexManager indexManager =
-        spy(indexManager(definition, generation, new CompletableFuture<>()));
-
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    SyncChangeStreamDispatcher syncDispatcher =
-        new SyncChangeStreamDispatcher(
-            meterRegistry,
-            mongoClientFactory,
-            new FifoExecutor(
-                Executors.fixedSizeThreadScheduledExecutor(
-                    "executor", 1, new SimpleMeterRegistry())),
-            CommonReplicationConfig.Type.DEFAULT,
-            /* retryThrottledGetMoreOnSameCursor= */ true,
-            Sleeper.NO_OP);
-
-    try {
-      syncDispatcher.add(
-          definition,
-          generation.getGenerationId(),
-          mock(ChangeStreamResumeInfo.class),
-          indexManager,
-          false);
-
-      // Both rate-limited getMores are retried on the same cursor, so only the third,
-      // non-throttling failure reaches the lifecycle.
-      verify(indexManager, timeout(5000)).failLifecycle(any());
-      verify(mongoClient, timeout(5000).times(3)).getNext();
-      assertThat(throttlingRetries(meterRegistry)).isEqualTo(2.0);
-    } finally {
-      syncDispatcher.shutdown();
+        verify(indexManager, timeout(5000)).failLifecycle(rejection);
+        verify(reader, timeout(5000)).close();
+        verify(reader).getNext();
+      } finally {
+        dispatcher.shutdown();
+      }
     }
   }
 
   @Test
-  public void getNext_admissionQueueOverflow_retriesSameCursor() throws Exception {
+  public void getNext_partitionedRenameFailure_failsLifecycle() throws Exception {
     var definition = SearchIndex.mockSearchDefinition(new ObjectId());
-    IndexDefinitionGeneration generation =
-        mockIndexGeneration(definition).getDefinitionGeneration();
+    var generation = mockIndexGeneration(definition).getDefinitionGeneration();
+    var rename = ChangeStreamUtils.renameEvent(10);
+    var invalidate = ChangeStreamUtils.invalidateEvent(11);
+    var failure = throttled(Errors.ADMISSION_QUEUE_OVERFLOW.code);
+    ChangeStreamMongoClient<SteadyStateException> reader = mock(ChangeStreamMongoClient.class);
+    when(reader.getNext())
+        .thenReturn(
+            new ChangeStreamBatch(
+                ChangeStreamUtils.toRawBsonDocuments(
+                    List.of(ChangeStreamUtils.insertEvent(1, definition), rename)),
+                rename.getResumeToken(),
+                Optional.of(new BsonTimestamp(1, 10))))
+        .thenThrow(failure)
+        .thenReturn(
+            new ChangeStreamBatch(
+                ChangeStreamUtils.toRawBsonDocuments(List.of(invalidate)),
+                invalidate.getResumeToken(),
+                Optional.of(new BsonTimestamp(1, 11))));
+    var tracker =
+        new PartitionedChangeStreamProgressTracker(
+            Map.of(
+                new ChangeStreamPartition(0, 1),
+                ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getResumeToken()));
+    var indexManager =
+        spy(indexManager(definition, generation, new CompletableFuture<>(), Optional.of(tracker)));
+    var meterRegistry = new SimpleMeterRegistry();
 
-    ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
-    when(mongoClient.getNext())
-        .thenThrow(throttled(Errors.ADMISSION_QUEUE_OVERFLOW.code))
-        .thenThrow(throttled(Errors.ADMISSION_QUEUE_OVERFLOW.code))
-        .thenThrow(
-            SteadyStateException.createTransient(
-                new RuntimeException("not throttling"), "test-terminate"));
+    try (var readerExecutor =
+            Executors.fixedSizeThreadPool("partition-reader", 1, new SimpleMeterRegistry());
+        var client =
+            PartitionedChangeStreamClient.resume(
+                1,
+                ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getResumeToken(),
+                mock(BatchMongoClient.class),
+                (mongoClient, partition, start) -> reader,
+                readerExecutor,
+                SteadyStateException::wrapIfThrows)) {
+      var mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
+      when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+              any(), any(), any(), anyBoolean(), eq(true), any()))
+          .thenReturn(client);
+      // Throttling retries happen inside the low-level readers; the dispatcher never retries.
+      var dispatcher =
+          new SyncChangeStreamDispatcher(
+              meterRegistry,
+              mongoClientFactory,
+              new FifoExecutor(
+                  Executors.fixedSizeThreadScheduledExecutor(
+                      "executor", 1, new SimpleMeterRegistry())),
+              CommonReplicationConfig.Type.DEFAULT);
+      try {
+        dispatcher.add(
+            definition,
+            generation.getGenerationId(),
+            ChangeStreamUtils.PRE_BATCH_RESUME_INFO,
+            indexManager,
+            false);
 
-    ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
-        .thenReturn(mongoClient);
-
-    ChangeStreamIndexManager indexManager =
-        spy(indexManager(definition, generation, new CompletableFuture<>()));
-
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    SyncChangeStreamDispatcher syncDispatcher =
-        new SyncChangeStreamDispatcher(
-            meterRegistry,
-            mongoClientFactory,
-            new FifoExecutor(
-                Executors.fixedSizeThreadScheduledExecutor(
-                    "executor", 1, new SimpleMeterRegistry())),
-            CommonReplicationConfig.Type.DEFAULT,
-            /* retryThrottledGetMoreOnSameCursor= */ true,
-            Sleeper.NO_OP);
-
-    try {
-      syncDispatcher.add(
-          definition,
-          generation.getGenerationId(),
-          mock(ChangeStreamResumeInfo.class),
-          indexManager,
-          false);
-
-      // 433 is rejected at ticket acquisition, before the operation runs, so the cursor survives
-      // and the same-cursor retry applies (CLOUDP-450070).
-      verify(indexManager, timeout(5000)).failLifecycle(any());
-      verify(mongoClient, timeout(5000).times(3)).getNext();
-      assertThat(throttlingRetries(meterRegistry)).isEqualTo(2.0);
-      assertThat(
-              overloadRejections(
-                  meterRegistry, Errors.ADMISSION_QUEUE_OVERFLOW.code, "steadyState"))
-          .isEqualTo(2.0);
-    } finally {
-      syncDispatcher.shutdown();
+        verify(indexManager, timeout(5000)).failLifecycle(failure);
+        verify(reader, timeout(5000)).close();
+        verify(reader, times(2)).getNext();
+        verify(indexManager, never()).indexBatch(any(), any(), any());
+      } finally {
+        dispatcher.shutdown();
+      }
     }
   }
 
   @Test
-  public void getNext_throttledWithFeatureDisabled_failsLifecycleImmediately() throws Exception {
+  public void getNext_throttled_failsBatchWithoutRetryingInTheDispatcher() throws Exception {
     var definition = SearchIndex.mockSearchDefinition(new ObjectId());
     IndexDefinitionGeneration generation =
         mockIndexGeneration(definition).getDefinitionGeneration();
@@ -779,17 +815,16 @@ public class SyncChangeStreamDispatcherTest {
         .thenThrow(throttled(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code));
 
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
 
     ChangeStreamIndexManager indexManager =
         spy(indexManager(definition, generation, new CompletableFuture<>()));
 
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    // Flag off (the convenience constructor defaults it to false).
     SyncChangeStreamDispatcher syncDispatcher =
         new SyncChangeStreamDispatcher(
-            meterRegistry,
+            new SimpleMeterRegistry(),
             mongoClientFactory,
             new FifoExecutor(
                 Executors.fixedSizeThreadScheduledExecutor(
@@ -804,157 +839,48 @@ public class SyncChangeStreamDispatcherTest {
           indexManager,
           false);
 
-      // With RETRY_THROTTLED_GETMORE_ON_SAME_CURSOR off, the throttled getMore takes the
-      // pre-existing path straight away: one call, no retries, lifecycle failed. This is what
-      // makes disabling the flag a behavioural revert to the state before CLOUDP-427401.
+      // Throttled getMores are retried inside ChangeStreamMongoCursorClient, below the client
+      // wrappers. A throttled failure that reaches the dispatcher is final: one call, then the
+      // batch fails to the existing path.
       verify(indexManager, timeout(5000)).failLifecycle(any());
       verify(mongoClient, timeout(5000).times(1)).getNext();
-      assertThat(throttlingRetries(meterRegistry)).isEqualTo(0.0);
     } finally {
       syncDispatcher.shutdown();
     }
   }
 
   @Test
-  public void getNext_throttlingPersists_failsLifecycleAfterRetriesExhausted() throws Exception {
+  public void add_stopRetryingCondition_followsDispatcherAndIndexShutdown() throws Exception {
     var definition = SearchIndex.mockSearchDefinition(new ObjectId());
     IndexDefinitionGeneration generation =
         mockIndexGeneration(definition).getDefinitionGeneration();
-
+    // Park the dispatcher's worker inside getNext() so it is not using the index manager spy while
+    // the test re-stubs it; stubbing a spy that another thread is calling is racy.
+    CountDownLatch getNextEntered = new CountDownLatch(1);
+    CountDownLatch releaseGetNext = new CountDownLatch(1);
     ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
     when(mongoClient.getNext())
-        .thenThrow(throttled(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code));
-
+        .thenAnswer(
+            invocation -> {
+              getNextEntered.countDown();
+              releaseGetNext.await(5, TimeUnit.SECONDS);
+              throw SteadyStateException.createShutDown();
+            });
     ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(
+            any(), any(), any(), anyBoolean(), anyBoolean(), any()))
         .thenReturn(mongoClient);
-
     ChangeStreamIndexManager indexManager =
         spy(indexManager(definition, generation, new CompletableFuture<>()));
-
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
     SyncChangeStreamDispatcher syncDispatcher =
         new SyncChangeStreamDispatcher(
-            meterRegistry,
-            mongoClientFactory,
-            new FifoExecutor(
-                Executors.fixedSizeThreadScheduledExecutor(
-                    "executor", 1, new SimpleMeterRegistry())),
-            CommonReplicationConfig.Type.DEFAULT,
-            /* retryThrottledGetMoreOnSameCursor= */ true,
-            Sleeper.NO_OP);
-
-    try {
-      syncDispatcher.add(
-          definition,
-          generation.getGenerationId(),
-          mock(ChangeStreamResumeInfo.class),
-          indexManager,
-          false);
-
-      // The initial attempt plus MAX_THROTTLING_RETRIES retries, then we fall through to the
-      // existing shutdown/retry path.
-      verify(indexManager, timeout(5000)).failLifecycle(any());
-      int expectedGetNextCalls = SyncChangeStreamDispatcher.MAX_THROTTLING_RETRIES + 1;
-      verify(mongoClient, timeout(5000).times(expectedGetNextCalls)).getNext();
-      verify(mongoClient, timeout(5000)).close();
-      assertThat(throttlingRetries(meterRegistry))
-          .isEqualTo((double) SyncChangeStreamDispatcher.MAX_THROTTLING_RETRIES);
-      // The retry budget ran out, which is what distinguishes this from a retry that succeeded.
-      assertThat(throttlingRetriesExhausted(meterRegistry)).isEqualTo(1.0);
-      // Every attempt was a rejection, including the one that exhausted the budget.
-      assertThat(
-              overloadRejections(
-                  meterRegistry, Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code, "steadyState"))
-          .isEqualTo((double) SyncChangeStreamDispatcher.MAX_THROTTLING_RETRIES + 1);
-    } finally {
-      syncDispatcher.shutdown();
-    }
-  }
-
-  @Test
-  public void getNext_throttledThenSucceeds_countsRejectionsButNotExhaustion() throws Exception {
-    var definition = SearchIndex.mockSearchDefinition(new ObjectId());
-    IndexDefinitionGeneration generation =
-        mockIndexGeneration(definition).getDefinitionGeneration();
-
-    ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
-    when(mongoClient.getNext())
-        .thenThrow(throttled(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code))
-        .thenThrow(
-            SteadyStateException.createTransient(
-                new RuntimeException("not throttling"), "test-terminate"));
-
-    ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
-        .thenReturn(mongoClient);
-
-    ChangeStreamIndexManager indexManager =
-        spy(indexManager(definition, generation, new CompletableFuture<>()));
-
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    SyncChangeStreamDispatcher syncDispatcher =
-        new SyncChangeStreamDispatcher(
-            meterRegistry,
-            mongoClientFactory,
-            new FifoExecutor(
-                Executors.fixedSizeThreadScheduledExecutor(
-                    "executor", 1, new SimpleMeterRegistry())),
-            CommonReplicationConfig.Type.DEFAULT,
-            /* retryThrottledGetMoreOnSameCursor= */ true,
-            Sleeper.NO_OP);
-
-    try {
-      syncDispatcher.add(
-          definition,
-          generation.getGenerationId(),
-          mock(ChangeStreamResumeInfo.class),
-          indexManager,
-          false);
-
-      verify(indexManager, timeout(5000)).failLifecycle(any());
-
-      assertThat(throttlingRetries(meterRegistry)).isEqualTo(1.0);
-      // The budget was never exhausted: the retry was taken and the next call failed for an
-      // unrelated reason.
-      assertThat(throttlingRetriesExhausted(meterRegistry)).isEqualTo(0.0);
-      assertThat(
-              overloadRejections(
-                  meterRegistry, Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code, "steadyState"))
-          .isEqualTo(1.0);
-    } finally {
-      syncDispatcher.shutdown();
-    }
-  }
-
-  @Test
-  public void getNext_throttledWithRetryDisabled_stillCountsTheRejection() throws Exception {
-    var definition = SearchIndex.mockSearchDefinition(new ObjectId());
-    IndexDefinitionGeneration generation =
-        mockIndexGeneration(definition).getDefinitionGeneration();
-
-    ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
-    when(mongoClient.getNext())
-        .thenThrow(throttled(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code));
-
-    ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
-        .thenReturn(mongoClient);
-
-    ChangeStreamIndexManager indexManager =
-        spy(indexManager(definition, generation, new CompletableFuture<>()));
-
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    // Flag off, which is every cluster by default. This is the case the rejection counter exists
-    // for: the retry counter stays at zero while mongot is being shed (CLOUDP-441246).
-    SyncChangeStreamDispatcher syncDispatcher =
-        new SyncChangeStreamDispatcher(
-            meterRegistry,
+            new SimpleMeterRegistry(),
             mongoClientFactory,
             new FifoExecutor(
                 Executors.fixedSizeThreadScheduledExecutor(
                     "executor", 1, new SimpleMeterRegistry())),
             CommonReplicationConfig.Type.DEFAULT);
+    ArgumentCaptor<BooleanSupplier> stopRetrying = ArgumentCaptor.forClass(BooleanSupplier.class);
 
     try {
       syncDispatcher.add(
@@ -963,67 +889,20 @@ public class SyncChangeStreamDispatcherTest {
           mock(ChangeStreamResumeInfo.class),
           indexManager,
           false);
+      verify(mongoClientFactory)
+          .resumeTimedModeAwareChangeStream(
+              any(), any(), any(), anyBoolean(), anyBoolean(), stopRetrying.capture());
+      assertThat(getNextEntered.await(5, TimeUnit.SECONDS)).isTrue();
 
-      verify(indexManager, timeout(5000)).failLifecycle(any());
-
-      assertThat(throttlingRetries(meterRegistry)).isEqualTo(0.0);
-      assertThat(throttlingRetriesExhausted(meterRegistry)).isEqualTo(0.0);
-      assertThat(
-              overloadRejections(
-                  meterRegistry, Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code, "steadyState"))
-          .isEqualTo(1.0);
-    } finally {
+      // The same checks the dispatcher-level retry made before each attempt.
+      assertThat(stopRetrying.getValue().getAsBoolean()).isFalse();
+      doReturn(true).when(indexManager).isShutdown();
+      assertThat(stopRetrying.getValue().getAsBoolean()).isTrue();
+      doReturn(false).when(indexManager).isShutdown();
       syncDispatcher.shutdown();
-    }
-  }
-
-  @Test
-  public void getNext_interruptedDueToOverload_countsRejectionButDoesNotRetry() throws Exception {
-    var definition = SearchIndex.mockSearchDefinition(new ObjectId());
-    IndexDefinitionGeneration generation =
-        mockIndexGeneration(definition).getDefinitionGeneration();
-
-    ChangeStreamMongoClient<SteadyStateException> mongoClient = mock(ChangeStreamMongoClient.class);
-    when(mongoClient.getNext()).thenThrow(throttled(Errors.INTERRUPTED_DUE_TO_OVERLOAD.code));
-
-    ChangeStreamMongoClientFactory mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
-    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
-        .thenReturn(mongoClient);
-
-    ChangeStreamIndexManager indexManager =
-        spy(indexManager(definition, generation, new CompletableFuture<>()));
-
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    SyncChangeStreamDispatcher syncDispatcher =
-        new SyncChangeStreamDispatcher(
-            meterRegistry,
-            mongoClientFactory,
-            new FifoExecutor(
-                Executors.fixedSizeThreadScheduledExecutor(
-                    "executor", 1, new SimpleMeterRegistry())),
-            CommonReplicationConfig.Type.DEFAULT,
-            /* retryThrottledGetMoreOnSameCursor= */ true,
-            Sleeper.NO_OP);
-
-    try {
-      syncDispatcher.add(
-          definition,
-          generation.getGenerationId(),
-          mock(ChangeStreamResumeInfo.class),
-          indexManager,
-          false);
-
-      verify(indexManager, timeout(5000)).failLifecycle(any());
-
-      // 473 is counted as an overload rejection but is not retried in place: it arrives via killOp,
-      // so the cursor is already dead.
-      assertThat(
-              overloadRejections(
-                  meterRegistry, Errors.INTERRUPTED_DUE_TO_OVERLOAD.code, "steadyState"))
-          .isEqualTo(1.0);
-      assertThat(throttlingRetries(meterRegistry)).isEqualTo(0.0);
-      assertThat(throttlingRetriesExhausted(meterRegistry)).isEqualTo(0.0);
+      assertThat(stopRetrying.getValue().getAsBoolean()).isTrue();
     } finally {
+      releaseGetNext.countDown();
       syncDispatcher.shutdown();
     }
   }
@@ -1041,6 +920,14 @@ public class SyncChangeStreamDispatcherTest {
       SearchIndexDefinition definition,
       IndexDefinitionGeneration generation,
       CompletableFuture<Void> lifecycleFuture) {
+    return indexManager(definition, generation, lifecycleFuture, Optional.empty());
+  }
+
+  private static ChangeStreamIndexManager indexManager(
+      SearchIndexDefinition definition,
+      IndexDefinitionGeneration generation,
+      CompletableFuture<Void> lifecycleFuture,
+      Optional<PartitionedChangeStreamProgressTracker> partitionTracker) {
     return DecodingExecutorChangeStreamIndexManager.createWithDecodingScheduler(
         definition,
         mock(IndexingWorkScheduler.class),
@@ -1050,31 +937,9 @@ public class SyncChangeStreamDispatcherTest {
         IGNORE_METRICS,
         lifecycleFuture,
         generation.getGenerationId(),
-        DecodingWorkScheduler.create(2, new SimpleMeterRegistry()));
-  }
-
-  private static double throttlingRetries(SimpleMeterRegistry meterRegistry) {
-    return meterRegistry
-        .get("indexing.steadyStateChangeStream.getMoreThrottlingRetries")
-        .counter()
-        .count();
-  }
-
-  private static double throttlingRetriesExhausted(SimpleMeterRegistry meterRegistry) {
-    return meterRegistry
-        .get("indexing.steadyStateChangeStream.getMoreThrottlingRetriesExhausted")
-        .counter()
-        .count();
-  }
-
-  private static double overloadRejections(
-      SimpleMeterRegistry meterRegistry, int code, String phase) {
-    return meterRegistry
-        .get("replication.overloadRejections")
-        .tag("code", String.valueOf(code))
-        .tag("phase", phase)
-        .counter()
-        .count();
+        DecodingWorkScheduler.create(2, new SimpleMeterRegistry()),
+        Optional.empty(),
+        partitionTracker);
   }
 
   private static void assertNumberOfEmbeddingPermits(

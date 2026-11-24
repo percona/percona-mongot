@@ -20,10 +20,12 @@ import com.xgen.mongot.cursor.serialization.MongotCursorBatch;
 import com.xgen.mongot.cursor.serialization.MongotCursorResult;
 import com.xgen.mongot.cursor.serialization.MongotIntermediateCursorBatch;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.DynamicFeatureFlagsMetricsRecorder;
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.MetaResults;
@@ -42,7 +44,6 @@ import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.SearchQuery;
 import com.xgen.mongot.index.query.SearchQueryParseOptions;
-import com.xgen.mongot.index.query.operators.ApproximateVectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchOperator;
 import com.xgen.mongot.index.query.operators.VectorSearchQueryInput;
@@ -59,6 +60,7 @@ import com.xgen.mongot.trace.Tracing;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.ErrorType;
+import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.UserFacingException;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
@@ -71,7 +73,9 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
@@ -181,57 +185,74 @@ public class SearchCommand implements Command {
               .orElse(QueryCursorOptions.empty());
 
       // Validate before touching the catalog or the embedding service. These checks depend only on
-      // the parsed query and cursor options, so running them first ensures a malformed request
-      // (e.g. an omitted numCandidates with the AUTO_NUM_CANDIDATES flag disabled) is rejected with
-      // the expected user error rather than an index-unavailable or embedding error, and without
-      // invoking embedding, matching the previous parser-level rejection order.
+      // the parsed query and cursor options, so running them first ensures a malformed request is
+      // rejected with the expected user error rather than an index-unavailable or embedding error,
+      // and without invoking embedding.
       validateQueryAndCursorOptions(queryDefinition, queryCursorOptions);
 
       Optional<InitializedIndex> index = getIndexFromCatalog(queryDefinition);
 
-      if (index.isPresent()) {
-        queryDefinition = maybeEmbedSearchQuery(queryDefinition, index.get().getDefinition());
-      }
+      // Counted before auto-embedding so embedding and execution failures are both attributed to
+      // the index. Nested vectorSearch is rejected at parse time, so the root operator is enough.
+      Optional<IndexMetricsUpdater.QueryingMetricsUpdater> searchVectorSearchMetrics =
+          isSearchVectorSearch(queryDefinition)
+              ? index.map(idx -> idx.getMetricsUpdater().getQueryingMetricsUpdater())
+              : Optional.empty();
+      searchVectorSearchMetrics.ifPresent(m -> m.getSearchVectorSearchQueryCounter().increment());
+      @Var boolean succeeded = false;
+      try {
+        if (index.isPresent()) {
+          validateAutoEmbedQueryPaths(
+              queryDefinition, index.get().getDefinition(), queryOptimizationFlags);
+          queryDefinition = maybeEmbedSearchQuery(queryDefinition, index.get().getDefinition());
+        }
 
-      try (var unusedExplain =
-              Explain.setup(
-                  this.definition.explain().map(ExplainDefinition::verbosity),
-                  index.map(idx -> idx.getDefinition().getNumPartitions()));
-          var unusedFeatureFlags = DynamicFeatureFlagsMetricsRecorder.setup()) {
+        try (var unusedExplain =
+                Explain.setup(
+                    this.definition.explain().map(ExplainDefinition::verbosity),
+                    index.map(idx -> idx.getDefinition().getNumPartitions()));
+            var unusedFeatureFlags = DynamicFeatureFlagsMetricsRecorder.setup()) {
 
-        addMetadataIfExplain(queryDefinition);
+          addMetadataIfExplain(queryDefinition);
 
-        boolean populateCursorResult =
-            determinePopulateCursor(
-                Explain.getExplainQueryState(),
-                this.metadata
-                    .mongoDbServerInfoProvider()
-                    .getCachedMongoDbServerInfo()
-                    .mongoDbVersion());
+          boolean populateCursorResult =
+              determinePopulateCursor(
+                  Explain.getExplainQueryState(),
+                  this.metadata
+                      .mongoDbServerInfoProvider()
+                      .getCachedMongoDbServerInfo()
+                      .mongoDbVersion());
 
-        try (var cursorGuard = new CursorGuard(this.createdCursorIds, this.cursorManager)) {
-          BsonDocument batch;
-          if (this.definition.intermediateVersion().isEmpty()) {
-            batch =
-                getBatch(
-                    queryDefinition,
-                    queryCursorOptions,
-                    queryOptimizationFlags,
-                    populateCursorResult);
-          } else {
-            var protocolVersion = this.definition.intermediateVersion().get();
-            batch =
-                getIntermediateBatch(
-                    queryDefinition,
-                    protocolVersion,
-                    queryCursorOptions,
-                    queryOptimizationFlags,
-                    populateCursorResult);
+          try (var cursorGuard = new CursorGuard(this.createdCursorIds, this.cursorManager)) {
+            BsonDocument batch;
+            if (this.definition.intermediateVersion().isEmpty()) {
+              batch =
+                  getBatch(
+                      queryDefinition,
+                      queryCursorOptions,
+                      queryOptimizationFlags,
+                      populateCursorResult);
+            } else {
+              var protocolVersion = this.definition.intermediateVersion().get();
+              batch =
+                  getIntermediateBatch(
+                      queryDefinition,
+                      protocolVersion,
+                      queryCursorOptions,
+                      queryOptimizationFlags,
+                      populateCursorResult);
+            }
+            if (populateCursorResult) {
+              cursorGuard.keepCursors();
+            }
+            succeeded = true;
+            return batch;
           }
-          if (populateCursorResult) {
-            cursorGuard.keepCursors();
-          }
-          return batch;
+        }
+      } finally {
+        if (!succeeded) {
+          searchVectorSearchMetrics.ifPresent(
+              m -> m.getSearchVectorSearchFailedQueryCounter().increment());
         }
       }
     } catch (RegexLimitExceededException e) {
@@ -288,6 +309,52 @@ public class SearchCommand implements Command {
   }
 
   /**
+   * Rejects a query that reads an auto-embed source path outside a vectorSearch operator path when
+   * the served index embeds that path and does not also map it with another type. Source paths come
+   * from both the catalog definition and the materialized-view schema, since the served generation
+   * can lag the catalog during a definition change; the served definition decides which of them it
+   * embeds.
+   */
+  private void validateAutoEmbedQueryPaths(
+      SearchQuery queryDefinition,
+      IndexDefinition servedDefinition,
+      QueryOptimizationFlags queryOptimizationFlags)
+      throws InvalidQueryException {
+    if (!(servedDefinition instanceof SearchIndexDefinition servedSearchDefinition)) {
+      return;
+    }
+    Optional<IndexDefinition> autoEmbedDefinition =
+        SearchAutoEmbeddingHelper.resolveAutoEmbeddingDefinition(
+            this.indexCatalog,
+            this.definition.db(),
+            this.definition.collectionUuid(),
+            this.definition.viewName(),
+            queryDefinition.index(),
+            servedDefinition);
+    if (autoEmbedDefinition.isEmpty()
+        || !(autoEmbedDefinition.get() instanceof SearchIndexDefinition searchDef)) {
+      return;
+    }
+    Map<FieldPath, FieldPath> materializedViewPaths =
+        SearchAutoEmbeddingHelper.resolveAutoEmbeddingFieldsMapping(
+            this.indexCatalog,
+            this.definition.db(),
+            this.definition.collectionUuid(),
+            this.definition.viewName(),
+            queryDefinition.index());
+    Map<FieldPath, FieldPath> sourcePaths = new HashMap<>(materializedViewPaths);
+    for (FieldPath path : searchDef.getAutoEmbedFields().byPath().keySet()) {
+      sourcePaths.putIfAbsent(
+          path, AutoEmbedFieldMappingCreator.getMatViewFieldPath(path, materializedViewPaths));
+    }
+    AutoEmbedQueryPathValidator.validate(
+        queryDefinition,
+        sourcePaths,
+        servedSearchDefinition,
+        queryOptimizationFlags.omitSearchDocumentResults());
+  }
+
+  /**
    * Rewrites a vectorSearch operator against an auto-embedding index so it addresses the derived
    * index: text input is embedded into a query vector using the queried field's auto-embedding
    * model, and a user-supplied query vector is retargeted to the materialized-view vector path and
@@ -321,6 +388,11 @@ public class SearchCommand implements Command {
         || !(effectiveDef.get() instanceof SearchIndexDefinition searchDef)) {
       return queryDefinition;
     }
+
+    // The source path is the public input. Accepting _autoEmbed.* here would skip the rewrite and
+    // the queryVector dtype reconciliation below, so the query would silently search an empty
+    // vector field when the indexed encoding does not match.
+    VectorSearchStageAutoEmbedValidator.validateNotReservedAutoEmbedPath(criteria.path());
 
     var autoEmbeddingFieldsMapping =
         SearchAutoEmbeddingHelper.resolveAutoEmbeddingFieldsMapping(
@@ -374,16 +446,6 @@ public class SearchCommand implements Command {
       throw new InvalidQueryException(
           "Pagination is not supported with the 'vectorSearch' operator. "
               + "Use $skip and $limit stages instead.");
-    }
-
-    // Mirror the $vectorSearch command: an omitted numCandidates (auto mode) is only allowed when
-    // the AUTO_NUM_CANDIDATES flag is enabled. Otherwise reject it as before, since nothing
-    // resolves the auto value on the flag-off path.
-    if (operatorQuery.operator() instanceof VectorSearchOperator vectorSearchOperator
-        && vectorSearchOperator.criteria() instanceof ApproximateVectorSearchCriteria approx
-        && approx.isAutoNumCandidates()
-        && !this.metadata.featureFlags().isEnabled(Feature.AUTO_NUM_CANDIDATES)) {
-      throw new InvalidQueryException("numCandidates is required for approximate vector search");
     }
   }
 
@@ -549,6 +611,11 @@ public class SearchCommand implements Command {
 
       return batch.toBson();
     }
+  }
+
+  private static boolean isSearchVectorSearch(SearchQuery query) {
+    return query instanceof OperatorQuery operatorQuery
+        && operatorQuery.operator() instanceof VectorSearchOperator;
   }
 
   private Optional<InitializedIndex> getIndexFromCatalog(Query query)

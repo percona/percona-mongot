@@ -22,29 +22,29 @@ maven.install(
     artifacts = [
         "com.google.guava:guava:33.7.2-jre",
         # Jackson
-        "com.fasterxml.jackson.core:jackson-databind:2.18.11",
-        "com.fasterxml.jackson.core:jackson-annotations:2.18.11",
-        "com.fasterxml.jackson.core:jackson-core:2.18.11",
-        "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.11",
-        "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.18.11",
-        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.11",
-        "com.fasterxml.jackson.module:jackson-module-parameter-names:2.18.11",
+        "com.fasterxml.jackson.core:jackson-databind:2.18.12",
+        "com.fasterxml.jackson.core:jackson-annotations:2.18.12",
+        "com.fasterxml.jackson.core:jackson-core:2.18.12",
+        "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.12",
+        "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.18.12",
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.12",
+        "com.fasterxml.jackson.module:jackson-module-parameter-names:2.18.12",
         # METRICS_ARTIFACTS (1.16.7)
         # micrometer-core >= 1.16.7 addresses CVE-2026-59296 (CRLF injection in
         # StatsD/logging line builders); keep all three artifacts aligned.
         "io.micrometer:micrometer-core:1.16.7",
         "io.micrometer:micrometer-registry-prometheus:1.16.7",
         "io.micrometer:micrometer-registry-otlp:1.16.7",
-        # OPEN_TELEMETRY_ARTIFACTS (1.62.0)
-        "io.opentelemetry:opentelemetry-api:1.62.0",
-        "io.opentelemetry:opentelemetry-context:1.62.0",
-        "io.opentelemetry:opentelemetry-sdk:1.62.0",
-        "io.opentelemetry:opentelemetry-sdk-trace:1.62.0",
-        "io.opentelemetry:opentelemetry-sdk-common:1.62.0",
-        "io.opentelemetry:opentelemetry-exporter-logging-otlp:1.62.0",
-        "io.opentelemetry:opentelemetry-exporter-otlp-common:1.62.0",
-        "io.opentelemetry:opentelemetry-exporter-common:1.62.0",
-        "io.opentelemetry:opentelemetry-exporter-otlp:1.62.0",
+        # OPEN_TELEMETRY_ARTIFACTS (1.67.0)
+        "io.opentelemetry:opentelemetry-api:1.67.0",
+        "io.opentelemetry:opentelemetry-context:1.67.0",
+        "io.opentelemetry:opentelemetry-sdk:1.67.0",
+        "io.opentelemetry:opentelemetry-sdk-trace:1.67.0",
+        "io.opentelemetry:opentelemetry-sdk-common:1.67.0",
+        "io.opentelemetry:opentelemetry-exporter-logging-otlp:1.67.0",
+        "io.opentelemetry:opentelemetry-exporter-otlp-common:1.67.0",
+        "io.opentelemetry:opentelemetry-exporter-common:1.67.0",
+        "io.opentelemetry:opentelemetry-exporter-otlp:1.67.0",
         "io.opentelemetry:opentelemetry-semconv:1.28.0-alpha",
         "io.opentelemetry:opentelemetry-sdk-extension-resources:1.19.0",
         # MISC_ARTIFACTS
@@ -203,6 +203,9 @@ maven.install(
         ("com.google.guava", "guava-testlib", "33.7.2-jre"),
         ("com.pholser", "junit-quickcheck-core", "1.0"),
         ("com.pholser", "junit-quickcheck-generators", "1.0"),
+        # Force ognl (transitive via junit-quickcheck-core) to 3.4.13 to address
+        # CVE-2026-113730 / GHSA-crwc-vw2r-qr6m
+        ("ognl", "ognl", "3.4.13"),
         ("com.github.docker-java", "docker-java-core", "3.7.1"),
         ("com.github.docker-java", "docker-java-api", "3.7.1"),
         ("com.github.docker-java", "docker-java-transport", "3.7.1"),

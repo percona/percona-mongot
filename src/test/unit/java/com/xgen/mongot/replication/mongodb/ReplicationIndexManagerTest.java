@@ -39,15 +39,20 @@ import com.mongodb.MongoNamespace;
 import com.mongodb.MongoQueryException;
 import com.mongodb.ServerAddress;
 import com.xgen.mongot.cursor.MongotCursorManager;
+import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewNonTransientException;
+import com.xgen.mongot.embedding.utils.AutoEmbeddingIndexDefinitionUtils;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData.IndexTypeTag;
 import com.xgen.mongot.index.IndexWriter;
 import com.xgen.mongot.index.InitializedIndex;
+import com.xgen.mongot.index.autoembedding.DerivedLocalIndexGeneration;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.IndexStatus.Reason;
@@ -59,6 +64,7 @@ import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import com.xgen.mongot.replication.mongodb.IndexManager.State;
 import com.xgen.mongot.replication.mongodb.ReplicationIndexManager.FailedIndexAction;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingCommitMetadata;
 import com.xgen.mongot.replication.mongodb.common.BufferlessIdOrderInitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.BufferlessNaturalOrderInitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
@@ -76,12 +82,14 @@ import com.xgen.mongot.replication.mongodb.synonyms.SynonymMappingHighWaterMark;
 import com.xgen.mongot.replication.mongodb.synonyms.SynonymMappingManager;
 import com.xgen.mongot.replication.mongodb.synonyms.SynonymMappingManagerFactory;
 import com.xgen.mongot.util.Crash;
+import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import com.xgen.testing.mongot.mock.index.IndexMetricsSupplier;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
+import com.xgen.testing.mongot.mock.index.VectorIndex;
 import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
@@ -91,6 +99,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -689,7 +698,7 @@ public class ReplicationIndexManagerTest {
 
       inOrder
           .verify(mocks.steadyStateManager, timeout(1000))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       assertEquals(IndexStatus.StatusCode.STEADY, mocks.index.getStatus().getStatusCode());
       mocks.assertStateTransitions(
@@ -751,7 +760,7 @@ public class ReplicationIndexManagerTest {
       IndexWriter writer = mocks.index.getWriter();
 
       verify(mocks.steadyStateManager, timeout(1000))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
       verify(writer, never()).forceMerge(anyInt());
 
       mocks.assertStateTransitions(
@@ -766,7 +775,7 @@ public class ReplicationIndexManagerTest {
       IndexWriter writer = mocks.index.getWriter();
 
       verify(mocks.steadyStateManager, timeout(5000))
-          .add(eq(MOCK_INDEX_GENERATION_ID), any(), any(), any(), any(), anyBoolean());
+          .add(eq(MOCK_INDEX_GENERATION_ID), any(), any(), any(), any(), anyBoolean(), eq(true));
       verify(mocks.index, timeout(1000))
           .setStatus(indexStatusWithCode(IndexStatus.StatusCode.STEADY));
       // This resume did not come from initial sync, so no force-merge should have occurred.
@@ -780,12 +789,19 @@ public class ReplicationIndexManagerTest {
   }
 
   @Test
-  public void testDroppedInitialSyncException() throws Exception {
+  public void initialSync_collectionDropped_preservesDroppedCommit() throws Exception {
     try (Mocks mocks = Mocks.exceptionalInitialSync(InitialSyncException.createDropped())) {
-      verify(mocks.index, timeout(5000)).drop();
+      var inOrder = Mockito.inOrder(mocks.documentIndexer, mocks.synonymMappingManager);
+      inOrder
+          .verify(mocks.documentIndexer, timeout(5000))
+          .clearIndex(
+              IndexCommitUserData.createFromIndexStateInfo(
+                  IndexStateInfo.create(StatusCode.DOES_NOT_EXIST, Reason.INDEX_DROPPED)));
+      inOrder.verify(mocks.synonymMappingManager, timeout(1000)).shutdown();
+      verify(mocks.index, never()).close();
+      verify(mocks.index, never()).drop();
 
-      verify(mocks.index, timeout(1000))
-          .setStatus(indexStatusWithCode(IndexStatus.StatusCode.DOES_NOT_EXIST));
+      assertThat(mocks.index.getStatus()).isEqualTo(IndexStatus.doesNotExist(Reason.INDEX_DROPPED));
 
       mocks.assertStateTransitions(IndexManager.State.INITIAL_SYNC, IndexManager.State.SHUT_DOWN);
 
@@ -1062,13 +1078,131 @@ public class ReplicationIndexManagerTest {
   public void testValidCommitUserDataResumesSteadyState() throws Exception {
     try (Mocks mocks = Mocks.validUserData()) {
       verify(mocks.steadyStateManager, timeout(5000))
-          .add(eq(MOCK_INDEX_GENERATION_ID), any(), any(), any(), any(), anyBoolean());
+          .add(eq(MOCK_INDEX_GENERATION_ID), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       verify(mocks.index, timeout(1000))
           .setStatus(indexStatusWithCode(IndexStatus.StatusCode.STEADY));
 
       mocks.assertStateTransitions(
           IndexManager.State.INITIALIZING, IndexManager.State.STEADY_STATE);
+    }
+  }
+
+  @Test
+  public void resumeSteadyState_vectorIndex_allowsParallelReaders() throws Exception {
+    var generation = mockIndexGeneration(VectorIndex.MOCK_VECTOR_DEFINITION);
+
+    try (Mocks mocks = Mocks.steadyState(generation, Mocks.HANGING_STEADY_STATE_MANAGER)) {
+      verify(mocks.steadyStateManager, timeout(1000))
+          .add(
+              eq(generation.getGenerationId()),
+              any(),
+              eq(generation.getDefinition()),
+              any(),
+              any(),
+              anyBoolean(),
+              eq(true));
+    }
+  }
+
+  @Test
+  public void resumeSteadyState_derivedSearchIndex_disallowsParallelReaders() throws Exception {
+    var generation = Mocks.derivedSearchIndexGeneration();
+    assertThat(generation.getDefinition().isAutoEmbeddingIndex()).isFalse();
+
+    try (Mocks mocks = Mocks.steadyState(generation, Mocks.HANGING_STEADY_STATE_MANAGER)) {
+      verify(mocks.steadyStateManager, timeout(1000))
+          .add(
+              eq(generation.getGenerationId()),
+              any(),
+              eq(generation.getDefinition()),
+              any(),
+              any(),
+              anyBoolean(),
+              eq(false));
+    }
+  }
+
+  @Test
+  public void resumeSteadyState_derivedSearchIndexAfterTransientError_keepsParallelReadersDisabled()
+      throws Exception {
+    var generation = Mocks.derivedSearchIndexGeneration();
+    var failure = SteadyStateException.createTransient(new MongoException("temporary failure"));
+
+    try (Mocks mocks =
+        Mocks.steadyState(generation, Mocks.exceptionalSteadyStateManager(failure))) {
+      verify(mocks.steadyStateManager, timeout(1000).times(2))
+          .add(
+              eq(generation.getGenerationId()),
+              any(),
+              eq(generation.getDefinition()),
+              any(),
+              any(),
+              anyBoolean(),
+              eq(false));
+    }
+  }
+
+  @Test
+  public void resumeSteadyState_autoEmbeddingSearchIndex_disallowsParallelReaders()
+      throws Exception {
+    var generation =
+        mockIndexGeneration(
+            SearchIndex.mockAutoEmbeddingSearchDefinition(SearchIndex.MOCK_INDEX_ID));
+    assertThat(generation.getDefinition().isAutoEmbeddingIndex()).isTrue();
+
+    try (Mocks mocks = Mocks.steadyState(generation, Mocks.HANGING_STEADY_STATE_MANAGER)) {
+      verify(mocks.steadyStateManager, timeout(1000))
+          .add(
+              eq(generation.getGenerationId()),
+              any(),
+              eq(generation.getDefinition()),
+              any(),
+              any(),
+              anyBoolean(),
+              eq(false));
+    }
+  }
+
+  @Test
+  public void resumeSteadyState_autoEmbeddingVectorIndex_disallowsParallelReaders()
+      throws Exception {
+    var generation =
+        mockIndexGeneration(
+            VectorIndex.mockMaterializedViewAutoEmbeddingVectorDefinition(
+                VectorIndex.MOCK_INDEX_ID));
+    assertThat(generation.getDefinition().isAutoEmbeddingIndex()).isTrue();
+
+    try (Mocks mocks = Mocks.steadyState(generation, Mocks.HANGING_STEADY_STATE_MANAGER)) {
+      verify(mocks.steadyStateManager, timeout(1000))
+          .add(
+              eq(generation.getGenerationId()),
+              any(),
+              eq(generation.getDefinition()),
+              any(),
+              any(),
+              anyBoolean(),
+              eq(false));
+    }
+  }
+
+  @Test
+  public void resumeSteadyState_legacyTextVectorIndex_disallowsParallelReaders() throws Exception {
+    var generation =
+        mockIndexGeneration(
+            VectorIndexDefinitionBuilder.builder().withTextField("content").build());
+    assertThat(generation.getDefinition().isAutoEmbeddingIndex()).isTrue();
+
+    try (Mocks mocks = Mocks.steadyState(generation, Mocks.HANGING_STEADY_STATE_MANAGER)) {
+      verify(mocks.steadyStateManager, timeout(1000))
+          .add(
+              eq(generation.getGenerationId()),
+              any(),
+              eq(generation.getDefinition()),
+              any(),
+              any(),
+              anyBoolean(),
+              eq(false));
     }
   }
 
@@ -1084,7 +1218,7 @@ public class ReplicationIndexManagerTest {
       verify(mocks.initialSyncQueue, timeout(5000))
           .enqueue(any(), any(), any(), any(), anyBoolean(), anyBoolean());
       verify(mocks.steadyStateManager, never())
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), anyBoolean());
     }
   }
 
@@ -1101,7 +1235,7 @@ public class ReplicationIndexManagerTest {
             Mocks.UNPREFIXED_INTERNAL_SEARCH_DB,
             Optional.of(featureFlags))) {
       verify(mocks.steadyStateManager, timeout(5000))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
       verify(mocks.initialSyncQueue, never())
           .enqueue(any(), any(), any(), any(), anyBoolean(), anyBoolean());
     }
@@ -1115,7 +1249,7 @@ public class ReplicationIndexManagerTest {
         Mocks.internalSearchNamespace(
             Mocks.PREFIXED_INTERNAL_SEARCH_DB, Mocks.PREFIXED_INTERNAL_SEARCH_DB)) {
       verify(mocks.steadyStateManager, timeout(5000))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
       verify(mocks.initialSyncQueue, never())
           .enqueue(any(), any(), any(), any(), anyBoolean(), anyBoolean());
     }
@@ -1125,7 +1259,7 @@ public class ReplicationIndexManagerTest {
   public void testShutdownStopsSteadyStateManager() throws Exception {
     try (Mocks mocks = Mocks.validUserData()) {
       verify(mocks.steadyStateManager, timeout(5000))
-          .add(eq(MOCK_INDEX_GENERATION_ID), any(), any(), any(), any(), anyBoolean());
+          .add(eq(MOCK_INDEX_GENERATION_ID), any(), any(), any(), any(), anyBoolean(), eq(true));
       mocks.manager.shutdown();
       verify(mocks.steadyStateManager).stop(eq(MOCK_INDEX_GENERATION_ID));
 
@@ -1134,12 +1268,19 @@ public class ReplicationIndexManagerTest {
   }
 
   @Test
-  public void testDroppedSteadyStateException() throws Exception {
+  public void steadyState_collectionDropped_preservesDroppedCommit() throws Exception {
     try (Mocks mocks = Mocks.exceptionalSteadyState(SteadyStateException.createDropped())) {
-      verify(mocks.index, timeout(5000)).drop();
+      var inOrder = Mockito.inOrder(mocks.documentIndexer, mocks.synonymMappingManager);
+      inOrder
+          .verify(mocks.documentIndexer, timeout(5000))
+          .clearIndex(
+              IndexCommitUserData.createFromIndexStateInfo(
+                  IndexStateInfo.create(StatusCode.DOES_NOT_EXIST, Reason.INDEX_DROPPED)));
+      inOrder.verify(mocks.synonymMappingManager, timeout(1000)).shutdown();
+      verify(mocks.index, never()).close();
+      verify(mocks.index, never()).drop();
 
-      verify(mocks.index, timeout(1000))
-          .setStatus(indexStatusWithCode(IndexStatus.StatusCode.DOES_NOT_EXIST));
+      assertThat(mocks.index.getStatus()).isEqualTo(IndexStatus.doesNotExist(Reason.INDEX_DROPPED));
 
       mocks.assertStateTransitions(
           IndexManager.State.STEADY_STATE, IndexManager.State.STEADY_STATE_SHUT_DOWN);
@@ -1150,6 +1291,42 @@ public class ReplicationIndexManagerTest {
           SteadyStateException.class, SteadyStateException.Type.DROPPED.toString(), "None", "None");
 
       mocks.assertDropMetric(Reason.INDEX_DROPPED);
+    }
+  }
+
+  @Test
+  public void init_droppedIndexCommitData_staysDroppedWithoutReplication() throws Exception {
+    try (Mocks mocks = Mocks.droppedUserData()) {
+      mocks.manager.getInitFuture().get(5, TimeUnit.SECONDS);
+
+      assertThat(mocks.index.getStatus()).isEqualTo(IndexStatus.doesNotExist(Reason.INDEX_DROPPED));
+      assertThat(mocks.manager.getState()).isEqualTo(State.SHUT_DOWN);
+      verify(mocks.index, never()).close();
+      verify(mocks.index, never()).drop();
+      verify(mocks.synonymMappingManager).shutdown();
+      verifyNoInteractions(mocks.initialSyncQueue, mocks.steadyStateManager, mocks.documentIndexer);
+    }
+  }
+
+  @Test
+  public void handleCollectionDropped_duringShutdown_leavesIndexUntouched() throws Exception {
+    try (Mocks mocks = Mocks.validUserData()) {
+      mocks.manager.getInitFuture().get(5, TimeUnit.SECONDS);
+      var stopped = new CompletableFuture<ChangeStreamResumeInfo>();
+      when(mocks.steadyStateManager.stop(MOCK_INDEX_GENERATION_ID)).thenReturn(stopped);
+      var shutdown = mocks.manager.shutdown();
+      clearInvocations(mocks.index, mocks.documentIndexer, mocks.synonymMappingManager);
+
+      try {
+        mocks.manager.handleCollectionDropped();
+
+        verifyNoInteractions(mocks.index, mocks.documentIndexer, mocks.synonymMappingManager);
+        assertThat(mocks.manager.getState()).isEqualTo(State.SHUT_DOWN);
+        assertThat(shutdown.isDone()).isFalse();
+      } finally {
+        stopped.complete(Mocks.RESUME_INFO);
+        shutdown.get(5, TimeUnit.SECONDS);
+      }
     }
   }
 
@@ -1181,7 +1358,9 @@ public class ReplicationIndexManagerTest {
 
       inOrder.verify(mocks.index).setStatus(indexStatusWithCode(IndexStatus.StatusCode.STEADY));
 
-      inOrder.verify(mocks.steadyStateManager).add(any(), any(), any(), any(), any(), anyBoolean());
+      inOrder
+          .verify(mocks.steadyStateManager)
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       inOrder.verify(mocks.steadyStateManager).stop(MOCK_INDEX_GENERATION_ID);
 
@@ -1211,7 +1390,7 @@ public class ReplicationIndexManagerTest {
     try (Mocks mocks =
         Mocks.exceptionalSteadyState(SteadyStateException.createTransient(causeException))) {
       verify(mocks.steadyStateManager, timeout(1000).times(2))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       mocks.assertStateTransitions(
           IndexManager.State.STEADY_STATE, IndexManager.State.STEADY_STATE_SHUT_DOWN);
@@ -1232,7 +1411,7 @@ public class ReplicationIndexManagerTest {
         Mocks.exceptionalSteadyState(
             SteadyStateException.createNonInvalidatingResync(causeException))) {
       verify(mocks.steadyStateManager, timeout(1000))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
       verify(mocks.documentIndexer, timeout(1000)).commit();
       verify(mocks.index, timeout(1000))
           .setStatus(indexStatusWithCode(IndexStatus.StatusCode.RECOVERING_NON_TRANSIENT));
@@ -1257,7 +1436,7 @@ public class ReplicationIndexManagerTest {
       var indexCommitUserData = IndexCommitUserData.createExceeded(reason);
 
       verify(mocks.steadyStateManager, timeout(1000).times(1))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       InOrder inOrder =
           Mockito.inOrder(
@@ -1294,17 +1473,17 @@ public class ReplicationIndexManagerTest {
     try (Mocks mocks =
         Mocks.exceptionalSteadyState(SteadyStateException.createRenamed(renamedResumeInfo))) {
       verify(mocks.steadyStateManager, timeout(10000).times(2))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       // Ensure that first the change stream is resumed with the commit user data resume info, then
       // after that resumed with the resume info from the SteadyStateException.
       InOrder inOrder = Mockito.inOrder(mocks.steadyStateManager);
       inOrder
           .verify(mocks.steadyStateManager)
-          .add(any(), any(), any(), any(), eq(Mocks.RESUME_INFO), anyBoolean());
+          .add(any(), any(), any(), any(), eq(Mocks.RESUME_INFO), anyBoolean(), eq(true));
       inOrder
           .verify(mocks.steadyStateManager)
-          .add(any(), any(), any(), any(), eq(renamedResumeInfo), anyBoolean());
+          .add(any(), any(), any(), any(), eq(renamedResumeInfo), anyBoolean(), eq(true));
 
       mocks.assertStateTransitions(
           IndexManager.State.STEADY_STATE, IndexManager.State.STEADY_STATE_SHUT_DOWN);
@@ -1324,17 +1503,17 @@ public class ReplicationIndexManagerTest {
     try (Mocks mocks =
         Mocks.exceptionalSteadyState(SteadyStateException.createInvalidated(resumeInfo))) {
       verify(mocks.steadyStateManager, timeout(10000).times(2))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       // Ensure that first the change stream is resumed with the commit user data resume info, then
       // after that resumed with the resume info from the SteadyStateException.
       InOrder inOrder = Mockito.inOrder(mocks.steadyStateManager);
       inOrder
           .verify(mocks.steadyStateManager)
-          .add(any(), any(), any(), any(), eq(Mocks.RESUME_INFO), anyBoolean());
+          .add(any(), any(), any(), any(), eq(Mocks.RESUME_INFO), anyBoolean(), eq(true));
       inOrder
           .verify(mocks.steadyStateManager)
-          .add(any(), any(), any(), any(), eq(resumeInfo), anyBoolean());
+          .add(any(), any(), any(), any(), eq(resumeInfo), anyBoolean(), eq(true));
 
       mocks.assertStateTransitions(
           IndexManager.State.STEADY_STATE, IndexManager.State.STEADY_STATE_SHUT_DOWN);
@@ -1399,7 +1578,7 @@ public class ReplicationIndexManagerTest {
         Mocks.exceptionalSteadyState(
             new IllegalArgumentException("invalid field name"), featureFlags)) {
       verify(mocks.steadyStateManager, timeout(1000).times(1))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       // index becomes stale due to unknown errors
       verify(mocks.index, timeout(1000))
@@ -1511,7 +1690,7 @@ public class ReplicationIndexManagerTest {
         Mocks.exceptionalSteadyState(
             new IllegalArgumentException("invalid field name"), featureFlags)) {
       verify(mocks.steadyStateManager, timeout(1000).times(1))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       // index becomes failed due to unknown errors
       verify(mocks.index, timeout(1000))
@@ -1540,7 +1719,7 @@ public class ReplicationIndexManagerTest {
         Mocks.exceptionalSteadyState(
             new IllegalArgumentException("invalid field name"), featureFlags)) {
       verify(mocks.steadyStateManager, timeout(1000).times(1))
-          .add(any(), any(), any(), any(), any(), anyBoolean());
+          .add(any(), any(), any(), any(), any(), anyBoolean(), eq(true));
 
       // index becomes failed due to unknown errors
       verify(mocks.index, timeout(1000))
@@ -1578,7 +1757,7 @@ public class ReplicationIndexManagerTest {
           0);
 
       mocks.latch.orElseThrow(AssertionError::new).countDown();
-      verify(mocks.index, timeout(5000)).drop();
+      verify(mocks.synonymMappingManager, timeout(5000)).shutdown();
 
       assertEquals(
           1,
@@ -1611,7 +1790,7 @@ public class ReplicationIndexManagerTest {
 
       mocks.latch.orElseThrow(AssertionError::new).countDown();
 
-      verify(mocks.index, timeout(5000)).drop();
+      verify(mocks.synonymMappingManager, timeout(5000)).shutdown();
 
       assertEquals(
           1,
@@ -1692,9 +1871,8 @@ public class ReplicationIndexManagerTest {
   @Test
   public void testDropShutsDownSynonymMappingManager() throws Exception {
     try (Mocks mocks = Mocks.exceptionalInitialSync(InitialSyncException.createDropped())) {
-      verify(mocks.index, timeout(5000)).drop();
-
       verify(mocks.synonymMappingManager, timeout(1000)).shutdown();
+      verify(mocks.index, never()).close();
       verifyNoMoreInteractions(mocks.synonymMappingManager);
     }
   }
@@ -2344,6 +2522,18 @@ public class ReplicationIndexManagerTest {
           Optional.empty());
     }
 
+    static Mocks droppedUserData() throws Exception {
+      return create(
+          Optional.of(
+              IndexCommitUserData.createFromIndexStateInfo(
+                  IndexStateInfo.create(StatusCode.DOES_NOT_EXIST, Reason.INDEX_DROPPED))),
+          HANGING_INITIAL_SYNC_QUEUE,
+          HANGING_STEADY_STATE_MANAGER,
+          HANGING_SYNONYM_MANAGER,
+          Optional.empty(),
+          Optional.empty());
+    }
+
     static Mocks validUserData() throws Exception {
       return create(
           Optional.of(
@@ -2555,6 +2745,48 @@ public class ReplicationIndexManagerTest {
           Optional.of(featureFlags));
     }
 
+    static DerivedLocalIndexGeneration derivedSearchIndexGeneration() {
+      SearchIndexDefinition rawDefinition =
+          SearchIndex.mockAutoEmbeddingSearchDefinition(SearchIndex.MOCK_INDEX_ID);
+      SearchIndexDefinition derivedDefinition =
+          AutoEmbeddingIndexDefinitionUtils.getDerivedSearchIndexDefinition(
+              rawDefinition,
+              "database",
+              SearchIndex.MOCK_INDEX_COLLECTION_UUID,
+              new MaterializedViewSchemaMetadata(
+                  1L, Map.of(FieldPath.parse("content"), FieldPath.parse("_autoEmbed.content"))));
+      var definitionGeneration = mockDefinitionGeneration(derivedDefinition);
+      return new DerivedLocalIndexGeneration(
+          mockIndex(definitionGeneration),
+          definitionGeneration,
+          IndexTypeTag.TAG_SEARCH_AUTO_EMBEDDING,
+          rawDefinition.getDatabase(),
+          () -> new AutoEmbeddingCommitMetadata(true));
+    }
+
+    static Mocks steadyState(
+        com.xgen.mongot.index.IndexGeneration generation,
+        Answer<CompletableFuture<Void>> steadyStateManagerAnswer)
+        throws Exception {
+      var resumeInfo =
+          ChangeStreamResumeInfo.create(
+              new MongoNamespace(
+                  generation.getDefinition().getDatabase(),
+                  generation.getDefinition().getLastObservedCollectionName()),
+              ChangeStreamUtils.POST_BATCH_RESUME_TOKEN);
+      return create(
+          Optional.of(
+              IndexCommitUserData.createChangeStreamResume(
+                  resumeInfo, IndexFormatVersion.CURRENT.versionNumber)),
+          HANGING_INITIAL_SYNC_QUEUE,
+          steadyStateManagerAnswer,
+          HANGING_SYNONYM_MANAGER,
+          Optional.empty(),
+          generation,
+          Optional.empty(),
+          Optional.empty());
+    }
+
     static Mocks steadyState(CompletableFuture<Void> steadyStateFuture, FeatureFlags featureFlags)
         throws Exception {
       return create(
@@ -2718,8 +2950,10 @@ public class ReplicationIndexManagerTest {
 
       SteadyStateManager steadyStateManager = mock(SteadyStateManager.class);
       when(steadyStateManager.stop(any()))
-          .thenReturn(CompletableFuture.completedFuture(RESUME_INFO));
-      when(steadyStateManager.add(any(), any(), any(), any(), any(), anyBoolean()))
+          .thenReturn(
+              CompletableFuture.completedFuture(
+                  commitUserData.flatMap(IndexCommitUserData::resumeInfo).orElse(RESUME_INFO)));
+      when(steadyStateManager.add(any(), any(), any(), any(), any(), anyBoolean(), anyBoolean()))
           .then(steadyStateManagerAnswer);
 
       SynonymManager synonymManager = mock(SynonymManager.class);
@@ -2734,7 +2968,10 @@ public class ReplicationIndexManagerTest {
       SynonymMappingManagerFactory synonymFactory =
           (ignored0, ignored1, ignored2) -> List.of(synonymMappingManager);
 
-      var index = mockInitializedIndex(indexGeneration);
+      InitializedIndex index =
+          indexGeneration.getDefinition() instanceof VectorIndexDefinition
+              ? VectorIndex.mockInitializedIndex(indexGeneration)
+              : mockInitializedIndex(indexGeneration);
       when(index.getWriter().getCommitUserData())
           .then(
               ignored ->

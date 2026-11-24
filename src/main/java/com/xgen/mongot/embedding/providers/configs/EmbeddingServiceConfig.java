@@ -213,6 +213,41 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     }
   }
 
+  /**
+   * Cloud and geography of the provider endpoint, as reported by conf-call. Values are kept as
+   * strings so new clouds or geographies parse without a mongot change; a missing field is {@link
+   * #UNKNOWN}.
+   */
+  public record InferenceScope(String cloud, String geography) implements DocumentEncodable {
+    private static final String UNKNOWN_VALUE = "UNKNOWN";
+    public static final InferenceScope UNKNOWN = new InferenceScope(UNKNOWN_VALUE, UNKNOWN_VALUE);
+
+    public InferenceScope {
+      Check.argNotNull(cloud, "cloud");
+      Check.argNotNull(geography, "geography");
+    }
+
+    static class Fields {
+      static final Field.WithDefault<String> CLOUD =
+          Field.builder("cloud").stringField().optional().withDefault(UNKNOWN_VALUE);
+      static final Field.WithDefault<String> GEOGRAPHY =
+          Field.builder("geography").stringField().optional().withDefault(UNKNOWN_VALUE);
+    }
+
+    public static InferenceScope fromBson(DocumentParser parser) throws BsonParseException {
+      return new InferenceScope(
+          parser.getField(Fields.CLOUD).unwrap(), parser.getField(Fields.GEOGRAPHY).unwrap());
+    }
+
+    @Override
+    public BsonDocument toBson() {
+      return BsonDocumentBuilder.builder()
+          .field(Fields.CLOUD, this.cloud)
+          .field(Fields.GEOGRAPHY, this.geography)
+          .build();
+    }
+  }
+
   // TODO(CLOUDP-370950): Update TruncationOption to match Voyage API
   public enum TruncationOption {
     NONE,
@@ -294,6 +329,12 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           Field.builder("useFlexTier").booleanField().optional().withDefault(DEFAULT_USE_FLEX_TIER);
       static final Field.Optional<Integer> RPS_PER_PROVIDER =
           Field.builder("rpsPerProvider").intField().mustBePositive().optional().noDefault();
+      static final Field.WithDefault<InferenceScope> INFERENCE_SCOPE =
+          Field.builder("inferenceScope")
+              .classField(InferenceScope::fromBson)
+              .allowUnknownFields()
+              .optional()
+              .withDefault(InferenceScope.UNKNOWN);
     }
 
     public static EmbeddingConfig fromBson(DocumentParser parser) throws BsonParseException {
@@ -309,7 +350,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           parser.getField(Fields.IS_DEDICATED_CLUSTER).unwrap(),
           parser.getField(Fields.PROVIDER_ENDPOINT).unwrap(),
           parser.getField(Fields.USE_FLEX_TIER).unwrap(),
-          parser.getField(Fields.RPS_PER_PROVIDER).unwrap());
+          parser.getField(Fields.RPS_PER_PROVIDER).unwrap(),
+          parser.getField(Fields.INFERENCE_SCOPE).unwrap());
     }
 
     @Override
@@ -327,6 +369,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           .field(Fields.PROVIDER_ENDPOINT, this.providerEndpoint)
           .fieldOmitDefaultValue(Fields.USE_FLEX_TIER, this.useFlexTier)
           .field(Fields.RPS_PER_PROVIDER, this.rpsPerProvider)
+          .fieldOmitDefaultValue(Fields.INFERENCE_SCOPE, this.inferenceScope)
           .build();
     }
 
@@ -349,6 +392,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     public final boolean useFlexTier;
 
     public final Optional<Integer> rpsPerProvider;
+    public final InferenceScope inferenceScope;
 
     public EmbeddingConfig(
         Optional<String> region,
@@ -389,6 +433,36 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
         Optional<String> providerEndpoint,
         boolean useFlexTier,
         Optional<Integer> rpsPerProvider) {
+      this(
+          region,
+          modelConfig,
+          errorHandlingConfig,
+          credentials,
+          queryParams,
+          collectionScanParams,
+          changeStreamParams,
+          tenantCredentials,
+          isDedicatedCluster,
+          providerEndpoint,
+          useFlexTier,
+          rpsPerProvider,
+          InferenceScope.UNKNOWN);
+    }
+
+    public EmbeddingConfig(
+        Optional<String> region,
+        ModelConfig modelConfig,
+        ErrorHandlingConfig errorHandlingConfig,
+        EmbeddingCredentials credentials,
+        Optional<WorkloadParams> queryParams,
+        Optional<WorkloadParams> collectionScanParams,
+        Optional<WorkloadParams> changeStreamParams,
+        Optional<Map<String, TenantWorkloadCredentials>> tenantCredentials,
+        Boolean isDedicatedCluster,
+        Optional<String> providerEndpoint,
+        boolean useFlexTier,
+        Optional<Integer> rpsPerProvider,
+        InferenceScope inferenceScope) {
       this.region = region;
       this.modelConfigBase = modelConfig;
       this.errorHandlingConfigBase = errorHandlingConfig;
@@ -401,6 +475,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
       this.providerEndpoint = providerEndpoint;
       this.useFlexTier = useFlexTier;
       this.rpsPerProvider = rpsPerProvider;
+      this.inferenceScope = Check.argNotNull(inferenceScope, "inferenceScope");
     }
 
     public ModelConfig getModelConfigBase() {
@@ -457,7 +532,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
               this.tenantCredentials.orElse(null), that.tenantCredentials.orElse(null))
           && Objects.equals(this.isDedicatedCluster, that.isDedicatedCluster)
           && Objects.equals(this.providerEndpoint.orElse(null), that.providerEndpoint.orElse(null))
-          && this.useFlexTier == that.useFlexTier;
+          && this.useFlexTier == that.useFlexTier
+          && Objects.equals(this.inferenceScope, that.inferenceScope);
     }
 
     @Override
@@ -473,7 +549,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           this.tenantCredentials.orElse(null),
           this.isDedicatedCluster,
           this.providerEndpoint.orElse(null),
-          this.useFlexTier);
+          this.useFlexTier,
+          this.inferenceScope);
     }
 
     /**
@@ -506,7 +583,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           this.isDedicatedCluster,
           this.providerEndpoint,
           this.useFlexTier,
-          this.rpsPerProvider);
+          this.rpsPerProvider,
+          this.inferenceScope);
     }
   }
 
@@ -538,6 +616,12 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
      */
     public final Optional<Map<String, String>> similarityByQuantization;
 
+    /**
+     * Output dimensions the model accepts. When absent, index validation accepts any {@code
+     * numDimensions} for the model.
+     */
+    public final Optional<List<Integer>> supportedDimensions;
+
     public VoyageModelConfig(
         Optional<Integer> outputDimensions,
         Optional<TruncationOption> truncation,
@@ -561,6 +645,26 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
         Optional<String> modality,
         Optional<VectorAutoEmbedQuantization> quantization,
         Optional<Map<String, String>> similarityByQuantization) {
+      this(
+          outputDimensions,
+          truncation,
+          batchSize,
+          batchTokenLimit,
+          modality,
+          quantization,
+          similarityByQuantization,
+          Optional.empty());
+    }
+
+    public VoyageModelConfig(
+        Optional<Integer> outputDimensions,
+        Optional<TruncationOption> truncation,
+        Optional<Integer> batchSize,
+        Optional<Integer> batchTokenLimit,
+        Optional<String> modality,
+        Optional<VectorAutoEmbedQuantization> quantization,
+        Optional<Map<String, String>> similarityByQuantization,
+        Optional<List<Integer>> supportedDimensions) {
       this.outputDimensions = outputDimensions;
       this.truncation = truncation;
       this.batchSize = batchSize;
@@ -568,6 +672,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
       this.modality = modality;
       this.quantization = quantization;
       this.similarityByQuantization = similarityByQuantization;
+      this.supportedDimensions = supportedDimensions;
     }
 
     @Override
@@ -600,6 +705,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           .field(Fields.MODALITY, this.modality)
           .field(Fields.QUANTIZATION, this.quantization.map(VectorAutoEmbedQuantization::getName))
           .field(Fields.SIMILARITY, this.similarityByQuantization)
+          .field(Fields.SUPPORTED_DIMENSIONS, this.supportedDimensions)
           .build();
     }
 
@@ -611,7 +717,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           parser.getField(Fields.BATCH_TOKEN_LIMIT).unwrap(),
           parser.getField(Fields.MODALITY).unwrap(),
           parseQuantization(parser),
-          parser.getField(Fields.SIMILARITY).unwrap());
+          parser.getField(Fields.SIMILARITY).unwrap(),
+          parser.getField(Fields.SUPPORTED_DIMENSIONS).unwrap());
     }
 
     private static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
@@ -650,6 +757,11 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
               .mapOf(Value.builder().stringValue().required())
               .optional()
               .noDefault();
+      static final Field.Optional<List<Integer>> SUPPORTED_DIMENSIONS =
+          Field.builder("supportedDimensions")
+              .listOf(Value.builder().intValue().required())
+              .optional()
+              .noDefault();
     }
 
     @Override
@@ -669,7 +781,9 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null))
           && Objects.equals(
               this.similarityByQuantization.orElse(null),
-              that.similarityByQuantization.orElse(null));
+              that.similarityByQuantization.orElse(null))
+          && Objects.equals(
+              this.supportedDimensions.orElse(null), that.supportedDimensions.orElse(null));
     }
 
     @Override
@@ -681,7 +795,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           this.truncation.orElse(null),
           this.modality.orElse(null),
           this.quantization.orElse(null),
-          this.similarityByQuantization.orElse(null));
+          this.similarityByQuantization.orElse(null),
+          this.supportedDimensions.orElse(null));
     }
   }
 

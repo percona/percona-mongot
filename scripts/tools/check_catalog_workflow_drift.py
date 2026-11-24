@@ -52,6 +52,7 @@ TASK_SYNC_POLICY = {
     # --- Allowed to diverge entirely (empty set) ---
     # NonPatchRelease-only: full-release preparation and tagging.
     "RELEASE_PREPARATION": set(),
+    "READY_FOR_BRANCH_CUT": set(),
     "BRANCH_AND_RELEASE_INIT": set(),
     "BRANCHING": set(),
     "SEND_BRANCH_CUT_SLACK": set(),
@@ -59,6 +60,7 @@ TASK_SYNC_POLICY = {
     "JIRA_BULK_UPDATE": set(),
     # PatchRelease-only: patch preparation and cherry-pick flow.
     "PATCH_RELEASE_PREPARATION": set(),
+    "READY_FOR_PATCH_PREPARATION": set(),
     "PATCH_PREPARATION_AND_CHERRY_PICK": set(),
     "PATCH_CHERRY_PICK_TO_RELEASE_BRANCH": set(),
     "ENSURE_CHANGES_MERGED_TO_MASTER": set(),
@@ -77,7 +79,8 @@ TASK_SYNC_POLICY = {
     "CLOUD_DEV_RELEASE": _SYNC_EXCEPT_DESCRIPTIVE,
     "CREATE_JIRA_RELEASE": _SYNC_EXCEPT_DESCRIPTIVE,
     "EVERGREEN_WATERFALL_CHECKS": _SYNC_EXCEPT_DESCRIPTIVE,
-    "NON_PROD_ENV_PVM_ROLLOUT": _SYNC_EXCEPT_DESCRIPTIVE,
+    # The tagging prerequisite has a different display name in each workflow.
+    "NOTIFY_RELEASE_TAG_CREATED": set(_COMPARED_FIELDS) - {"Notes"},
     "RELEASE_TO_10_PERCENT_PROD": _SYNC_EXCEPT_DESCRIPTIVE,
     "RELEASE_TO_50_PERCENT_PROD": _SYNC_EXCEPT_DESCRIPTIVE,
     "RELEASE_TO_100_PERCENT_PROD": _SYNC_EXCEPT_DESCRIPTIVE,
