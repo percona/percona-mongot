@@ -1,6 +1,7 @@
 package com.xgen.testing.mongot.index.definition;
 
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.IndexNamespaceDefinition;
 import com.xgen.mongot.index.definition.StoredSourceDefinition;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldDefinition;
 import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
@@ -35,11 +36,13 @@ public class VectorIndexDefinitionBuilder {
   private UUID collectionUuid = UUID.fromString("eb6c40ca-f25e-47e8-b48c-02a05b64a5aa");
   private Optional<Long> definitionVersion = Optional.empty();
   private Optional<Instant> definitionVersionCreatedAt = Optional.empty();
+  private Optional<ObjectId> definitionVersionId = Optional.empty();
   private List<VectorIndexFieldDefinition> fields = new ArrayList<>();
   private int indexFeatureVersion =
       VectorIndexDefinition.Fields.INDEX_FEATURE_VERSION.getDefaultValue();
   private Optional<StoredSourceDefinition> storedSource = Optional.empty();
   private Optional<FieldPath> nestedRoot = Optional.empty();
+  private Optional<IndexNamespaceDefinition> indexNamespace = Optional.empty();
   private Optional<ObjectId> indexIdAtCreationTime = Optional.empty();
   private Optional<Long> autoEmbeddingDefinitionVersion = Optional.empty();
   private Optional<Long> materializedViewNameFormatVersion = Optional.empty();
@@ -59,7 +62,8 @@ public class VectorIndexDefinitionBuilder {
             .lastObservedCollectionName(definition.getLastObservedCollectionName())
             .numPartitions(definition.getNumPartitions())
             .withDefinitionVersion(definition.getDefinitionVersion())
-            .withDefinitionVersionCreatedAt(definition.getDefinitionVersionCreatedAt());
+            .withDefinitionVersionCreatedAt(definition.getDefinitionVersionCreatedAt())
+            .withDefinitionVersionId(definition.getDefinitionVersionId());
 
     definition
         .getFields()
@@ -175,6 +179,12 @@ public class VectorIndexDefinitionBuilder {
     return this;
   }
 
+  public VectorIndexDefinitionBuilder withDefinitionVersionId(
+      Optional<ObjectId> definitionVersionId) {
+    this.definitionVersionId = definitionVersionId;
+    return this;
+  }
+
   public VectorIndexDefinitionBuilder withVectorFieldDefaultOptions(
       String path, int dimensions, VectorSimilarity function, VectorQuantization quantization) {
     return withVectorField(
@@ -232,6 +242,11 @@ public class VectorIndexDefinitionBuilder {
 
   public VectorIndexDefinitionBuilder nestedRoot(FieldPath nestedRoot) {
     this.nestedRoot = Optional.of(nestedRoot);
+    return this;
+  }
+
+  public VectorIndexDefinitionBuilder indexNamespace(String path) {
+    this.indexNamespace = Optional.of(new IndexNamespaceDefinition(FieldPath.parse(path)));
     return this;
   }
 
@@ -326,8 +341,10 @@ public class VectorIndexDefinitionBuilder {
         this.indexFeatureVersion,
         this.definitionVersion,
         this.definitionVersionCreatedAt,
+        this.definitionVersionId,
         this.storedSource,
         this.nestedRoot,
+        this.indexNamespace,
         this.indexIdAtCreationTime,
         this.autoEmbeddingDefinitionVersion,
         this.materializedViewNameFormatVersion);

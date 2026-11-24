@@ -8,6 +8,7 @@ import static com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionG
 import static com.xgen.testing.mongot.mock.index.VectorIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.VectorIndex.MOCK_INDEX_GENERATION_ID;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -18,6 +19,9 @@ import com.google.common.base.Supplier;
 import com.xgen.mongot.catalog.DefaultIndexCatalog;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.config.backup.JournalEntryIdentity;
+import com.xgen.mongot.config.manager.IncompatibleIndexes;
+import com.xgen.mongot.config.manager.QuarantinedIndex;
 import com.xgen.mongot.cursor.CursorConfig;
 import com.xgen.mongot.cursor.CursorQuery;
 import com.xgen.mongot.cursor.MongotCursorManager;
@@ -31,13 +35,16 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.EmptyExplainInformation;
+import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.MetaResults;
+import com.xgen.mongot.index.QuarantinedIndexException;
 import com.xgen.mongot.index.ReaderClosedException;
+import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.StoredSourceDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.lucene.LuceneVectorIndex;
@@ -51,14 +58,20 @@ import com.xgen.mongot.index.query.DeadlineExceededException;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
 import com.xgen.mongot.index.query.QueryExecutionContext;
+import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchFilter;
 import com.xgen.mongot.index.query.operators.VectorSearchQueryInput;
 import com.xgen.mongot.index.query.operators.mql.Clause;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.index.version.Generation;
+import com.xgen.mongot.index.version.IndexFormatVersion;
+import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
+import com.xgen.mongot.server.executors.LoadSheddingRejectedException;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.ErrorType;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.FloatVector;
 import com.xgen.mongot.util.bson.Vector;
@@ -76,23 +89,29 @@ import com.xgen.testing.mongot.index.query.VectorQueryBuilder;
 import com.xgen.testing.mongot.index.query.operators.mql.ClauseBuilder;
 import com.xgen.testing.mongot.index.query.operators.mql.MqlFilterOperatorBuilder;
 import com.xgen.testing.mongot.index.query.operators.mql.ValueBuilder;
+import com.xgen.testing.mongot.metrics.TestMeterRegistry;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import com.xgen.testing.mongot.mock.index.VectorIndex;
 import com.xgen.testing.mongot.mock.index.VectorSearchResultBatch;
 import com.xgen.testing.mongot.server.command.search.definition.request.CursorOptionsDefinitionBuilder;
 import com.xgen.testing.mongot.server.command.search.definition.request.ExplainDefinitionBuilder;
 import com.xgen.testing.mongot.server.command.search.definition.request.VectorSearchCommandDefinitionBuilder;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import org.bson.BsonArray;
+import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
@@ -144,6 +163,16 @@ public class VectorSearchCommandTest {
         dynamicFeatureFlagRegistry);
   }
 
+  private SearchCommandsRegister.BootstrapperMetadata bootstrapperMetadata(
+      FeatureFlags featureFlags) {
+    return new SearchCommandsRegister.BootstrapperMetadata(
+        "testVersion",
+        "localhost",
+        () -> new MongoDbServerInfo(Optional.of(this.mongoDbVersion), Optional.of("testRs")),
+        featureFlags,
+        registryWithVectorSearchTimeoutEnabled());
+  }
+
   private static DynamicFeatureFlagRegistry registryWithVectorSearchTimeoutEnabled() {
     return new DynamicFeatureFlagRegistry(
         Optional.of(
@@ -188,6 +217,99 @@ public class VectorSearchCommandTest {
   }
 
   @Test
+  public void internalFailureMetric_hasPrometheusCompatibleTagKeys() {
+    var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+    var metrics = new VectorSearchCommand.Metrics(new MetricsFactory("search_metrics", registry));
+
+    metrics.recordInternalFailure(new IOException("handled exception"));
+    metrics.recordInternalFailure(new AssertionError("raw throwable"));
+
+    Assert.assertEquals(
+        1.0,
+        registry
+            .find("search_metrics.vectorSearchCommandInternalFailures")
+            .tags(
+                "exceptionName",
+                IOException.class.getSimpleName(),
+                ErrorType.METRIC_TAG_KEY,
+                ErrorType.INTERNAL_ERROR.toString())
+            .counter()
+            .count(),
+        0.0);
+    Assert.assertEquals(
+        1.0,
+        registry
+            .find("search_metrics.vectorSearchCommandInternalFailures")
+            .tags(
+                "exceptionName",
+                AssertionError.class.getSimpleName(),
+                ErrorType.METRIC_TAG_KEY,
+                ErrorType.INTERNAL_ERROR.toString())
+            .counter()
+            .count(),
+        0.0);
+  }
+
+  /**
+   * A quarantined index is absent from the catalog just like a nonexistent one, but must report why
+   * it is unavailable rather than be treated as though it never existed.
+   */
+  @Test
+  public void testQuarantinedIndex() throws Exception {
+    var incompatibleIndexes = new IncompatibleIndexes(TestMeterRegistry.get());
+    incompatibleIndexes.addLiveIndex(
+        new QuarantinedIndex(
+            new JournalEntryIdentity(
+                new ObjectId(),
+                DATABASE_NAME,
+                COLLECTION_UUID,
+                INDEX_NAME,
+                new Generation(new UserIndexVersion(1), IndexFormatVersion.CURRENT)),
+            IndexDefinitionGeneration.Type.VECTOR,
+            "unsupported field 'fieldFromTheFuture'",
+            new BsonDocument("fieldFromTheFuture", new BsonBoolean(true))));
+
+    var command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .build())
+                        .build())
+                .build(),
+            new DefaultIndexCatalog(),
+            new InitializedIndexCatalog(),
+            incompatibleIndexes,
+            bootstrapperMetadata(),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            Mockito.mock(MongotCursorManager.class),
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    var result = command.run();
+
+    Assert.assertEquals(
+        new BsonString(
+            "Index 'default' is unavailable: its definition cannot be parsed (unsupported field"
+                + " 'fieldFromTheFuture')."),
+        result.get("errmsg"));
+    command.handleSearchEnvoyMetadata(SearchEnvoyMetadata.getDefaultInstance());
+
+    var failure = Assert.assertThrows(CompletionException.class, command::run);
+    Assert.assertTrue(failure.getCause() instanceof QuarantinedIndexException);
+  }
+
+  @Test
   public void testValidIndex() throws Exception {
 
     var mocks = new Mocks();
@@ -213,6 +335,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -222,7 +345,7 @@ public class VectorSearchCommandTest {
     var result = command.run();
 
     // ensure that reader is being called with the exact same query as in command
-    Mockito.verify(mocks.reader, times(1))
+    verify(mocks.reader, times(1))
         .query(
             new MaterializedVectorSearchQuery(query, query.criteria().queryVector().get()),
             QueryExecutionContext.empty());
@@ -233,6 +356,92 @@ public class VectorSearchCommandTest {
     Assert.assertTrue(command.getCreatedCursorIds().isEmpty());
     Assert.assertEquals(
         1, mocks.metricsUpdater.getQueryingMetricsUpdater().getVectorCommandCounter().count(), 0);
+  }
+
+  @Test
+  public void omittedNumCandidatesWithoutAutoFeatureFlag_returnsUserError() throws Exception {
+    var mocks = new Mocks();
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .build();
+    var command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(query)
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            (database, collectionUuid, indexName) -> {},
+            bootstrapperMetadata(
+                FeatureFlags.withDefaults().disable(Feature.AUTO_NUM_CANDIDATES).build()),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    var result = command.run();
+
+    Assert.assertEquals(
+        new BsonDocument()
+            .append("ok", new BsonInt32(0))
+            .append(
+                "errmsg",
+                new BsonString("numCandidates is required for approximate vector search")),
+        result);
+    verify(mocks.reader, times(0)).query(any(), any());
+  }
+
+  @Test
+  public void omittedNumCandidatesWithAutoFeatureFlag_queriesIndex() throws Exception {
+    var mocks = new Mocks();
+    var query =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build())
+            .build();
+    var command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(query)
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            (database, collectionUuid, indexName) -> {},
+            bootstrapperMetadata(
+                FeatureFlags.withDefaults().enable(Feature.AUTO_NUM_CANDIDATES).build()),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    var result = command.run();
+
+    verify(mocks.reader, times(1))
+        .query(
+            new MaterializedVectorSearchQuery(query, query.criteria().queryVector().get()),
+            QueryExecutionContext.empty());
+    var expected =
+        mockInitialMongotCursorBatchForVectorSearch(0, new VectorSearchResultBatch(4), NAMESPACE)
+            .toBson();
+    Assert.assertEquals(expected, result);
   }
 
   @Test
@@ -261,6 +470,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -278,9 +488,7 @@ public class VectorSearchCommandTest {
   public void testDeadlineExceededIsReturnedAsErrorToUser() throws Exception {
     var mocks = new Mocks();
 
-    when(mocks.reader.query(any(), any()))
-        .thenThrow(
-            new DeadlineExceededException());
+    when(mocks.reader.query(any(), any())).thenThrow(new DeadlineExceededException());
 
     VectorSearchCommand command =
         new VectorSearchCommand(
@@ -303,6 +511,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -318,6 +527,48 @@ public class VectorSearchCommandTest {
             .append("codeName", new BsonString("MaxTimeMSExpired"))
             .append("errmsg", new BsonString("operation exceeded time limit")),
         result);
+  }
+
+  @Test
+  public void run_readerOverloaded_propagatesRejectionWithoutRecordingInternalFailure()
+      throws Exception {
+    var mocks = new Mocks();
+    var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+    LoadSheddingRejectedException rejection = LoadSheddingRejectedException.serverAtCapacity();
+    when(mocks.reader.query(any(), any())).thenThrow(rejection);
+
+    VectorSearchCommand command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .build())
+                        .build())
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            bootstrapperMetadata(),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(new MetricsFactory("search_metrics", registry)),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    var thrown = Assert.assertThrows(LoadSheddingRejectedException.class, command::run);
+
+    Assert.assertSame(rejection, thrown);
+    Assert.assertNull(
+        registry.find("search_metrics.vectorSearchCommandInternalFailures").counter());
   }
 
   @Test
@@ -345,6 +596,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(DynamicFeatureFlagRegistry.empty()),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -385,6 +637,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -413,6 +666,7 @@ public class VectorSearchCommandTest {
                 .build(),
             new DefaultIndexCatalog(),
             new InitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -453,6 +707,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -485,6 +740,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -507,6 +763,7 @@ public class VectorSearchCommandTest {
                 .build(),
             new DefaultIndexCatalog(),
             new InitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -540,6 +797,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -553,6 +811,7 @@ public class VectorSearchCommandTest {
   @Test
   public void testIndexNameThatDoesNotExistReturnsEmptyBatch() throws Exception {
     var mocks = new Mocks();
+    var metricsFactory = mockMetricsFactory();
     var command =
         new VectorSearchCommand(
             VectorSearchCommandDefinitionBuilder.builder()
@@ -574,14 +833,19 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
-            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            new VectorSearchCommand.Metrics(metricsFactory),
             mocks.cursorManager,
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
 
+    command.handleSearchEnvoyMetadata(SearchEnvoyMetadata.getDefaultInstance());
+
     var result = command.run();
     mocks.verifyEmptyBatchReturned(result, command);
+    Assert.assertEquals(
+        1.0, metricsFactory.counter("vectorSearchCommandNonexistentIndex").count(), 0);
   }
 
   @Test
@@ -606,6 +870,107 @@ public class VectorSearchCommandTest {
     when(initializedIndexCatalog.getIndex(indexGeneration.getGenerationId()))
         .thenReturn(Optional.empty());
 
+    var registry = new SimpleMeterRegistry();
+    var result = runAgainstCatalog(catalog, initializedIndexCatalog, registry);
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Assert.assertTrue(result.containsKey("errmsg"));
+    Assert.assertEquals(
+        String.format("Index %s not initialized", INDEX_NAME),
+        result.getString("errmsg").getValue());
+    // Verify that throwIfUnavailableForQuerying() was called before the initialization check
+    verify(mockVectorIndex).throwIfUnavailableForQuerying();
+    Assert.assertEquals(1.0, unavailableIndexCount(registry, "LUCENE"), 0);
+    Assert.assertEquals(0.0, unavailableIndexCount(registry, "VECTORLITE"), 0);
+    Assert.assertEquals(
+        result, runAgainstCatalog(catalog, initializedIndexCatalog, registry, true, false));
+    var failure =
+        Assert.assertThrows(
+            CompletionException.class,
+            () -> runAgainstCatalog(catalog, initializedIndexCatalog, registry, true));
+    Assert.assertTrue(failure.getCause() instanceof IndexUnavailableException);
+    Assert.assertEquals(
+        0.0,
+        registry.get("search_metrics.vectorSearchCommandNonexistentIndex").counter().count(),
+        0);
+  }
+
+  @Test
+  public void testIndexUnavailableForQueryingRecordsUnavailableIndexByEngine() throws Exception {
+    var catalog = Mockito.mock(IndexCatalog.class);
+    var initializedIndexCatalog = Mockito.mock(InitializedIndexCatalog.class);
+
+    var vectorIndexDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .name(INDEX_NAME)
+            .withCustomEngineVectorField(PATH.toString(), 1024)
+            .build();
+    var definitionGeneration = mockDefinitionGeneration(vectorIndexDefinition);
+    com.xgen.mongot.index.VectorIndex mockVectorIndex = VectorIndex.mockIndex(definitionGeneration);
+    doThrow(new IndexUnavailableException("unavailable"))
+        .when(mockVectorIndex)
+        .throwIfUnavailableForQuerying();
+
+    IndexGeneration indexGeneration = new IndexGeneration(mockVectorIndex, definitionGeneration);
+    when(catalog.getIndex(DATABASE_NAME, COLLECTION_UUID, Optional.empty(), INDEX_NAME))
+        .thenReturn(Optional.of(indexGeneration));
+
+    var registry = new SimpleMeterRegistry();
+    var result = runAgainstCatalog(catalog, initializedIndexCatalog, registry);
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Assert.assertEquals("unavailable", result.getString("errmsg").getValue());
+    Assert.assertEquals(0.0, unavailableIndexCount(registry, "LUCENE"), 0);
+    Assert.assertEquals(1.0, unavailableIndexCount(registry, "VECTORLITE"), 0);
+    Assert.assertEquals(
+        result, runAgainstCatalog(catalog, initializedIndexCatalog, registry, true, false));
+    var failure =
+        Assert.assertThrows(
+            CompletionException.class,
+            () -> runAgainstCatalog(catalog, initializedIndexCatalog, registry, true));
+    Assert.assertTrue(failure.getCause() instanceof IndexUnavailableException);
+    Assert.assertEquals(
+        0.0,
+        registry.get("search_metrics.vectorSearchCommandNonexistentIndex").counter().count(),
+        0);
+  }
+
+  private BsonDocument runAgainstCatalog(
+      IndexCatalog catalog, InitializedIndexCatalog initializedIndexCatalog, MeterRegistry registry)
+      throws Exception {
+    return runAgainstCatalog(catalog, initializedIndexCatalog, registry, false);
+  }
+
+  private BsonDocument runAgainstCatalog(
+      IndexCatalog catalog,
+      InitializedIndexCatalog initializedIndexCatalog,
+      MeterRegistry registry,
+      boolean grpc)
+      throws Exception {
+    return runAgainstCatalog(catalog, initializedIndexCatalog, registry, grpc, true);
+  }
+
+  private BsonDocument runAgainstCatalog(
+      IndexCatalog catalog,
+      InitializedIndexCatalog initializedIndexCatalog,
+      MeterRegistry registry,
+      boolean grpc,
+      boolean retryEnabled)
+      throws Exception {
+    var retryRegistry =
+        new DynamicFeatureFlagRegistry(
+            Optional.of(
+                List.of(
+                    new DynamicFeatureFlagConfig(
+                        DynamicFeatureFlags.INDEX_UNAVAILABLE_RETRY.getName(),
+                        retryEnabled
+                            ? DynamicFeatureFlagConfig.Phase.ENABLED
+                            : DynamicFeatureFlagConfig.Phase.DISABLED,
+                        List.of(),
+                        List.of(),
+                        0,
+                        DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER))),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(new ObjectId()));
     var mocks = new Mocks();
     var command =
         new VectorSearchCommand(
@@ -628,20 +993,24 @@ public class VectorSearchCommandTest {
                 .build(),
             catalog,
             initializedIndexCatalog,
-            bootstrapperMetadata(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            bootstrapperMetadata(retryRegistry),
             MOCK_EMBEDDING_SERVICE,
-            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            new VectorSearchCommand.Metrics(new MetricsFactory("search_metrics", registry)),
             mocks.cursorManager,
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+    if (grpc) {
+      command.handleSearchEnvoyMetadata(SearchEnvoyMetadata.getDefaultInstance());
+    }
+    return command.run();
+  }
 
-    var result = command.run();
-    Assert.assertEquals(0, result.getInt32("ok").getValue());
-    Assert.assertTrue(result.containsKey("errmsg"));
-    Assert.assertEquals(
-        String.format("Index %s not initialized", INDEX_NAME),
-        result.getString("errmsg").getValue());
-    // Verify that throwIfUnavailableForQuerying() was called before the initialization check
-    verify(mockVectorIndex).throwIfUnavailableForQuerying();
+  private static double unavailableIndexCount(MeterRegistry registry, String indexEngine) {
+    return registry
+        .get("search_metrics.vectorSearchCommandUnavailableIndex")
+        .tag("indexEngine", indexEngine)
+        .counter()
+        .count();
   }
 
   @Test
@@ -675,6 +1044,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -729,6 +1099,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -787,6 +1158,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -836,6 +1208,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -868,6 +1241,7 @@ public class VectorSearchCommandTest {
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
+        Optional.empty(),
         Optional.of(
             new MetadataExplainInformation(
                 Optional.empty(),
@@ -876,6 +1250,10 @@ public class VectorSearchCommandTest {
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty())),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
@@ -913,6 +1291,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -969,6 +1348,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1021,6 +1401,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1066,6 +1447,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1080,6 +1462,50 @@ public class VectorSearchCommandTest {
     Assert.assertTrue(command.getCreatedCursorIds().isEmpty());
     Assert.assertEquals(
         1, mocks.metricsUpdater.getQueryingMetricsUpdater().getVectorCommandCounter().count(), 0);
+  }
+
+  @Test
+  public void run_indexClosedBeforeGetReader_retriesAgainstCatalog() throws Exception {
+    var mocks = new Mocks();
+    when(mocks.initializedIndex.getReader())
+        .thenThrow(new IndexClosedException("Cannot call getReader() after to close()"))
+        .thenReturn(mocks.reader);
+
+    var command =
+        new VectorSearchCommand(
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .filter(getFilter())
+                                .build())
+                        .build())
+                .build(),
+            mocks.catalog,
+            mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            bootstrapperMetadata(),
+            MOCK_EMBEDDING_SERVICE,
+            new VectorSearchCommand.Metrics(mockMetricsFactory()),
+            mocks.cursorManager,
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT);
+
+    var result = command.run();
+
+    var expected =
+        mockInitialMongotCursorBatchForVectorSearch(0, new VectorSearchResultBatch(4), NAMESPACE)
+            .toBson();
+    Assert.assertEquals(expected, result);
+    verify(mocks.initializedIndexCatalog, times(2)).getIndex(MOCK_INDEX_GENERATION_ID);
   }
 
   @Test
@@ -1117,6 +1543,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1184,6 +1611,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1249,6 +1677,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1314,6 +1743,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1370,6 +1800,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1416,6 +1847,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1460,6 +1892,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1504,6 +1937,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1554,6 +1988,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1604,6 +2039,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1654,6 +2090,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1703,6 +2140,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory()),
@@ -1750,6 +2188,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory),
@@ -1830,6 +2269,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(mockMetricsFactory),
@@ -1864,7 +2304,7 @@ public class VectorSearchCommandTest {
   }
 
   @Test
-  public void getBatch_unreachableErrorThrown_metricIncremented()
+  public void getBatch_unreachableErrorThrown_internalMetricNotIncremented()
       throws ReaderClosedException,
           IOException,
           InvalidQueryException,
@@ -1896,6 +2336,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(metricsFactory),
@@ -1907,9 +2348,13 @@ public class VectorSearchCommandTest {
             metricsFactory
                 .counter(
                     "vectorSearchCommandInternalFailures",
-                    Tags.of("throwableName", AssertionError.class.getSimpleName()))
+                    Tags.of(
+                        "exceptionName",
+                        AssertionError.class.getSimpleName(),
+                        ErrorType.METRIC_TAG_KEY,
+                        ErrorType.INTERNAL_ERROR.toString()))
                 .count())
-        .isEqualTo(1.0);
+        .isEqualTo(0.0);
   }
 
   // Test to prove that a RunTimeException that is wrapping an InvalidQueryException results in
@@ -1947,6 +2392,7 @@ public class VectorSearchCommandTest {
                 .build(),
             mocks.catalog,
             mocks.initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             bootstrapperMetadata(),
             MOCK_EMBEDDING_SERVICE,
             new VectorSearchCommand.Metrics(metricsFactory),
@@ -1964,7 +2410,7 @@ public class VectorSearchCommandTest {
     Assert.assertEquals(
         1.0, metricsFactory.counter("vectorSearchCommandInvalidQueries").count(), 0.0);
 
-    // Should NOT count as an Internal System Failure
+    // Should NOT count as an internal failure (invalid query path)
     Assert.assertEquals(
         0.0, metricsFactory.counter("vectorSearchCommandInternalFailures").count(), 0.0);
 
@@ -2057,6 +2503,7 @@ public class VectorSearchCommandTest {
     private final IndexCatalog catalog;
     private final InitializedIndexCatalog initializedIndexCatalog;
     private final IndexMetricsUpdater metricsUpdater;
+    final InitializedVectorIndex initializedIndex;
     final LuceneVectorIndexReader reader;
     final BsonArray bsonResults;
     final MongotCursorManager cursorManager;
@@ -2069,6 +2516,7 @@ public class VectorSearchCommandTest {
       var index = Mockito.mock(LuceneVectorIndex.class);
 
       InitializedVectorIndex initializedIndex = Mockito.mock(InitializedVectorIndex.class);
+      this.initializedIndex = initializedIndex;
       lenient()
           .when(initializedIndex.getDefinition())
           .thenReturn(
@@ -2129,5 +2577,70 @@ public class VectorSearchCommandTest {
 
   private static MetricsFactory mockMetricsFactory() {
     return new MetricsFactory("mockNamespace", new SimpleMeterRegistry());
+  }
+
+  private static VectorSearchQuery indexNamespaceQuery(String namespacePath) {
+    var builder =
+        VectorQueryBuilder.builder()
+            .index(INDEX_NAME)
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .limit(LIMIT)
+                    .numCandidates(NUM_CANDIDATES)
+                    .queryVector(QUERY_VECTOR)
+                    .path(PATH)
+                    .build());
+    if (namespacePath != null) {
+      builder.indexNamespace(namespacePath, new BsonString("acme"));
+    }
+    return builder.build();
+  }
+
+  private static VectorIndexDefinition indexNamespaceDefinition(boolean withNamespace) {
+    var builder =
+        VectorIndexDefinitionBuilder.builder().withCustomEngineVectorField(PATH.toString(), 3);
+    if (withNamespace) {
+      builder.indexNamespace("tenantId");
+    }
+    return builder.build();
+  }
+
+  @Test
+  public void validateIndexNamespace_requiredButMissing_throws() {
+    var thrown =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.validateIndexNamespace(
+                    indexNamespaceQuery(null), indexNamespaceDefinition(true)));
+    assertThat(thrown).hasMessageThat().contains("must supply");
+  }
+
+  @Test
+  public void validateIndexNamespace_matchingPath_passes() throws Exception {
+    VectorSearchCommand.validateIndexNamespace(
+        indexNamespaceQuery("tenantId"), indexNamespaceDefinition(true));
+  }
+
+  @Test
+  public void validateIndexNamespace_mismatchedPath_throws() {
+    var thrown =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.validateIndexNamespace(
+                    indexNamespaceQuery("otherField"), indexNamespaceDefinition(true)));
+    assertThat(thrown).hasMessageThat().contains("does not match");
+  }
+
+  @Test
+  public void validateIndexNamespace_notDefinedOnIndex_throws() {
+    var thrown =
+        Assert.assertThrows(
+            InvalidQueryException.class,
+            () ->
+                VectorSearchCommand.validateIndexNamespace(
+                    indexNamespaceQuery("tenantId"), indexNamespaceDefinition(false)));
+    assertThat(thrown).hasMessageThat().contains("not defined with indexNamespace");
   }
 }

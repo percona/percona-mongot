@@ -36,6 +36,10 @@ public interface IndexWriter extends Closeable {
   /**
    * Commits the index, along with the supplied user data that can later be retrieved via
    * getCommitUserData.
+   *
+   * <p>Whether the commit is durable when this returns is up to the concrete implementation: for a
+   * writer whose engine schedules its own commits this is a no-op, and the user data reaches the
+   * engine via {@link CommitDataStagingWriter#stageUserData} instead.
    */
   void commit(EncodedUserData userData) throws IOException;
 
@@ -115,4 +119,15 @@ public interface IndexWriter extends Closeable {
    * @throws IOException if there is an error during merge cancellation
    */
   void cancelMerges() throws IOException;
+
+  /**
+   * Force-merges the index down to at most {@code maxNumSegments} segments.
+   *
+   * <p>The default implementation is a no-op for writer implementations that do not support
+   * force-merging.
+   *
+   * @param maxNumSegments the maximum number of segments to merge down to (e.g. {@code 1})
+   * @throws IOException if there is an error during the merge
+   */
+  default void forceMerge(int maxNumSegments) throws IOException {}
 }

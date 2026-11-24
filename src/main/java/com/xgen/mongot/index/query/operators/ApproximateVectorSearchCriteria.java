@@ -8,8 +8,18 @@ import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
 import java.util.Optional;
+import java.util.OptionalInt;
 import org.bson.BsonDocument;
 
+/**
+ * Criteria for approximate (ANN) vector search.
+ *
+ * <p>{@code numCandidates} may be empty when the {@code enableAutoNumCandidates} feature flag is
+ * enabled and the user omits numCandidates from the query (auto mode). Use {@link
+ * #getNumCandidates()} for the raw user-supplied value (empty in auto mode), {@link
+ * #isAutoNumCandidates()} to check the mode, and {@link #resolveNumCandidates()} for the effective
+ * value ({@code clamp(8 * limit, 100, 10000)} in auto mode, the user value otherwise).
+ */
 public record ApproximateVectorSearchCriteria(
     FieldPath path,
     Optional<Vector> queryVector,
@@ -17,14 +27,56 @@ public record ApproximateVectorSearchCriteria(
     Optional<VectorSearchFilter> filter,
     Optional<VectorSearchFilter> parentFilter,
     int limit,
-    int numCandidates,
+    Optional<Integer> numCandidates,
     Optional<ExplainOptions> explainOptions,
     boolean returnStoredSource,
     Optional<VectorEmbeddedOptions> embeddedOptions)
     implements VectorSearchCriteria {
 
+  /** Maximum value for numCandidates, whether user-supplied or auto-computed. */
+  public static final int MAX_NUM_CANDIDATES = 10_000;
+
+  /** Lower bound for auto-computed numCandidates. */
+  public static final int MIN_NUM_CANDIDATES = 100;
+
+  /** Auto k/limit ratio: auto numCandidates targets 8x the requested limit before clamping. */
+  public static final int AUTO_NUM_CANDIDATES_RATIO = 8;
+
   public ApproximateVectorSearchCriteria {
-    Check.checkArg(limit <= numCandidates, "limit should be less than or equal to numCandidates");
+    if (numCandidates.isPresent()) {
+      Check.checkArg(
+          limit <= numCandidates.get(), "limit should be less than or equal to numCandidates");
+    } else {
+      Check.checkArg(limit <= MAX_NUM_CANDIDATES, "limit cannot exceed %s", MAX_NUM_CANDIDATES);
+    }
+  }
+
+  /** Returns true when numCandidates was omitted (auto mode). */
+  public boolean isAutoNumCandidates() {
+    return this.numCandidates.isEmpty();
+  }
+
+  /** Returns the raw user-supplied numCandidates, or empty in auto mode. */
+  public OptionalInt getNumCandidates() {
+    return this.numCandidates.map(OptionalInt::of).orElseGet(OptionalInt::empty);
+  }
+
+  /**
+   * Returns the effective numCandidates to use for query execution: the user-supplied value, or in
+   * auto mode {@code clamp(AUTO_NUM_CANDIDATES_RATIO * limit, MIN_NUM_CANDIDATES,
+   * MAX_NUM_CANDIDATES)}. Never throws.
+   *
+   * <p>The {@code (long)} multiply avoids int overflow for large limits; {@code Math.clamp(long,
+   * int, int)} returns the value clamped into the int bounds. The result is always {@code >=
+   * limit}: parsing and the constructor reject {@code limit > MAX_NUM_CANDIDATES} in auto mode.
+   */
+  public int resolveNumCandidates() {
+    return this.numCandidates.orElseGet(
+        () ->
+            Math.clamp(
+                (long) AUTO_NUM_CANDIDATES_RATIO * this.limit,
+                MIN_NUM_CANDIDATES,
+                MAX_NUM_CANDIDATES));
   }
 
   public static ApproximateVectorSearchCriteria fromBson(
@@ -35,19 +87,25 @@ public record ApproximateVectorSearchCriteria(
       throw new BsonParseException(
           "exact must be false or omitted for ApproximateVectorSearchCriteria", Optional.empty());
     }
-    Optional<Integer> wrappedNumCandidates = parser.getField(Fields.NUM_CANDIDATES).unwrap();
-    if (wrappedNumCandidates.isEmpty()) {
-      parser
-          .getContext()
-          .handleSemanticError("numCandidates is required for approximate vector search");
-    }
-    int numCandidates = wrappedNumCandidates.get();
+    // Empty in auto mode: numCandidates will be computed at query time. When
+    // enableAutoNumCandidates is disabled, the command layer rejects the omission.
+    Optional<Integer> numCandidates = parser.getField(Fields.NUM_CANDIDATES).unwrap();
     int limit = parser.getField(Fields.LIMIT).unwrap();
-    if (limit > numCandidates) {
+
+    if (numCandidates.isPresent() && limit > numCandidates.get()) {
       parser
           .getContext()
           .handleSemanticError("limit should be less than or equal to numCandidates");
     }
+
+    // An explicit numCandidates is already bounded by MAX_NUM_CANDIDATES (and limit <=
+    // numCandidates), so only auto mode needs a separate bound on limit.
+    if (numCandidates.isEmpty() && limit > MAX_NUM_CANDIDATES) {
+      parser
+          .getContext()
+          .handleSemanticError(String.format("limit cannot exceed %d", MAX_NUM_CANDIDATES));
+    }
+
     var vector = parser.getField(Fields.QUERY_VECTOR).unwrap();
     var queryInput = VectorSearchQueryInput.fromBson(parser);
 
@@ -80,6 +138,36 @@ public record ApproximateVectorSearchCriteria(
   }
 
   @Override
+  public VectorSearchCriteria withQueryVector(Vector vector) {
+    return new ApproximateVectorSearchCriteria(
+        this.path,
+        Optional.of(vector),
+        Optional.empty(),
+        this.filter,
+        this.parentFilter,
+        this.limit,
+        this.numCandidates,
+        this.explainOptions,
+        this.returnStoredSource,
+        this.embeddedOptions);
+  }
+
+  @Override
+  public VectorSearchCriteria withPath(FieldPath path) {
+    return new ApproximateVectorSearchCriteria(
+        path,
+        this.queryVector,
+        this.query,
+        this.filter,
+        this.parentFilter,
+        this.limit,
+        this.numCandidates,
+        this.explainOptions,
+        this.returnStoredSource,
+        this.embeddedOptions);
+  }
+
+  @Override
   public BsonDocument toBson() {
     BsonDocument filterDocument =
         this.filter.map(DocumentEncodable::toBson).orElse(new BsonDocument());
@@ -89,7 +177,7 @@ public record ApproximateVectorSearchCriteria(
         BsonDocumentBuilder.builder()
             .field(Fields.LIMIT, this.limit())
             .field(Fields.EXACT, false)
-            .field(Fields.NUM_CANDIDATES, Optional.of(this.numCandidates))
+            .field(Fields.NUM_CANDIDATES, this.numCandidates)
             .field(Fields.QUERY_VECTOR, this.queryVector())
             .join(queryDocument)
             .field(Fields.EXPLAIN_OPTIONS, this.explainOptions())
@@ -97,10 +185,8 @@ public record ApproximateVectorSearchCriteria(
             .field(Fields.NESTED_OPTIONS, this.embeddedOptions())
             .join(filterDocument);
 
-    // Add parentFilter with the correct key name
     if (this.parentFilter.isPresent()) {
       BsonDocument pfDoc = this.parentFilter.get().toBson();
-      // Extract the filter content and add it under "parentFilter" key
       if (pfDoc.containsKey("filter")) {
         BsonDocument parentFilterDoc = new BsonDocument("parentFilter", pfDoc.get("filter"));
         builder.join(parentFilterDoc);

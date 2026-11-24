@@ -3,8 +3,8 @@ package com.xgen.mongot.embedding.mongodb.common;
 import com.google.common.annotations.VisibleForTesting;
 
 /**
- * Default implementation of {@link InternalDatabaseResolver}. Resolves every source database to
- * the same fixed base name.
+ * Default implementation of {@link InternalDatabaseResolver}. Resolves every source database to the
+ * same fixed base name.
  */
 public class DefaultInternalDatabaseResolver implements InternalDatabaseResolver {
 
@@ -27,5 +27,11 @@ public class DefaultInternalDatabaseResolver implements InternalDatabaseResolver
   @Override
   public String resolveDefault() {
     return this.baseName;
+  }
+
+  /** This resolver is single-tenant by definition — never emits a tenant-prefixed namespace. */
+  @Override
+  public boolean isDedicatedCluster() {
+    return true;
   }
 }

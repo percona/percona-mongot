@@ -6,6 +6,7 @@ import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
+import com.xgen.mongot.config.manager.QuarantinedIndexLookup;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -18,6 +19,7 @@ import com.xgen.mongot.server.command.management.definition.ManageSearchIndexCom
 import com.xgen.mongot.server.command.registry.CommandRegistry;
 import com.xgen.mongot.server.command.search.definition.request.GetMoreCommandDefinition;
 import com.xgen.mongot.server.command.search.definition.request.KillCursorsCommandDefinition;
+import com.xgen.mongot.server.command.search.definition.request.MaterializeVectorSearchCommandDefinition;
 import com.xgen.mongot.server.command.search.definition.request.PlanShardedSearchCommandDefinition;
 import com.xgen.mongot.server.command.search.definition.request.SearchCommandDefinition;
 import com.xgen.mongot.server.command.search.definition.request.VectorSearchCommandDefinition;
@@ -37,8 +39,7 @@ public class SearchCommandsRegister {
       String mongotHostName,
       MongoDbServerInfoProvider mongoDbServerInfoProvider,
       FeatureFlags featureFlags,
-      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
-  }
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {}
 
   public enum RegistrationMode {
     SECURE {
@@ -65,6 +66,7 @@ public class SearchCommandsRegister {
       MeterRegistry meterRegistry,
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
+      QuarantinedIndexLookup quarantinedIndexLookup,
       BootstrapperMetadata metadata,
       Bytes bsonSizeSoftLimit,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier) {
@@ -76,9 +78,11 @@ public class SearchCommandsRegister {
             cursorManager,
             indexCatalog,
             initializedIndexCatalog,
+            quarantinedIndexLookup,
             bsonSizeSoftLimit,
             metadata,
-            searchMetrics);
+            searchMetrics,
+            embeddingServiceManagerSupplier);
     var getMore = new GetMoreCommand.Factory(cursorManager, bsonSizeSoftLimit, searchMetrics);
     var planShardedSearch = new PlanShardedSearchCommand.Factory(metadata);
     var killCursors = new KillCursorsCommand.Factory(cursorManager);
@@ -87,10 +91,17 @@ public class SearchCommandsRegister {
             cursorManager,
             indexCatalog,
             initializedIndexCatalog,
+            quarantinedIndexLookup,
             bsonSizeSoftLimit,
             embeddingServiceManagerSupplier,
             metadata,
             searchMetrics);
+
+    // Removes read amplification on sharded clusters: the router calls this once before the
+    // scatter to embed query text into a queryVector, instead of every shard's mongot embedding it.
+    var materializeVectorSearch =
+        new MaterializeVectorSearchCommand.Factory(
+            indexCatalog, embeddingServiceManagerSupplier, metadata, searchMetrics);
 
     // TODO(CLOUDP-280897): replace deprecated command with VectorSearchCommand once we disallow
     // running vector queries against search indexes
@@ -100,6 +111,7 @@ public class SearchCommandsRegister {
             bsonSizeSoftLimit,
             indexCatalog,
             initializedIndexCatalog,
+            quarantinedIndexLookup,
             vectorSearch,
             metadata);
 
@@ -109,6 +121,8 @@ public class SearchCommandsRegister {
     registrationCommand.register(PlanShardedSearchCommandDefinition.NAME, planShardedSearch, true);
     registrationCommand.register(KillCursorsCommandDefinition.NAME, killCursors, false);
     registrationCommand.register(VectorSearchCommandDefinition.NAME, deprecatedVectorSearch, true);
+    registrationCommand.register(
+        MaterializeVectorSearchCommandDefinition.NAME, materializeVectorSearch, true);
   }
 
   public static void registerIndexManagementCommands(

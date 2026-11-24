@@ -15,6 +15,7 @@ import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.SearchIndex;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingCompositeIndex;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
@@ -45,7 +46,7 @@ class AllPresentIndexes {
    * <p>Most information is taken out of the staged index (if exists), then the live one, or any of
    * the phasing out ones in this order of precedence.
    *
-   * <p>Data size is summed over all the indexes.
+   * <p>Data size and cold storage bytes are summed over all the indexes.
    */
   static AllIndexInformations allIndexInfos(ConfigState configState) {
     return new AllIndexInformations(allIndexInfosAndMetrics(configState));
@@ -245,6 +246,28 @@ class AllPresentIndexes {
               .map(InitializedIndex::getMetrics)
               .map(metrics -> AggregatedIndexMetrics.createFromOrderedMetrics(List.of(metrics)));
 
+      // An unresolved auto-embedding generation reports the raw definition's type (SEARCH or
+      // VECTOR), but its index is a stub with neither a derived search index nor a synonym
+      // registry, so the detailed status is built from the definition alone.
+      if (AutoEmbeddingIndexGenerationFactory.isAutoEmbeddingResolutionFailed(indexGeneration)) {
+        return switch (indexGeneration.getDefinition()) {
+          case SearchIndexDefinition searchDef ->
+              new IndexDetailedStatus.Search(
+                  Map.of(),
+                  searchDef,
+                  indexGeneration.getOverriddenAnalyzers(),
+                  this.indexStatuses.get(indexGeneration),
+                  indexGeneration.getGenerationId(),
+                  indexMetrics);
+          case VectorIndexDefinition vectorDef ->
+              new IndexDetailedStatus.Vector(
+                  vectorDef,
+                  this.indexStatuses.get(indexGeneration),
+                  indexGeneration.getGenerationId(),
+                  indexMetrics);
+        };
+      }
+
       return switch (indexGeneration.getType()) {
         case SEARCH ->
             new IndexDetailedStatus.Search(
@@ -254,6 +277,7 @@ class AllPresentIndexes {
                     .getSynonymRegistry()
                     .getDetailedStatuses(),
                 indexGeneration.getDefinition().asSearchDefinition(),
+                indexGeneration.getOverriddenAnalyzers(),
                 this.indexStatuses.get(indexGeneration),
                 indexGeneration.getGenerationId(),
                 indexMetrics);
@@ -270,21 +294,19 @@ class AllPresentIndexes {
               AutoEmbeddingCompositeIndex composite =
                   Check.instanceOf(indexGeneration.getIndex(), AutoEmbeddingCompositeIndex.class);
               yield new IndexDetailedStatus.Search(
-                  composite
-                      .derivedIndex
-                      .asSearchIndex()
-                      .getSynonymRegistry()
-                      .getDetailedStatuses(),
+                  composite.derivedIndex.asSearchIndex().getSynonymRegistry().getDetailedStatuses(),
                   searchDef,
+                  indexGeneration.getOverriddenAnalyzers(),
                   this.indexStatuses.get(indexGeneration),
                   indexGeneration.getGenerationId(),
                   indexMetrics);
             }
-            case VectorIndexDefinition vectorDef -> new IndexDetailedStatus.Vector(
-                vectorDef,
-                this.indexStatuses.get(indexGeneration),
-                indexGeneration.getGenerationId(),
-                indexMetrics);
+            case VectorIndexDefinition vectorDef ->
+                new IndexDetailedStatus.Vector(
+                    vectorDef,
+                    this.indexStatuses.get(indexGeneration),
+                    indexGeneration.getGenerationId(),
+                    indexMetrics);
           };
         }
       };

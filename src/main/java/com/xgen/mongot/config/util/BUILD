@@ -4,9 +4,9 @@ java_library(
     name = "util",
     srcs = [
         "AuthMode.java",
-        "DeploymentEnvironment.java",
         "HysteresisConfig.java",
         "IndexDefinitions.java",
+        "IndexIdentity.java",
         "Invariants.java",
         "TlsMode.java",
         "ViewValidator.java",

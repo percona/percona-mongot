@@ -4,16 +4,26 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
 
 import com.google.common.net.HostAndPort;
+import com.mongodb.AuthenticationMechanism;
 import com.mongodb.ConnectionString;
+import com.mongodb.MongoCredential;
+import com.mongodb.MongoCredential.OidcCallback;
+import com.mongodb.MongoCredential.OidcCallbackContext;
+import com.mongodb.MongoCredential.OidcCallbackResult;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadPreference;
 import com.mongodb.Tag;
 import com.mongodb.TagSet;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.internal.MongoClientImpl;
 import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.Databases;
+import com.xgen.mongot.util.mongodb.MongoClientBuilder;
 import com.xgen.mongot.util.mongodb.SslContextFactory;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,6 +38,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
@@ -122,12 +133,17 @@ public class ConnectionInfoFactoryTest {
 
   private static final List<HostAndPort> HOSTS =
       List.of(HostAndPort.fromParts("localhost", 27017), HostAndPort.fromParts("localhost", 27018));
+  private static final String SRV_HOST = "srv.example.com";
 
   private static final ReadPreference SECONDARY_PREFERRED_RP = ReadPreference.secondaryPreferred();
   private static final ReadPreference PRIMARY_RP = ReadPreference.primary();
 
   private static final TlsConfig TLS_DISABLED =
       new TlsConfig(false, Optional.empty(), Optional.empty(), Optional.empty());
+
+  /** For tests that don't use OIDC: any call to {@code create} fails. */
+  private static final OidcCallbackFactory NO_OIDC = OidcCallbackFactory.unsupported();
+
   private static final TlsConfig TLS_ENABLED =
       new TlsConfig(true, Optional.empty(), Optional.empty(), Optional.empty());
 
@@ -141,22 +157,44 @@ public class ConnectionInfoFactoryTest {
     return new ReplicaSetConfig(
         hosts,
         Optional.empty(),
-        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)));
+        Optional.empty(),
+        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)),
+        Optional.empty());
   }
 
   private static ReplicaSetConfig replicaSetConfig(X509Config x509) {
-    return new ReplicaSetConfig(HOSTS, Optional.of(x509), Optional.empty());
+    return new ReplicaSetConfig(
+        HOSTS, Optional.empty(), Optional.of(x509), Optional.empty(), Optional.empty());
   }
 
   private static ReplicaSetConfig replicaSetConfig(ScramConfig scramConfig) {
-    return new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.of(scramConfig));
+    return new ReplicaSetConfig(
+        HOSTS, Optional.empty(), Optional.empty(), Optional.of(scramConfig), Optional.empty());
+  }
+
+  /** A config with an {@code oidc} block. */
+  private static ReplicaSetConfig replicaSetConfig(OidcConfig oidcConfig) {
+    return new ReplicaSetConfig(
+        HOSTS, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(oidcConfig));
+  }
+
+  private static ReplicaSetConfig replicaSetConfigSrv(
+      String username, Path passwordFile, TlsConfig tls) {
+    return new ReplicaSetConfig(
+        List.of(),
+        Optional.of(SRV_HOST),
+        Optional.empty(),
+        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)),
+        Optional.empty());
   }
 
   private static RouterConfig routerConfig(String username, Path passwordFile, TlsConfig tls) {
     return new RouterConfig(
         HOSTS,
         Optional.empty(),
-        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)));
+        Optional.empty(),
+        Optional.of(new ScramConfig(Databases.ADMIN, username, passwordFile, tls)),
+        Optional.empty());
   }
 
   private static Path createPasswordFile(String password) throws IOException {
@@ -178,7 +216,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig("testuser", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP, NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("localhost:27017", "localhost:27018");
@@ -204,7 +242,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig("u", passwordFile, TLS_ENABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP, NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getReadConcern()).isEqualTo(ReadConcern.MAJORITY);
@@ -221,7 +259,7 @@ public class ConnectionInfoFactoryTest {
       RouterConfig config = routerConfig("u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, PRIMARY_RP);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, PRIMARY_RP, NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getReadPreference()).isEqualTo(ReadPreference.primary());
@@ -238,7 +276,7 @@ public class ConnectionInfoFactoryTest {
       RouterConfig config = routerConfig("u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("localhost:27017");
@@ -251,20 +289,26 @@ public class ConnectionInfoFactoryTest {
 
   @Test
   public void getClusterConnectionInfo_noAuthConfig_throwsAssertionError() {
-    ReplicaSetConfig config = new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.empty());
+    ReplicaSetConfig config =
+        new ReplicaSetConfig(
+            HOSTS, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
 
     assertThrows(
         AssertionError.class,
-        () -> ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP));
+        () ->
+            ConnectionInfoFactory.getClusterConnectionInfo(
+                config, SECONDARY_PREFERRED_RP, NO_OIDC));
   }
 
   @Test
   public void getSingleHostConnectionInfo_noAuthConfig_throwsAssertionError() {
-    ReplicaSetConfig config = new ReplicaSetConfig(HOSTS, Optional.empty(), Optional.empty());
+    ReplicaSetConfig config =
+        new ReplicaSetConfig(
+            HOSTS, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
 
     assertThrows(
         AssertionError.class,
-        () -> ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0)));
+        () -> ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), NO_OIDC));
   }
 
   @Test
@@ -283,7 +327,7 @@ public class ConnectionInfoFactoryTest {
             IllegalArgumentException.class,
             () ->
                 ConnectionInfoFactory.getClusterConnectionInfo(
-                    config, SECONDARY_PREFERRED_RP));
+                    config, SECONDARY_PREFERRED_RP, NO_OIDC));
 
     assertThat(e).hasMessageThat().contains("caFile must be set within x509 config");
   }
@@ -296,7 +340,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig("testuser", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).hasSize(1);
@@ -323,7 +367,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig(oneHost, "u", passwordFile, TLS_DISABLED);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, oneHost.get(0));
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, oneHost.get(0), NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getHosts()).containsExactly("sync.example:27019");
@@ -343,7 +387,7 @@ public class ConnectionInfoFactoryTest {
 
       ConnectionInfo info =
           ConnectionInfoFactory.getSingleHostConnectionInfo(
-              config, HOSTS.get(0), ReadPreference.secondary());
+              config, HOSTS.get(0), ReadPreference.secondary(), NO_OIDC);
 
       String uri = info.uri().getConnectionString();
       assertThat(uri).contains("readPreference=secondary");
@@ -364,7 +408,8 @@ public class ConnectionInfoFactoryTest {
           ReadPreference.secondary(List.of(new TagSet(List.of(new Tag("dc", "east")))));
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), rpWithTags);
+          ConnectionInfoFactory.getSingleHostConnectionInfo(
+              config, HOSTS.get(0), rpWithTags, NO_OIDC);
 
       String uri = info.uri().getConnectionString();
       assertThat(uri).contains("readPreference=secondary");
@@ -388,7 +433,7 @@ public class ConnectionInfoFactoryTest {
                   new TagSet(List.of(new Tag("dc", "west")))));
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithTags);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithTags, NO_OIDC);
 
       String uri = info.uri().getConnectionString();
       assertThat(uri).contains("readPreference=nearest");
@@ -410,7 +455,7 @@ public class ConnectionInfoFactoryTest {
           ReadPreference.nearest(List.of(new TagSet(List.of(new Tag("dc", "east coast")))));
 
       ConnectionInfo infoWithSpace =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithSpace);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithSpace, NO_OIDC);
       assertThat(infoWithSpace.uri().getConnectionString())
           .contains("readPreferenceTags=dc:east+coast");
 
@@ -418,7 +463,7 @@ public class ConnectionInfoFactoryTest {
           ReadPreference.nearest(List.of(new TagSet(List.of(new Tag("key+name", "value")))));
 
       ConnectionInfo infoWithPlus =
-          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithPlus);
+          ConnectionInfoFactory.getClusterConnectionInfo(config, rpWithPlus, NO_OIDC);
 
       assertThat(infoWithPlus.uri().getConnectionString())
           .contains("readPreferenceTags=key%2Bname:value");
@@ -437,7 +482,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig(scram);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getCredential()).isNotNull();
@@ -464,7 +509,7 @@ public class ConnectionInfoFactoryTest {
       ReplicaSetConfig config = replicaSetConfig(scram);
 
       ConnectionInfo info =
-          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0));
+          ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), NO_OIDC);
 
       ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
       assertThat(cs.getCredential()).isNotNull();
@@ -527,5 +572,244 @@ public class ConnectionInfoFactoryTest {
             () -> ConnectionInfoFactory.getSslContextFactory(config));
 
     assertThat(e).hasMessageThat().contains("tlsCertificateKeyFile required for x509 auth");
+  }
+
+  @Test
+  public void getClusterConnectionInfo_srvReplicaSet_usernamePassword_parsesAsExpected()
+      throws IOException {
+    Path passwordFile = createPasswordFile("secret"); // kingfisher:ignore
+    try {
+      ReplicaSetConfig config = replicaSetConfigSrv("testuser", passwordFile, TLS_DISABLED);
+
+      ConnectionInfo info =
+          ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP, NO_OIDC);
+
+      ConnectionString cs = new ConnectionString(info.uri().getConnectionString());
+      assertThat(cs.getHosts()).containsExactly(SRV_HOST);
+      assertThat(cs.getHosts()).hasSize(1);
+      assertThat(cs.getCredential()).isNotNull();
+      assertThat(cs.getCredential().getUserName()).isEqualTo("testuser");
+      assertThat(cs.getCredential().getSource()).isEqualTo("admin");
+      String raw = info.uri().getConnectionString();
+      assertThat(raw).startsWith("mongodb+srv://");
+      assertThat(raw).contains("tls=false");
+      assertThat(raw).contains("directConnection=false");
+      assertThat(raw).contains("readConcernLevel=majority");
+      assertThat(info.sslContextFactory()).isEmpty();
+    } finally {
+      Files.deleteIfExists(passwordFile);
+    }
+  }
+
+  /** OIDC TLS settings; the CA file must exist because the SSL context is built from it. */
+  private static TlsConfig oidcTls() {
+    return new TlsConfig(true, Optional.empty(), Optional.empty(), Optional.of(tlsCaFile));
+  }
+
+  /** A custom {@code oidc} config. */
+  private static CustomOidcConfig oidcConfig(TlsConfig tls) {
+    return new CustomOidcConfig(
+        URI.create("https://idp.example.com/token"),
+        "mongot",
+        Path.of("/etc/mongot/secrets/oidc-client-secret"),
+        Path.of("/etc/mongot/tls/idp-ca.pem"),
+        Optional.empty(),
+        tls);
+  }
+
+  private static OidcCallback noopCallback() {
+    return context -> new OidcCallbackResult("token");
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidc_uriHasMechanismAndNoMechanismProperties() {
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            config, SECONDARY_PREFERRED_RP, new OidcCallbackFactory(oidc -> noopCallback()));
+
+    String uri = info.uri().getConnectionString();
+    assertThat(uri).contains("authMechanism=MONGODB-OIDC");
+    assertThat(uri).contains("authSource=$external");
+    assertThat(uri).doesNotContain("authMechanismProperties");
+    assertThat(uri).contains("tls=true");
+    assertThat(uri).contains("readConcernLevel=majority");
+    assertThat(uri).doesNotContain("@");
+    // The token callback travels via ConnectionInfo; the URI carries only the mechanism.
+    ConnectionString cs = new ConnectionString(uri);
+    assertThat(cs.getHosts()).containsExactly("localhost:27017", "localhost:27018");
+    assertThat(cs.getCredential().getMechanism()).isEqualTo("MONGODB-OIDC");
+    assertThat(info.oidcCredential()).isPresent();
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_oidc_hasDirectConnectionAndMechanism() {
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getSingleHostConnectionInfo(
+            config, HOSTS.get(0), new OidcCallbackFactory(oidc -> noopCallback()));
+
+    String uri = info.uri().getConnectionString();
+    assertThat(uri).contains("authMechanism=MONGODB-OIDC");
+    assertThat(uri).contains("directConnection=true");
+    assertThat(uri).doesNotContain("@");
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidc_credentialWrapsFactoryCallback() {
+    OidcCallback callback = noopCallback();
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            config, SECONDARY_PREFERRED_RP, new OidcCallbackFactory(oidc -> callback));
+
+    assertThat(info.oidcCredential()).isPresent();
+    MongoCredential credential = info.oidcCredential().get();
+    assertThat(credential.getAuthenticationMechanism())
+        .isEqualTo(AuthenticationMechanism.MONGODB_OIDC);
+    OidcCallback credentialCallback =
+        credential.getMechanismProperty(MongoCredential.OIDC_CALLBACK_KEY, null);
+    assertThat(credentialCallback).isSameInstanceAs(callback);
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidc_clientSettingsCarryCallbackCredential() {
+    OidcCallback callback = noopCallback();
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+    ConnectionInfo info =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            config, SECONDARY_PREFERRED_RP, new OidcCallbackFactory(oidc -> callback));
+
+    try (MongoClient client =
+        MongoClientBuilder.buildNonReplicationWithDefaults(
+            info, "oidcTest", new SimpleMeterRegistry())) {
+      MongoCredential credential = ((MongoClientImpl) client).getSettings().getCredential();
+
+      assertThat(credential.getAuthenticationMechanism())
+          .isEqualTo(AuthenticationMechanism.MONGODB_OIDC);
+      OidcCallback credentialCallback =
+          credential.getMechanismProperty(MongoCredential.OIDC_CALLBACK_KEY, null);
+      assertThat(credentialCallback).isSameInstanceAs(callback);
+    }
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidc_returnsEqualCredentialAcrossBuilds() {
+    // A new callback instance per build, so equality only holds if the factory caches by config.
+    var factory =
+        new OidcCallbackFactory(
+            oidc ->
+                new OidcCallback() {
+                  @Override
+                  public OidcCallbackResult onRequest(OidcCallbackContext context) {
+                    return new OidcCallbackResult("token");
+                  }
+                });
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo first =
+        ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP, factory);
+    ConnectionInfo second =
+        ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP, factory);
+
+    assertThat(second.oidcCredential()).isEqualTo(first.oidcCredential());
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_oidc_credentialPresent() {
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getSingleHostConnectionInfo(
+            config, HOSTS.get(0), new OidcCallbackFactory(oidc -> noopCallback()));
+
+    String uri = info.uri().getConnectionString();
+    assertThat(uri).contains("directConnection=true");
+    assertThat(uri).contains("authMechanism=MONGODB-OIDC");
+    assertThat(info.oidcCredential()).isPresent();
+    assertThat(info.oidcCredential().get().getAuthenticationMechanism())
+        .isEqualTo(AuthenticationMechanism.MONGODB_OIDC);
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidcTlsCaFile_sslContextFactoryPresent() {
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            config, SECONDARY_PREFERRED_RP, new OidcCallbackFactory(oidc -> noopCallback()));
+
+    assertThat(info.sslContextFactory()).isPresent();
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidcClientCertKeyFile_sslContextUsableForMtls() {
+    TlsConfig tls =
+        new TlsConfig(
+            true, Optional.of(tlsClientCombinedFile), Optional.empty(), Optional.of(tlsCaFile));
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(tls));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getClusterConnectionInfo(
+            config, SECONDARY_PREFERRED_RP, new OidcCallbackFactory(oidc -> noopCallback()));
+
+    assertThat(info.sslContextFactory()).isPresent();
+    assertThat(info.sslContextFactory().get().getJavaContext()).isNotNull();
+  }
+
+  /** The callback is built exactly once per ConnectionInfo. */
+  @Test
+  public void getClusterConnectionInfo_oidc_buildsCallbackOnce() {
+    AtomicInteger createCount = new AtomicInteger();
+    OidcCallbackFactory factory =
+        new OidcCallbackFactory(
+            oidc -> {
+              createCount.incrementAndGet();
+              return noopCallback();
+            });
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getClusterConnectionInfo(config, SECONDARY_PREFERRED_RP, factory);
+
+    assertThat(info.uri().getConnectionString()).isNotEmpty();
+    assertThat(info.oidcCredential()).isPresent();
+    assertThat(createCount.get()).isEqualTo(1);
+  }
+
+  @Test
+  public void getSingleHostConnectionInfo_oidc_buildsCallbackOnce() {
+    AtomicInteger createCount = new AtomicInteger();
+    OidcCallbackFactory factory =
+        new OidcCallbackFactory(
+            oidc -> {
+              createCount.incrementAndGet();
+              return noopCallback();
+            });
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    ConnectionInfo info =
+        ConnectionInfoFactory.getSingleHostConnectionInfo(config, HOSTS.get(0), factory);
+
+    assertThat(info.uri().getConnectionString()).isNotEmpty();
+    assertThat(info.oidcCredential()).isPresent();
+    assertThat(createCount.get()).isEqualTo(1);
+  }
+
+  @Test
+  public void getClusterConnectionInfo_oidcWithUnsupportedCallbackFactory_throwsIllegalState() {
+    ReplicaSetConfig config = replicaSetConfig(oidcConfig(oidcTls()));
+
+    IllegalStateException e =
+        assertThrows(
+            IllegalStateException.class,
+            () ->
+                ConnectionInfoFactory.getClusterConnectionInfo(
+                    config, SECONDARY_PREFERRED_RP, NO_OIDC));
+
+    assertThat(e).hasMessageThat().contains("no OIDC callback factory is installed");
   }
 }

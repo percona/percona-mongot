@@ -112,7 +112,8 @@ public class MqlStringSortTest {
               FieldName.TypeField.TOKEN,
               new MongotSortField(FieldPath.newRoot("field"), UserFieldSortOptions.DEFAULT_ASC),
               true,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       Query query = new MatchAllDocsQuery();
       Sort sort = new Sort(sortFields);
 
@@ -140,7 +141,8 @@ public class MqlStringSortTest {
               new MongotSortField(
                   FieldPath.newRoot("field"), SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
               true,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       Query query = new MatchAllDocsQuery();
       Sort sort = new Sort(sortFields);
 
@@ -167,7 +169,8 @@ public class MqlStringSortTest {
               FieldName.TypeField.TOKEN,
               new MongotSortField(FieldPath.newRoot("field"), UserFieldSortOptions.DEFAULT_ASC),
               true,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       Query query = new MatchAllDocsQuery();
       Sort sort = new Sort(sortFields);
 
@@ -202,7 +205,8 @@ public class MqlStringSortTest {
               new MongotSortField(
                   FieldPath.newRoot("field"), SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
               true,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       Query query = new MatchAllDocsQuery();
       Sort sort = new Sort(sortFields);
 
@@ -358,7 +362,7 @@ public class MqlStringSortTest {
         Sort sort = new Sort(new ExplainSortField(sortField, explainer));
         CollectorManager<TopFieldCollector, TopFieldDocs> manager =
             new TopFieldCollectorManager(sort, numHits, null, numHits);
-        TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+        TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
         if (enablePruning) {
           SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
           SortStats sortExplainResult =
@@ -408,7 +412,7 @@ public class MqlStringSortTest {
 
         CollectorManager<TopFieldCollector, TopFieldDocs> manager =
             new TopFieldCollectorManager(sort, numHits, after, numHits);
-        TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+        TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
         if (enablePruning) {
           SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
@@ -437,12 +441,13 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       }
@@ -467,12 +472,13 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortField.STRING_LAST);
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       }
@@ -496,12 +502,13 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_DESC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertReversedOptimizedSort(topDocs, numHits, numDocs);
@@ -526,12 +533,13 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, SortPruningTestUtils.DEFAULT_DESC_NULLS_HIGHEST),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortField.STRING_LAST);
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertReversedOptimizedSort(topDocs, numHits, numDocs);
@@ -556,7 +564,8 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField);
       BsonValue afterValue = new BsonString(Character.toString((char) afterNum));
@@ -564,7 +573,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, after, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
@@ -589,7 +598,8 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortField.STRING_LAST);
       Sort sort = new Sort(sortField);
       BsonValue afterValue = new BsonString(Character.toString((char) afterNum));
@@ -597,7 +607,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, after, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
@@ -621,13 +631,14 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(SortField.FIELD_SCORE, sortField);
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertUnoptimizedSort(topDocs, numHits, numDocs);
       return List.of(topDocs);
     }
@@ -648,13 +659,14 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField, SortField.FIELD_SCORE);
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       // test that if there is the secondary sort on _score, hits are still skipped
       SortPruningTestUtils.assertScore(topDocs, 1, 1.0f);
@@ -681,14 +693,15 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField);
 
       // test that sorting on a single field with equal values uses the optimization
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, totalHitsThreshold);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
@@ -747,7 +760,7 @@ public class MqlStringSortTest {
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       return List.of(topDocs);
     }
 
@@ -771,7 +784,7 @@ public class MqlStringSortTest {
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       return List.of(topDocs);
     }
 
@@ -794,7 +807,7 @@ public class MqlStringSortTest {
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       return List.of(topDocs);
     }
 
@@ -817,7 +830,7 @@ public class MqlStringSortTest {
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       return List.of(topDocs);
     }
 
@@ -838,7 +851,8 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField);
       BsonValue afterValue = new BsonString(Character.toString((char) afterNum));
@@ -846,7 +860,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, after, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
@@ -871,7 +885,8 @@ public class MqlStringSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
               enablePruning,
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortField.STRING_LAST);
       Sort sort = new Sort(sortField);
       BsonValue afterValue = new BsonString(Character.toString((char) afterNum));
@@ -879,7 +894,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, after, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       if (enablePruning) {
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
@@ -909,7 +924,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, after, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       // singleSort is disabled if an "after" FieldDoc is specified. See:
       // https://github.com/apache/lucene/blob/ee3d60ff92961c744e61b56a2b6272983b3b69dd/lucene/core/src/java/org/apache/lucene/search/TopFieldCollectorManager.java#L153-L156
@@ -941,7 +956,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       // Tests that if there is the secondary sort on _score, hits are not skipped when sorting over
       // null values. For reference, all documents contain the same null field value "N". Due to
       // this line,
@@ -973,7 +988,7 @@ public class MqlStringSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertUnoptimizedSort(topDocs, numHits, numDocs);
       return List.of(topDocs);
     }
@@ -999,7 +1014,7 @@ public class MqlStringSortTest {
       // test that sorting on a single field with equal values uses the optimization
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, totalHitsThreshold);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       return List.of(topDocs);
     }
   }

@@ -22,6 +22,12 @@ package com.xgen.mongot.index.lucene.quantization;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.quantization.ScalarQuantizer;
 
+/**
+ * Will binary quantize float or byte vectors into 1-bit values. This is a lossy transformation.
+ * Binary quantization works by capturing only the sign of each dimension. Unlike scalar
+ * quantization, binary quantization is stateless: there is no confidence interval or quantiles to
+ * calculate.
+ */
 public class BinaryQuantizer extends ScalarQuantizer {
   // Placeholder quantile values: quantiles are not used for binary quantization.
   // The ScalarQuantizer superclass computes scalar-quantization-specific parameters
@@ -29,19 +35,43 @@ public class BinaryQuantizer extends ScalarQuantizer {
   static final float UNUSED_MIN_QUANTILE = 0f;
   static final float UNUSED_MAX_QUANTILE = 1f;
 
-  public BinaryQuantizer() {
+  /** Binary quantization is stateless, so a single shared instance serves all call sites. */
+  public static final BinaryQuantizer INSTANCE = new BinaryQuantizer();
+
+  private BinaryQuantizer() {
     super(UNUSED_MIN_QUANTILE, UNUSED_MAX_QUANTILE, (byte) 1);
   }
 
   @Override
   public float quantize(float[] src, byte[] dest, VectorSimilarityFunction similarityFunction) {
-    assert src.length == dest.length;
     if (dest != null) {
+      assert src.length == dest.length;
       for (int i = 0; i < src.length; i++) {
         dest[i] = (src[i] > 0.0 ? (byte) 1 : (byte) 0);
       }
     }
     return 0f;
+  }
+
+  /**
+   * Quantizes each byte-valued dimension into a single bit (1 if positive, else 0). Binary
+   * quantization is stateless, so this is exposed as a static helper to avoid downcasting a {@link
+   * ScalarQuantizer} at call sites.
+   *
+   * <p>note that this does not return a float correction constant because there is no correction
+   * for binary quantization. Since the {@link #quantize} override from {@link ScalarQuantizer}
+   * method is not used (and doesn't exist for bytes), passing 0 is not necessary.
+   *
+   * @param src source array of raw byte values
+   * @param dest destination array of quantized bytes
+   */
+  public static void quantizeBytes(byte[] src, byte[] dest) {
+    if (dest != null) {
+      assert src.length == dest.length;
+      for (int i = 0; i < src.length; i++) {
+        dest[i] = (src[i] > 0 ? (byte) 1 : (byte) 0);
+      }
+    }
   }
 
   @Override

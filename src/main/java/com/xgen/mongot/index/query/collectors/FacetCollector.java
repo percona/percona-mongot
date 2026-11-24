@@ -145,8 +145,8 @@ public record FacetCollector(
 
   /**
    * Deserializes collector from BSON with 10k limits when {@link
-   * com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags#ENABLE_10K_BUCKET_LIMIT} is on
-   * (string {@code numBuckets} and number/date {@code boundaries}).
+   * com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags#ENABLE_10K_BUCKET_LIMIT} is on (string
+   * {@code numBuckets} and number/date {@code boundaries}).
    */
   public static FacetCollector fromBson10kAllowed(DocumentParser parser) throws BsonParseException {
     return FacetCollector.create(
@@ -178,7 +178,12 @@ public record FacetCollector(
     return total;
   }
 
-  private static int requestedBucketCount(FacetDefinition def) {
+  /**
+   * The requested bucket count of one grouping. Shared with the search-aggregation shape metrics
+   * ({@code aggregationRequestedBucketsPerQuery}), which group by the same payload, so both metrics
+   * count a grouping the same way.
+   */
+  public static int requestedBucketCount(FacetDefinition def) {
     return switch (def) {
       case FacetDefinition.StringFacetDefinition stringFacet -> stringFacet.numBuckets();
       case FacetDefinition.NumericFacetDefinition numericFacet ->

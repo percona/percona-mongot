@@ -23,6 +23,8 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -84,9 +86,7 @@ public abstract class IndexingWorkScheduler extends Thread {
 
     // TODO(CLOUDP-319970): differentiate metrics for each strategy.
     MetricsFactory metricsFactory =
-        new MetricsFactory(
-            "indexingWorkScheduler",
-            executor.getMeterRegistry());
+        new MetricsFactory("indexingWorkScheduler", executor.getMeterRegistry());
     var replicationTag = ServerStatusDataExtractor.Scope.REPLICATION.getTag();
 
     this.schedulerQueue = new SchedulerQueue<>(metricsFactory);
@@ -216,6 +216,15 @@ public abstract class IndexingWorkScheduler extends Thread {
       this.schedulerQueue.finalizeBatch(batch);
       if (batch.commitUserData.isPresent()) {
         batch.indexer.updateCommitUserData(batch.commitUserData.get());
+        try {
+          // Publishes the batch's resume position to writers whose engine schedules its own
+          // commits; a no-op for commit-driven writers.
+          batch.indexer.stageCommitUserData();
+        } catch (IOException e) {
+          // Fails the batch's future via handleBatchException, like a finalize-time commit
+          // failure.
+          throw new UncheckedIOException("Failed to stage commit user data", e);
+        }
         if (shouldCommitOnFinalize()) {
           try {
             batch.indexer.commit();
@@ -251,9 +260,19 @@ public abstract class IndexingWorkScheduler extends Thread {
    * shut down the IndexingWorkScheduler after all managers that submit work to it have been shut
    * down, so we expect that the queue is drained and expect no more work to be scheduled. The run
    * loop, if waiting, will be awoken by a signal, see the shutdown, and return.
+   *
+   * <p>Idempotent: repeated calls return the same future without interrupting again. A second
+   * interrupt would land while the run loop is inside {@link Executors#shutdownOrFail}, whose
+   * {@code awaitTermination} treats {@code InterruptedException} as fatal and halts the JVM. That
+   * matters because one scheduler instance is reachable under several {@link IndexingStrategy} keys
+   * of {@link IndexingWorkSchedulerFactory}, so a caller iterating those entries shuts the same
+   * instance down more than once.
    */
   public CompletableFuture<Void> shutdown() {
     synchronized (this) { // https://github.com/mockito/mockito/issues/2970
+      if (this.shutdown) {
+        return this.shutdownFuture;
+      }
       this.shutdown = true;
 
       if (!this.schedulerQueue.isEmpty()) {

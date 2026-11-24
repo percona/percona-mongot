@@ -9,6 +9,7 @@ import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
 import com.xgen.mongot.util.bson.parser.Field;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -36,7 +37,7 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
   private final String modality;
   private final VectorAutoEmbedQuantization autoEmbedQuantization;
 
-  private static class Fields {
+  static class Fields {
     static final Field.Required<String> MODEL = Field.builder("model").stringField().required();
     static final Field.Required<String> MODALITY =
         Field.builder("modality")
@@ -48,10 +49,7 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
                         : Optional.of("must be '" + DEFAULT_MODALITY + "'"))
             .required();
 
-    /**
-     * Omitted in BSON → model {@code outputDimensions}; if the model config doesn't set it either,
-     * parsing fails ("numDimensions cannot be resolved from model config").
-     */
+    /** Omitted in BSON → model {@code outputDimensions} → default NUM_DIMENSIONS of 1024. */
     static final Field.Optional<Integer> NUM_DIMENSIONS =
         Field.builder("numDimensions")
             .intField()
@@ -64,7 +62,7 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
      * follow quantization-based mapping: {@code float}/{@code scalar} → dot product; {@code
      * binary}/{@code binaryNoRescore} → Euclidean.
      */
-    private static final Field.Optional<VectorSimilarity> SIMILARITY =
+    static final Field.Optional<VectorSimilarity> SIMILARITY =
         Field.builder("similarity")
             .enumField(VectorSimilarity.class)
             .asCamelCase()
@@ -72,7 +70,7 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
             .noDefault();
 
     /** Omitted in BSON → model {@code quantization} → {@link VectorAutoEmbedQuantization#FLOAT}. */
-    private static final Field.Optional<VectorAutoEmbedQuantization> AUTO_EMBED_QUANTIZATION =
+    static final Field.Optional<VectorAutoEmbedQuantization> AUTO_EMBED_QUANTIZATION =
         Field.builder("quantization")
             .enumField(VectorAutoEmbedQuantization.class)
             .asCamelCase()
@@ -121,6 +119,24 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
     return this.autoEmbedQuantization;
   }
 
+  /**
+   * Fully identifies the provider-generated embedding stored in the materialized view.
+   *
+   * <p>Keep this in lockstep with MV identity and resync checks. Lucene-only settings such as
+   * similarity, indexing method, and HNSW options must not be added here.
+   */
+  public record MaterializedViewIdentity(
+      String modelName,
+      String modality,
+      int numDimensions,
+      VectorAutoEmbedQuantization autoEmbedQuantization) {}
+
+  /** Returns the canonical identity of the embedding stored in the materialized view. */
+  public MaterializedViewIdentity materializedViewIdentity() {
+    return new MaterializedViewIdentity(
+        this.modelName, this.modality, numDimensions(), this.autoEmbedQuantization);
+  }
+
   @Override
   public BsonDocument toBson() {
     Optional<HnswOptions> maybeHnswOptions =
@@ -148,8 +164,8 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
 
   public static VectorAutoEmbedFieldSpecification fromBson(DocumentParser parser)
       throws BsonParseException {
-    String modelName = parser.getField(Fields.MODEL).unwrap().toLowerCase();
-    String modality = parser.getField(Fields.MODALITY).unwrap().toLowerCase();
+    String modelName = parser.getField(Fields.MODEL).unwrap().toLowerCase(Locale.ROOT);
+    String modality = parser.getField(Fields.MODALITY).unwrap().toLowerCase(Locale.ROOT);
 
     // resolve VectorIndexingAlgorithm
     VectorIndexingAlgorithm.AlgorithmType userAlgorithmType =
@@ -167,17 +183,6 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
     ResolvedAutoEmbedVectorParams resolved =
         resolveAutoEmbedVectorParams(
             modelName, userNumDimensions, userSimilarity, userProviderQuantization);
-
-    if ((resolved.providerQuantization() == VectorAutoEmbedQuantization.BINARY_NO_RESCORE
-            || resolved.providerQuantization() == VectorAutoEmbedQuantization.BINARY)
-        && resolved.numDimensions() % 8 != 0) {
-      throw new BsonParseException(
-          "numDimensions must be a multiple of 8 for quantization type "
-              + resolved.providerQuantization()
-              + "; but got "
-              + resolved.numDimensions(),
-          Optional.empty());
-    }
 
     return new VectorAutoEmbedFieldSpecification(
         resolved.numDimensions(),
@@ -233,52 +238,64 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
     if (userNumDimensions.isPresent()
         && userQuantization.isPresent()
         && userSimilarity.isPresent()) {
-      return new ResolvedAutoEmbedVectorParams(
+      return buildResolvedParams(
           userNumDimensions.get(), userSimilarity.get(), userQuantization.get());
     }
 
-    // Resolve model config from catalog via the polymorphic ModelConfig interface (not a cast to
-    // VoyageModelConfig) so non-Voyage providers (e.g. OPENAI_COMPATIBLE) resolve correctly. When
-    // the confcall response doesn't carry embedding model configs the model may not be registered
-    // yet; wrap as BsonParseException so the confcall handler marks the index invalid instead of
-    // crashing.
+    // Resolve model config from catalog. When confcall response doesn't contain embedding model
+    // configs, the model may not be registered yet. Wrap as BsonParseException so the confcall
+    // handler marks the index as invalid instead of crashing confcall processing.
     EmbeddingModelConfig cfg;
     try {
       cfg = EmbeddingModelCatalog.getModelConfig(modelName);
     } catch (EmbeddingProviderNonTransientException e) {
       throw new BsonParseException(e.getMessage(), Optional.empty(), e);
     }
-    EmbeddingServiceConfig.ModelConfig modelConfig = cfg.collectionScan().modelConfig();
+    EmbeddingServiceConfig.VoyageModelConfig modelConfig =
+        (EmbeddingServiceConfig.VoyageModelConfig) cfg.collectionScan().modelConfig();
 
     // resolve numDimensions
-    Optional<Integer> configuredDimensions = modelConfig.getConfiguredOutputDimensions();
-    if (configuredDimensions.isEmpty()) {
+    if (modelConfig.outputDimensions.isEmpty()) {
       throw new BsonParseException(
           "numDimensions cannot be resolved from model config", Optional.empty());
     }
-    Integer resolvedNumDimensions = userNumDimensions.orElse(configuredDimensions.get());
+    Integer resolvedNumDimensions = userNumDimensions.orElse(modelConfig.outputDimensions.get());
 
     // resolve VectorProviderQuantization
-    Optional<VectorAutoEmbedQuantization> configuredQuantization =
-        modelConfig.getConfiguredQuantization();
-    if (configuredQuantization.isEmpty()) {
+    if (modelConfig.quantization.isEmpty()) {
       throw new BsonParseException(
           "quantization cannot be resolved from model config", Optional.empty());
     }
     VectorAutoEmbedQuantization resolvedQuantization =
-        userQuantization.orElse(configuredQuantization.get());
+        userQuantization.orElse(modelConfig.quantization.get());
 
     // resolve VectorSimilarity: explicit BSON value, then model-config per-quantization default,
     // then the static quantization-based fallback.
     VectorSimilarity similarity =
         resolveSimilarity(
-            modelName,
-            userSimilarity,
-            resolvedQuantization,
-            modelConfig.getConfiguredSimilarityByQuantization());
+            modelName, userSimilarity, resolvedQuantization, modelConfig.similarityByQuantization);
 
-    return new ResolvedAutoEmbedVectorParams(
-        resolvedNumDimensions, similarity, resolvedQuantization);
+    return buildResolvedParams(resolvedNumDimensions, similarity, resolvedQuantization);
+  }
+
+  static void validateResolvedParams(
+      int numDimensions, VectorSimilarity similarity, VectorAutoEmbedQuantization quantization)
+      throws BsonParseException {
+    buildResolvedParams(numDimensions, similarity, quantization);
+  }
+
+  private static void validateBinaryDimensionsMultipleOf8(ResolvedAutoEmbedVectorParams resolved)
+      throws BsonParseException {
+    if ((resolved.providerQuantization() == VectorAutoEmbedQuantization.BINARY_NO_RESCORE
+            || resolved.providerQuantization() == VectorAutoEmbedQuantization.BINARY)
+        && resolved.numDimensions() % 8 != 0) {
+      throw new BsonParseException(
+          "numDimensions must be a multiple of 8 for quantization type "
+              + resolved.providerQuantization()
+              + "; but got "
+              + resolved.numDimensions(),
+          Optional.empty());
+    }
   }
 
   private static VectorSimilarity getDefaultSimilarity(VectorAutoEmbedQuantization quantization) {
@@ -286,6 +303,28 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
       case BINARY, BINARY_NO_RESCORE -> VectorSimilarity.EUCLIDEAN;
       default -> VectorSimilarity.DOT_PRODUCT;
     };
+  }
+
+  /**
+   * {@code binaryNoRescore} produces packed-bit vectors, which Lucene only supports with Euclidean
+   * similarity; any other similarity would otherwise be silently dropped at indexing time
+   * (IndexableFieldFactory), leaving the index empty. Reject it here instead.
+   */
+  private static ResolvedAutoEmbedVectorParams buildResolvedParams(
+      int numDimensions, VectorSimilarity similarity, VectorAutoEmbedQuantization quantization)
+      throws BsonParseException {
+    if (quantization == VectorAutoEmbedQuantization.BINARY_NO_RESCORE
+        && similarity != VectorSimilarity.EUCLIDEAN) {
+      throw new BsonParseException(
+          "quantization 'binaryNoRescore' only supports 'euclidean' similarity, got '"
+              + similarity.getName()
+              + "'",
+          Optional.empty());
+    }
+    ResolvedAutoEmbedVectorParams resolved =
+        new ResolvedAutoEmbedVectorParams(numDimensions, similarity, quantization);
+    validateBinaryDimensionsMultipleOf8(resolved);
+    return resolved;
   }
 
   /**

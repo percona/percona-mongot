@@ -3,10 +3,10 @@ package com.xgen.mongot.server.command.management.aic;
 import com.mongodb.ErrorCategory;
 import com.mongodb.MongoWriteException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
 import com.xgen.mongot.config.provider.community.embedding.AutoEmbeddingIndexValidator;
 import com.xgen.mongot.config.util.Invariants;
 import com.xgen.mongot.config.util.Invariants.AnalyzerInvariants;
@@ -133,6 +133,7 @@ public class AicCreateSearchIndexesCommand implements Command {
           if (newIndex.internal instanceof SearchIndexDefinition searchIndex) {
             searchIndex.validateEmbeddedDocumentsNestingLevel(
                 this.indexDefinitionConfig.getMaxEmbeddedDocumentsNestingLevel());
+            searchIndex.validateSortDefinition();
           }
           if (newIndex.internal.isAutoEmbeddingIndex()) {
             AutoEmbeddingIndexValidator.validate(newIndex.internal);
@@ -198,6 +199,7 @@ public class AicCreateSearchIndexesCommand implements Command {
       AnalyzerInvariants.validate(searchList, List.of());
       for (SearchIndexDefinition searchIndex : searchList) {
         AnalyzerInvariants.validateFieldAnalyzerReferences(searchIndex, Set.of(), Set.of());
+        AnalyzerInvariants.validateSynonymAnalyzersAreReferenceable(searchIndex);
       }
       Invariants.validateVectorNestedRootReferences(vectorList);
 

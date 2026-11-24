@@ -7,6 +7,7 @@ import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.config.manager.ConfigManager;
+import com.xgen.mongot.config.manager.QuarantinedIndexLookup;
 import com.xgen.mongot.config.util.TlsMode;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
@@ -67,6 +68,7 @@ public class GrpcStreamingServer implements CommandServer {
       ExecutorManager executorManager,
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
+      QuarantinedIndexLookup quarantinedIndexLookup,
       SearchCommandsRegister.BootstrapperMetadata metadata,
       HealthManager healthManager,
       Bytes bsonSizeSoftLimit,
@@ -83,6 +85,7 @@ public class GrpcStreamingServer implements CommandServer {
             configManager,
             indexCatalog,
             initializedIndexCatalog,
+            quarantinedIndexLookup,
             metadata,
             bsonSizeSoftLimit,
             embeddingServiceManagerSupplier);
@@ -124,6 +127,7 @@ public class GrpcStreamingServer implements CommandServer {
       ExecutorManager executorManager,
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
+      QuarantinedIndexLookup quarantinedIndexLookup,
       SearchCommandsRegister.BootstrapperMetadata metadata,
       Bytes bsonSizeSoftLimit,
       Bytes inboundMessageSizeLimit,
@@ -137,6 +141,7 @@ public class GrpcStreamingServer implements CommandServer {
         executorManager,
         indexCatalog,
         initializedIndexCatalog,
+        quarantinedIndexLookup,
         metadata,
         bsonSizeSoftLimit,
         inboundMessageSizeLimit,
@@ -154,6 +159,7 @@ public class GrpcStreamingServer implements CommandServer {
       ExecutorManager executorManager,
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
+      QuarantinedIndexLookup quarantinedIndexLookup,
       SearchCommandsRegister.BootstrapperMetadata metadata,
       Bytes bsonSizeSoftLimit,
       Bytes inboundMessageSizeLimit,
@@ -166,6 +172,7 @@ public class GrpcStreamingServer implements CommandServer {
             configManager,
             indexCatalog,
             initializedIndexCatalog,
+            quarantinedIndexLookup,
             metadata,
             bsonSizeSoftLimit,
             embeddingServiceManagerSupplier);
@@ -226,9 +233,9 @@ public class GrpcStreamingServer implements CommandServer {
               }
               // Fetch per-stream gRPC context values once here so that the handler does not
               // re-resolve them for each command in the stream. SearchEnvoyMetadataInterceptor
-              // always populates ENVOY_ATTEMPT_COUNT_KEY (with a fallback of 1 on missing/
-              // malformed headers), so .get() returns a non-null Integer on the gRPC ingress
-              // path.
+              // always populates ENVOY_ATTEMPT_COUNT_KEY, ENVOY_MAX_ATTEMPT_COUNT_KEY and
+              // ENVOY_IN_REQUEST_PATH_KEY (with fallbacks on missing/malformed headers), so
+              // .get() returns a non-null value on the gRPC ingress path.
               Context context = Context.current();
               return new WireMessageCallHandler(
                   commandRegistry,
@@ -236,7 +243,9 @@ public class GrpcStreamingServer implements CommandServer {
                   cursorManager,
                   GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(context),
                   GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get(context),
-                  featureFlags,
+                  GrpcContext.ENVOY_MAX_ATTEMPT_COUNT_KEY.get(context),
+                  Boolean.TRUE.equals(GrpcContext.IS_SHADOW_KEY.get(context)),
+                  GrpcContext.ENVOY_IN_REQUEST_PATH_KEY.get(context),
                   responseStream);
             });
 
@@ -253,9 +262,16 @@ public class GrpcStreamingServer implements CommandServer {
                   cursorManager,
                   GrpcContext.SEARCH_ENVOY_METADATA_KEY.get(context),
                   GrpcContext.ENVOY_ATTEMPT_COUNT_KEY.get(context),
-                  featureFlags,
+                  GrpcContext.ENVOY_MAX_ATTEMPT_COUNT_KEY.get(context),
+                  Boolean.TRUE.equals(GrpcContext.IS_SHADOW_KEY.get(context)),
+                  GrpcContext.ENVOY_IN_REQUEST_PATH_KEY.get(context),
                   responseStream);
             });
+
+    var manageSearchIndexUnaryCallHandler =
+        ServerCalls.asyncUnaryCall(
+            new ManageSearchIndexUnaryCallHandler(
+                commandRegistry, executorManager.commandExecutor, healthManager));
 
     TlsMode tlsMode =
         securityConfigOpt.isPresent() ? securityConfigOpt.get().tlsMode() : TlsMode.DISABLED;
@@ -277,6 +293,9 @@ public class GrpcStreamingServer implements CommandServer {
                         .addMethod(CommandStreamMethods.searchCommandStream, bsonMessageCallHandler)
                         .addMethod(
                             CommandStreamMethods.vectorSearchCommandStream, bsonMessageCallHandler)
+                        .addMethod(
+                            CommandStreamMethods.manageSearchIndexUnary,
+                            manageSearchIndexUnaryCallHandler)
                         .build())
             .addService(healthManager.getHealthService())
             .maxInboundMessageSize((int) inboundMessageSizeLimit.toBytes())
@@ -351,6 +370,7 @@ public class GrpcStreamingServer implements CommandServer {
       ConfigManager configManager,
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
+      QuarantinedIndexLookup quarantinedIndexLookup,
       SearchCommandsRegister.BootstrapperMetadata metadata,
       Bytes bsonSizeSoftLimit,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier) {
@@ -363,6 +383,7 @@ public class GrpcStreamingServer implements CommandServer {
         meterRegistry,
         indexCatalog,
         initializedIndexCatalog,
+        quarantinedIndexLookup,
         metadata,
         bsonSizeSoftLimit,
         embeddingServiceManagerSupplier);

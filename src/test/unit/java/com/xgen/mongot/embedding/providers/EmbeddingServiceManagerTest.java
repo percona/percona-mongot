@@ -3,6 +3,9 @@ package com.xgen.mongot.embedding.providers;
 import static com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN;
 import static com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier.QUERY;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -18,17 +21,20 @@ import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.VectorOrError;
 import com.xgen.mongot.embedding.exceptions.EmbeddingProviderNonTransientException;
+import com.xgen.mongot.embedding.exceptions.EmbeddingProviderRateLimitException;
 import com.xgen.mongot.embedding.exceptions.EmbeddingProviderTransientException;
 import com.xgen.mongot.embedding.providers.clients.ClientInterface;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
+import com.xgen.mongot.util.UserFacingException;
 import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.testing.mongot.embedding.providers.FakeEmbeddingClientFactory;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.Arrays;
 import java.util.List;
@@ -289,10 +295,24 @@ public class EmbeddingServiceManagerTest {
             1E-7);
       }
     }
+
+    // The terminal, post-retry failure is also tagged by reason. Single-arg
+    // EmbeddingProviderTransientException("Transient error") defaults to Reason.UNKNOWN.
+    double failedByReasonCount =
+        registry
+            .find("embeddingServiceManager.failedRequestsByReason")
+            .tags(Tags.of("workload", QUERY.name(), "reason", "unknown"))
+            .counter()
+            .count();
+    assertEquals(1.0, failedByReasonCount, 1E-7);
   }
 
   @Test
-  public void testNonTransientErrorThrowWithRebatches() {
+  public void testQueryTierLocalErrorCountsAsFailedNotSuccessful() {
+    // QUERY-tier embed() swallows a per-input provider error into a VectorOrError instead of
+    // throwing (see VoyageClient's QUERY-tier 400 handling), so the outer embed() call can return
+    // normally even though the request failed. It must still be counted as a failure, not a
+    // success, on the SLO's success/failure counters.
     EmbeddingServiceConfig embeddingServiceConfig =
         new EmbeddingServiceConfig(
             EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
@@ -306,10 +326,195 @@ public class EmbeddingServiceManagerTest {
             List.of(embeddingServiceConfig),
             new FakeEmbeddingClientFactory(
                 new SimpleMeterRegistry(),
+                ImmutableSet.of("invalid token"),
                 ImmutableSet.of(),
-                ImmutableSet.of(),
-                ImmutableSet.of(),
-                47), // only allow single text to pass.
+                ImmutableSet.of()),
+            EXECUTOR,
+            registry,
+            Optional.empty());
+
+    List<VectorOrError> result =
+        embeddingServiceManager.embed(
+            Arrays.asList("invalid token"),
+            EmbeddingModelConfig.create(
+                "voyage-3-large", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, VOYAGE_3_CONFIG),
+            QUERY,
+            dummyContext());
+
+    assertTrue(result.get(0).errorMessage.isPresent());
+
+    Map<String, Double> expectedMetrics =
+        Map.of(
+            "embeddingServiceManager.failedRequests",
+            1.0,
+            "embeddingServiceManager.successfulRequests",
+            0.0);
+    List<Counter> counters =
+        registry.getMeters().stream()
+            .filter(meter -> expectedMetrics.containsKey(meter.getId().getName()))
+            .map(meter -> (Counter) meter)
+            .toList();
+    for (Counter counter : counters) {
+      if (QUERY.name().equals(counter.getId().getTag("workload"))) {
+        assertEquals(
+            counter.getId().getName(),
+            expectedMetrics.get(counter.getId().getName()),
+            counter.count(),
+            1E-7);
+      }
+    }
+  }
+
+  @Test
+  public void testAllEmptyInputExcludedFromBothCounters() throws Exception {
+    // VectorOrError.EMPTY_INPUT_ERROR is a local, pre-HTTP-call check (empty input text). When
+    // every input is empty, VoyageClient never issues an HTTP call at all, so this isn't a
+    // provider availability event - it must not count as either a success or a failure.
+    EmbeddingServiceConfig embeddingServiceConfig =
+        new EmbeddingServiceConfig(
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            "voyage-3-large",
+            Optional.empty(),
+            VOYAGE_3_CONFIG);
+
+    ClientInterface mockClient = mock(ClientInterface.class);
+    doReturn(List.of(VectorOrError.EMPTY_INPUT_ERROR)).when(mockClient).embed(any(), any());
+    FakeEmbeddingClientFactory embeddingClientFactory = mock(FakeEmbeddingClientFactory.class);
+    doReturn(mockClient)
+        .when(embeddingClientFactory)
+        .createEmbeddingClient(
+            any(EmbeddingModelConfig.class),
+            any(EmbeddingServiceConfig.ServiceTier.class),
+            any(EmbeddingModelConfig.ConsolidatedWorkloadParams.class),
+            any(Optional.class));
+
+    MeterRegistry registry = new SimpleMeterRegistry();
+    EmbeddingServiceManager embeddingServiceManager =
+        new EmbeddingServiceManager(
+            List.of(embeddingServiceConfig),
+            embeddingClientFactory,
+            EXECUTOR,
+            registry,
+            Optional.empty());
+
+    List<VectorOrError> result =
+        embeddingServiceManager.embed(
+            Arrays.asList(""),
+            EmbeddingModelConfig.create(
+                "voyage-3-large", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, VOYAGE_3_CONFIG),
+            QUERY,
+            dummyContext());
+
+    assertEquals(VectorOrError.EMPTY_INPUT_ERROR, result.get(0));
+
+    Map<String, Double> expectedMetrics =
+        Map.of(
+            "embeddingServiceManager.failedRequests",
+            0.0,
+            "embeddingServiceManager.successfulRequests",
+            0.0);
+    List<Counter> counters =
+        registry.getMeters().stream()
+            .filter(meter -> expectedMetrics.containsKey(meter.getId().getName()))
+            .map(meter -> (Counter) meter)
+            .toList();
+    for (Counter counter : counters) {
+      if (QUERY.name().equals(counter.getId().getTag("workload"))) {
+        assertEquals(
+            counter.getId().getName(),
+            expectedMetrics.get(counter.getId().getName()),
+            counter.count(),
+            1E-7);
+      }
+    }
+  }
+
+  @Test
+  public void testMixedEmptyAndValidInputCountsAsSuccess() throws Exception {
+    // A batch mixing empty and non-empty inputs does reach the provider for the non-empty
+    // inputs, unlike an all-empty batch - it should still count as a successful provider call.
+    EmbeddingServiceConfig embeddingServiceConfig =
+        new EmbeddingServiceConfig(
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            "voyage-3-large",
+            Optional.empty(),
+            VOYAGE_3_CONFIG);
+
+    ClientInterface mockClient = mock(ClientInterface.class);
+    doReturn(
+            List.of(
+                VectorOrError.EMPTY_INPUT_ERROR,
+                new VectorOrError(Vector.fromBytes(new byte[] {1, 2, 3, 4}))))
+        .when(mockClient)
+        .embed(any(), any());
+    FakeEmbeddingClientFactory embeddingClientFactory = mock(FakeEmbeddingClientFactory.class);
+    doReturn(mockClient)
+        .when(embeddingClientFactory)
+        .createEmbeddingClient(
+            any(EmbeddingModelConfig.class),
+            any(EmbeddingServiceConfig.ServiceTier.class),
+            any(EmbeddingModelConfig.ConsolidatedWorkloadParams.class),
+            any(Optional.class));
+
+    MeterRegistry registry = new SimpleMeterRegistry();
+    EmbeddingServiceManager embeddingServiceManager =
+        new EmbeddingServiceManager(
+            List.of(embeddingServiceConfig),
+            embeddingClientFactory,
+            EXECUTOR,
+            registry,
+            Optional.empty());
+
+    embeddingServiceManager.embed(
+        Arrays.asList("", "one"),
+        EmbeddingModelConfig.create(
+            "voyage-3-large", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, VOYAGE_3_CONFIG),
+        QUERY,
+        dummyContext());
+
+    Map<String, Double> expectedMetrics =
+        Map.of(
+            "embeddingServiceManager.failedRequests",
+            0.0,
+            "embeddingServiceManager.successfulRequests",
+            1.0);
+    List<Counter> counters =
+        registry.getMeters().stream()
+            .filter(meter -> expectedMetrics.containsKey(meter.getId().getName()))
+            .map(meter -> (Counter) meter)
+            .toList();
+    for (Counter counter : counters) {
+      if (QUERY.name().equals(counter.getId().getTag("workload"))) {
+        assertEquals(
+            counter.getId().getName(),
+            expectedMetrics.get(counter.getId().getName()),
+            counter.count(),
+            1E-7);
+      }
+    }
+  }
+
+  @Test
+  public void testNonTransientErrorThrowWithRebatches() {
+    EmbeddingServiceConfig embeddingServiceConfig =
+        new EmbeddingServiceConfig(
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            "voyage-3-large",
+            Optional.empty(),
+            VOYAGE_3_CONFIG);
+
+    MeterRegistry registry = new SimpleMeterRegistry();
+    FakeEmbeddingClientFactory embeddingClientFactory =
+        new FakeEmbeddingClientFactory(
+            new SimpleMeterRegistry(),
+            ImmutableSet.of(),
+            ImmutableSet.of(),
+            ImmutableSet.of(),
+            47); // only allow single text to pass.
+    EmbeddingServiceManager embeddingServiceManager =
+        new EmbeddingServiceManager(
+            List.of(embeddingServiceConfig),
+            embeddingClientFactory,
             EXECUTOR,
             registry,
             Optional.empty());
@@ -329,6 +534,16 @@ public class EmbeddingServiceManagerTest {
                 COLLECTION_SCAN,
                 dummyContext())
             .join();
+
+    // The original oversized batch attempt is not a rebatch, but every sub-batch resubmitted
+    // after it hit EmbeddingProviderBatchingException is.
+    List<EmbeddingRequestContext> receivedContexts =
+        embeddingClientFactory.getCreatedClient(COLLECTION_SCAN).getReceivedContexts();
+    assertEquals(4, receivedContexts.size());
+    assertFalse(receivedContexts.get(0).isRebatchAttempt());
+    for (EmbeddingRequestContext rebatchedContext : receivedContexts.subList(1, 4)) {
+      assertTrue(rebatchedContext.isRebatchAttempt());
+    }
 
     // Verify the result
     assertEquals(
@@ -404,6 +619,10 @@ public class EmbeddingServiceManagerTest {
             registry,
             Optional.empty());
 
+    assertNull(
+        "Counter should not be registered until the first token-estimation failure",
+        registry.find("embeddingServiceManager.tokenEstimationFailsCounter").counter());
+
     Throwable ex =
         assertThrows(
                 CompletionException.class,
@@ -425,6 +644,25 @@ public class EmbeddingServiceManagerTest {
             .getCause();
     assertTrue(ex instanceof EmbeddingProviderNonTransientException);
     assertEquals("Please lower the number of tokens in the batch.", ex.getMessage());
+
+    Counter tokenEstimationFailsCounter =
+        registry.find("embeddingServiceManager.tokenEstimationFailsCounter").counter();
+    assertNotNull(tokenEstimationFailsCounter);
+    assertEquals(1.0, tokenEstimationFailsCounter.count(), 0.0);
+
+    // The original batch and every rebatch sub-attempt each independently record their own
+    // terminal (post-retry) failure as payload_too_large - the outer BATCHING_ERROR thrown by
+    // EmbeddingServiceManager never itself reaches EmbeddingProviderManager's failedRequests
+    // counters, since it's constructed one layer above the failsafe-wrapped embedAsync calls.
+    // 1 original attempt + 3 rebatch sub-batches (one per input text, per generateBatches at
+    // FALLBACK_AVG_CHAR_SIZE_PER_TOKEN for these 48-char inputs) = 4.
+    double payloadTooLargeFailures =
+        registry
+            .find("embeddingServiceManager.failedRequestsByReason")
+            .tags(Tags.of("workload", COLLECTION_SCAN.name(), "reason", "payload_too_large"))
+            .counter()
+            .count();
+    assertEquals(4.0, payloadTooLargeFailures, 1E-7);
   }
 
   @Test
@@ -456,12 +694,13 @@ public class EmbeddingServiceManagerTest {
             Optional.of(rpsLimit),
             disabledRetriesConfig);
 
+    MeterRegistry registry = new SimpleMeterRegistry();
     EmbeddingServiceManager embeddingServiceManager =
         new EmbeddingServiceManager(
             List.of(embeddingServiceConfig),
             new FakeEmbeddingClientFactory(),
             EXECUTOR,
-            new SimpleMeterRegistry(),
+            registry,
             Optional.empty());
 
     Throwable ex =
@@ -483,8 +722,20 @@ public class EmbeddingServiceManagerTest {
                   }
                 })
             .getCause();
-    assertTrue(ex instanceof EmbeddingProviderTransientException);
+    assertTrue(ex instanceof EmbeddingProviderRateLimitException);
+    assertTrue(UserFacingException.isUserFacing(ex));
     assertEquals("Client side rate limit exceeded, retry it later", ex.getMessage());
+
+    // Distinguishable from Reason.UNKNOWN (unlike the plain "Transient error" test case above),
+    // so this actually proves terminalFailureReason reads the exception's real Reason rather than
+    // coincidentally landing on the same fallback value.
+    double rateLimitedByReasonCount =
+        registry
+            .find("embeddingServiceManager.failedRequestsByReason")
+            .tags(Tags.of("workload", QUERY.name(), "reason", "rate_limit_exceeded"))
+            .counter()
+            .count();
+    assertTrue(rateLimitedByReasonCount >= 1.0);
   }
 
   @Test
@@ -543,10 +794,9 @@ public class EmbeddingServiceManagerTest {
                   }
                 })
             .getCause();
-    assertTrue(ex instanceof EmbeddingProviderTransientException);
-    assertEquals(
-        "Client side rate limit exceeded, retry it later",
-        ex.getMessage());
+    assertTrue(ex instanceof EmbeddingProviderRateLimitException);
+    assertTrue(UserFacingException.isUserFacing(ex));
+    assertEquals("Client side rate limit exceeded, retry it later", ex.getMessage());
   }
 
   @Test

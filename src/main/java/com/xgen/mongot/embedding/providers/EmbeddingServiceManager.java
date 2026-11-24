@@ -17,7 +17,6 @@ import com.xgen.mongot.embedding.providers.congestion.AimdCongestionControl.Cong
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -44,7 +43,6 @@ public class EmbeddingServiceManager {
   private final NamedScheduledExecutorService namedScheduledExecutorService;
   private final EmbeddingClientFactory embeddingClientFactory;
   private final MetricsFactory metricsFactory;
-  private final Counter tokenEstimationFailsCounter;
   private final Optional<CongestionControlParams> congestionControl;
   private final Optional<Integer> embeddingProviderRpsLimit;
 
@@ -75,7 +73,6 @@ public class EmbeddingServiceManager {
     this.embeddingClientFactory = embeddingClientFactory;
     this.namedScheduledExecutorService = namedScheduledExecutorService;
     this.metricsFactory = new MetricsFactory("embeddingServiceManager", meterRegistry);
-    this.tokenEstimationFailsCounter = this.metricsFactory.counter("tokenEstimationFailsCounter");
     this.congestionControl = congestionControl;
     this.embeddingProviderRpsLimit = embeddingProviderRpsLimit;
 
@@ -197,6 +194,11 @@ public class EmbeddingServiceManager {
       // Rebatches it by using FALLBACK_AVG_CHAR_SIZE_PER_TOKEN, which we
       // use to divide total char length and we just rebatch it once since
       // this token estimation should be conservative enough.
+      // Marks the sub-batch context as a rebatch attempt so a payload-too-large failure here
+      // (which persisted even at the smaller size) is distinguishable from the original
+      // oversized-batch attempt, which self-heals via this rebatch and shouldn't count as a
+      // real availability failure.
+      EmbeddingRequestContext rebatchContext = context.withRebatchAttempt();
       return FutureUtils.transposeList(
               generateBatches(
                       inputList,
@@ -204,7 +206,9 @@ public class EmbeddingServiceManager {
                       workloadModelConfig.getBatchTokenLimit(),
                       FALLBACK_AVG_CHAR_SIZE_PER_TOKEN)
                   .stream()
-                  .map(subInputList -> clientManager.embedAsync(subInputList, serviceTier, context))
+                  .map(
+                      subInputList ->
+                          clientManager.embedAsync(subInputList, serviceTier, rebatchContext))
                   .toList())
           // Merge responses from rebatched requests into one list.
           .thenApply(
@@ -217,7 +221,7 @@ public class EmbeddingServiceManager {
                 Throwable unrecoverableEx = unwrapThrowable(unrecoverableThrowable);
                 if (unrecoverableEx
                     instanceof EmbeddingProviderBatchingException batchingException) {
-                  this.tokenEstimationFailsCounter.increment();
+                  this.metricsFactory.counter("tokenEstimationFailsCounter").increment();
                   throw new EmbeddingProviderNonTransientException(
                       Strings.nullToEmpty(batchingException.getMessage()),
                       EmbeddingProviderNonTransientException.Reason.BATCHING_ERROR);

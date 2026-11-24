@@ -4,6 +4,7 @@ import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
+import com.xgen.mongot.index.PreparableWriter;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
@@ -37,12 +38,72 @@ public interface ReplicationIndexManagerFactory {
    * Returns the appropriate factory for the given index generation: a {@link
    * RecyclableReplicationIndexManager} factory for VectorLite indexes, or {@code defaultFactory}
    * for all other indexes.
+   *
+   * <p>For VectorLite indexes the returned factory also registers the freshly created manager's
+   * {@link RecyclableReplicationIndexManager#onLeaderStatusChange} as the leadership sink via
+   * {@code leaderStatusRegistrar}. Such an index is leadership-driven, so the registrar is
+   * required: the factory throws {@link IllegalStateException} when {@code leaderStatusRegistrar}
+   * is empty, rather than silently leaving the manager without leadership updates. Because the
+   * factory creates the concrete manager type directly, no downcast or {@code instanceof} is needed
+   * at the call site.
    */
   static ReplicationIndexManagerFactory forIndexGeneration(
-      IndexGeneration indexGeneration, ReplicationIndexManagerFactory defaultFactory) {
+      IndexGeneration indexGeneration,
+      ReplicationIndexManagerFactory defaultFactory,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
     if (indexGeneration.getDefinition() instanceof VectorIndexDefinition vectorDef
         && vectorDef.isCustomVectorEngineIndex()) {
-      return RecyclableReplicationIndexManager::create;
+      return (executor,
+          cursorManager,
+          initialSyncQueue,
+          steadyStateManager,
+          synonymManager,
+          generation,
+          index,
+          documentIndexer,
+          commitExecutor,
+          commitInterval,
+          requestRateLimitBackoff,
+          meterRegistry,
+          featureFlags,
+          enableNaturalOrderScan) -> {
+        // A custom vector engine index is leadership-driven, so a registrar must be wired or the
+        // manager would silently never receive leadership transitions. Fail fast (before creating
+        // the manager) rather than degrading to a no-op.
+        LeaderStatusRegistrar registrar =
+            leaderStatusRegistrar.orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "Custom vector engine index "
+                            + generation.getGenerationId()
+                            + " requires a LeaderStatusRegistrar, but none was configured"));
+        // A custom vector engine index's writer is a preparable writer: RRIM
+        // prepares it on promotion before creating the RIM, on the
+        // shared, bounded prepare executor. The shared per-generation documentIndexer
+        // is intentionally not forwarded: RRIM builds a fresh per-session indexer on
+        // each promotion instead, so stale work from an old session cannot poison the
+        // next one.
+        PreparableWriter preparableWriter = (PreparableWriter) index.getWriter();
+        RecyclableReplicationIndexManager manager =
+            RecyclableReplicationIndexManager.create(
+                executor,
+                cursorManager,
+                initialSyncQueue,
+                steadyStateManager,
+                synonymManager,
+                generation,
+                index,
+                commitExecutor,
+                commitInterval,
+                requestRateLimitBackoff,
+                meterRegistry,
+                featureFlags,
+                enableNaturalOrderScan,
+                preparableWriter,
+                VectorlitePrepareExecutor.get());
+        registrar.register(generation, manager::onLeaderStatusChange);
+        return manager;
+      };
     }
     return defaultFactory;
   }

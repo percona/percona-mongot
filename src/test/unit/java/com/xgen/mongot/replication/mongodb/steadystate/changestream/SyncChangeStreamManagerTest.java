@@ -12,6 +12,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -27,6 +28,7 @@ import com.xgen.mongot.replication.mongodb.common.ChangeStreamBatch;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoClient;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
@@ -38,7 +40,11 @@ import com.xgen.testing.mongot.mock.index.SearchIndex;
 import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -80,7 +86,7 @@ public class SyncChangeStreamManagerTest {
                 ChangeStreamUtils.toRawBsonDocuments(
                     List.of(ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                 ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                new BsonTimestamp()));
+                Optional.of(new BsonTimestamp())));
 
     when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
         .thenReturn(changeStreamMongoClient);
@@ -94,7 +100,7 @@ public class SyncChangeStreamManagerTest {
     DecodingWorkScheduler decodingScheduler = DecodingWorkScheduler.create(4, simpleMeterRegistry);
 
     when(changeStreamIndexManagerFactory.create(
-            any(), any(), any(), any(), any(), any(), any(), any()))
+            any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation -> {
               DecodingExecutorChangeStreamIndexManager manager =
@@ -190,7 +196,7 @@ public class SyncChangeStreamManagerTest {
                 ChangeStreamUtils.toRawBsonDocuments(
                     List.of(ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                 ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                new BsonTimestamp()));
+                Optional.of(new BsonTimestamp())));
 
     when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
         .thenReturn(changeStreamMongoClient);
@@ -206,7 +212,7 @@ public class SyncChangeStreamManagerTest {
     var capturedDecodingExecutorChangeStreamIndexManagerRef =
         new AtomicReference<DecodingExecutorChangeStreamIndexManager>();
     when(changeStreamIndexManagerFactory.create(
-            any(), any(), any(), any(), any(), any(), any(), any()))
+            any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation -> {
               DecodingExecutorChangeStreamIndexManager manager =
@@ -275,7 +281,7 @@ public class SyncChangeStreamManagerTest {
     var changeStreamIndexManagerFactory = mock(ChangeStreamIndexManagerFactory.class);
 
     when(changeStreamIndexManagerFactory.create(
-            any(), any(), any(), any(), any(), any(), any(), any()))
+            any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation ->
                 spy(
@@ -325,8 +331,7 @@ public class SyncChangeStreamManagerTest {
   }
 
   @Test
-  public void testConcurrentEmbeddingGetMoresSemaphoreReleased_batchException()
-      throws Exception {
+  public void testConcurrentEmbeddingGetMoresSemaphoreReleased_batchException() throws Exception {
     testConcurrentEmbeddingGetMoresSemaphore(GetMoreScenario.INDEXING_EXCEPTION);
   }
 
@@ -353,7 +358,7 @@ public class SyncChangeStreamManagerTest {
             ChangeStreamUtils.toRawBsonDocuments(
                 List.of(ChangeStreamUtils.insertEvent(0, embeddingDefinition))),
             ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-            new BsonTimestamp());
+            Optional.of(new BsonTimestamp()));
 
     CountDownLatch getMoreStarted = new CountDownLatch(1);
     CountDownLatch getMoreDone = new CountDownLatch(1);
@@ -371,7 +376,7 @@ public class SyncChangeStreamManagerTest {
     DecodingWorkScheduler decodingScheduler =
         DecodingWorkScheduler.create(4, new SimpleMeterRegistry());
     when(changeStreamIndexManagerFactory.create(
-            any(), any(), any(), any(), any(), any(), any(), any()))
+            any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation ->
                 spy(
@@ -397,6 +402,7 @@ public class SyncChangeStreamManagerTest {
                 .setNumConcurrentChangeStreams(2)
                 .setChangeStreamCursorMaxTimeSec(1)
                 .setMaxInFlightEmbeddingGetMores(1)
+                .setReplicationType(CommonReplicationConfig.Type.AUTO_EMBEDDING)
                 .build(),
             changeStreamIndexManagerFactory);
 
@@ -458,5 +464,185 @@ public class SyncChangeStreamManagerTest {
     SUCCESS,
     INDEXING_EXCEPTION,
     SHUTDOWN
+  }
+
+  // ---------------------------------------------------------------------------
+  // Activity observer wiring (the static-flag-gated observer lifecycle).
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void activityObserverCreatedAndIndexRegisteredOnAdd() throws Exception {
+    RecordingObserverFactory observerFactory = new RecordingObserverFactory();
+    CountDownLatch getMoreDone = new CountDownLatch(1);
+    ChangeStreamManager manager = managerWithObserverFactory(observerFactory, getMoreDone);
+
+    manager.add(
+        MOCK_INDEX_GENERATION_ID,
+        mockDocumentIndexer(),
+        MOCK_INDEX_DEFINITION,
+        INITIAL_RESUME_INFO,
+        (ignoreResumeInfo) -> {},
+        IGNORE_METRICS,
+        false);
+
+    // The observer for the index's database is created once and the index registers with it.
+    assertThat(observerFactory.createdDatabases).containsExactly(MOCK_INDEX_DATABASE_NAME);
+    verify(observerFactory.observerFor(MOCK_INDEX_DATABASE_NAME))
+        .register(eq(MOCK_INDEX_GENERATION_ID), any(), any());
+
+    getMoreDone.countDown();
+    manager.shutdown();
+  }
+
+  @Test
+  public void activityObserverClosedWhenItsLastIndexIsRemoved() throws Exception {
+    RecordingObserverFactory observerFactory = new RecordingObserverFactory();
+    CountDownLatch getMoreDone = new CountDownLatch(1);
+    ChangeStreamManager manager = managerWithObserverFactory(observerFactory, getMoreDone);
+
+    manager.add(
+        MOCK_INDEX_GENERATION_ID,
+        mockDocumentIndexer(),
+        MOCK_INDEX_DEFINITION,
+        INITIAL_RESUME_INFO,
+        (ignoreResumeInfo) -> {},
+        IGNORE_METRICS,
+        false);
+    ChangeStreamActivityObserver observer = observerFactory.observerFor(MOCK_INDEX_DATABASE_NAME);
+    // deregister returns true => that was the database's last managed index.
+    when(observer.deregister(MOCK_INDEX_GENERATION_ID)).thenReturn(true);
+
+    manager.stop(MOCK_INDEX_GENERATION_ID);
+
+    verify(observer).deregister(MOCK_INDEX_GENERATION_ID);
+    verify(observer).close();
+
+    getMoreDone.countDown();
+    manager.shutdown();
+  }
+
+  @Test
+  public void activityObserverNotClosedWhileIndexesRemain() throws Exception {
+    RecordingObserverFactory observerFactory = new RecordingObserverFactory();
+    CountDownLatch getMoreDone = new CountDownLatch(1);
+    ChangeStreamManager manager = managerWithObserverFactory(observerFactory, getMoreDone);
+
+    manager.add(
+        MOCK_INDEX_GENERATION_ID,
+        mockDocumentIndexer(),
+        MOCK_INDEX_DEFINITION,
+        INITIAL_RESUME_INFO,
+        (ignoreResumeInfo) -> {},
+        IGNORE_METRICS,
+        false);
+    ChangeStreamActivityObserver observer = observerFactory.observerFor(MOCK_INDEX_DATABASE_NAME);
+    // deregister returns false => the database still has other managed indexes.
+    when(observer.deregister(MOCK_INDEX_GENERATION_ID)).thenReturn(false);
+
+    manager.stop(MOCK_INDEX_GENERATION_ID);
+
+    verify(observer).deregister(MOCK_INDEX_GENERATION_ID);
+    verify(observer, never()).close();
+
+    getMoreDone.countDown();
+    manager.shutdown();
+  }
+
+  @Test
+  public void allActivityObserversClosedOnShutdown() throws Exception {
+    RecordingObserverFactory observerFactory = new RecordingObserverFactory();
+    CountDownLatch getMoreDone = new CountDownLatch(1);
+    ChangeStreamManager manager = managerWithObserverFactory(observerFactory, getMoreDone);
+
+    manager.add(
+        MOCK_INDEX_GENERATION_ID,
+        mockDocumentIndexer(),
+        MOCK_INDEX_DEFINITION,
+        INITIAL_RESUME_INFO,
+        (ignoreResumeInfo) -> {},
+        IGNORE_METRICS,
+        false);
+    ChangeStreamActivityObserver observer = observerFactory.observerFor(MOCK_INDEX_DATABASE_NAME);
+
+    getMoreDone.countDown();
+    manager.shutdown();
+
+    verify(observer).close();
+  }
+
+  // Builds a manager wired with the supplied observer factory. The change-stream client's getNext
+  // blocks on getMoreDone so the dispatcher does no real work until the test releases it at
+  // teardown; the observer registration under test happens synchronously in
+  // add()/stop()/shutdown().
+  private ChangeStreamManager managerWithObserverFactory(
+      ChangeStreamManager.ActivityObserverFactory observerFactory, CountDownLatch getMoreDone)
+      throws Exception {
+    var changeStreamMongoClient = mock(ChangeStreamMongoClient.class);
+    var mongoClientFactory = mock(ChangeStreamMongoClientFactory.class);
+    var changeStreamIndexManagerFactory = mock(ChangeStreamIndexManagerFactory.class);
+
+    when(changeStreamMongoClient.getNext())
+        .thenAnswer(
+            ignored -> {
+              getMoreDone.await();
+              return new ChangeStreamBatch(
+                  ChangeStreamUtils.toRawBsonDocuments(
+                      List.of(ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
+                  ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
+                  Optional.of(new BsonTimestamp()));
+            });
+    when(mongoClientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
+        .thenReturn(changeStreamMongoClient);
+
+    DecodingWorkScheduler decodingScheduler =
+        DecodingWorkScheduler.create(4, new SimpleMeterRegistry());
+    when(changeStreamIndexManagerFactory.create(
+            any(), any(), any(), any(), any(), any(), any(), any(), any()))
+        .thenAnswer(
+            invocation ->
+                spy(
+                    DecodingExecutorChangeStreamIndexManager.createWithDecodingScheduler(
+                        invocation.getArgument(0),
+                        invocation.getArgument(1),
+                        invocation.getArgument(2),
+                        invocation.getArgument(3),
+                        invocation.getArgument(4),
+                        invocation.getArgument(5),
+                        invocation.getArgument(6),
+                        invocation.getArgument(7),
+                        decodingScheduler)));
+
+    return ChangeStreamManager.createSync(
+        MeterAndFtdcRegistry.createWithSimpleRegistries(),
+        mongoClientFactory,
+        mock(ChangeStreamModeSelector.class),
+        mock(IndexingWorkSchedulerFactory.class),
+        SteadyStateReplicationConfig.builder()
+            .setChangeStreamQueryMaxTimeMs(1)
+            .setNumConcurrentChangeStreams(1)
+            .setChangeStreamCursorMaxTimeSec(1)
+            .setMaxInFlightEmbeddingGetMores(1)
+            .build(),
+        changeStreamIndexManagerFactory,
+        Optional.of(observerFactory));
+  }
+
+  // Records each database an observer was created for and hands back a mock observer per
+  // database so the test can verify register/deregister/close on it.
+  private static final class RecordingObserverFactory
+      implements ChangeStreamManager.ActivityObserverFactory {
+    private final Map<String, ChangeStreamActivityObserver> observers = new HashMap<>();
+    private final List<String> createdDatabases = new ArrayList<>();
+
+    @Override
+    public ChangeStreamActivityObserver create(String databaseName) {
+      this.createdDatabases.add(databaseName);
+      return this.observers.computeIfAbsent(
+          databaseName, ignored -> mock(ChangeStreamActivityObserver.class));
+    }
+
+    ChangeStreamActivityObserver observerFor(String databaseName) {
+      return this.observers.get(databaseName);
+    }
   }
 }

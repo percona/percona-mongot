@@ -25,8 +25,12 @@ import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.SynonymMappingDefinition;
+import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexCapabilities;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
+import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
+import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.SynonymStatus;
 import com.xgen.mongot.index.synonym.SynonymDetailedStatus;
@@ -38,7 +42,7 @@ import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.index.version.SynonymMappingId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
-import com.xgen.mongot.util.FieldPath;
+import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
@@ -70,6 +74,13 @@ public class SearchIndex {
   public static final String MOCK_INDEX_LAST_OBSERVED_COLLECTION_NAME = "mock_collection";
   public static final String MOCK_SEARCH_ANALYZER_NAME = "my_analyzer";
   public static final UUID MOCK_INDEX_COLLECTION_UUID = UUID.randomUUID();
+
+  /** What {@code listCollections} would report for the mock index's collection. */
+  public static final MongoDbCollectionInfo MOCK_INDEX_COLLECTION_INFO =
+      new MongoDbCollectionInfo.Collection(
+          MOCK_INDEX_LAST_OBSERVED_COLLECTION_NAME,
+          new MongoDbCollectionInfo.Collection.Info(MOCK_INDEX_COLLECTION_UUID));
+
   public static final DocumentFieldDefinition MOCK_INDEX_MAPPINGS =
       DocumentFieldDefinitionBuilder.builder().dynamic(true).build();
 
@@ -396,13 +407,19 @@ public class SearchIndex {
   /** Creates a mock auto embedding search index definition. */
   public static SearchIndexDefinition mockAutoEmbeddingSearchDefinition(ObjectId indexId) {
     SearchAutoEmbedFieldDefinition autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+        new SearchAutoEmbedFieldDefinition(
+            new VectorAutoEmbedFieldSpecification(
+                1024,
+                VectorSimilarity.DOT_PRODUCT,
+                VectorAutoEmbedQuantization.FLOAT,
+                new VectorIndexingAlgorithm.HnswIndexingAlgorithm(),
+                "voyage-3-large",
+                "text"));
     DocumentFieldDefinition autoEmbedMappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(false)
             .field(
-                "embedding",
-                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
             .build();
     return SearchIndexDefinitionBuilder.builder()
         .indexId(indexId)
@@ -491,7 +508,8 @@ public class SearchIndex {
         type == IndexDefinition.Type.VECTOR_SEARCH
             ? VectorIndexCapabilities.CURRENT_FEATURE_VERSION
             : SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
-        true);
+        true,
+        /* isSearchAggregationEnabled= */ true);
   }
 
   /** create a IndexMetricsUpdater.ReplicationMetricsUpdater for the Mock Index class. */

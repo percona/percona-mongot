@@ -1,12 +1,9 @@
 package com.xgen.mongot.util.bson;
 
 import com.xgen.mongot.util.Check;
-import com.xgen.mongot.util.FloatCollector;
 import com.xgen.mongot.util.bson.parser.BsonParseContext;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.Encodable;
-import java.util.Optional;
-import org.bson.BsonArray;
 import org.bson.BsonValue;
 
 /**
@@ -14,20 +11,43 @@ import org.bson.BsonValue;
  * (scalar quantized vector) or a bit vector (binary quantized vector).
  */
 public abstract sealed class Vector implements Encodable
-    permits BitVector, ByteVector, FloatVector {
+    permits BitVector, ByteVector, FloatVector, Float16Vector {
 
   /**
-   * The data type of the vector. This indicates whether the vector consists of floats, int8s/bytes
-   * or bits.
+   * The data type of the vector. This indicates whether the vector consists of floats, half-floats
+   * (f16), int8s/bytes or bits.
    */
   public enum VectorType {
     FLOAT,
+    FLOAT16,
     BYTE,
     BIT
   }
 
+  /**
+   * The BSON wire form a vector was supplied in: either a plain BSON array of numbers, or a binData
+   * vector (subtype 9) of one of the {@link BsonVectorParser} data types.
+   *
+   * <p>Only float vectors can arrive both ways; float16, int8, and bit vectors exist solely in the
+   * binData format. A vector constructed programmatically rather than parsed from BSON reports the
+   * encoding its construction implies (e.g. {@link #fromFloats} with {@link
+   * FloatVector.OriginalType#NATIVE} reports {@code ARRAY}).
+   */
+  public enum BsonEncoding {
+    ARRAY,
+    BIN_DATA_FLOAT32,
+    BIN_DATA_FLOAT16,
+    BIN_DATA_INT8,
+    BIN_DATA_BIT
+  }
+
   public static FloatVector fromFloats(float[] floats, FloatVector.OriginalType originalType) {
     return new FloatVector(floats, originalType);
+  }
+
+  /** Build a half-precision vector from its raw little-endian f16 bytes (two per dimension). */
+  public static Float16Vector fromFloat16Bytes(byte[] bytes) {
+    return new Float16Vector(bytes);
   }
 
   public static ByteVector fromBytes(byte[] bytes) {
@@ -43,6 +63,11 @@ public abstract sealed class Vector implements Encodable
     return (FloatVector) this;
   }
 
+  public Float16Vector asFloat16Vector() {
+    Check.expectedType(VectorType.FLOAT16, getVectorType());
+    return (Float16Vector) this;
+  }
+
   public ByteVector asByteVector() {
     Check.expectedType(VectorType.BYTE, getVectorType());
     return (ByteVector) this;
@@ -56,29 +81,26 @@ public abstract sealed class Vector implements Encodable
   public static Vector fromBson(BsonParseContext context, BsonValue value)
       throws BsonParseException {
     if (value.isArray()) {
-      // TODO(CLOUDP-271775): re-use code from KnnVectorParser class
-      BsonArray array = value.asArray();
-      FloatCollector collector = new FloatCollector();
-      for (BsonValue bsonValue : array) {
-        float floatValue;
-        if (bsonValue.isDouble()) {
-          floatValue = (float) bsonValue.asDouble().getValue();
-        } else if (bsonValue.isInt32()) {
-          floatValue = (float) bsonValue.asInt32().getValue();
-        } else if (bsonValue.isInt64()) {
-          floatValue = (float) bsonValue.asInt64().getValue();
-        } else {
-          throw new BsonParseException(
-              "Unsupported BsonValue type: " + bsonValue.getBsonType(), Optional.empty());
-        }
-        collector.add(floatValue);
-      }
-      return Vector.fromFloats(collector.toArray(), FloatVector.OriginalType.NATIVE);
+      return Vector.fromFloats(NativeVectorParser.parse(value), FloatVector.OriginalType.NATIVE);
     } else if (value.isBinary()) {
       return BsonVectorParser.parse(value.asBinary());
     } else {
       return context.handleSemanticError("Unexpected type found when parsing vector");
     }
+  }
+
+  /** Returns the BSON wire form this vector was parsed from (see {@link BsonEncoding}). */
+  public BsonEncoding getBsonEncoding() {
+    return switch (this) {
+      case FloatVector floatVector ->
+          switch (floatVector.getOriginalType()) {
+            case NATIVE -> BsonEncoding.ARRAY;
+            case BSON -> BsonEncoding.BIN_DATA_FLOAT32;
+          };
+      case Float16Vector ignored -> BsonEncoding.BIN_DATA_FLOAT16;
+      case ByteVector ignored -> BsonEncoding.BIN_DATA_INT8;
+      case BitVector ignored -> BsonEncoding.BIN_DATA_BIT;
+    };
   }
 
   /**

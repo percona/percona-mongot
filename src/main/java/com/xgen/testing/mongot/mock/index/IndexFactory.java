@@ -10,6 +10,7 @@ import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.status.IndexStatus;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import org.mockito.Answers;
 import org.mockito.stubbing.Answer;
 
 public class IndexFactory {
@@ -34,7 +35,18 @@ public class IndexFactory {
       Consumer<IndexGeneration> createdIndexesObserver,
       Supplier<IndexStatus> statusForCreatedIndexes)
       throws Exception {
-    T indexFactory = mock(classType);
+    return mockIndexFactory(
+        classType, createdIndexesObserver, statusForCreatedIndexes, Answers.RETURNS_DEFAULTS);
+  }
+
+  /** Generic version with a custom answer for unstubbed methods. */
+  public static <T extends com.xgen.mongot.index.IndexFactory> T mockIndexFactory(
+      Class<T> classType,
+      Consumer<IndexGeneration> createdIndexesObserver,
+      Supplier<IndexStatus> statusForCreatedIndexes,
+      Answer<?> defaultAnswer)
+      throws Exception {
+    T indexFactory = mock(classType, defaultAnswer);
 
     Answer<Index> getIndexAnswer =
         invocation -> {
@@ -54,21 +66,22 @@ public class IndexFactory {
         };
 
     when(indexFactory.getIndex(any(IndexDefinitionGeneration.class))).thenAnswer(getIndexAnswer);
-    when(indexFactory.getInitializedIndex(any(), any()))
-        .thenAnswer(
-            invocation -> {
-              Index index = invocation.getArgument(0);
-              IndexDefinitionGeneration defGen = invocation.getArgument(1);
-              return switch (defGen.getType()) {
-                case SEARCH ->
-                    SearchIndex.mockInitializedIndex(
-                        index.asSearchIndex(), defGen.getGenerationId());
-                case VECTOR ->
-                    VectorIndex.mockInitializedIndex(
-                        index.asVectorIndex(), defGen.getGenerationId());
-                case AUTO_EMBEDDING -> MaterializedViewIndex.mockIndex(defGen.asMaterializedView());
-              };
-            });
+    Answer<?> getInitializedIndexAnswer =
+        invocation -> {
+          Index index = invocation.getArgument(0);
+          IndexDefinitionGeneration defGen = invocation.getArgument(1);
+          return switch (defGen.getType()) {
+            case SEARCH ->
+                SearchIndex.mockInitializedIndex(index.asSearchIndex(), defGen.getGenerationId());
+            case VECTOR ->
+                VectorIndex.mockInitializedIndex(index.asVectorIndex(), defGen.getGenerationId());
+            case AUTO_EMBEDDING -> MaterializedViewIndex.mockIndex(defGen.asMaterializedView());
+          };
+        };
+
+    when(indexFactory.getInitializedIndex(any(), any())).thenAnswer(getInitializedIndexAnswer);
+    when(indexFactory.getInitializedIndex(any(), any(), any()))
+        .thenAnswer(getInitializedIndexAnswer);
 
     return indexFactory;
   }

@@ -28,6 +28,7 @@ import com.xgen.mongot.index.ReplicationOpTimeInfo;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.StaleStatusReason;
 import com.xgen.mongot.index.version.IndexFormatVersion;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.replication.mongodb.common.BufferlessIdOrderInitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
@@ -191,7 +192,8 @@ public class MongoDbNoOpReplicationManagerTest {
               mock(IndexCatalog.class),
               initializedIndexCatalog,
               featureFlags,
-              spy(new SimpleMeterRegistry()));
+              spy(new SimpleMeterRegistry()),
+              new ThreadPoolResourceMetrics.Bindings());
     }
 
     static Mocks create() {
@@ -241,7 +243,7 @@ public class MongoDbNoOpReplicationManagerTest {
               ChangeStreamResumeInfo.create(new MongoNamespace("db", "coll"), staleResumeToken);
           var staleIndexCommitData =
               IndexCommitUserData.createChangeStreamResume(
-                  staleResumeInfo, IndexFormatVersion.CURRENT);
+                  staleResumeInfo, IndexFormatVersion.CURRENT.versionNumber);
           StaleStateInfo staleStateInfo =
               StaleStateInfo.create(
                   StaleStatusReason.DOCS_EXCEEDED,
@@ -258,7 +260,7 @@ public class MongoDbNoOpReplicationManagerTest {
         case INITIAL_SYNC:
           indexCommitUserData =
               IndexCommitUserData.createInitialSyncResume(
-                  IndexFormatVersion.CURRENT,
+                  IndexFormatVersion.CURRENT.versionNumber,
                   new BufferlessIdOrderInitialSyncResumeInfo(
                       new BsonTimestamp(1234567890L), new BsonString("a")));
           break;
@@ -268,7 +270,7 @@ public class MongoDbNoOpReplicationManagerTest {
                   ChangeStreamResumeInfo.create(
                       new MongoNamespace("database", "collection"),
                       new BsonDocument("_data", new BsonString("820000000000000000"))),
-                  IndexFormatVersion.CURRENT);
+                  IndexFormatVersion.CURRENT.versionNumber);
           break;
         case EMPTY:
           break;

@@ -59,10 +59,8 @@ public class MultiLuceneIndexWriter implements LuceneIndexWriter {
     // negative integer.
     return (int)
         (Integer.toUnsignedLong(
-            HASH_FUNCTION.hashBytes(
-                bytesRef.bytes,
-                bytesRef.offset,
-                bytesRef.length).asInt()) % numPartitions);
+                HASH_FUNCTION.hashBytes(bytesRef.bytes, bytesRef.offset, bytesRef.length).asInt())
+            % numPartitions);
   }
 
   private int getIndexPartitionId(byte[] encodedDocumentId) {
@@ -176,6 +174,12 @@ public class MultiLuceneIndexWriter implements LuceneIndexWriter {
   public void cancelMerges() throws IOException {
     // Cancel merges on all underlying index writers
     CheckedStream.from(this.indexWriters).forEachChecked(IndexWriter::cancelMerges);
+  }
+
+  @Override
+  public void forceMerge(int maxNumSegments) throws IOException {
+    CheckedStream.from(this.indexWriters)
+        .forEachChecked(indexWriter -> indexWriter.forceMerge(maxNumSegments));
   }
 
   public List<SingleLuceneIndexWriter> getSingleLuceneIndexWriters() {

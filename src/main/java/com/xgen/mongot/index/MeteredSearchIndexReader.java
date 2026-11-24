@@ -3,6 +3,7 @@ package com.xgen.mongot.index;
 import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.cursor.batch.BatchSizeStrategy;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
+import com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
@@ -26,7 +27,9 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
     this.queryingMetricsUpdater = queryingMetricsUpdater;
     this.recordTotalFacetBucketsMetric = recordTotalFacetBucketsMetric;
     this.queryMetricsRecorder =
-        new QueryMetricsRecorder(queryingMetricsUpdater.getQueryFeaturesMetricsUpdater());
+        new QueryMetricsRecorder(
+            queryingMetricsUpdater.getQueryFeaturesMetricsUpdater(),
+            queryingMetricsUpdater.getSearchAggregationMetricsReporter());
   }
 
   @Override
@@ -46,7 +49,8 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
       this.queryMetricsRecorder.record(query, queryCursorOptions);
       return result;
     } catch (Exception e) {
-      this.queryingMetricsUpdater.handleQueryException(e, query.toBson().toString());
+      this.queryingMetricsUpdater.handleQueryException(
+          e, "from SearchIndexReader.query, shape=" + QueryShape.of(query));
       throw e;
     }
   }
@@ -68,7 +72,8 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
       this.queryMetricsRecorder.record(query, queryCursorOptions);
       return result;
     } catch (Exception e) {
-      this.queryingMetricsUpdater.handleQueryException(e, query.toBson().toString());
+      this.queryingMetricsUpdater.handleQueryException(
+          e, "from SearchIndexReader.intermediateQuery, shape=" + QueryShape.of(query));
       throw e;
     }
   }
@@ -81,6 +86,11 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
   @Override
   public List<FieldInfos> getFieldInfos() throws IOException, ReaderClosedException {
     return this.indexReader.getFieldInfos();
+  }
+
+  @Override
+  public TokenFacetsStateCache.Snapshot getTokenFacetsStateCacheSnapshot() {
+    return this.indexReader.getTokenFacetsStateCacheSnapshot();
   }
 
   @Override
@@ -101,10 +111,5 @@ public class MeteredSearchIndexReader implements SearchIndexReader {
   @VisibleForTesting
   public SearchIndexReader unwrap() {
     return this.indexReader;
-  }
-
-  @Override
-  public long getRequiredMemoryForVectorData() throws ReaderClosedException {
-    return this.indexReader.getRequiredMemoryForVectorData();
   }
 }

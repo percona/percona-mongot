@@ -1,5 +1,9 @@
 package com.xgen.mongot.config.provider.community;
 
+import com.xgen.mongot.config.provider.cli.CliOptionRegistry;
+import com.xgen.mongot.config.provider.community.CommunityIndexingConfig.LuceneConfig.MergePolicyConfig.TieredMergePolicyConfig.TieredMergePolicyConfigCliOptionRegistry;
+import com.xgen.mongot.config.provider.community.CommunityIndexingConfig.LuceneConfig.MergePolicyConfig.TieredMergePolicyConfig.VectorMergePolicyConfig.VectorMergePolicyConfigCliOptionRegistry;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
@@ -8,10 +12,9 @@ import com.xgen.mongot.util.bson.parser.Field;
 import java.util.Optional;
 import org.apache.commons.lang3.Range;
 import org.bson.BsonDocument;
+import picocli.CommandLine;
 
-/**
- * The {@code indexing} block of the Community mongot config file.
- */
+/** The {@code indexing} block of the Community mongot config file. */
 public record CommunityIndexingConfig(
     Optional<LuceneConfig> luceneConfig, Optional<IndexDefinitionConfig> definitionConfig)
     implements DocumentEncodable {
@@ -21,6 +24,7 @@ public record CommunityIndexingConfig(
         Field.builder("lucene")
             .classField(LuceneConfig::fromBson)
             .disallowUnknownFields()
+            .edition(DeploymentEnvironment.COMMUNITY)
             .optional()
             .noDefault();
 
@@ -28,8 +32,19 @@ public record CommunityIndexingConfig(
         Field.builder("definition")
             .classField(IndexDefinitionConfig::fromBson)
             .disallowUnknownFields()
+            .edition(DeploymentEnvironment.COMMUNITY)
             .optional()
             .noDefault();
+  }
+
+  public static final class CommunityIndexingConfigCliOptionRegistry extends CliOptionRegistry {
+    @CommandLine.Mixin
+    public LuceneConfig.LuceneConfigCliOptionRegistry luceneConfigCliOptionRegistry =
+        new LuceneConfig.LuceneConfigCliOptionRegistry();
+
+    public CommunityIndexingConfigCliOptionRegistry() {
+      addChildRegistry(Fields.LUCENE_CONFIG, this.luceneConfigCliOptionRegistry);
+    }
   }
 
   public static CommunityIndexingConfig fromBson(DocumentParser parser) throws BsonParseException {
@@ -58,6 +73,7 @@ public record CommunityIndexingConfig(
           Field.builder("refresh")
               .classField(RefreshConfig::fromBson)
               .disallowUnknownFields()
+              .edition(DeploymentEnvironment.COMMUNITY)
               .optional()
               .noDefault();
 
@@ -65,6 +81,7 @@ public record CommunityIndexingConfig(
           Field.builder("mergePolicy")
               .classField(MergePolicyConfig::fromBson)
               .disallowUnknownFields()
+              .edition(DeploymentEnvironment.COMMUNITY)
               .optional()
               .noDefault();
 
@@ -72,6 +89,7 @@ public record CommunityIndexingConfig(
           Field.builder("mergeScheduler")
               .classField(MergeSchedulerConfig::fromBson)
               .disallowUnknownFields()
+              .edition(DeploymentEnvironment.COMMUNITY)
               .optional()
               .noDefault();
 
@@ -83,8 +101,37 @@ public record CommunityIndexingConfig(
                   Range.of(
                       com.xgen.mongot.index.lucene.config.LuceneConfig.MIN_FIELD_LIMIT,
                       Integer.MAX_VALUE))
+              .edition(DeploymentEnvironment.COMMUNITY)
               .optional()
               .noDefault();
+    }
+
+    public static final class LuceneConfigCliOptionRegistry extends CliOptionRegistry {
+      @CommandLine.Option(
+          names = "--indexingLuceneFieldLimit",
+          description = "Maximum number of indexed fields allowed in an index")
+      public Optional<Integer> fieldLimit = Optional.empty();
+
+      @CommandLine.Mixin
+      public RefreshConfig.RefreshConfigCliOptionRegistry refreshConfigCliOptionRegistry =
+          new RefreshConfig.RefreshConfigCliOptionRegistry();
+
+      @CommandLine.Mixin
+      public MergePolicyConfig.MergePolicyConfigCliOptionRegistry
+          mergePolicyConfigCliOptionRegistry =
+              new MergePolicyConfig.MergePolicyConfigCliOptionRegistry();
+
+      @CommandLine.Mixin
+      public MergeSchedulerConfig.MergeSchedulerConfigCliOptionRegistry
+          mergeSchedulerConfigCliOptionRegistry =
+              new MergeSchedulerConfig.MergeSchedulerConfigCliOptionRegistry();
+
+      public LuceneConfigCliOptionRegistry() {
+        addChildRegistry(Fields.REFRESH_CONFIG, this.refreshConfigCliOptionRegistry);
+        addChildRegistry(Fields.MERGE_POLICY_CONFIG, this.mergePolicyConfigCliOptionRegistry);
+        addChildRegistry(Fields.MERGE_SCHEDULER_CONFIG, this.mergeSchedulerConfigCliOptionRegistry);
+        addIntegerLeafValue(LuceneConfig.Fields.FIELD_LIMIT, () -> this.fieldLimit);
+      }
     }
 
     public static LuceneConfig fromBson(DocumentParser parser) throws BsonParseException {
@@ -105,24 +152,38 @@ public record CommunityIndexingConfig(
           .build();
     }
 
-    public record RefreshConfig(Optional<Integer> intervalMs)
-        implements DocumentEncodable {
+    public record RefreshConfig(Optional<Integer> intervalMs) implements DocumentEncodable {
 
       static class Fields {
         public static final Field.Optional<Integer> INTERVAL_MS =
-            Field.builder("intervalMs").intField().mustBePositive().optional().noDefault();
+            Field.builder("intervalMs")
+                .intField()
+                .mustBePositive()
+                .edition(DeploymentEnvironment.COMMUNITY)
+                .optional()
+                .noDefault();
+      }
+
+      public static final class RefreshConfigCliOptionRegistry extends CliOptionRegistry {
+        @CommandLine.Option(
+            names = "--indexingLuceneRefreshIntervalMs",
+            description =
+                "Interval that mongot waits before refreshing an index to make recently indexed"
+                    + " changes visible to queries.")
+        public Optional<Integer> intervalMs = Optional.empty();
+
+        public RefreshConfigCliOptionRegistry() {
+          addIntegerLeafValue(LuceneConfig.RefreshConfig.Fields.INTERVAL_MS, () -> this.intervalMs);
+        }
       }
 
       public static RefreshConfig fromBson(DocumentParser parser) throws BsonParseException {
-        return new RefreshConfig(
-            parser.getField(Fields.INTERVAL_MS).unwrap());
+        return new RefreshConfig(parser.getField(Fields.INTERVAL_MS).unwrap());
       }
 
       @Override
       public BsonDocument toBson() {
-        return BsonDocumentBuilder.builder()
-            .field(Fields.INTERVAL_MS, this.intervalMs)
-            .build();
+        return BsonDocumentBuilder.builder().field(Fields.INTERVAL_MS, this.intervalMs).build();
       }
     }
 
@@ -134,8 +195,20 @@ public record CommunityIndexingConfig(
             Field.builder("tiered")
                 .classField(TieredMergePolicyConfig::fromBson)
                 .disallowUnknownFields()
+                .edition(DeploymentEnvironment.COMMUNITY)
                 .optional()
                 .noDefault();
+      }
+
+      public static final class MergePolicyConfigCliOptionRegistry extends CliOptionRegistry {
+        @CommandLine.Mixin
+        public TieredMergePolicyConfigCliOptionRegistry tieredMergePolicyConfigCliOptionRegistry =
+            new TieredMergePolicyConfigCliOptionRegistry();
+
+        public MergePolicyConfigCliOptionRegistry() {
+          addChildRegistry(
+              Fields.TIERED_MERGE_POLICY_CONFIG, this.tieredMergePolicyConfigCliOptionRegistry);
+        }
       }
 
       public static MergePolicyConfig fromBson(DocumentParser parser) throws BsonParseException {
@@ -150,14 +223,14 @@ public record CommunityIndexingConfig(
       }
 
       public record TieredMergePolicyConfig(
-          Optional<VectorMergePolicyConfig> vectorMergePolicyConfig)
-          implements DocumentEncodable {
+          Optional<VectorMergePolicyConfig> vectorMergePolicyConfig) implements DocumentEncodable {
 
         static class Fields {
           public static final Field.Optional<VectorMergePolicyConfig> VECTOR_MERGE_POLICY_CONFIG =
               Field.builder("vectorMergePolicy")
                   .classField(VectorMergePolicyConfig::fromBson)
                   .disallowUnknownFields()
+                  .edition(DeploymentEnvironment.COMMUNITY)
                   .optional()
                   .noDefault();
         }
@@ -175,12 +248,44 @@ public record CommunityIndexingConfig(
               .build();
         }
 
+        public static final class TieredMergePolicyConfigCliOptionRegistry
+            extends CliOptionRegistry {
+          @CommandLine.Mixin
+          public VectorMergePolicyConfigCliOptionRegistry vectorMergePolicyConfigCliOptionRegistry =
+              new VectorMergePolicyConfigCliOptionRegistry();
+
+          public TieredMergePolicyConfigCliOptionRegistry() {
+            addChildRegistry(
+                Fields.VECTOR_MERGE_POLICY_CONFIG, this.vectorMergePolicyConfigCliOptionRegistry);
+          }
+        }
+
         public record VectorMergePolicyConfig(Optional<Integer> mergeBudgetMb)
             implements DocumentEncodable {
 
           static class Fields {
             public static final Field.Optional<Integer> MERGE_BUDGET_MB =
-                Field.builder("mergeBudgetMb").intField().mustBePositive().optional().noDefault();
+                Field.builder("mergeBudgetMb")
+                    .intField()
+                    .mustBePositive()
+                    .edition(DeploymentEnvironment.COMMUNITY)
+                    .optional()
+                    .noDefault();
+          }
+
+          public static final class VectorMergePolicyConfigCliOptionRegistry
+              extends CliOptionRegistry {
+
+            @CommandLine.Option(
+                names = "--indexingLuceneMergeBudgetMb",
+                description =
+                    "Memory budget available to background merges of vector index segments.")
+            public Optional<Integer> mergeBudgetMb = Optional.empty();
+
+            public VectorMergePolicyConfigCliOptionRegistry() {
+              addIntegerLeafValue(
+                  VectorMergePolicyConfig.Fields.MERGE_BUDGET_MB, () -> this.mergeBudgetMb);
+            }
           }
 
           public static VectorMergePolicyConfig fromBson(DocumentParser parser)
@@ -208,12 +313,39 @@ public record CommunityIndexingConfig(
                 Field.builder("concurrent")
                     .classField(ConcurrentMergeSchedulerConfig::fromBson)
                     .disallowUnknownFields()
+                    .edition(DeploymentEnvironment.COMMUNITY)
                     .optional()
                     .noDefault();
       }
 
-      public static MergeSchedulerConfig fromBson(DocumentParser parser)
-          throws BsonParseException {
+      public static final class MergeSchedulerConfigCliOptionRegistry extends CliOptionRegistry {
+        @CommandLine.Mixin
+        public ConcurrentMergeSchedulerConfigCliOptionRegistry
+            concurrentMergeSchedulerConfigCliOptionRegistry =
+                new ConcurrentMergeSchedulerConfigCliOptionRegistry();
+
+        public MergeSchedulerConfigCliOptionRegistry() {
+          addChildRegistry(
+              Fields.CONCURRENT_MERGE_SCHEDULER_CONFIG,
+              this.concurrentMergeSchedulerConfigCliOptionRegistry);
+        }
+      }
+
+      public static final class ConcurrentMergeSchedulerConfigCliOptionRegistry
+          extends CliOptionRegistry {
+        @CommandLine.Option(
+            names = "--indexingLuceneMergeMaxThreadCount",
+            description =
+                "Max number of threads that can perform index segment merges concurrently.")
+        public Optional<Integer> maxThreadCount = Optional.empty();
+
+        public ConcurrentMergeSchedulerConfigCliOptionRegistry() {
+          addIntegerLeafValue(
+              ConcurrentMergeSchedulerConfig.Fields.MAX_THREAD_COUNT, () -> this.maxThreadCount);
+        }
+      }
+
+      public static MergeSchedulerConfig fromBson(DocumentParser parser) throws BsonParseException {
         return new MergeSchedulerConfig(
             parser.getField(Fields.CONCURRENT_MERGE_SCHEDULER_CONFIG).unwrap());
       }
@@ -230,7 +362,12 @@ public record CommunityIndexingConfig(
 
         static class Fields {
           public static final Field.Optional<Integer> MAX_THREAD_COUNT =
-              Field.builder("maxThreadCount").intField().mustBePositive().optional().noDefault();
+              Field.builder("maxThreadCount")
+                  .intField()
+                  .mustBePositive()
+                  .edition(DeploymentEnvironment.COMMUNITY)
+                  .optional()
+                  .noDefault();
         }
 
         public static ConcurrentMergeSchedulerConfig fromBson(DocumentParser parser)
@@ -257,6 +394,7 @@ public record CommunityIndexingConfig(
           Field.builder("maxEmbeddedDocumentsNestingLevel")
               .intField()
               .mustBeNonNegative()
+              .edition(DeploymentEnvironment.COMMUNITY)
               .optional()
               .noDefault();
     }
@@ -269,8 +407,7 @@ public record CommunityIndexingConfig(
     @Override
     public BsonDocument toBson() {
       return BsonDocumentBuilder.builder()
-          .field(
-              Fields.MAX_EMBEDDED_DOCUMENTS_NESTING_LEVEL, this.maxEmbeddedDocumentsNestingLevel)
+          .field(Fields.MAX_EMBEDDED_DOCUMENTS_NESTING_LEVEL, this.maxEmbeddedDocumentsNestingLevel)
           .build();
     }
   }

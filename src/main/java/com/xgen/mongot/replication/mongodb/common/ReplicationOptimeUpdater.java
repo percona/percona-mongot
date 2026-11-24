@@ -8,11 +8,14 @@ import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.GenerationId;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
+import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.VerboseRunnable;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.mongot.util.mongodb.MongoClientBuilder;
+import com.xgen.mongot.util.mongodb.MongoDbOplog;
 import com.xgen.mongot.util.mongodb.MongoDbReplSetStatus;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.Counter;
@@ -21,6 +24,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.bson.BsonTimestamp;
 import org.slf4j.Logger;
@@ -28,7 +32,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Periodically fetches the last committed optime and sets it to indexing metrics updaters of the
- * stale indexes.
+ * stale indexes. Also records the sync-source oplog cliff ({@code local.oplog.rs} oldest {@code
+ * ts}) and window as process-level gauges so later alerts can compare per-index replication optime
+ * to fall-off risk.
  *
  * <p>Instance of this class uses MongoClient which is connected to a specific DB. If connection
  * string changes then new instance of this class should be created with the updated MongotClient.
@@ -48,11 +54,20 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
   @VisibleForTesting
   static final String ERROR_COUNTER_METRIC_NAME = "replicationOptimeUpdaterError";
 
+  @VisibleForTesting static final String OPLOG_METRICS_NAMESPACE = "mongodb.oplog";
+
+  @VisibleForTesting
+  static final String OLDEST_OPLOG_TIMESTAMP_SECONDS_METRIC = "oldestTimestampSeconds";
+
+  @VisibleForTesting static final String OPLOG_WINDOW_SECONDS_METRIC = "windowSeconds";
+
   private final IndexCatalog indexCatalog;
   private final InitializedIndexCatalog initializedIndexCatalog;
   private final Optional<MongoClient> mongoClient;
   private final NamedScheduledExecutorService executor;
   private final Counter errorCounter;
+  private final AtomicReference<Optional<Long>> oldestOplogTimestampSeconds;
+  private final AtomicReference<Optional<Long>> oplogWindowSeconds;
 
   @SuppressWarnings("checkstyle:MissingJavadocMethod")
   public ReplicationOptimeUpdater(
@@ -67,6 +82,17 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
     this.mongoClient = mongoClient;
     this.executor = executor;
     this.errorCounter = meterRegistry.counter(ERROR_COUNTER_METRIC_NAME);
+    this.oldestOplogTimestampSeconds = new AtomicReference<>(Optional.empty());
+    this.oplogWindowSeconds = new AtomicReference<>(Optional.empty());
+    var oplogMetrics = new MetricsFactory(OPLOG_METRICS_NAMESPACE, meterRegistry);
+    oplogMetrics.objectValueGauge(
+        OLDEST_OPLOG_TIMESTAMP_SECONDS_METRIC,
+        this.oldestOplogTimestampSeconds,
+        ref -> ref.get().map(Long::doubleValue).orElse(Double.NaN));
+    oplogMetrics.objectValueGauge(
+        OPLOG_WINDOW_SECONDS_METRIC,
+        this.oplogWindowSeconds,
+        ref -> ref.get().map(Long::doubleValue).orElse(Double.NaN));
 
     if (this.mongoClient.isPresent()) {
       LOG.info("Starting ReplicationOptimeUpdater.");
@@ -90,24 +116,13 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
     }
   }
 
-  // TODO(CLOUDP-405327): remove test-only overload once LIFECYCLE_ATTRIBUTION_METRICS rolls out.
-  public static ReplicationOptimeUpdater create(
-      IndexCatalog indexCatalog,
-      InitializedIndexCatalog initializedIndexCatalog,
-      Optional<SyncSourceConfig> syncSource,
-      Duration updateInterval,
-      MeterRegistry meterRegistry) {
-    return create(
-        indexCatalog, initializedIndexCatalog, syncSource, updateInterval, meterRegistry, false);
-  }
-
   public static ReplicationOptimeUpdater create(
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
       Optional<SyncSourceConfig> syncSource,
       Duration updateInterval,
       MeterRegistry meterRegistry,
-      boolean enableLifecycleAttributionMetrics) {
+      Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings) {
     // mongodSingleHostReplicationUri may be absent when this updater is created alongside a
     // NoOpReplicationManager (i.e. no healthy sync-source host has been selected yet).
     Optional<MongoClient> mongoClient =
@@ -119,9 +134,8 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
                             uri, "periodic optime fetcher", meterRegistry)));
     var executor =
         Executors.singleThreadScheduledExecutor("replicationOptimeUpdater", meterRegistry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("replication").register(executor, meterRegistry);
-    }
+    attributionBindings.ifPresent(
+        bindings -> bindings.forSubsystem("replication").register(executor, meterRegistry));
     return new ReplicationOptimeUpdater(
         indexCatalog,
         initializedIndexCatalog,
@@ -155,6 +169,12 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
     }
     try {
       var optime = MongoDbReplSetStatus.getReadConcernMajorityOpTime(this.mongoClient.get());
+      try {
+        recordOplogMetrics(optime, MongoDbOplog.getOldestTimestamp(this.mongoClient.get()));
+      } catch (Exception e) {
+        LOG.error("Failed to update oplog window metrics", e);
+        this.errorCounter.increment();
+      }
       Collection<IndexGeneration> indexes = this.indexCatalog.getIndexes();
       updateMaxReplicationOpTimeForQueryableIndexes(indexes, optime);
       unsetReplicationOpTimeInfo(indexes);
@@ -162,6 +182,20 @@ public class ReplicationOptimeUpdater implements AutoCloseable {
       LOG.error("Failed to update max optime", e);
       this.errorCounter.increment();
     }
+  }
+
+  /**
+   * Records the sync-source oplog cliff (oldest {@code ts}) and the window from that cliff to the
+   * current majority optime. Window is clamped at 0 if majority is not ahead of the oldest entry.
+   */
+  @VisibleForTesting
+  void recordOplogMetrics(BsonTimestamp majorityOptime, BsonTimestamp oldestOplogTs) {
+    Check.argNotNull(majorityOptime, "majorityOptime");
+    Check.argNotNull(oldestOplogTs, "oldestOplogTs");
+    long oldestSeconds = oldestOplogTs.getTime();
+    long majoritySeconds = majorityOptime.getTime();
+    this.oldestOplogTimestampSeconds.set(Optional.of(oldestSeconds));
+    this.oplogWindowSeconds.set(Optional.of(Math.max(0L, majoritySeconds - oldestSeconds)));
   }
 
   /**

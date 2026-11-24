@@ -221,10 +221,18 @@ public class ChangeStreamAggregateCommand {
     public Builder splitLargeEvent(boolean value) {
       if (value) {
         this.splitLargeEventStage =
-                Optional.of(new BsonDocument("$changeStreamSplitLargeEvent", new BsonDocument()));
+            Optional.of(new BsonDocument("$changeStreamSplitLargeEvent", new BsonDocument()));
       }
       return this;
     }
+  }
+
+  /**
+   * Whether this command targets the whole database ({@code aggregate: 1}) rather than a specific
+   * collection. Mirrors the {@code aggregate} value chosen in {@link #toProxy()}.
+   */
+  public boolean isCollectionLess() {
+    return this.collectionName.isEmpty();
   }
 
   /** Constructs the proper AggregateCommandProxy for the ChangeStreamAggregateCommand. */

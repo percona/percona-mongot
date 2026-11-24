@@ -3,14 +3,13 @@ package com.xgen.mongot.embedding.providers.clients;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
-import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.congestion.AimdCongestionControl;
 import com.xgen.mongot.embedding.providers.congestion.DynamicSemaphore;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.util.Optional;
@@ -24,8 +23,7 @@ public class EmbeddingClientFactoryTest {
 
   private static EmbeddingModelConfig voyageModelWithQueryAndCollectionScan() {
     EmbeddingServiceConfig.VoyageEmbeddingCredentials creds =
-        new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
-            "token", "2024-10-15T22:32:20.925Z");
+        new EmbeddingServiceConfig.VoyageEmbeddingCredentials("token", "2024-10-15T22:32:20.925Z");
     EmbeddingServiceConfig.WorkloadParams queryParams =
         new EmbeddingServiceConfig.WorkloadParams(
             Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(creds));
@@ -56,8 +54,7 @@ public class EmbeddingClientFactoryTest {
 
   private static EmbeddingModelConfig voyageModelFlexTierDisabled() {
     EmbeddingServiceConfig.VoyageEmbeddingCredentials creds =
-        new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
-            "token", "2024-10-15T22:32:20.925Z");
+        new EmbeddingServiceConfig.VoyageEmbeddingCredentials("token", "2024-10-15T22:32:20.925Z");
     EmbeddingServiceConfig.WorkloadParams collectionScanParams =
         new EmbeddingServiceConfig.WorkloadParams(
             Optional.empty(), Optional.empty(), Optional.of(creds), Optional.empty());
@@ -81,58 +78,6 @@ public class EmbeddingClientFactoryTest {
             Optional.empty());
     return EmbeddingModelConfig.create(
         "voyage-3-large", EmbeddingServiceConfig.EmbeddingProvider.VOYAGE, config);
-  }
-
-  private static EmbeddingModelConfig openAiCompatibleModel() {
-    EmbeddingServiceConfig.OpenAiEmbeddingCredentials creds =
-        new EmbeddingServiceConfig.OpenAiEmbeddingCredentials(Optional.empty(), Optional.empty());
-    EmbeddingServiceConfig.EmbeddingConfig config =
-        new EmbeddingServiceConfig.EmbeddingConfig(
-            Optional.empty(),
-            new EmbeddingServiceConfig.OpenAiModelConfig(
-                Optional.of(1024), Optional.of(96), Optional.of(120_000), Optional.empty()),
-            RETRY_CONFIG,
-            creds,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            true,
-            Optional.of("http://localhost:11434/v1/embeddings"),
-            false,
-            Optional.empty());
-    return EmbeddingModelConfig.create(
-        "bge-m3", EmbeddingServiceConfig.EmbeddingProvider.OPENAI_COMPATIBLE, config);
-  }
-
-  private static EmbeddingModelConfig huggingFaceModel() {
-    EmbeddingServiceConfig.EmbeddingConfig config =
-        new EmbeddingServiceConfig.EmbeddingConfig(
-            Optional.empty(),
-            new EmbeddingServiceConfig.HuggingFaceModelConfig(
-                Optional.of("BAAI/bge-small-en-v1.5"),
-                Optional.of(384),
-                Optional.of(32),
-                Optional.of(120_000),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty()),
-            RETRY_CONFIG,
-            new EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials(Optional.of("hf_token")),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            true,
-            Optional.empty(),
-            false,
-            Optional.empty());
-    return EmbeddingModelConfig.create(
-        "bge-small-en-v1.5",
-        EmbeddingServiceConfig.EmbeddingProvider.HUGGINGFACE_INFERENCE,
-        config);
   }
 
   private static DynamicSemaphore testSemaphore() {
@@ -236,102 +181,6 @@ public class EmbeddingClientFactoryTest {
 
     assertTrue(useFlexTierField(client));
     assertNotNull(congestionSemaphoreField(client));
-  }
-
-  @Test
-  public void openAiCompatibleProvider_buildsOpenAiCompatClient() {
-    EmbeddingModelConfig model = openAiCompatibleModel();
-    EmbeddingClientFactory factory =
-        new EmbeddingClientFactory(new SimpleMeterRegistry(), DeploymentEnvironment.COMMUNITY);
-
-    for (EmbeddingServiceConfig.ServiceTier tier : EmbeddingServiceConfig.ServiceTier.values()) {
-      EmbeddingModelConfig.ConsolidatedWorkloadParams params =
-          switch (tier) {
-            case QUERY -> model.query();
-            case CHANGE_STREAM -> model.changeStream();
-            case COLLECTION_SCAN -> model.collectionScan();
-          };
-
-      ClientInterface client = factory.createEmbeddingClient(model, tier, params);
-
-      assertTrue(
-          "Expected OPENAI_COMPATIBLE provider to build an OpenAiCompatClient for tier " + tier,
-          client instanceof OpenAiCompatClient);
-    }
-  }
-
-  @Test
-  public void openAiCompatibleProvider_ignoresFlexTierAndCongestionSemaphore() {
-    EmbeddingModelConfig model = openAiCompatibleModel();
-    EmbeddingClientFactory factory =
-        new EmbeddingClientFactory(
-            new SimpleMeterRegistry(),
-            DeploymentEnvironment.ATLAS,
-            Optional.of(Set.of(EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN)));
-
-    ClientInterface client =
-        factory.createEmbeddingClient(
-            model,
-            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
-            model.collectionScan(),
-            Optional.of(testSemaphore()));
-
-    assertTrue(
-        "Voyage-only flex tier wiring must not affect OPENAI_COMPATIBLE clients",
-        client instanceof OpenAiCompatClient);
-  }
-
-  @Test
-  public void huggingFaceProvider_buildsHuggingFaceClientForEveryTier() {
-    EmbeddingModelConfig model = huggingFaceModel();
-    EmbeddingClientFactory factory =
-        new EmbeddingClientFactory(
-            new SimpleMeterRegistry(),
-            DeploymentEnvironment.ATLAS,
-            Optional.of(Set.of(EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN)));
-
-    for (EmbeddingServiceConfig.ServiceTier tier : EmbeddingServiceConfig.ServiceTier.values()) {
-      EmbeddingModelConfig.ConsolidatedWorkloadParams params =
-          switch (tier) {
-            case QUERY -> model.query();
-            case CHANGE_STREAM -> model.changeStream();
-            case COLLECTION_SCAN -> model.collectionScan();
-          };
-
-      // flex tier / congestion semaphore are Voyage-only and must not affect HF clients
-      ClientInterface client =
-          factory.createEmbeddingClient(model, tier, params, Optional.of(testSemaphore()));
-
-      assertTrue(
-          "Expected HUGGINGFACE_INFERENCE provider to build a HuggingFaceClient for tier " + tier,
-          client instanceof HuggingFaceClient);
-    }
-  }
-
-  @Test
-  public void unsupportedProviders_throw() {
-    EmbeddingModelConfig base = openAiCompatibleModel();
-    EmbeddingClientFactory factory =
-        new EmbeddingClientFactory(new SimpleMeterRegistry(), DeploymentEnvironment.COMMUNITY);
-    for (EmbeddingServiceConfig.EmbeddingProvider provider :
-        new EmbeddingServiceConfig.EmbeddingProvider[] {
-          EmbeddingServiceConfig.EmbeddingProvider.AWS_BEDROCK,
-          EmbeddingServiceConfig.EmbeddingProvider.COHERE
-        }) {
-      EmbeddingModelConfig model =
-          new EmbeddingModelConfig(
-              base.name(),
-              provider,
-              false,
-              base.query(),
-              base.changeStream(),
-              base.collectionScan());
-      assertThrows(
-          UnsupportedOperationException.class,
-          () ->
-              factory.createEmbeddingClient(
-                  model, EmbeddingServiceConfig.ServiceTier.QUERY, model.query()));
-    }
   }
 
   private static boolean useFlexTierField(ClientInterface client) throws Exception {

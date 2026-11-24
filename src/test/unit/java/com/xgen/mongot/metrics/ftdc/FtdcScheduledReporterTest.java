@@ -17,9 +17,9 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import com.google.common.collect.MoreCollectors;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
-import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -48,7 +48,12 @@ public class FtdcScheduledReporterTest {
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(registry);
     FtdcScheduledReporter.create(
-        registry, combinedRegistry, ftdc, false, FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+        registry,
+        combinedRegistry,
+        ftdc,
+        false,
+        FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+        new ThreadPoolResourceMetrics.Bindings());
     Thread.sleep(100);
     verifyNoMoreInteractions(ftdc);
   }
@@ -61,7 +66,12 @@ public class FtdcScheduledReporterTest {
     combinedRegistry.add(registry);
     var reporter =
         FtdcScheduledReporter.create(
-            registry, combinedRegistry, ftdc, false, FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+            registry,
+            combinedRegistry,
+            ftdc,
+            false,
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+            new ThreadPoolResourceMetrics.Bindings());
     reporter.start(10, TimeUnit.MILLISECONDS);
     // we report every 10 ms, so we can report 10 times in under a second.
     verify(ftdc, timeout(1000).atLeast(10)).addSample(any(), anyLong());
@@ -495,7 +505,8 @@ public class FtdcScheduledReporterTest {
             combinedRegistry,
             ftdc,
             false,
-            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+            new ThreadPoolResourceMetrics.Bindings());
 
     // Set up captor to capture all successful reports before starting
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
@@ -838,7 +849,8 @@ public class FtdcScheduledReporterTest {
             combinedRegistry,
             ftdc,
             false,
-            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+            new ThreadPoolResourceMetrics.Bindings());
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
     String gaugeBeforeKey = getFormattedKey("gauge_before", Optional.empty());
     String gaugeMiddleKey = getFormattedKey("gauge_middle", Optional.empty());
@@ -933,7 +945,8 @@ public class FtdcScheduledReporterTest {
             combinedRegistry,
             ftdc,
             false,
-            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+            new ThreadPoolResourceMetrics.Bindings());
     ArgumentCaptor<BsonDocument> docCaptor = ArgumentCaptor.forClass(BsonDocument.class);
     String gaugeBeforeKey = getFormattedKey("gauge_before", Optional.empty());
     String gaugeMiddleKey = getFormattedKey("gauge_middle", Optional.empty());
@@ -992,7 +1005,8 @@ public class FtdcScheduledReporterTest {
             combinedRegistry,
             ftdc,
             true,
-            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+            new ThreadPoolResourceMetrics.Bindings());
     reporter.start(10, TimeUnit.MILLISECONDS);
 
     try {
@@ -1041,35 +1055,33 @@ public class FtdcScheduledReporterTest {
   }
 
   @Test
-  public void create_reporterThreadAttributionCounterIncreasesUnderLoad() throws Exception {
+  public void create_registersReporterThreadAttributionCounters() {
     var ftdc = mockFtdc();
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(registry);
-    var reporter =
-        FtdcScheduledReporter.create(
-            registry, combinedRegistry, ftdc, false, FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+    FtdcScheduledReporter.create(
+        registry,
+        combinedRegistry,
+        ftdc,
+        false,
+        FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+        new ThreadPoolResourceMetrics.Bindings());
 
-    FunctionCounter allocated =
-        registry
-            .find("executor.thread.allocatedBytes")
-            .tag("subsystem", "ftdc")
-            .tag("name", "ftdc-reporter")
-            .functionCounter();
-    assertThat(allocated).isNotNull();
-
-    reporter.start(10, TimeUnit.MILLISECONDS);
-    try {
-      verify(ftdc, timeout(20000).atLeast(1)).addSample(any(), anyLong());
-      double before = allocated.count();
-      // JVMs without per-thread allocation tracking report 0; skip rather than flake.
-      if (before == 0.0) {
-        return;
-      }
-      assertThat(pollUntil(() -> allocated.count() > before, Duration.ofSeconds(20))).isTrue();
-    } finally {
-      reporter.stop();
-    }
+    assertThat(
+            registry
+                .find("executor.thread.allocatedBytes")
+                .tag("subsystem", "ftdc")
+                .tag("name", "ftdc-reporter")
+                .functionCounter())
+        .isNotNull();
+    assertThat(
+            registry
+                .find("executor.thread.cpuTime")
+                .tag("subsystem", "ftdc")
+                .tag("name", "ftdc-reporter")
+                .functionCounter())
+        .isNotNull();
   }
 
   @Test
@@ -1079,7 +1091,13 @@ public class FtdcScheduledReporterTest {
     CompositeMeterRegistry combinedRegistry = new CompositeMeterRegistry();
     combinedRegistry.add(reportingRegistry);
     var reporter =
-        FtdcScheduledReporter.create(reportingRegistry, combinedRegistry, ftdc, false, 1);
+        FtdcScheduledReporter.create(
+            reportingRegistry,
+            combinedRegistry,
+            ftdc,
+            false,
+            1,
+            new ThreadPoolResourceMetrics.Bindings());
     reporter.start(10, TimeUnit.MILLISECONDS);
 
     try {
@@ -1125,7 +1143,8 @@ public class FtdcScheduledReporterTest {
             combinedRegistry,
             ftdc,
             false,
-            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT);
+            FtdcScheduledReporter.DEFAULT_MAX_METER_COUNT,
+            new ThreadPoolResourceMetrics.Bindings());
     reporter.start(10, TimeUnit.MILLISECONDS);
 
     try {
@@ -1286,6 +1305,35 @@ public class FtdcScheduledReporterTest {
 
     // Verify that ftdc.addSample was NOT called (because AssertionError was thrown)
     verifyNoInteractions(ftdc);
+  }
+
+  @Test
+  public void report_ioExceptionDuringAddSample_incrementsFailureCounterUnlessDiskIsFull()
+      throws Exception {
+    // A full disk is not an FTDC failure: it must not increment the counter the alert pages on.
+    assertThat(failureCountAfterAddSampleThrows(new IOException("No space left on device")))
+        .isEqualTo(0.0);
+    // Nested causes count too, since the ENOSPC error is usually wrapped.
+    assertThat(
+            failureCountAfterAddSampleThrows(
+                new IOException("write failed", new IOException("No space left on device"))))
+        .isEqualTo(0.0);
+    // Any other IO failure still increments.
+    assertThat(failureCountAfterAddSampleThrows(new IOException("disk on fire"))).isEqualTo(1.0);
+  }
+
+  private double failureCountAfterAddSampleThrows(IOException e) throws Exception {
+    var ftdc = mockFtdc();
+    Mockito.doThrow(e).when(ftdc).addSample(any(), anyLong());
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    new FtdcScheduledReporter.Reporter(registry, registry, ftdc).report();
+
+    Counter counter =
+        registry
+            .find("mongot.ftdc_executor_failure")
+            .tag("context", "ioExceptionDuringAddSample")
+            .counter();
+    return counter == null ? 0.0 : counter.count();
   }
 
   private Ftdc mockFtdc() {

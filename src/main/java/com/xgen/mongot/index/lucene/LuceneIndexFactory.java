@@ -7,9 +7,12 @@ import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
+import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexFactory;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
+import com.xgen.mongot.index.IndexTypeData.IndexTypeTag;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistryFactory;
@@ -21,15 +24,19 @@ import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.lucene.blobstore.LuceneIndexSnapshotter;
 import com.xgen.mongot.index.lucene.blobstore.LuceneIndexSnapshotterManager;
 import com.xgen.mongot.index.lucene.codec.bloom.BloomCodecPolicy;
+import com.xgen.mongot.index.lucene.commit.LuceneCommitData;
 import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.directory.ByteReadCollector;
+import com.xgen.mongot.index.lucene.directory.CacheWarmerTimer;
 import com.xgen.mongot.index.lucene.directory.EnvironmentVariantPerfConfig;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryFactory;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryHelper;
+import com.xgen.mongot.index.lucene.directory.IndexPathFactory;
 import com.xgen.mongot.index.lucene.merge.DiskUtilizationAwareMergePolicy;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.merge.MergePolicyFactory;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
+import com.xgen.mongot.index.lucene.util.LuceneCodecUtils;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -48,12 +55,16 @@ import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import org.apache.lucene.index.MergePolicy;
+import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import oshi.SystemInfo;
@@ -86,7 +97,11 @@ public class LuceneIndexFactory implements IndexFactory {
       var meterRegistry = meterAndFtdcRegistry.meterRegistry();
 
       var mergeScheduler =
-          getInstrumentedConcurrentMergeScheduler(config, featureFlags, meterRegistry);
+          getInstrumentedConcurrentMergeScheduler(
+              config,
+              featureFlags,
+              meterRegistry,
+              meterAndFtdcRegistry.threadPoolResourceBindings());
 
       Gate mergeGate = DiskUtilizationAwareMergePolicy.createMergeGate(config, diskMonitor);
       // Pass the merge gate to the scheduler for disk-based pause/resume support
@@ -132,7 +147,8 @@ public class LuceneIndexFactory implements IndexFactory {
               : Optional.empty();
 
       if (featureFlags.isEnabled(Feature.QUERY_MEMORY_ATTRIBUTION_METRICS)) {
-        ThreadPoolResourceMetrics resourceMetrics = ThreadPoolResourceMetrics.create("query");
+        ThreadPoolResourceMetrics resourceMetrics =
+            meterAndFtdcRegistry.threadPoolResourceBindings().forSubsystem("query");
         concurrentSearchExecutor.ifPresent(e -> resourceMetrics.register(e, meterRegistry));
         concurrentVectorRescoringExecutor.ifPresent(
             e -> resourceMetrics.register(e, meterRegistry));
@@ -156,7 +172,10 @@ public class LuceneIndexFactory implements IndexFactory {
     }
 
     private static InstrumentedConcurrentMergeScheduler getInstrumentedConcurrentMergeScheduler(
-        LuceneConfig config, FeatureFlags featureFlags, MeterRegistry meterRegistry) {
+        LuceneConfig config,
+        FeatureFlags featureFlags,
+        MeterRegistry meterRegistry,
+        ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
       long cancelMergeTimeout =
           config
               .cancelMergePerThreadTimeoutMs()
@@ -173,7 +192,9 @@ public class LuceneIndexFactory implements IndexFactory {
               meterRegistry,
               cancelMergeTimeout,
               cancelAllMergesTimeout,
-              featureFlags.isEnabled(Feature.MERGE_ATTRIBUTION_METRICS));
+              featureFlags.isEnabled(Feature.MERGE_ATTRIBUTION_METRICS)
+                  ? Optional.of(threadPoolResourceBindings)
+                  : Optional.empty());
       mergeScheduler.setMaxMergesAndThreads(config.numMaxMerges(), config.numMaxMergeThreads());
       return mergeScheduler;
     }
@@ -201,7 +222,7 @@ public class LuceneIndexFactory implements IndexFactory {
   private final EnvironmentVariantPerfConfig environmentVariantPerfConfig;
   protected final boolean enableNaturalOrderScan;
   private final Optional<SystemInfo> systemInfo;
-  private final AtomicLong cacheWarmerTotalMilliseconds;
+  private final CacheWarmerTimer cacheWarmerTimer;
   private volatile boolean cacheWarmerAlreadyDisabled;
 
   @VisibleForTesting
@@ -251,9 +272,11 @@ public class LuceneIndexFactory implements IndexFactory {
       this.byteReadCollector = Optional.empty();
     }
     this.systemInfo = systemInfo;
-    this.cacheWarmerTotalMilliseconds =
+    this.cacheWarmerTimer =
         this.metricsFactory.timeGauge(
-            "cacheWarmerTotalMilliseconds", new AtomicLong(), AtomicLong::doubleValue);
+            "cacheWarmerTotal",
+            new CacheWarmerTimer(),
+            timer -> (double) timer.warmingMilliseconds());
     this.cacheWarmerAlreadyDisabled = false;
   }
 
@@ -475,6 +498,60 @@ public class LuceneIndexFactory implements IndexFactory {
   }
 
   @Override
+  public Optional<EncodedUserData> readPersistedCommitUserData(
+      IndexDefinitionGeneration definitionGeneration) {
+    // Everything here (path construction included) is inside the try so that no failure can
+    // propagate: callers treat empty as "no persisted signal" and fall back to the pre-existing
+    // status, so degrading to empty is always safe.
+    try {
+      // Read partition 0's directory, mirroring MultiLuceneIndexWriter#getCommitUserData: every
+      // partition is committed with identical user data, and partition 0 is committed last, so on a
+      // partial-crash it holds the safest (oldest) value. For a single-partition index this
+      // resolves to the index directory itself; for a partitioned index it is the "0" subdirectory
+      // (the index directory has no segments file of its own).
+      Path path =
+          new IndexPathFactory(this.indexDirectoryHelper, definitionGeneration)
+              .getIndexPartitionDataPath(0);
+      if (!Files.exists(path)) {
+        return Optional.empty();
+      }
+      try (Directory directory = FSDirectory.open(path)) {
+        EncodedUserData encoded =
+            LuceneCommitData.fromDataMap(
+                    Optional.of(SegmentInfos.readLatestCommit(directory).getUserData().entrySet()))
+                .getEncodedUserData();
+        // fromDataMap degrades to EncodedUserData.EMPTY when the commit carries no user data (e.g.
+        // an older-schema commit). Collapse that to Optional.empty() so a present Optional always
+        // wraps real persisted data and empty uniformly means "no persisted signal".
+        return encoded.equals(EncodedUserData.EMPTY) ? Optional.empty() : Optional.of(encoded);
+      }
+    } catch (Exception e) {
+      // Includes a missing/unreadable commit (I/O error or a corrupt SegmentInfos surfacing as an
+      // unchecked exception) and any failure building the partition path from a malformed
+      // generation. Logging itself must not throw, or a malformed definitionGeneration would defeat
+      // the "never propagate" guarantee this method promises its callers.
+      try {
+        LOG.atWarn()
+            .setCause(e)
+            .addKeyValue("generationId", definitionGeneration.getGenerationId())
+            .log("Could not read persisted commit user data from disk; treating as absent");
+      } catch (Exception loggingFailure) {
+        LOG.warn("Could not read persisted commit user data from disk; treating as absent", e);
+      }
+      return Optional.empty();
+    }
+  }
+
+  @Override
+  public void deleteGenerationData(GenerationId generationId) throws IOException {
+    LOG.atInfo()
+        .addKeyValue("indexId", generationId.indexId)
+        .addKeyValue("generationId", generationId)
+        .log("deleting generation data");
+    this.indexDirectoryHelper.deleteGenerationData(generationId);
+  }
+
+  @Override
   public Index getIndex(IndexDefinitionGeneration definitionGeneration)
       throws InvalidAnalyzerDefinitionException, IOException {
 
@@ -499,7 +576,6 @@ public class LuceneIndexFactory implements IndexFactory {
           this.indexDirectoryHelper.getIndexDirectoryPath(definitionGeneration),
           this.indexDirectoryHelper.getIndexMetadataPath(definitionGeneration),
           this.config,
-          this.featureFlags,
           this.mergeScheduler,
           this.vectorMergePolicy.orElse(this.mergePolicy),
           this.queryCacheProvider,
@@ -507,7 +583,7 @@ public class LuceneIndexFactory implements IndexFactory {
           this.concurrentSearchExecutor,
           this.concurrentVectorRescoringExecutor,
           vectorDef,
-          definitionGeneration.generation().indexFormatVersion,
+          definitionGeneration.generation().formatVersion.asLucene(),
           this.indexRemover,
           metricsFactory);
     }
@@ -525,8 +601,8 @@ public class LuceneIndexFactory implements IndexFactory {
             this.featureFlags.isEnabled(Feature.TRUNCATE_AUTOCOMPLETE_TOKENS));
 
     boolean hasVectorField =
-        searchDefinition.getMappings().fields().values().stream()
-            .anyMatch(field -> field.vectorFieldSpecification().isPresent());
+        !LuceneCodecUtils.extractVectorFieldsFromSearchMappings(searchDefinition.getMappings())
+            .isEmpty();
     return LuceneSearchIndex.createDiskBacked(
         this.indexDirectoryHelper.getIndexDirectoryPath(definitionGeneration),
         this.indexDirectoryHelper.getIndexMetadataPath(definitionGeneration),
@@ -539,7 +615,7 @@ public class LuceneIndexFactory implements IndexFactory {
         this.concurrentSearchExecutor,
         this.concurrentVectorRescoringExecutor,
         searchDefinition,
-        definitionGeneration.generation().indexFormatVersion,
+        definitionGeneration.generation().formatVersion.asLucene(),
         analyzerRegistry,
         this.indexRemover,
         metricsFactory,
@@ -564,6 +640,16 @@ public class LuceneIndexFactory implements IndexFactory {
   @Override
   public InitializedIndex getInitializedIndex(
       Index index, IndexDefinitionGeneration definitionGeneration) throws IOException {
+    return getInitializedIndex(
+        index,
+        definitionGeneration,
+        IndexTypeData.getIndexTypeTag(definitionGeneration.getIndexDefinition()));
+  }
+
+  @Override
+  public InitializedIndex getInitializedIndex(
+      Index index, IndexDefinitionGeneration definitionGeneration, IndexTypeTag indexTypeTag)
+      throws IOException {
     try {
       FileUtils.mkdirIfNotExist(
           this.indexDirectoryHelper.getIndexMetadataPath(definitionGeneration));
@@ -583,15 +669,16 @@ public class LuceneIndexFactory implements IndexFactory {
             this.config,
             this.byteReadCollector,
             this.isCacheWarmerEnabled(),
-            Optional.of(this.cacheWarmerTotalMilliseconds));
+            Optional.of(this.cacheWarmerTimer));
     GenerationId generationId = definitionGeneration.getGenerationId();
 
-    BooleanSupplier useIdBloomFilter = BloomCodecPolicy.getBloomFilterEnabledForIdField(
-        this.dynamicFeatureFlagRegistry,
-        this.enableNaturalOrderScan,
-        definitionGeneration.getIndexDefinition(),
-        index::getStatus);
-    
+    BooleanSupplier useIdBloomFilter =
+        BloomCodecPolicy.getBloomFilterEnabledForIdField(
+            this.dynamicFeatureFlagRegistry,
+            this.enableNaturalOrderScan,
+            definitionGeneration.getIndexDefinition(),
+            index::getStatus);
+
     if (definitionGeneration.getType() == Type.VECTOR) {
       VectorIndexDefinition vectorDef =
           definitionGeneration.getIndexDefinition().asVectorDefinition();
@@ -607,7 +694,8 @@ public class LuceneIndexFactory implements IndexFactory {
           luceneIndexSnapshotter,
           this.featureFlags,
           this.dynamicFeatureFlagRegistry,
-          useIdBloomFilter);
+          useIdBloomFilter,
+          indexTypeTag);
     } else {
       var luceneSearchIndex = Check.instanceOf(index, LuceneSearchIndex.class);
       return InitializedLuceneSearchIndex.create(
@@ -618,7 +706,8 @@ public class LuceneIndexFactory implements IndexFactory {
           luceneIndexSnapshotter,
           this.featureFlags,
           this.dynamicFeatureFlagRegistry,
-          useIdBloomFilter);
+          useIdBloomFilter,
+          indexTypeTag);
     }
   }
 

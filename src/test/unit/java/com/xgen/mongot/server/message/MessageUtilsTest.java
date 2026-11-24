@@ -1,6 +1,5 @@
 package com.xgen.mongot.server.message;
 
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -51,7 +50,6 @@ public class MessageUtilsTest {
 
     assertThrows(IndexOutOfBoundsException.class, () -> MessageUtils.readCString(buffer));
   }
-
 
   @Test
   public void readRawBsonDocument() {

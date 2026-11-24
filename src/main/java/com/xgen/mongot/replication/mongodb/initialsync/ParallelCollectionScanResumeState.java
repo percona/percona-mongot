@@ -1,0 +1,131 @@
+package com.xgen.mongot.replication.mongodb.initialsync;
+
+import com.xgen.mongot.replication.mongodb.common.BufferlessParallelNaturalOrderInitialSyncResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.StringJoiner;
+import java.util.UUID;
+import org.bson.BsonTimestamp;
+
+/**
+ * In-memory, session-level aggregate for a parallel natural-order collection scan: the K
+ * per-partition {@link ParallelCollectionScanPartitionState} elements, the shared {@code
+ * highWaterMark}, and the session metadata stamped on every commit.
+ *
+ * <p>{@link #snapshot()} is the commit-data supplier. The periodic committer calls it to assemble a
+ * fresh {@link IndexCommitUserData} from the live components as it fires, rather than from a blob
+ * staged ahead of time. Each component has exactly one writer (a worker writes only its own
+ * partition's {@code resumeRecordId}; the change-stream applier writes {@code highWaterMark} one
+ * batch at a time), so no partition's commit can regress another's position.
+ */
+public class ParallelCollectionScanResumeState {
+
+  private final int formatVersion;
+  private final UUID initialSyncId;
+  private final Optional<String> syncSourceHost;
+  private final List<ParallelCollectionScanPartitionState> partitions;
+  private volatile BsonTimestamp highWaterMark;
+
+  public ParallelCollectionScanResumeState(
+      int formatVersion,
+      UUID initialSyncId,
+      Optional<String> syncSourceHost,
+      BsonTimestamp highWaterMark,
+      List<ParallelCollectionScanPartitionState> partitions) {
+    this.formatVersion = formatVersion;
+    this.initialSyncId = initialSyncId;
+    this.syncSourceHost = syncSourceHost;
+    this.highWaterMark = highWaterMark;
+    this.partitions = List.copyOf(partitions);
+  }
+
+  /**
+   * Builds the live session state for a freshly planned scan. Partitions are numbered by their
+   * position in the plan, which lists them in scan order, and each starts with nothing scanned.
+   */
+  public static ParallelCollectionScanResumeState fromPlan(
+      int formatVersion,
+      InitialSyncPartitionPlan.PartitionedResult plan,
+      BsonTimestamp highWaterMark,
+      Optional<String> syncSourceHost) {
+    List<ParallelCollectionScanPartitionState> partitions = new ArrayList<>();
+    for (int partitionId = 0; partitionId < plan.partitions().size(); partitionId++) {
+      InitialSyncPartitionPlan.PartitionRange range = plan.partitions().get(partitionId);
+      partitions.add(
+          new ParallelCollectionScanPartitionState(
+              partitionId, range.lowerRecordId(), range.upperRecordId(), Optional.empty(), false));
+    }
+
+    return new ParallelCollectionScanResumeState(
+        formatVersion, plan.initialSyncId(), syncSourceHost, highWaterMark, partitions);
+  }
+
+  /**
+   * Rebuilds the live session state from a persisted commit blob on resume. The format version is
+   * not in the blob; it comes from the index generation being resumed.
+   */
+  public static ParallelCollectionScanResumeState fromPersisted(
+      int formatVersion, BufferlessParallelNaturalOrderInitialSyncResumeInfo persisted) {
+    return new ParallelCollectionScanResumeState(
+        formatVersion,
+        persisted.getInitialSyncId(),
+        persisted.getSyncSourceHost(),
+        persisted.getResumeOperationTime(),
+        persisted.getPartitions().stream()
+            .map(ParallelCollectionScanPartitionState::fromPersisted)
+            .toList());
+  }
+
+  public UUID getInitialSyncId() {
+    return this.initialSyncId;
+  }
+
+  public Optional<String> getSyncSourceHost() {
+    return this.syncSourceHost;
+  }
+
+  public BsonTimestamp getHighWaterMark() {
+    return this.highWaterMark;
+  }
+
+  public List<ParallelCollectionScanPartitionState> getPartitions() {
+    return this.partitions;
+  }
+
+  /**
+   * Advances the shared high-water mark; it becomes the {@code afterClusterTime} floor for the next
+   * scan window and the {@code startAtOperationTime} for the next apply window. Called only by the
+   * change-stream applier, once each batch it read has been indexed.
+   */
+  public void advanceHighWaterMark(BsonTimestamp highWaterMark) {
+    this.highWaterMark = highWaterMark;
+  }
+
+  /**
+   * Assembles the current durable resume position into an {@link IndexCommitUserData}, reading the
+   * live components at the instant of the call.
+   */
+  public IndexCommitUserData snapshot() {
+    BufferlessParallelNaturalOrderInitialSyncResumeInfo resumeInfo =
+        new BufferlessParallelNaturalOrderInitialSyncResumeInfo(
+            this.highWaterMark,
+            this.initialSyncId,
+            this.partitions.stream()
+                .map(ParallelCollectionScanPartitionState::toPersisted)
+                .toList(),
+            this.syncSourceHost);
+    return IndexCommitUserData.createInitialSyncResume(this.formatVersion, resumeInfo);
+  }
+
+  @Override
+  public String toString() {
+    return new StringJoiner(", ", "ParallelCollectionScanResumeState[", "]")
+        .add("highWaterMark=" + this.highWaterMark)
+        .add("initialSyncId=" + this.initialSyncId)
+        .add("syncSourceHost=" + this.syncSourceHost)
+        .add("partitions=" + this.partitions)
+        .toString();
+  }
+}

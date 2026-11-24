@@ -6,19 +6,31 @@ import static org.junit.Assert.assertTrue;
 
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.server.command.Command;
+import com.xgen.mongot.util.Crash;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.bson.BsonDocument;
+import org.bson.types.ObjectId;
 import org.junit.Test;
 
 /** Unit tests for {@link BulkheadCommandExecutor}. */
@@ -46,9 +58,11 @@ public class BulkheadCommandExecutorTest {
         ExecutionException.class,
         () ->
             this.executor
-                .execute(syncCommand(() -> {
-                  throw new UncheckedIOException(new IOException());
-                }))
+                .execute(
+                    syncCommand(
+                        () -> {
+                          throw new UncheckedIOException(new IOException());
+                        }))
                 .get());
   }
 
@@ -71,9 +85,11 @@ public class BulkheadCommandExecutorTest {
         ExecutionException.class,
         () ->
             this.executor
-                .execute(asyncCommand(() -> {
-                  throw new UncheckedIOException(new IOException());
-                }))
+                .execute(
+                    asyncCommand(
+                        () -> {
+                          throw new UncheckedIOException(new IOException());
+                        }))
                 .get());
   }
 
@@ -96,7 +112,9 @@ public class BulkheadCommandExecutorTest {
 
     try (BulkheadCommandExecutor exec = new BulkheadCommandExecutor(meterRegistry, settings)) {
       Counter rejectedCounter =
-          meterRegistry.find("loadShedding.rejected").tag("executor", "blocking-server-worker")
+          meterRegistry
+              .find("loadShedding.rejected")
+              .tag("executor", "blocking-server-worker")
               .counter();
 
       assertThat(rejectedCounter).isNotNull();
@@ -113,7 +131,8 @@ public class BulkheadCommandExecutorTest {
 
     try (BulkheadCommandExecutor exec = new BulkheadCommandExecutor(meterRegistry, settings)) {
       Counter wouldHaveRejectedCounter =
-          meterRegistry.find("loadShedding.wouldHaveRejected")
+          meterRegistry
+              .find("loadShedding.wouldHaveRejected")
               .tag("executor", "blocking-server-worker")
               .counter();
 
@@ -128,10 +147,13 @@ public class BulkheadCommandExecutorTest {
 
     try (BulkheadCommandExecutor exec = new BulkheadCommandExecutor(meterRegistry, settings)) {
       Counter rejectedCounter =
-          meterRegistry.find("loadShedding.rejected").tag("executor", "blocking-server-worker")
+          meterRegistry
+              .find("loadShedding.rejected")
+              .tag("executor", "blocking-server-worker")
               .counter();
       Counter wouldHaveRejectedCounter =
-          meterRegistry.find("loadShedding.wouldHaveRejected")
+          meterRegistry
+              .find("loadShedding.wouldHaveRejected")
               .tag("executor", "blocking-server-worker")
               .counter();
 
@@ -150,7 +172,8 @@ public class BulkheadCommandExecutorTest {
 
     try (BulkheadCommandExecutor exec = new BulkheadCommandExecutor(meterRegistry, settings)) {
       Counter wouldHaveRejectedCounter =
-          meterRegistry.find("loadShedding.wouldHaveRejected")
+          meterRegistry
+              .find("loadShedding.wouldHaveRejected")
               .tag("executor", "blocking-server-worker")
               .counter();
 
@@ -209,7 +232,9 @@ public class BulkheadCommandExecutorTest {
       }
 
       Counter rejectedCounter =
-          meterRegistry.find("loadShedding.rejected").tag("executor", "blocking-server-worker")
+          meterRegistry
+              .find("loadShedding.rejected")
+              .tag("executor", "blocking-server-worker")
               .counter();
 
       assertThat(rejectedCounter.count()).isEqualTo(1.0);
@@ -238,7 +263,8 @@ public class BulkheadCommandExecutorTest {
       exec.execute(simpleAsyncCommand()); // exceeds virtual capacity
 
       Counter wouldHaveRejectedCounter =
-          meterRegistry.find("loadShedding.wouldHaveRejected")
+          meterRegistry
+              .find("loadShedding.wouldHaveRejected")
               .tag("executor", "blocking-server-worker")
               .counter();
 
@@ -389,8 +415,7 @@ public class BulkheadCommandExecutorTest {
       exec.execute(simpleAsyncCommand()); // fills queue
 
       // Load-sheddable command would be rejected with LoadSheddingRejectedException
-      assertThrows(
-          LoadSheddingRejectedException.class, () -> exec.execute(simpleAsyncCommand()));
+      assertThrows(LoadSheddingRejectedException.class, () -> exec.execute(simpleAsyncCommand()));
 
       // Non-load-sheddable command should still succeed
       exec.execute(simpleNonLoadSheddableAsyncCommand()); // should NOT throw
@@ -499,8 +524,7 @@ public class BulkheadCommandExecutorTest {
       assertTrue(taskStartedLatch.await(5, TimeUnit.SECONDS));
       exec.execute(simpleAsyncCommand());
 
-      assertThrows(
-          LoadSheddingRejectedException.class, () -> exec.execute(simpleAsyncCommand()));
+      assertThrows(LoadSheddingRejectedException.class, () -> exec.execute(simpleAsyncCommand()));
 
       exec.execute(simpleNonLoadSheddableAsyncCommand());
 
@@ -570,8 +594,7 @@ public class BulkheadCommandExecutorTest {
       exec.execute(blockingCommand(blockingLatch, taskStartedLatch));
       assertTrue(taskStartedLatch.await(5, TimeUnit.SECONDS));
 
-      var future =
-          exec.execute(asyncCommand(() -> secondCommandRan.set(true)), cancelled::get);
+      var future = exec.execute(asyncCommand(() -> secondCommandRan.set(true)), cancelled::get);
 
       cancelled.set(true);
       blockingLatch.countDown();
@@ -642,14 +665,167 @@ public class BulkheadCommandExecutorTest {
   @Test
   public void constructor_queryMemoryAttributionDisabled_doesNotRegisterResourceMetrics() {
     SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    FeatureFlags off = FeatureFlags.getDefault();
+    FeatureFlags off =
+        FeatureFlags.withDefaults().disable(Feature.QUERY_MEMORY_ATTRIBUTION_METRICS).build();
+    // Bindings are supplied, so only the flag can suppress the counters.
     try (BulkheadCommandExecutor exec =
         new BulkheadCommandExecutor(
-            meterRegistry, RegularBlockingRequestSettings.defaults(), off)) {
+            meterRegistry,
+            RegularBlockingRequestSettings.defaults(),
+            off,
+            DynamicFeatureFlagRegistry.empty(),
+            Optional.of(new ThreadPoolResourceMetrics.Bindings()),
+            FeatureFlags.getDefault().isEnabled(Feature.OVERLOAD_RETRY_SIGNAL))) {
       assertThat(meterRegistry.find("executor.thread.allocatedBytes").functionCounter()).isNull();
       assertThat(meterRegistry.find("executor.thread.cpuTime").functionCounter()).isNull();
     }
   }
+
+  @Test
+  @Crash.TestOnlyHaltHandler
+  public void submitOrCrashOnThreadCreationOom_featureDisabled_rethrowsWithoutCrashing()
+      throws Exception {
+    AtomicBoolean haltCalled = new AtomicBoolean(false);
+    Crash.setHaltHandlerForTesting(exitCode -> haltCalled.set(true));
+    try {
+      try (BulkheadCommandExecutor exec =
+          new BulkheadCommandExecutor(
+              new SimpleMeterRegistry(),
+              RegularBlockingRequestSettings.defaults(),
+              FeatureFlags.getDefault(),
+              DynamicFeatureFlagRegistry.empty(),
+              Optional.empty(),
+              FeatureFlags.getDefault().isEnabled(Feature.OVERLOAD_RETRY_SIGNAL))) {
+        Supplier<CompletableFuture<BsonDocument>> throwingSubmission =
+            () -> {
+              throw new OutOfMemoryError("unable to create native thread");
+            };
+
+        assertThrows(
+            InvocationTargetException.class,
+            () -> invokeSubmitOrCrashOnThreadCreationOom(exec, throwingSubmission));
+        assertThat(haltCalled.get()).isFalse();
+      }
+    } finally {
+      Crash.clearHaltHandlerForTesting();
+    }
+  }
+
+  @Test
+  @Crash.TestOnlyHaltHandler
+  public void submitOrCrashOnThreadCreationOom_featureEnabled_nonNativeOomDoesNotCrash()
+      throws Exception {
+    AtomicBoolean haltCalled = new AtomicBoolean(false);
+    Crash.setHaltHandlerForTesting(exitCode -> haltCalled.set(true));
+    try {
+      ObjectId clusterId = new ObjectId();
+      DynamicFeatureFlagConfig config =
+          new DynamicFeatureFlagConfig(
+              DynamicFeatureFlags.CRASH_ON_THREAD_CREATION_OOM.getName(),
+              DynamicFeatureFlagConfig.Phase.ENABLED,
+              List.of(),
+              List.of(),
+              0,
+              DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER);
+      DynamicFeatureFlagRegistry registryWithFlagEnabled =
+          new DynamicFeatureFlagRegistry(
+              Optional.of(List.of(config)),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.of(clusterId));
+
+      try (BulkheadCommandExecutor exec =
+          new BulkheadCommandExecutor(
+              new SimpleMeterRegistry(),
+              RegularBlockingRequestSettings.defaults(),
+              FeatureFlags.getDefault(),
+              registryWithFlagEnabled,
+              Optional.empty(),
+              FeatureFlags.getDefault().isEnabled(Feature.OVERLOAD_RETRY_SIGNAL))) {
+        OutOfMemoryError heapOom = new OutOfMemoryError("Java heap space");
+        Supplier<CompletableFuture<BsonDocument>> throwingSubmission =
+            () -> {
+              throw heapOom;
+            };
+
+        InvocationTargetException thrown =
+            assertThrows(
+                InvocationTargetException.class,
+                () -> invokeSubmitOrCrashOnThreadCreationOom(exec, throwingSubmission));
+        assertThat(thrown.getCause()).isSameInstanceAs(heapOom);
+        assertThat(haltCalled.get()).isFalse();
+      }
+    } finally {
+      Crash.clearHaltHandlerForTesting();
+    }
+  }
+
+  @Test
+  @Crash.TestOnlyHaltHandler
+  public void submitOrCrashOnThreadCreationOom_featureEnabled_crashesProcess() throws Exception {
+    AtomicInteger capturedExitCode = new AtomicInteger(-1);
+    CountDownLatch haltCalled = new CountDownLatch(1);
+    Crash.setHaltHandlerForTesting(
+        exitCode -> {
+          capturedExitCode.set(exitCode);
+          haltCalled.countDown();
+          // Simulate Runtime.halt() so control never returns to the caller.
+          throw new HaltError();
+        });
+    try {
+      ObjectId clusterId = new ObjectId();
+      DynamicFeatureFlagConfig config =
+          new DynamicFeatureFlagConfig(
+              DynamicFeatureFlags.CRASH_ON_THREAD_CREATION_OOM.getName(),
+              DynamicFeatureFlagConfig.Phase.ENABLED,
+              List.of(),
+              List.of(),
+              0,
+              DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER);
+      DynamicFeatureFlagRegistry registryWithFlagEnabled =
+          new DynamicFeatureFlagRegistry(
+              Optional.of(List.of(config)),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.of(clusterId));
+
+      try (BulkheadCommandExecutor exec =
+          new BulkheadCommandExecutor(
+              new SimpleMeterRegistry(),
+              RegularBlockingRequestSettings.defaults(),
+              FeatureFlags.getDefault(),
+              registryWithFlagEnabled,
+              Optional.empty(),
+              FeatureFlags.getDefault().isEnabled(Feature.OVERLOAD_RETRY_SIGNAL))) {
+        Supplier<CompletableFuture<BsonDocument>> throwingSubmission =
+            () -> {
+              throw new OutOfMemoryError("unable to create native thread");
+            };
+
+        assertThrows(
+            InvocationTargetException.class,
+            () -> invokeSubmitOrCrashOnThreadCreationOom(exec, throwingSubmission));
+
+        assertTrue(haltCalled.await(5, TimeUnit.SECONDS));
+        assertThat(capturedExitCode.get()).isEqualTo(1);
+      }
+    } finally {
+      Crash.clearHaltHandlerForTesting();
+    }
+  }
+
+  private void invokeSubmitOrCrashOnThreadCreationOom(
+      BulkheadCommandExecutor exec, Supplier<CompletableFuture<BsonDocument>> submission)
+      throws Exception {
+    Method method =
+        BulkheadCommandExecutor.class.getDeclaredMethod(
+            "submitOrCrashOnThreadCreationOom", Supplier.class);
+    method.setAccessible(true);
+    method.invoke(exec, submission);
+  }
+
+  /** Stand-in for the process exit that {@link Crash#now()} would otherwise trigger. */
+  private static final class HaltError extends Error {}
 
   @Test
   public void constructor_queryMemoryAttributionEnabled_registersResourceMetricsForBothPools() {
@@ -657,7 +833,13 @@ public class BulkheadCommandExecutorTest {
     FeatureFlags on =
         FeatureFlags.withDefaults().enable(Feature.QUERY_MEMORY_ATTRIBUTION_METRICS).build();
     try (BulkheadCommandExecutor exec =
-        new BulkheadCommandExecutor(meterRegistry, RegularBlockingRequestSettings.defaults(), on)) {
+        new BulkheadCommandExecutor(
+            meterRegistry,
+            RegularBlockingRequestSettings.defaults(),
+            on,
+            DynamicFeatureFlagRegistry.empty(),
+            Optional.of(new ThreadPoolResourceMetrics.Bindings()),
+            on.isEnabled(Feature.OVERLOAD_RETRY_SIGNAL))) {
       FunctionCounter regular =
           meterRegistry
               .find("executor.thread.allocatedBytes")
@@ -672,6 +854,25 @@ public class BulkheadCommandExecutorTest {
               .functionCounter();
       assertThat(regular).isNotNull();
       assertThat(guaranteed).isNotNull();
+    }
+  }
+
+  @Test
+  public void shouldRetryViaEnvoy_true_returnsBooleanState() {
+    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    RegularBlockingRequestSettings settings =
+        RegularBlockingRequestSettings.create(
+            Optional.of(2.0), Optional.of(2.0), Optional.of(false));
+
+    try (BulkheadCommandExecutor exec =
+        new BulkheadCommandExecutor(
+            meterRegistry,
+            settings,
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            Optional.empty(),
+            true)) {
+      assertThat(exec.shouldRetryViaEnvoy()).isTrue();
     }
   }
 }

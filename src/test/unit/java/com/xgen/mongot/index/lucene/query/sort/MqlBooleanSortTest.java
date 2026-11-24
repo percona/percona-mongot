@@ -110,7 +110,8 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   FieldPath.newRoot("booleanField"), UserFieldSortOptions.DEFAULT_ASC),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
 
       Object[] values = runSortQuery(sortFields);
 
@@ -128,7 +129,8 @@ public class MqlBooleanSortTest {
               new MongotSortField(
                   FieldPath.newRoot("booleanField"),
                   SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
 
       Object[] values = runSortQuery(sortFields);
 
@@ -145,7 +147,8 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   FieldPath.newRoot("booleanField"), UserFieldSortOptions.DEFAULT_DESC),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
 
       Object[] values = runSortQuery(sortFields);
 
@@ -163,7 +166,8 @@ public class MqlBooleanSortTest {
               new MongotSortField(
                   FieldPath.newRoot("booleanField"),
                   SortPruningTestUtils.DEFAULT_DESC_NULLS_HIGHEST),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
 
       Object[] values = runSortQuery(sortFields);
 
@@ -189,7 +193,8 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   FieldPath.newRoot("booleanField"), UserFieldSortOptions.DEFAULT_ASC),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       Query query = new MatchAllDocsQuery();
       Sort sort = new Sort(sortFields);
 
@@ -225,7 +230,8 @@ public class MqlBooleanSortTest {
               new MongotSortField(
                   FieldPath.newRoot("booleanField"),
                   SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       Query query = new MatchAllDocsQuery();
       Sort sort = new Sort(sortFields);
 
@@ -320,7 +326,7 @@ public class MqlBooleanSortTest {
         Sort sort = new Sort(new ExplainSortField(sortField, explainer));
         CollectorManager<TopFieldCollector, TopFieldDocs> manager =
             new TopFieldCollectorManager(sort, numHits, null, numHits);
-        TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+        TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
         SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
         SortStats sortExplainResult =
@@ -347,7 +353,8 @@ public class MqlBooleanSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME,
                   new UserFieldSortOptions(SortOrder.ASC, nullEmptySortPosition)),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       if (nullEmptySortPosition == NullEmptySortPosition.HIGHEST) {
         sortField.setMissingValue(SortField.STRING_LAST);
       } else {
@@ -356,7 +363,7 @@ public class MqlBooleanSortTest {
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
     }
 
@@ -377,12 +384,13 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, SortPruningTestUtils.DEFAULT_ASC_NULLS_HIGHEST),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortField.STRING_LAST);
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
     }
 
@@ -404,7 +412,8 @@ public class MqlBooleanSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME,
                   new UserFieldSortOptions(SortOrder.ASC, nullEmptySortPosition)),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       if (nullEmptySortPosition == NullEmptySortPosition.HIGHEST) {
         sortField.setMissingValue(SortField.STRING_LAST);
       } else {
@@ -413,7 +422,7 @@ public class MqlBooleanSortTest {
       Sort sort = new Sort(sortField);
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
 
       SortPruningTestUtils.assertReversedOptimizedSort(topDocs, numHits, numDocs);
     }
@@ -435,7 +444,8 @@ public class MqlBooleanSortTest {
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME,
                   new UserFieldSortOptions(SortOrder.ASC, nullEmptySortPosition)),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       if (nullEmptySortPosition == NullEmptySortPosition.HIGHEST) {
         sortField.setMissingValue(SortField.STRING_LAST);
       } else {
@@ -449,7 +459,7 @@ public class MqlBooleanSortTest {
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, after, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
     }
 
@@ -467,13 +477,14 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(SortField.FIELD_SCORE, sortField);
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertUnoptimizedSort(topDocs, numHits, numDocs);
     }
 
@@ -492,13 +503,14 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField, SortField.FIELD_SCORE);
 
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, numHits);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       // test that if there is the secondary sort on _score, hits are still skipped
       SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
       SortPruningTestUtils.assertScore(topDocs, 1, 1.0f);
@@ -535,14 +547,15 @@ public class MqlBooleanSortTest {
           MqlSortedSetSortField.booleanSort(
               new MongotSortField(
                   SortPruningTestUtils.FIELD_NAME, UserFieldSortOptions.DEFAULT_ASC),
-              Optional.empty(), false);
+              Optional.empty(),
+              false);
       sortField.setMissingValue(SortPruningTestUtils.MISSING_VALUE_ORDER);
       Sort sort = new Sort(sortField);
 
       // test that sorting on a single field with equal values uses the optimization
       CollectorManager<TopFieldCollector, TopFieldDocs> manager =
           new TopFieldCollectorManager(sort, numHits, null, totalHitsThreshold);
-      TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), manager);
+      TopDocs topDocs = searcher.search(SortPruningTestUtils.matchAllDocsQuery(), manager);
       SortPruningTestUtils.assertOptimizedSort(topDocs, numHits, numDocs);
     }
   }

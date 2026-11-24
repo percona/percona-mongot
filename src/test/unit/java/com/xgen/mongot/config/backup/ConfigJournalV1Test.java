@@ -2,6 +2,7 @@ package com.xgen.mongot.config.backup;
 
 import static com.xgen.testing.BsonDeserializationTestSuite.fromDocument;
 
+import com.xgen.mongot.config.util.Invariants;
 import com.xgen.mongot.index.definition.AnalyzerBoundSearchIndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.VectorIndexDefinitionGeneration;
@@ -10,9 +11,11 @@ import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.util.FileUtils;
 import com.xgen.mongot.util.bson.JsonCodec;
+import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonSerializationTestSuite;
+import com.xgen.testing.JsonTestSuite;
 import com.xgen.testing.TestUtils;
 import com.xgen.testing.mongot.config.backup.ConfigJournalV1Builder;
 import com.xgen.testing.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinitionBuilder;
@@ -27,6 +30,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import org.bson.BsonArray;
 import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
@@ -46,6 +50,7 @@ import org.junit.runners.Suite;
 @Suite.SuiteClasses(
     value = {
       ConfigJournalV1Test.DeserializationTest.class,
+      ConfigJournalV1Test.InvariantTest.class,
       ConfigJournalV1Test.SerializationTest.class,
       ConfigJournalV1Test.ClassTest.class,
     })
@@ -164,6 +169,7 @@ public class ConfigJournalV1Test {
       return BsonDeserializationTestSuite.TestSpec.valid(
           "with staged index",
           ConfigJournalV1Builder.builder()
+              .liveIndex(searchDefinition("012345678901234567890123", "foo", 0, 2))
               .stagedIndex(searchDefinition("012345678901234567890123", "foo", 1, 2))
               .build());
     }
@@ -172,6 +178,12 @@ public class ConfigJournalV1Test {
       return BsonDeserializationTestSuite.TestSpec.valid(
           "with staged vector index",
           ConfigJournalV1Builder.builder()
+              .liveIndex(
+                  new VectorIndexDefinitionGeneration(
+                      VectorIndexDefinitionBuilder.builder()
+                          .setFields(VectorIndex.MOCK_VECTOR_DEFINITION.getFields())
+                          .build(),
+                      Generation.FIRST))
               .stagedIndex(
                   new VectorIndexDefinitionGeneration(
                       VectorIndexDefinitionBuilder.builder()
@@ -241,7 +253,7 @@ public class ConfigJournalV1Test {
                       VectorIndexDefinitionBuilder.builder()
                           .setFields(VectorIndex.MOCK_VECTOR_DEFINITION.getFields())
                           .build(),
-                      Generation.FIRST))
+                      Generation.FIRST.incrementUser()))
               .build());
     }
   }
@@ -418,6 +430,23 @@ public class ConfigJournalV1Test {
     }
   }
 
+  public static class InvariantTest {
+    @Test
+    public void validateInvariantsTest() throws Exception {
+      JsonTestSuite json =
+          JsonTestSuite.load(
+              "src/test/unit/resources/config/backup/", "config-journal-v1-deserialization");
+      for (var testCase : json.getValid()) {
+        try (var parser =
+            BsonDocumentParser.fromRoot(testCase.getValueAsBsonValue().asDocument()).build()) {
+          ConfigJournalV1 journal = ConfigJournalV1.fromBson(parser);
+          Invariants.validateGenerationalInvariants(
+              journal.getStagedIndexes(), journal.getLiveIndexes(), journal.getDeletedIndexes());
+        }
+      }
+    }
+  }
+
   private static IndexDefinitionGeneration searchDefinition(
       String indexId, String name, int user, int format) {
     return SearchIndexDefinitionBuilder.builder()
@@ -507,6 +536,227 @@ public class ConfigJournalV1Test {
           "must be a integer", BsonParseException.class, () -> loadExisting(path));
       TestUtils.assertThrows(
           "must be a integer", BsonParseException.class, () -> loadExisting(path));
+    }
+
+    /**
+     * A journal holding a single valid entry in one of the six index arrays, so that each array's
+     * quarantine behaviour can be exercised the same way.
+     */
+    public record SingleEntryJournal(
+        String arrayName, ConfigJournalV1 journal, IndexDefinitionGeneration.Type type) {
+      @Override
+      public String toString() {
+        return this.arrayName;
+      }
+    }
+
+    @DataPoints("singleEntryJournals")
+    public static List<SingleEntryJournal> singleEntryJournals() {
+      IndexDefinitionGeneration search = searchDefinition("012345678901234567890123", "foo", 1, 2);
+      IndexDefinitionGeneration vector = VectorIndex.MOCK_INDEX_DEFINITION_GENERATION;
+
+      return List.of(
+          new SingleEntryJournal(
+              "stagedIndexes",
+              ConfigJournalV1Builder.builder().stagedIndex(search).build(),
+              IndexDefinitionGeneration.Type.SEARCH),
+          new SingleEntryJournal(
+              "indexes",
+              ConfigJournalV1Builder.builder().liveIndex(search).build(),
+              IndexDefinitionGeneration.Type.SEARCH),
+          new SingleEntryJournal(
+              "deletedIndexes",
+              ConfigJournalV1Builder.builder().deletedIndex(search).build(),
+              IndexDefinitionGeneration.Type.SEARCH),
+          new SingleEntryJournal(
+              "stagedVectorIndexes",
+              ConfigJournalV1Builder.builder().stagedIndex(vector).build(),
+              IndexDefinitionGeneration.Type.VECTOR),
+          new SingleEntryJournal(
+              "vectorIndexes",
+              ConfigJournalV1Builder.builder().liveIndex(vector).build(),
+              IndexDefinitionGeneration.Type.VECTOR),
+          new SingleEntryJournal(
+              "deletedVectorIndexes",
+              ConfigJournalV1Builder.builder().deletedIndex(vector).build(),
+              IndexDefinitionGeneration.Type.VECTOR));
+    }
+
+    @DataPoints("policies")
+    public static List<QuarantinePolicy> policies() {
+      return List.of(QuarantinePolicy.FAIL_FAST, QuarantinePolicy.QUARANTINE);
+    }
+
+    @Theory
+    public void fromFileIfExists_quarantine_unparseableEntryRoundTripsVerbatim(
+        @FromDataPoints("singleEntryJournals") SingleEntryJournal singleEntryJournal)
+        throws Exception {
+      Path path = getFilePath();
+      BsonDocument corrupted =
+          withUnknownFieldInFirstElement(
+              singleEntryJournal.journal().toBson(), singleEntryJournal.arrayName());
+      write(path, corrupted);
+
+      ConfigJournalV1 parsed =
+          ConfigJournalV1.fromFileIfExists(path, QuarantinePolicy.QUARANTINE).orElseThrow();
+
+      Assert.assertEquals(JsonCodec.toJson(corrupted), JsonCodec.toJson(parsed.toBson()));
+      Assert.assertEquals(1, parsed.getQuarantinedEntries().size());
+      Assert.assertTrue(parsed.getStagedIndexes().isEmpty());
+      Assert.assertTrue(parsed.getLiveIndexes().isEmpty());
+      Assert.assertTrue(parsed.getDeletedIndexes().isEmpty());
+    }
+
+    /**
+     * The type of a quarantined entry comes from the array it was read from, since its own fields
+     * could not be parsed.
+     */
+    @Theory
+    public void fromFileIfExists_quarantine_entryCarriesTheTypeOfItsArray(
+        @FromDataPoints("singleEntryJournals") SingleEntryJournal singleEntryJournal)
+        throws Exception {
+      Path path = getFilePath();
+      write(
+          path,
+          withUnknownFieldInFirstElement(
+              singleEntryJournal.journal().toBson(), singleEntryJournal.arrayName()));
+
+      ConfigJournalV1 parsed =
+          ConfigJournalV1.fromFileIfExists(path, QuarantinePolicy.QUARANTINE).orElseThrow();
+
+      Assert.assertEquals(
+          singleEntryJournal.type(), parsed.getQuarantinedEntries().get(0).getType());
+    }
+
+    @Theory
+    public void fromFileIfExists_failFast_unparseableEntryThrows(
+        @FromDataPoints("singleEntryJournals") SingleEntryJournal singleEntryJournal)
+        throws Exception {
+      Path path = getFilePath();
+      write(
+          path,
+          withUnknownFieldInFirstElement(
+              singleEntryJournal.journal().toBson(), singleEntryJournal.arrayName()));
+
+      TestUtils.assertThrows(
+          "unrecognized field \"fieldFromTheFuture\"",
+          BsonParseException.class,
+          () -> ConfigJournalV1.fromFileIfExists(path, QuarantinePolicy.FAIL_FAST));
+    }
+
+    @Test
+    public void fromFileIfExists_quarantine_healthyEntriesInSameArrayStillParse() throws Exception {
+      Path path = getFilePath();
+      var journal =
+          ConfigJournalV1Builder.builder()
+              .liveIndex(searchDefinition("012345678901234567890123", "foo", 1, 2))
+              .liveIndex(searchDefinition("012345678901234567890124", "baz", 1, 2))
+              .build();
+      write(path, withUnknownFieldInFirstElement(journal.toBson(), "indexes"));
+
+      ConfigJournalV1 parsed =
+          ConfigJournalV1.fromFileIfExists(path, QuarantinePolicy.QUARANTINE).orElseThrow();
+
+      Assert.assertEquals(1, parsed.getLiveIndexes().size());
+      Assert.assertEquals("baz", parsed.getLiveIndexes().get(0).getIndexDefinition().getName());
+      Assert.assertEquals(1, parsed.getQuarantinedEntries().size());
+    }
+
+    /**
+     * The corrupted entry is the one that sorts first, so a byte-identical round trip is only
+     * possible if it sorted into the same slot its parseable twin would have.
+     */
+    @Test
+    public void fromFileIfExists_quarantine_quarantinedEntrySortsLikeItsParseableTwin()
+        throws Exception {
+      Path path = getFilePath();
+      var journal =
+          ConfigJournalV1Builder.builder()
+              .liveIndex(searchDefinition("012345678901234567890123", "foo", 1, 2))
+              .liveIndex(searchDefinition("012345678901234567890124", "baz", 1, 2))
+              .build();
+      BsonDocument corrupted = withUnknownFieldInFirstElement(journal.toBson(), "indexes");
+      write(path, corrupted);
+
+      ConfigJournalV1 parsed =
+          ConfigJournalV1.fromFileIfExists(path, QuarantinePolicy.QUARANTINE).orElseThrow();
+
+      Assert.assertEquals(JsonCodec.toJson(corrupted), JsonCodec.toJson(parsed.toBson()));
+    }
+
+    @Theory
+    public void fromFileIfExists_entryWithoutIdentity_throwsUnderEitherPolicy(
+        @FromDataPoints("policies") QuarantinePolicy policy) throws Exception {
+      Path path = getFilePath();
+      BsonDocument journal =
+          ConfigJournalV1Builder.builder()
+              .liveIndex(searchDefinition("012345678901234567890123", "foo", 1, 2))
+              .build()
+              .toBson();
+      journal.getArray("indexes").get(0).asDocument().getDocument("index").remove("indexID");
+      write(path, journal);
+
+      TestUtils.assertThrows(
+          "is required",
+          BsonParseException.class,
+          () -> ConfigJournalV1.fromFileIfExists(path, policy));
+    }
+
+    @Theory
+    public void fromFileIfExists_entryIsNotADocument_throwsUnderEitherPolicy(
+        @FromDataPoints("policies") QuarantinePolicy policy) throws Exception {
+      Path path = getFilePath();
+      BsonDocument journal = ConfigJournalV1Builder.builder().build().toBson();
+      journal.put("indexes", new BsonArray(List.of(new BsonInt32(5))));
+      write(path, journal);
+
+      TestUtils.assertThrows(
+          "must be a document",
+          BsonParseException.class,
+          () -> ConfigJournalV1.fromFileIfExists(path, policy));
+    }
+
+    @Theory
+    public void fromFileIfExists_arrayIsNotAnArray_throwsUnderEitherPolicy(
+        @FromDataPoints("policies") QuarantinePolicy policy) throws Exception {
+      Path path = getFilePath();
+      BsonDocument journal = ConfigJournalV1Builder.builder().build().toBson();
+      journal.put("indexes", new BsonInt32(5));
+      write(path, journal);
+
+      TestUtils.assertThrows(
+          "must be a array",
+          BsonParseException.class,
+          () -> ConfigJournalV1.fromFileIfExists(path, policy));
+    }
+
+    @Theory
+    public void fromFileIfExists_requiredArrayMissing_throwsUnderEitherPolicy(
+        @FromDataPoints("policies") QuarantinePolicy policy) throws Exception {
+      Path path = getFilePath();
+      BsonDocument journal = ConfigJournalV1Builder.builder().build().toBson();
+      journal.remove("indexes");
+      write(path, journal);
+
+      TestUtils.assertThrows(
+          "is required",
+          BsonParseException.class,
+          () -> ConfigJournalV1.fromFileIfExists(path, policy));
+    }
+
+    /**
+     * Adds a field no version of mongot knows about, which makes the entry unparseable while
+     * leaving its identity readable.
+     */
+    private static BsonDocument withUnknownFieldInFirstElement(
+        BsonDocument journal, String arrayName) {
+      BsonDocument corrupted = journal.clone();
+      corrupted
+          .getArray(arrayName)
+          .get(0)
+          .asDocument()
+          .append("fieldFromTheFuture", new BsonBoolean(true));
+      return corrupted;
     }
 
     private Path getFilePath() throws Exception {

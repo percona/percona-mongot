@@ -18,16 +18,16 @@ import static org.mockito.Mockito.when;
 
 import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
-import com.xgen.mongot.catalogservice.IndexEntry;
 import com.xgen.mongot.catalogservice.IndexStats;
-import com.xgen.mongot.catalogservice.IndexStatsEntry;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerState;
-import com.xgen.mongot.catalogservice.ServerStateEntry;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.schema.IndexEntry;
+import com.xgen.mongot.catalogservice.schema.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.schema.ServerStateEntry;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.IndexInformation;
@@ -92,7 +92,7 @@ public class AicListSearchIndexesCommandTest {
         new AuthoritativeIndexKey(COLLECTION_UUID, def.getName()),
         def.getIndexId(),
         1,
-        def,
+        def.toBson(),
         Optional.empty());
   }
 
@@ -101,7 +101,7 @@ public class AicListSearchIndexesCommandTest {
         new AuthoritativeIndexKey(COLLECTION_UUID, def.getName()),
         def.getIndexId(),
         1,
-        def,
+        def.toBson(),
         customerDefinition);
   }
 
@@ -145,6 +145,7 @@ public class AicListSearchIndexesCommandTest {
     assertEquals(1, response.getInt32("ok").getValue());
     assertEquals(1, batch.size());
     assertEquals(INDEX_NAME, batch.getFirst().asDocument().getString("name").getValue());
+    assertEquals("search", batch.getFirst().asDocument().getString("type").getValue());
   }
 
   @Test
@@ -446,7 +447,7 @@ public class AicListSearchIndexesCommandTest {
     when(this.mockServerState.list(any(BsonDocument.class))).thenReturn(List.of());
 
     // Create IndexInformation with numDocs
-    var aggregatedMetrics = new AggregatedIndexMetrics(0L, 12345L, new BsonTimestamp(0L), 0L);
+    var aggregatedMetrics = new AggregatedIndexMetrics(0L, 12345L, new BsonTimestamp(0L), 0L, 0L);
     var indexInfo =
         new IndexInformation.Search(
             (SearchIndexDefinition) indexDefinition,
@@ -487,7 +488,7 @@ public class AicListSearchIndexesCommandTest {
     // Create IndexInformation but with a different indexId so numDocs won't be found
     var differentIndexId = new ObjectId();
     var differentIndexDefinition = createIndexDefinition(differentIndexId, "different_index");
-    var aggregatedMetrics = new AggregatedIndexMetrics(0L, 99999L, new BsonTimestamp(0L), 0L);
+    var aggregatedMetrics = new AggregatedIndexMetrics(0L, 99999L, new BsonTimestamp(0L), 0L, 0L);
     var indexInfo =
         new IndexInformation.Search(
             (SearchIndexDefinition) differentIndexDefinition,
@@ -662,5 +663,35 @@ public class AicListSearchIndexesCommandTest {
     var definition = createListDefinition();
     var command = createCommand(definition);
     assertFalse(command.maybeLoadShed());
+  }
+
+  @Test
+  public void testUnparsableDefinitionIsSkipped() throws Exception {
+    // One valid index and one with an unparsable definitionBson
+    var validIndex = createIndexDefinition(INDEX_NAME);
+    BsonDocument unparsableBson = new BsonDocument();
+    var unparsableEntry =
+        new IndexEntry(
+            new AuthoritativeIndexKey(COLLECTION_UUID, "unparsable-index"),
+            new ObjectId(),
+            1,
+            unparsableBson,
+            Optional.empty());
+
+    when(this.mockAic.listIndexes(COLLECTION_UUID))
+        .thenReturn(List.of(toIndexEntry(validIndex), unparsableEntry));
+    when(this.mockIndexStats.list(any(BsonDocument.class))).thenReturn(List.of());
+    when(this.mockServerState.list(any(BsonDocument.class))).thenReturn(List.of());
+
+    var definition = createListDefinition();
+    var command = createCommand(definition);
+
+    BsonDocument response = command.run();
+    BsonArray batch = response.getDocument("cursor").getArray("firstBatch");
+
+    // Only the parseable index should appear; the unparsable one is silently skipped
+    assertEquals(1, response.getInt32("ok").getValue());
+    assertEquals(1, batch.size());
+    assertEquals(INDEX_NAME, batch.getFirst().asDocument().getString("name").getValue());
   }
 }

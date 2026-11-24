@@ -3,10 +3,11 @@ package com.xgen.mongot.index.lucene.codec;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.xgen.mongot.index.lucene.quantization.Mongot01042BinaryQuantizedFlatVectorsFormat;
-import com.xgen.mongot.index.lucene.vector.Lucene99NativeHnswVectorsFormat;
 import java.lang.reflect.Field;
 import org.apache.lucene.backward_codecs.lucene99.Lucene94FieldInfosFormatV1;
 import org.apache.lucene.backward_codecs.lucene99.Lucene99PostingsFormat;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99ScalarQuantizedVectorsFormat;
+import org.apache.lucene.codecs.lucene104.Lucene104PostingsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90CompoundFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90DocValuesFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90LiveDocsFormat;
@@ -14,9 +15,9 @@ import org.apache.lucene.codecs.lucene90.Lucene90NormsFormat;
 import org.apache.lucene.codecs.lucene90.Lucene90PointsFormat;
 import org.apache.lucene.codecs.lucene90.compressing.Lucene90CompressingStoredFieldsWriter;
 import org.apache.lucene.codecs.lucene90.compressing.Lucene90CompressingTermVectorsWriter;
+import org.apache.lucene.codecs.lucene94.Lucene94FieldInfosFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99FlatVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99ScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99SegmentInfoFormat;
 import org.apache.lucene.index.SegmentInfos;
 import org.junit.Test;
@@ -40,6 +41,19 @@ import org.junit.Test;
  *       customers on the previous mongot release cannot roll back without re-indexing the affected
  *       indexes.
  * </ol>
+ *
+ * <p>This is one of three layered guards enforcing mongot's codec rollback-safety contract, each
+ * locking a different axis:
+ *
+ * <ul>
+ *   <li>{@code LuceneForkVersionTest} — which jar each Lucene module loads from.
+ *   <li>{@code CodecSubformatChangeDetectorTest} — per-field dispatch and the class of every
+ *       sub-format slot.
+ *   <li>{@code OnDiskFormatVersionsTest} — the on-disk version each format writes.
+ * </ul>
+ *
+ * <p>See the codec sub-format rollout policy:
+ * docs/internal/development/codec-subformat-rollout-policy.md.
  */
 public class OnDiskFormatVersionsTest {
 
@@ -47,9 +61,13 @@ public class OnDiskFormatVersionsTest {
   // Per-field codec formats (Lucene 9.0 family).
   // ---------------------------------------------------------------------------------------------
 
+  // Lucene90PointsFormat.VERSION_CURRENT matches upstream 10.4 (v1). The 9.11-compatible write
+  // path opts DOWN explicitly: the fork's backward_codecs Lucene99Codec passes VERSION_START to
+  // its points writer. Written-byte identity is enforced end-to-end by
+  // LuceneCodecWrittenFormatVersionsTest.
   @Test
   public void lucene90PointsFormat_versionCurrent() {
-    assertVersionPin(Lucene90PointsFormat.class, "VERSION_CURRENT", 0);
+    assertVersionPin(Lucene90PointsFormat.class, "VERSION_CURRENT", 1);
   }
 
   @Test
@@ -111,6 +129,13 @@ public class OnDiskFormatVersionsTest {
     assertVersionPin(Lucene99PostingsFormat.class, "VERSION_CURRENT", 0);
   }
 
+  // The default postings format under WriteFormat.LUCENE104 (Feature.LUCENE_104_CODEC on).
+
+  @Test
+  public void lucene104PostingsFormat_versionCurrent() {
+    assertVersionPin(Lucene104PostingsFormat.class, "VERSION_CURRENT", 0);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // FieldInfos — mongot uses the fork's V1 shim that emits FORMAT_PARENT_FIELD (= 1, the 9.11
   // header value) rather than the v2 FORMAT_DOCVALUE_SKIPPER (= 2) that upstream defaults to.
@@ -128,15 +153,27 @@ public class OnDiskFormatVersionsTest {
     assertVersionPin(Lucene94FieldInfosFormatV1.class, "FORMAT_PARENT_FIELD", 1);
   }
 
+  // The fieldInfos format under WriteFormat.LUCENE104 is the core class, which writes v2.
+
+  @Test
+  public void lucene94FieldInfosFormat_formatCurrent() {
+    assertVersionPin(Lucene94FieldInfosFormat.class, "FORMAT_CURRENT", 2);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Vectors — HNSW (core) + flat (core) + scalar quantized (backward_codecs in 10.x).
   // Lucene99HnswScalarQuantizedVectorsFormat composes the HNSW + flat-SQ formats and has no
   // VERSION_CURRENT of its own; its on-disk shape is covered by the entries below.
   // ---------------------------------------------------------------------------------------------
 
+  // Lucene99HnswVectorsFormat.VERSION_CURRENT matches upstream 10.4 (v1, group-varint). The
+  // 9.11-compatible write path opts DOWN explicitly: LuceneCodec passes the WriteFormat's graph
+  // write version to every HNSW format, and the fork's backward_codecs writers pass
+  // VERSION_START. Written-byte identity is enforced end-to-end by
+  // LuceneCodecWrittenFormatVersionsTest.
   @Test
   public void lucene99HnswVectorsFormat_versionCurrent() {
-    assertVersionPin(Lucene99HnswVectorsFormat.class, "VERSION_CURRENT", 0);
+    assertVersionPin(Lucene99HnswVectorsFormat.class, "VERSION_CURRENT", 1);
   }
 
   @Test
@@ -150,13 +187,10 @@ public class OnDiskFormatVersionsTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // mongot's custom formats.
+  // mongot's custom formats. Lucene99NativeHnswVectorsFormat has no version constant of its own:
+  // its writer version comes from HnswWriteParams (fork Lucene99HnswVectorsFormat constants,
+  // pinned above); the bytes it writes are locked by LuceneCodecWrittenFormatVersionsTest.
   // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void lucene99NativeHnswVectorsFormat_versionCurrent() {
-    assertVersionPin(Lucene99NativeHnswVectorsFormat.class, "VERSION_CURRENT", 0);
-  }
 
   @Test
   public void mongot01042BinaryQuantizedFlatVectorsFormat_versionCurrent() {

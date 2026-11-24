@@ -6,8 +6,8 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
-import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexUnavailableException;
+import com.xgen.mongot.index.InitialSyncIndexUnavailableException;
 import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
@@ -53,7 +53,6 @@ public class LuceneVectorIndexTest {
             indexPath,
             metadataPath,
             LuceneConfigBuilder.builder().dataPath(indexPath).build(),
-            FeatureFlags.getDefault(),
             new InstrumentedConcurrentMergeScheduler(meterRegistry),
             new TieredMergePolicy(),
             new QueryCacheProvider.DefaultQueryCacheProvider(),
@@ -61,7 +60,7 @@ public class LuceneVectorIndexTest {
             Optional.empty(),
             Optional.empty(),
             VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             VectorIndex.mockMetricsFactory());
 
@@ -146,7 +145,6 @@ public class LuceneVectorIndexTest {
             indexPath,
             metadataPath,
             LuceneConfigBuilder.builder().dataPath(indexPath).build(),
-            FeatureFlags.getDefault(),
             new InstrumentedConcurrentMergeScheduler(meterRegistry),
             new TieredMergePolicy(),
             new QueryCacheProvider.DefaultQueryCacheProvider(),
@@ -154,7 +152,7 @@ public class LuceneVectorIndexTest {
             Optional.empty(),
             Optional.empty(),
             VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             VectorIndex.mockMetricsFactory());
 
@@ -184,7 +182,7 @@ public class LuceneVectorIndexTest {
         IndexUnavailableException.class,
         () -> createIndexWithStatus(IndexStatus.notStarted()).throwIfUnavailableForQuerying());
     Assert.assertThrows(
-        IndexUnavailableException.class,
+        InitialSyncIndexUnavailableException.class,
         () -> createIndexWithStatus(IndexStatus.initialSync()).throwIfUnavailableForQuerying());
     Assert.assertThrows(
         IndexUnavailableException.class,
@@ -224,7 +222,6 @@ public class LuceneVectorIndexTest {
         indexPath,
         metadataPath,
         config,
-        FeatureFlags.getDefault(),
         new InstrumentedConcurrentMergeScheduler(meterRegistry),
         new TieredMergePolicy(),
         new QueryCacheProvider.DefaultQueryCacheProvider(),
@@ -232,7 +229,7 @@ public class LuceneVectorIndexTest {
         Optional.of(Mockito.mock(NamedExecutorService.class)),
         Optional.of(Mockito.mock(NamedExecutorService.class)),
         VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-        VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+        VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
         new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
         metricsFactory);
   }

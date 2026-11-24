@@ -3,6 +3,7 @@ package com.xgen.mongot.index.lucene.query;
 import static com.xgen.mongot.index.query.InvalidQueryException.Type;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
@@ -12,10 +13,20 @@ import com.xgen.mongot.index.analyzer.wrapper.LuceneAnalyzer;
 import com.xgen.mongot.index.analyzer.wrapper.QueryAnalyzerWrapper;
 import com.xgen.mongot.index.definition.EmbeddedDocumentsFieldDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
+import com.xgen.mongot.index.lucene.explain.explainers.SortFeatureExplainer;
+import com.xgen.mongot.index.lucene.explain.tracing.Explain;
+import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.query.context.SearchQueryFactoryContext;
 import com.xgen.mongot.index.lucene.query.custom.WrappedKnnQuery;
 import com.xgen.mongot.index.lucene.query.custom.WrappedQuery;
+import com.xgen.mongot.index.lucene.query.sort.EmbeddedScopedDateSort;
+import com.xgen.mongot.index.lucene.query.sort.EmbeddedScopedDoubleSort;
+import com.xgen.mongot.index.lucene.query.sort.EmbeddedScopedLongSort;
 import com.xgen.mongot.index.lucene.query.sort.LuceneSortFactory;
+import com.xgen.mongot.index.lucene.query.sort.MqlSortedSetSortField;
+import com.xgen.mongot.index.lucene.query.sort.comparator.InstrumentedChildBitSetProducer;
+import com.xgen.mongot.index.lucene.query.sort.comparator.ScopeFilters;
+import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.lucene.searcher.FieldToSortableTypesMapping;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
@@ -25,6 +36,7 @@ import com.xgen.mongot.index.query.operators.AllDocumentsOperator;
 import com.xgen.mongot.index.query.operators.AutocompleteOperator;
 import com.xgen.mongot.index.query.operators.CompoundOperator;
 import com.xgen.mongot.index.query.operators.EmbeddedDocumentOperator;
+import com.xgen.mongot.index.query.operators.EmbeddedDocumentScope;
 import com.xgen.mongot.index.query.operators.EqualsOperator;
 import com.xgen.mongot.index.query.operators.ExistsOperator;
 import com.xgen.mongot.index.query.operators.GeoShapeOperator;
@@ -36,6 +48,7 @@ import com.xgen.mongot.index.query.operators.KnnBetaOperator;
 import com.xgen.mongot.index.query.operators.MoreLikeThisOperator;
 import com.xgen.mongot.index.query.operators.NearOperator;
 import com.xgen.mongot.index.query.operators.Operator;
+import com.xgen.mongot.index.query.operators.OperatorEmbeddedRootValidator;
 import com.xgen.mongot.index.query.operators.PhraseOperator;
 import com.xgen.mongot.index.query.operators.QueryStringOperator;
 import com.xgen.mongot.index.query.operators.RangeOperator;
@@ -49,12 +62,21 @@ import com.xgen.mongot.index.query.operators.VectorSearchFilter;
 import com.xgen.mongot.index.query.operators.VectorSearchOperator;
 import com.xgen.mongot.index.query.operators.WildcardOperator;
 import com.xgen.mongot.index.query.operators.type.NonNullValueType;
+import com.xgen.mongot.index.query.optimizer.QueryOptimizer;
+import com.xgen.mongot.index.query.optimizer.rules.DefaultRuleRegistry;
+import com.xgen.mongot.index.query.sort.EmbeddedSortScope;
+import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.SequenceToken;
 import com.xgen.mongot.index.query.sort.SortSpec;
+import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import com.xgen.mongot.index.synonym.SynonymRegistry;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.util.FieldPath;
+import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.ConstantScoreQuery;
@@ -62,7 +84,11 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.join.BitSetProducer;
+import org.apache.lucene.search.join.QueryBitSetProducer;
 import org.apache.lucene.util.automaton.TooComplexToDeterminizeException;
+import org.bson.BsonDocument;
 
 /**
  * This class is used for $search queries running against search index type. It can also handle
@@ -95,6 +121,7 @@ public class LuceneSearchQueryFactoryDistributor {
   private final LuceneQueryScorer luceneQueryScorer;
   private final LuceneSortFactory luceneSortFactory;
   private final SearchQueryFactoryContext queryFactoryContext;
+  private final QueryOptimizer queryOptimizer;
 
   /** Generates Lucene Queries from Operators, IndexDefinitions and Analyzers. */
   private LuceneSearchQueryFactoryDistributor(
@@ -119,14 +146,19 @@ public class LuceneSearchQueryFactoryDistributor {
       RangeQueryFactory rangeQueryFactory,
       LuceneQueryScorer luceneQueryScorer,
       LuceneSortFactory luceneSortFactory,
-      SearchQueryFactoryContext queryFactoryContext) {
+      SearchQueryFactoryContext queryFactoryContext,
+      QueryOptimizer queryOptimizer,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     this.allDocsQueryFactory = allDocsQueryFactory;
     this.autocompleteQueryFactory = autocompleteQueryFactory;
     this.embeddedDocumentQueryFactory = embeddedDocumentQueryFactory;
     this.existsQueryFactory = existsQueryFactory;
     this.compoundQueryFactory =
         new CompoundQueryFactory(
-            queryFactoryContext, this::createQuery, this::createSearchExplainQuery);
+            queryFactoryContext,
+            this::createQuery,
+            this::createSearchExplainQuery,
+            dynamicFeatureFlagRegistry);
     this.geoQueryFactory = geoQueryFactory;
     this.hasAncestorQueryFactory = hasAncestorQueryFactory;
     this.hasRootQueryFactory = hasRootQueryFactory;
@@ -149,12 +181,15 @@ public class LuceneSearchQueryFactoryDistributor {
             inQueryFactory,
             existsQueryFactory,
             equalsQueryFactory,
+            queryOptimizer,
             this::createQuery);
     this.vectorSearchQueryFactory =
-        new VectorSearchQueryFactory(queryFactoryContext, this.vectorSearchFilterQueryFactory);
+        new VectorSearchQueryFactory(
+            queryFactoryContext, this.vectorSearchFilterQueryFactory, dynamicFeatureFlagRegistry);
     this.luceneQueryScorer = luceneQueryScorer;
     this.luceneSortFactory = luceneSortFactory;
     this.queryFactoryContext = queryFactoryContext;
+    this.queryOptimizer = queryOptimizer;
   }
 
   /**
@@ -206,17 +241,26 @@ public class LuceneSearchQueryFactoryDistributor {
             featureFlags);
     TermQueryFactory termQueryFactory = new TermQueryFactory(queryFactoryContext);
     DateRangeQueryFactory dateRangeQueryFactory =
-        new DateRangeQueryFactory(
-            queryFactoryContext.getIndexCapabilities(), dynamicFeatureFlagRegistry);
+        new DateRangeQueryFactory(queryFactoryContext, dynamicFeatureFlagRegistry);
+    NumericRangeQueryFactory numericRangeQueryFactory =
+        new NumericRangeQueryFactory(queryFactoryContext, dynamicFeatureFlagRegistry);
     EqualsQueryFactory equalsQueryFactory =
-        new EqualsQueryFactory(queryFactoryContext, dateRangeQueryFactory);
+        new EqualsQueryFactory(
+            queryFactoryContext, dateRangeQueryFactory, numericRangeQueryFactory);
     ExistsQueryFactory existsQueryFactory = new ExistsQueryFactory(queryFactoryContext);
     RangeQueryFactory rangeQueryFactory =
-        new RangeQueryFactory(queryFactoryContext, equalsQueryFactory, dateRangeQueryFactory);
+        new RangeQueryFactory(
+            queryFactoryContext,
+            equalsQueryFactory,
+            dateRangeQueryFactory,
+            numericRangeQueryFactory);
     InQueryFactory inQueryFactory =
         new InQueryFactory(queryFactoryContext, dynamicFeatureFlagRegistry);
 
     AllDocsQueryFactory allDocsQueryFactory = new AllDocsQueryFactory(queryFactoryContext);
+    QueryOptimizer queryOptimizer =
+        new QueryOptimizer(
+            DefaultRuleRegistry.get(), queryFactoryContext, dynamicFeatureFlagRegistry);
     return new LuceneSearchQueryFactoryDistributor(
         allDocsQueryFactory,
         new AutocompleteQueryFactory(queryFactoryContext),
@@ -239,7 +283,9 @@ public class LuceneSearchQueryFactoryDistributor {
         rangeQueryFactory,
         LuceneQueryScorer.create(queryFactoryContext),
         new LuceneSortFactory(queryFactoryContext),
-        queryFactoryContext);
+        queryFactoryContext,
+        queryOptimizer,
+        dynamicFeatureFlagRegistry);
   }
 
   /**
@@ -259,9 +305,10 @@ public class LuceneSearchQueryFactoryDistributor {
       QueryOptimizationFlags queryOptimizationFlags)
       throws InvalidQueryException, IOException {
     validateReturnScope(returnScope);
+    Operator optimized = this.queryOptimizer.optimize(operator).tree();
     var scoredQuery =
         createQuery(
-            operator, SingleQueryContext.createQueryRootWithReturnScope(indexReader, returnScope));
+            optimized, SingleQueryContext.createQueryRootWithReturnScope(indexReader, returnScope));
     return queryOptimizationFlags.omitSearchDocumentResults()
         ? new ConstantScoreQuery(scoredQuery)
         : scoredQuery;
@@ -283,6 +330,36 @@ public class LuceneSearchQueryFactoryDistributor {
         operator,
         createUnscoredQueryFromOperator(operator, singleQueryContext),
         singleQueryContext);
+  }
+
+  /**
+   * Builds a Lucene query that matches the <b>child</b> documents selected by an
+   * embeddedDocument-scoped facet's {@code operator}, evaluated with {@code embeddedPath} as the
+   * embedded root. Unlike a top-level embeddedDocument operator query, this does not join matches
+   * up to their parents: the caller (an embedded-scoped facet counter) needs the matching child
+   * docs themselves so it can group them by parent and deduplicate.
+   */
+  public Query createEmbeddedChildQuery(
+      Operator operator, FieldPath embeddedPath, IndexReader indexReader)
+      throws InvalidQueryException, IOException {
+    return createQuery(
+        operator, SingleQueryContext.createQueryRoot(indexReader).withEmbeddedRoot(embeddedPath));
+  }
+
+  /** Builds the same child-only query with the standard explain operator-path instrumentation. */
+  public Query createEmbeddedChildExplainQuery(
+      Operator operator, FieldPath embeddedPath, IndexReader indexReader)
+      throws InvalidQueryException, IOException {
+    return createSearchExplainQuery(
+        operator, SingleQueryContext.createExplainRoot(indexReader).withEmbeddedRoot(embeddedPath));
+  }
+
+  /**
+   * Returns a {@link BitSetProducer} identifying root (top-level) documents, used to group an
+   * embedded-scoped facet's matching child docs up to their root for per-root deduplication.
+   */
+  public BitSetProducer rootParentBitSetProducer() {
+    return new QueryBitSetProducer(EmbeddedDocumentQueryFactory.ROOT_DOCUMENTS_QUERY);
   }
 
   public Query createVectorQuery(
@@ -311,9 +388,10 @@ public class LuceneSearchQueryFactoryDistributor {
       QueryOptimizationFlags queryOptimizationFlags)
       throws InvalidQueryException, IOException {
     validateReturnScope(returnScope);
+    Operator optimized = this.queryOptimizer.optimize(operator).tree();
     var explainQuery =
         createSearchExplainQuery(
-            operator,
+            optimized,
             SingleQueryContext.createExplainRootWithReturnScope(indexReader, returnScope));
     return queryOptimizationFlags.omitSearchDocumentResults()
         ? new ConstantScoreQuery(explainQuery)
@@ -359,23 +437,218 @@ public class LuceneSearchQueryFactoryDistributor {
         this.vectorSearchQueryFactory.fromQuery(vectorSearchOperator, singleQueryContext));
   }
 
+  /**
+   * The query's Lucene sort, or empty when it has none or does not need one.
+   *
+   * @param sortDrivesAggregation whether a {@code first}/{@code last} aggregation metric reads the
+   *     sort, in which case it is built even when document results are omitted. See {@link
+   *     com.xgen.mongot.index.query.SearchQuery#sortDrivesAggregation}.
+   */
   public Optional<Sort> createSort(
       Optional<SortSpec> sortSpec,
       Optional<SequenceToken> sequenceToken,
       FieldToSortableTypesMapping fieldsToSortableTypesMapping,
       Optional<ReturnScope> returnScope,
       QueryOptimizationFlags queryOptimizationFlags,
-      Optional<org.apache.lucene.search.Sort> indexSort)
-      throws InvalidQueryException {
-    if (sortSpec.isEmpty() || queryOptimizationFlags.omitSearchDocumentResults()) {
+      Optional<org.apache.lucene.search.Sort> indexSort,
+      boolean sortDrivesAggregation,
+      IndexReader reader,
+      boolean scopedSortEnabled)
+      throws InvalidQueryException, IOException {
+    // A sort exists to order the returned documents, so $searchMeta normally has no use for one.
+    // first/last are the exception: there the sort picks each bucket's winner, which is meta
+    // output and has to be built either way (CLOUDP-425978).
+    if (sortSpec.isEmpty()) {
       return Optional.empty();
     }
 
     Optional<FieldPath> embeddedRoot = returnScope.map(ReturnScope::path);
+    ScopedSortOverrides scopedOverrides =
+        buildScopedSortOverrides(
+            sortSpec.get(), reader, fieldsToSortableTypesMapping, scopedSortEnabled, embeddedRoot);
+    if (queryOptimizationFlags.omitSearchDocumentResults() && !sortDrivesAggregation) {
+      return Optional.empty();
+    }
     this.luceneSortFactory.validateSortSpec(sortSpec.get(), embeddedRoot);
-    return Optional.of(
+    Sort sort =
         this.luceneSortFactory.createLuceneSort(
-            sortSpec.get(), sequenceToken, fieldsToSortableTypesMapping, embeddedRoot, indexSort));
+            sortSpec.get(),
+            sequenceToken,
+            fieldsToSortableTypesMapping,
+            embeddedRoot,
+            indexSort,
+            scopedOverrides.sortFields());
+    Explain.getQueryInfo()
+        .flatMap(queryInfo -> queryInfo.getFeatureExplainer(SortFeatureExplainer.class))
+        .ifPresent(
+            explainer -> scopedOverrides.childQueries().forEach(explainer::setScopedChildQuery));
+    return Optional.of(sort);
+  }
+
+  private record ScopedSortOverrides(
+      Map<FieldPath, SortField> sortFields, Map<FieldPath, Query> childQueries) {}
+
+  /**
+   * Builds the block-join sort field for each embeddedDoc-scoped sort key, keyed by field path. The
+   * scope operator is recovered from the raw {@code embeddedDocument} carried on the sort option
+   * (kept unparsed so it survives serialization; see CLOUDP-441316), compiled to a child query, and
+   * combined with the root parent bitset. Scoped sort is gated behind {@code
+   * ENABLE_EMBEDDED_SCOPED_SORT} and supports the mixed engine's sortable BSON types.
+   */
+  private ScopedSortOverrides buildScopedSortOverrides(
+      SortSpec sortSpec,
+      IndexReader reader,
+      FieldToSortableTypesMapping fieldsToSortableTypesMapping,
+      boolean scopedSortEnabled,
+      Optional<FieldPath> returnScope)
+      throws InvalidQueryException, IOException {
+    Map<FieldPath, SortField> overrides = new HashMap<>();
+    Map<FieldPath, Query> childQueries = new HashMap<>();
+    for (MongotSortField field : sortSpec.getSortFields()) {
+      if (!(field.options() instanceof UserFieldSortOptions userOptions)
+          || userOptions.embeddedScope().isEmpty()) {
+        continue;
+      }
+      if (!scopedSortEnabled) {
+        throw new InvalidQueryException(
+            "embeddedDocument-scoped sort is not currently supported on this cluster");
+      }
+      InvalidQueryException.validate(
+          returnScope.isEmpty(), "embeddedDocument-scoped sort cannot be used with returnScope");
+      FieldPath scopePath = userOptions.embeddedScope().orElseThrow().path();
+      InvalidQueryException.validate(
+          this.queryFactoryContext.getEmbeddedDocumentsFieldDefinition(scopePath).isPresent(),
+          "Sort scope '%s' must be indexed as embeddedDocuments",
+          scopePath);
+      InvalidQueryException.validate(
+          this.queryFactoryContext.getIndexCapabilities().supportsEmbeddedNumericAndDateV2(),
+          "embeddedDocument-scoped numeric sort requires index feature version 4 or later");
+      var numericDefinition =
+          this.queryFactoryContext.getNumericFieldDefinition(field.field(), Optional.of(scopePath));
+      var dateDefinition =
+          this.queryFactoryContext.getDateFieldDefinition(field.field(), Optional.of(scopePath));
+      var tokenDefinition =
+          this.queryFactoryContext.getTokenFieldDefinition(field.field(), Optional.of(scopePath));
+      var booleanDefinition =
+          this.queryFactoryContext.getBooleanFieldDefinition(field.field(), Optional.of(scopePath));
+      var uuidDefinition =
+          this.queryFactoryContext.getUuidFieldDefinition(field.field(), Optional.of(scopePath));
+      var objectIdDefinition =
+          this.queryFactoryContext.getObjectIdFieldDefinition(
+              field.field(), Optional.of(scopePath));
+      // A field declared as more than one sortable type sorts by MongoDB's cross-type bracket
+      // order, via the mixed engine. Single number/date/token fields keep specialized engines.
+      int declaredTypes =
+          (numericDefinition.isPresent() ? 1 : 0)
+              + (dateDefinition.isPresent() ? 1 : 0)
+              + (tokenDefinition.isPresent() ? 1 : 0)
+              + (booleanDefinition.isPresent() ? 1 : 0)
+              + (uuidDefinition.isPresent() ? 1 : 0)
+              + (objectIdDefinition.isPresent() ? 1 : 0);
+      InvalidQueryException.validate(
+          declaredTypes > 0,
+          "embeddedDocument-scoped sort supports number, date, token, boolean, uuid, and objectId;"
+              + " field '%s' is not indexed as sortable under scope '%s'",
+          field.field(),
+          scopePath);
+      // Types without a specialized scoped engine also use the mixed comparator on their own.
+      boolean multiType = declaredTypes > 1;
+      boolean useMixed =
+          multiType
+              || booleanDefinition.isPresent()
+              || uuidDefinition.isPresent()
+              || objectIdDefinition.isPresent();
+      Optional<FieldName.TypeField> sortType;
+      if (multiType) {
+        sortType = Optional.empty();
+      } else if (numericDefinition.isPresent()) {
+        sortType =
+            Optional.of(
+                switch (numericDefinition.orElseThrow().options().representation()) {
+                  case INT64 -> FieldName.TypeField.NUMBER_INT64_V2;
+                  case DOUBLE -> FieldName.TypeField.NUMBER_DOUBLE_V2;
+                });
+      } else if (dateDefinition.isPresent()) {
+        sortType = Optional.of(FieldName.TypeField.DATE_V2);
+      } else if (tokenDefinition.isPresent()) {
+        sortType = Optional.of(FieldName.TypeField.TOKEN);
+      } else if (booleanDefinition.isPresent()) {
+        sortType = Optional.of(FieldName.TypeField.BOOLEAN);
+      } else if (uuidDefinition.isPresent()) {
+        sortType = Optional.of(FieldName.TypeField.UUID);
+      } else {
+        sortType = Optional.of(FieldName.TypeField.OBJECT_ID);
+      }
+      ImmutableSet<FieldName.TypeField> types =
+          fieldsToSortableTypesMapping
+              .getFieldToSortableTypes(Optional.of(scopePath))
+              .get(field.field());
+      // FieldInfos may be empty on a shard with no values. The schema still determines the
+      // comparator. Nulls are missing values. A single-type field must not have indexed values of
+      // some other type; a multi-type field is handled by the mixed engine's bracket ordering.
+      InvalidQueryException.validate(
+          multiType
+              || types.stream()
+                  .allMatch(
+                      type -> type == sortType.orElseThrow() || type == FieldName.TypeField.NULL),
+          "embeddedDocument-scoped sort does not support mixed sortable types"
+              + " for field '%s' under scope '%s': %s",
+          field.field(),
+          scopePath,
+          types);
+      // Recover the scope operator from the raw operator BSON carried on the sort option (it
+      // survives query serialization, unlike a query-level side channel) and compile it against
+      // child docs (needs the reader) only after the cheap validations above pass. The sort option
+      // keeps the operator unparsed to avoid a sort -> operators dependency cycle; reassemble the
+      // {path, operator} block the operators-layer scope parser expects.
+      EmbeddedSortScope sortScope = userOptions.embeddedScope().orElseThrow();
+      EmbeddedDocumentScope scope = parseSortScope(field.field(), sortScope.toBson());
+      Query childQuery;
+      if (Explain.isEnabled()) {
+        childQuery = createEmbeddedChildExplainQuery(scope.operator(), scope.path(), reader);
+        childQueries.put(field.field(), childQuery);
+      } else {
+        childQuery = createEmbeddedChildQuery(scope.operator(), scope.path(), reader);
+      }
+      // Instrument the child side only: the parent filter is the shared root-documents bitset,
+      // not a cost the scope introduces.
+      BitSetProducer childFilter =
+          new InstrumentedChildBitSetProducer(
+              new QueryBitSetProducer(childQuery),
+              this.queryFactoryContext.getMetrics().getScopedSortChildEvaluationLatencyTimer(),
+              this.queryFactoryContext.getMetrics().getScopedSortMatchingChildrenPerSegment());
+      BitSetProducer parentFilter = rootParentBitSetProducer();
+      ScopeFilters scopeFilters = new ScopeFilters(parentFilter, childFilter);
+      SortField scopedSort;
+      if (useMixed) {
+        scopedSort = MqlMixedSort.scoped(field, scopePath, scopeFilters);
+      } else {
+        scopedSort =
+            switch (sortType.orElseThrow()) {
+              case NUMBER_INT64_V2 -> new EmbeddedScopedLongSort(field, scopePath, scopeFilters);
+              case NUMBER_DOUBLE_V2 -> new EmbeddedScopedDoubleSort(field, scopePath, scopeFilters);
+              case DATE_V2 -> new EmbeddedScopedDateSort(field, scopePath, scopeFilters);
+              default -> MqlSortedSetSortField.scopedTokenSort(field, scopePath, scopeFilters);
+            };
+      }
+      overrides.put(field.field(), scopedSort);
+    }
+    return new ScopedSortOverrides(overrides, childQueries);
+  }
+
+  /** Parses a scoped sort key and validates its operator against the scope's embedded root. */
+  private static EmbeddedDocumentScope parseSortScope(
+      FieldPath field, BsonDocument embeddedDocument) throws InvalidQueryException {
+    try (var parser = BsonDocumentParser.fromRoot(embeddedDocument).build()) {
+      EmbeddedDocumentScope scope = EmbeddedDocumentScope.fromBson(parser);
+      new OperatorEmbeddedRootValidator(parser.getContext()).validate(scope);
+      return scope;
+    } catch (BsonParseException e) {
+      throw new InvalidQueryException(
+          String.format(
+              "Could not parse embeddedDocument scope for sort field '%s': %s",
+              field, e.getMessage()));
+    }
   }
 
   private Query createUnscoredQueryFromOperator(
@@ -411,6 +684,7 @@ public class LuceneSearchQueryFactoryDistributor {
         case InOperator inOperator ->
             // delegating to equals under these conditions achieves better performance
             (inOperator.values().size() == 1
+                    && inOperator.paths().size() == 1
                     && (inOperator.getValueType() == NonNullValueType.STRING
                         || inOperator.getValueType() == NonNullValueType.UUID
                         || inOperator.getValueType() == NonNullValueType.OBJECT_ID))

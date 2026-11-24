@@ -3,10 +3,10 @@ package com.xgen.mongot.index.lucene;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.cursor.batch.BatchSizeStrategy;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
 import com.xgen.mongot.index.IndexMetricsUpdater;
-import com.xgen.mongot.index.IndexReader;
 import com.xgen.mongot.index.MetaResults;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.VectorIndexReader;
@@ -18,7 +18,6 @@ import com.xgen.mongot.index.query.MaterializedVectorSearchQuery;
 import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.util.Check;
-import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
@@ -172,12 +171,12 @@ public class MultiLuceneVectorIndexReader implements VectorIndexReader {
   }
 
   @Override
-  public long getRequiredMemoryForVectorData() throws ReaderClosedException {
-    // Sum required memory metric from all the readers
-    return CheckedStream.from(this.readers)
-        .mapAndCollectChecked(IndexReader::getRequiredMemoryForVectorData)
-        .stream()
-        .reduce(0L, Long::sum);
+  public long getNumEmbeddedRootDocuments() throws IOException, ReaderClosedException {
+    @Var long total = 0L;
+    for (var reader : this.readers) {
+      total += reader.getNumEmbeddedRootDocuments();
+    }
+    return total;
   }
 
   private List<VectorSearchResult> mergeVectorSearchResults(

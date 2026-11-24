@@ -3,9 +3,17 @@ package com.xgen.mongot.server.command.search;
 import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.collect.ImmutableList;
+import com.xgen.mongot.featureflag.Feature;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.query.CollectorQuery;
 import com.xgen.mongot.index.query.OperatorQuery;
 import com.xgen.mongot.index.query.SearchQuery;
+import com.xgen.mongot.index.query.aggregation.AggregationRegistry;
+import com.xgen.mongot.index.query.aggregation.ShardMergePipelineBuilder;
+import com.xgen.mongot.index.query.aggregation.TopAggregationSpec;
+import com.xgen.mongot.index.query.collectors.AggregationCollector;
+import com.xgen.mongot.index.query.collectors.AggregationSpecBuilder;
+import com.xgen.mongot.index.query.collectors.AggregationValidator;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
 import com.xgen.mongot.index.query.counts.Count;
@@ -35,12 +43,35 @@ public class ShardedSearchPlanner {
   /**
    * Accepts a deserialized query and the supported searchFeatures of a MongoDB deployment and
    * generates a ShardedSearchPlan.
+   *
+   * <p>Aggregation merge planning does not use index field metadata: boundary grouping keys and
+   * default-bucket labels come from the query. Execution-time encoding still requires a {@link
+   * AggregationSpecBuilder.BoundaryFieldResolver}.
    */
   static PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan planSearch(
-      SearchQuery queryDefinition, PlanShardedSearchCommandDefinition.SearchFeatures searchFeatures)
+      SearchQuery queryDefinition,
+      PlanShardedSearchCommandDefinition.SearchFeatures searchFeatures,
+      FeatureFlags featureFlags)
+      throws ShardedSearchPlannerException {
+    return planSearch(
+        queryDefinition, searchFeatures, featureFlags, /* enforceRequestedBucketLimit= */ true);
+  }
+
+  /**
+   * Same as {@link #planSearch} with an explicit requested-bucket-cap gate. When {@code
+   * enforceRequestedBucketLimit} is true, a tree whose requested bucket space exceeds {@link
+   * TopAggregationSpec#MAX_REQUESTED_BUCKETS} is rejected using the spec already built for the
+   * merge pipeline.
+   */
+  static PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan planSearch(
+      SearchQuery queryDefinition,
+      PlanShardedSearchCommandDefinition.SearchFeatures searchFeatures,
+      FeatureFlags featureFlags,
+      boolean enforceRequestedBucketLimit)
       throws ShardedSearchPlannerException {
     BsonDocument sortSpec = validateQueryAndConstructSortSpec(searchFeatures, queryDefinition);
-    List<BsonDocument> metaPipeline = getShardedSearchMetaPipeline(queryDefinition);
+    List<BsonDocument> metaPipeline =
+        getShardedSearchMetaPipeline(queryDefinition, featureFlags, enforceRequestedBucketLimit);
     return new PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan(metaPipeline, sortSpec);
   }
 
@@ -77,9 +108,14 @@ public class ShardedSearchPlanner {
    * this section</a> in the search docs for more details.
    *
    * @param query the $search query made against a sharded collection
+   * @param featureFlags feature flags governing optional search behavior (e.g. aggregation)
+   * @param enforceRequestedBucketLimit when true, reject a tree whose requested bucket space
+   *     exceeds {@link TopAggregationSpec#MAX_REQUESTED_BUCKETS}
    * @return the pipeline to execute over the sharded metadata results
    */
-  private static List<BsonDocument> getShardedSearchMetaPipeline(SearchQuery query) {
+  private static List<BsonDocument> getShardedSearchMetaPipeline(
+      SearchQuery query, FeatureFlags featureFlags, boolean enforceRequestedBucketLimit)
+      throws ShardedSearchPlannerException {
     String countType = query.count().type() == Count.Type.LOWER_BOUND ? "lowerBound" : "total";
 
     // If the Query is a CollectorQuery, then get facet definitions from the FacetCollector and
@@ -92,10 +128,66 @@ public class ShardedSearchPlanner {
             Map<String, FacetDefinition> facetDefinitions = facetCollector.facetDefinitions();
             yield buildMetaPipeline(countType, Optional.of(facetDefinitions));
           }
+          case AggregationCollector aggregationCollector -> {
+            if (!featureFlags.isEnabled(Feature.SEARCH_AGGREGATION)) {
+              throw new ShardedSearchPlannerException(
+                  "Aggregation is not enabled. Please contact support.");
+            }
+            yield buildAggregationMetaPipeline(
+                countType, aggregationCollector, query.sortSpec(), enforceRequestedBucketLimit);
+          }
         }
       }
       case OperatorQuery operatorQuery -> buildMetaPipeline(countType, Optional.empty());
     };
+  }
+
+  /**
+   * Build the sharded merge pipeline for the unified aggregation framework. Parses the collector
+   * into an {@link com.xgen.mongot.index.query.aggregation.AggregationSpec} tree and walks it via
+   * {@link com.xgen.mongot.index.query.aggregation.AggregationSpec#buildShardMergePipeline}.
+   */
+  private static List<BsonDocument> buildAggregationMetaPipeline(
+      String countType,
+      AggregationCollector aggregationCollector,
+      Optional<SortSpec> sortSpec,
+      boolean enforceRequestedBucketLimit)
+      throws ShardedSearchPlannerException {
+    try {
+      TopAggregationSpec spec =
+          AggregationSpecBuilder.toTopLevelSpec(
+              aggregationCollector, AggregationRegistry.getInstance(), Optional.empty());
+      if (enforceRequestedBucketLimit) {
+        AggregationValidator.validateRequestedBuckets(spec);
+      }
+      List<Integer> sortDirs = sortSpec.map(ShardedSearchPlanner::sortDirections).orElse(List.of());
+      ShardMergePipelineBuilder builder = spec.newShardMergePipelineBuilder(sortDirs);
+      return builder.build(countType);
+    } catch (IllegalArgumentException | IllegalStateException e) {
+      throw new ShardedSearchPlannerException(
+          "Failed to build aggregation merge pipeline: " + e.getMessage(), e);
+    } catch (AggregationValidator.AggregationValidationException e) {
+      String message = e.getMessage();
+      throw new ShardedSearchPlannerException(message == null ? e.toString() : message, e);
+    }
+  }
+
+  /**
+   * Directions of the query's sort fields, for the {@code first}/{@code last} shard merge.
+   *
+   * <p>Both sort syntaxes are read the same way. Unlike the {@code $searchSortValues} merge-sort of
+   * ordinary results, which sortBetaV1 opts out of (CLOUDP-184455) because mongos cannot reproduce
+   * its ordering, this key is materialized by the aggregation accumulators themselves, so the
+   * direction is all mongod needs on top of it.
+   *
+   * <p>A {@code $meta} sort component is not rejected here: {@code
+   * AggregationValidator#validateSort} owns that rule on the shard, and leaving it there keeps one
+   * error message rather than two.
+   */
+  private static List<Integer> sortDirections(SortSpec sortSpec) {
+    return sortSpec.getSortFields().stream()
+        .map(sortField -> sortField.options().order().intValue)
+        .toList();
   }
 
   private static BsonDocument constructSortSpec(Sort sort) {

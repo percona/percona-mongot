@@ -1,0 +1,324 @@
+package com.xgen.mongot.index.query.collectors;
+
+import com.google.common.math.LongMath;
+import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.index.definition.FieldDefinition;
+import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
+import com.xgen.mongot.index.lucene.field.FieldName;
+import com.xgen.mongot.index.query.aggregation.Operator;
+import com.xgen.mongot.index.query.aggregation.TopAggregationSpec;
+import com.xgen.mongot.index.query.sort.MetaSortOptions;
+import com.xgen.mongot.index.query.sort.SortSpec;
+import com.xgen.mongot.util.FieldPath;
+import com.xgen.mongot.util.UserFacingException;
+import com.xgen.mongot.util.bson.parser.BsonParseContext;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
+import java.io.IOException;
+import java.util.Optional;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.SortedSetDocValues;
+
+/**
+ * Central home for validation of aggregation-capable {@code facet} requests: parse-time semantic
+ * checks, the schema checks the query path runs per reader, the plan-time requested-bucket cap, and
+ * the aggregation feature gate. Keeping these checks in one place makes it easy to scope future
+ * aggregation-syntax validation here rather than scattering it across query parsing.
+ */
+public class AggregationValidator {
+
+  /**
+   * Signals a collector that parses but cannot run as issued -- either because aggregation is
+   * disabled or because it does not fit the index schema.
+   *
+   * <p>This package cannot depend on {@code index.query} (which already depends on it), so it
+   * cannot throw {@code InvalidQueryException} directly. Callers on the query path translate this
+   * into one.
+   */
+  public static class AggregationValidationException extends Exception
+      implements UserFacingException {
+    public AggregationValidationException(String message) {
+      super(message);
+    }
+  }
+
+  private final BsonParseContext bsonParseContext;
+
+  public AggregationValidator(BsonParseContext bsonParseContext) {
+    this.bsonParseContext = bsonParseContext;
+  }
+
+  /**
+   * Rejects an aggregation whose estimated total bucket count exceeds {@code maxBuckets}, before
+   * any bucket state is allocated.
+   *
+   * <p>The estimate assumes every unique value of every string grouping field survives the query's
+   * filter and lands in its own bucket. String levels multiply their cardinality bound at every
+   * depth — deliberately not capped by document count, since a multi-valued field fans one document
+   * into a bucket per value. Boundary levels are ignored: their bucket counts are parse-capped and
+   * tiny next to string cardinalities. The guard exists to keep a single aggregation from OOMing
+   * the node; a legitimately large workload raises the limit via the {@code aggregationMaxBuckets}
+   * configuration.
+   */
+  public static void validateBucketLimit(
+      AggregationCollector collector, IndexReader reader, long maxBuckets)
+      throws IOException, AggregationValidationException {
+    @Var long totalBuckets = 0;
+    for (AggregationFacetDefinition facet : collector.facets().values()) {
+      totalBuckets = LongMath.saturatedAdd(totalBuckets, estimateBranchBuckets(facet, 1, reader));
+      if (totalBuckets > maxBuckets) {
+        throw new AggregationValidationException(
+            String.format(
+                "The facets query materializes over %d buckets, which is not supported. Reduce the"
+                    + " total buckets by reducing nested facet depth or facet on fields with"
+                    + " cardinality below %d.",
+                maxBuckets, maxBuckets));
+      }
+    }
+  }
+
+  /**
+   * Returns the estimated bucket count of {@code facet}'s subtree: this level's bucket space plus
+   * its descendants'. {@code parentBuckets} is the bucket space of the enclosing level (1 at the
+   * root).
+   */
+  private static long estimateBranchBuckets(
+      AggregationFacetDefinition facet, long parentBuckets, IndexReader reader) throws IOException {
+    // Boundary levels pass the parent bucket space through unchanged: their range counts are
+    // parse-capped and negligible next to string cardinalities, so this estimate ignores them.
+    long levelBuckets =
+        facet.group() instanceof FacetDefinition.StringFacetDefinition
+            ? LongMath.saturatedMultiply(
+                parentBuckets, tokenFieldCardinalityUpperBound(reader, facet.path()))
+            : parentBuckets;
+    @Var
+    long total = facet.group() instanceof FacetDefinition.StringFacetDefinition ? levelBuckets : 0;
+    for (AggregationFacetDefinition child : facet.facets().values()) {
+      total = LongMath.saturatedAdd(total, estimateBranchBuckets(child, levelBuckets, reader));
+    }
+    return total;
+  }
+
+  /**
+   * Upper bound on a token grouping field's global cardinality: the sum of per-segment doc-values
+   * value counts, read from segment metadata without building the global ordinal map. Never below
+   * the true cardinality.
+   */
+  private static long tokenFieldCardinalityUpperBound(IndexReader reader, FieldPath path)
+      throws IOException {
+    String luceneField = FieldName.TypeField.TOKEN.getLuceneFieldName(path, Optional.empty());
+    @Var long sum = 0;
+    @Var long largestSegment = 0;
+    for (LeafReaderContext leaf : reader.leaves()) {
+      Optional<SortedSetDocValues> values =
+          Optional.ofNullable(leaf.reader().getSortedSetDocValues(luceneField));
+      if (values.isPresent()) {
+        sum = LongMath.saturatedAdd(sum, values.get().getValueCount());
+        largestSegment = Math.max(largestSegment, values.get().getValueCount());
+      }
+    }
+    // Summing per-segment counts double-counts values shared across segments, so an index with
+    // many segments over-estimates badly. Halving the sum damps that; flooring at the largest
+    // single segment keeps the estimate at or above a true lower bound on global cardinality.
+    return Math.max(largestSegment, sum / 2);
+  }
+
+  /**
+   * Rejects a global {@code sort}/{@code sortBetaV1} on an aggregation collector when no facet tree
+   * carries a {@code first}/{@code last}-dependent metric. The borrowed global sort is only
+   * meaningful for ordering such metrics, so a sort with nothing to order is a caller error rather
+   * than being silently ignored.
+   *
+   * <p>The converse is deliberately allowed: a {@code first}/{@code last} metric without a global
+   * field sort picks the first/last value in encountered (natural) order, mirroring MQL {@code
+   * $first}/{@code $last} semantics.
+   *
+   * <p>Only user-field sorts are accepted: a meta (score) sort component is rejected, because
+   * {@code last} under a score sort would need the globally lowest-scoring matching documents --
+   * exactly the ones score pruning and early termination skip. Score-sorted {@code first} could be
+   * admitted later without a breaking change; starting field-sort-only keeps the rule loosenable.
+   */
+  public void validateSort(AggregationCollector collector, Optional<SortSpec> sortSpec)
+      throws BsonParseException {
+    if (sortSpec.isEmpty()) {
+      return;
+    }
+    if (!collector.usesFirstOrLast()) {
+      this.bsonParseContext.handleSemanticError(
+          "sort (or sortBetaV1) is only supported when at least one 'first' or 'last' aggregation"
+              + " metric is specified");
+    }
+    boolean hasMetaSort =
+        sortSpec.get().getSortFields().stream()
+            .anyMatch(sortField -> sortField.options() instanceof MetaSortOptions);
+    if (hasMetaSort) {
+      this.bsonParseContext.handleSemanticError(
+          "'first' and 'last' aggregation metrics only support sorting by document fields; a $meta"
+              + " sort component is not supported");
+    }
+  }
+
+  /**
+   * Rejects a search-aggregation spec whose requested bucket space is larger than {@link
+   * TopAggregationSpec#MAX_REQUESTED_BUCKETS}. Nested grouping is a cartesian product, so this is a
+   * tree-wide cap rather than the per-node 1k/10k parse bounds on {@code numBuckets}/{@code
+   * boundaries}.
+   *
+   * <p>Call this on a spec that has already been lowered (the Lucene plan or the sharded merge
+   * plan) rather than lowering a second copy of the tree just to count buckets.
+   */
+  public static void validateRequestedBuckets(TopAggregationSpec spec)
+      throws AggregationValidationException {
+    long requested = spec.requestedBucketCount();
+    if (requested > TopAggregationSpec.MAX_REQUESTED_BUCKETS) {
+      throw new AggregationValidationException(
+          TopAggregationSpec.requestedBucketsLimitExceededMessage(requested));
+    }
+  }
+
+  /**
+   * Validates an aggregation collector against the index schema it was issued against, rejecting it
+   * up front rather than letting it fail deeper in boundary accumulator setup, where the failure
+   * could not surface as a query error: spec building reaches fields through {@code
+   * BoundaryFieldResolver}, whose method cannot declare a checked exception. {@code min}/{@code
+   * max} metric paths are checked here for the same reason: they do not resolve to a single column,
+   * so an unmapped or legacy-facet-only path would otherwise collect as empty rather than fail.
+   *
+   * <p>{@code aggregationEnabled} carries the {@code SEARCH_AGGREGATION} feature flag. It is
+   * checked first so a query that is invalid on both counts reports a disabled feature rather than
+   * a grouping-field error.
+   *
+   * <p>Callers on the Lucene query path run this per partition reader. The answer is the same for
+   * every partition of an index -- they share one index definition -- but repeating a schema check
+   * costs nothing next to the search itself, and it leaves each reader self-contained.
+   */
+  public static void validateAggregationQuery(
+      AggregationCollector collector,
+      SearchFieldDefinitionResolver fieldDefinitionResolver,
+      Optional<FieldPath> returnScope,
+      boolean aggregationEnabled)
+      throws AggregationValidationException {
+    if (!aggregationEnabled) {
+      throw new AggregationValidationException(
+          "Aggregation is not enabled. Please contact support.");
+    }
+    validateGroupingFieldDefinitions(collector, fieldDefinitionResolver, returnScope);
+    validateMixedMetricFields(collector, fieldDefinitionResolver, returnScope);
+  }
+
+  /**
+   * Rejects {@code min}/{@code max} paths that no sortable doc-values column backs, and rejects
+   * those metrics under an embedded-document return scope.
+   *
+   * <p>Run here rather than during Lucene field resolution: {@link #validateAggregationQuery} is
+   * the per-reader schema gate, so an invalid path fails once as a query error instead of being
+   * re-checked while resolving the spec tree.
+   */
+  private static void validateMixedMetricFields(
+      AggregationCollector collector,
+      SearchFieldDefinitionResolver fieldDefinitionResolver,
+      Optional<FieldPath> returnScope)
+      throws AggregationValidationException {
+    for (AggregationFacetDefinition facet : collector.facets().values()) {
+      validateMixedMetricFields(facet, fieldDefinitionResolver, returnScope);
+    }
+  }
+
+  private static void validateMixedMetricFields(
+      AggregationFacetDefinition facet,
+      SearchFieldDefinitionResolver fieldDefinitionResolver,
+      Optional<FieldPath> returnScope)
+      throws AggregationValidationException {
+    for (MetricSpec metric : facet.aggregations().values()) {
+      if (metric.operator() != Operator.MIN && metric.operator() != Operator.MAX) {
+        continue;
+      }
+      // TODO(CLOUDP-426510): support min/max aggregation over embedded documents.
+      if (returnScope.isPresent()) {
+        throw new AggregationValidationException(
+            "Multi-typed aggregation over embedded documents is not supported.");
+      }
+      FieldPath path = metric.path().orElseThrow();
+      Optional<FieldDefinition> fieldDef =
+          fieldDefinitionResolver.getFieldDefinition(path, returnScope);
+      if (fieldDef.isEmpty()
+          || !fieldDef.get().hasAnyFieldDefinitionOf(FieldDefinition.getIndexingSortableTypes())) {
+        throw new AggregationValidationException(
+            String.format(
+                "Cannot use a min/max aggregation on field \"%s\" because it was not indexed as any"
+                    + " of the following types: %s.",
+                path, FieldDefinition.getIndexingSortableTypes()));
+      }
+    }
+    for (AggregationFacetDefinition child : facet.facets().values()) {
+      validateMixedMetricFields(child, fieldDefinitionResolver, returnScope);
+    }
+  }
+
+  /**
+   * Rejects grouping fields whose index field definition search aggregation cannot read.
+   *
+   * <p>Search aggregation groups on v2 {@code number} / {@code date} fields only. The legacy {@code
+   * numberFacet} / {@code dateFacet} types remain supported by ordinary facet queries, so they are
+   * rejected here rather than in shared facet field resolution.
+   *
+   * <p>Without this, a legacy-facet-only field resolves to a {@code *_FACET} Lucene type and then
+   * fails deeper in {@code SearchAggregationBootstrap.boundary}, where {@code
+   * numberFieldDefinition()} / {@code dateFieldDefinition()} are empty and {@code orElseThrow()}
+   * raises a bare {@link java.util.NoSuchElementException} instead of a query error.
+   *
+   * <p>A grouping field indexed as neither is left alone: facet field resolution already reports
+   * that as a not-indexed error with a message covering both the v2 and legacy types.
+   */
+  private static void validateGroupingFieldDefinitions(
+      AggregationCollector collector,
+      SearchFieldDefinitionResolver fieldDefinitionResolver,
+      Optional<FieldPath> returnScope)
+      throws AggregationValidationException {
+    for (AggregationFacetDefinition facet : collector.facets().values()) {
+      validateGroupingFieldDefinitions(facet, fieldDefinitionResolver, returnScope);
+    }
+  }
+
+  private static void validateGroupingFieldDefinitions(
+      AggregationFacetDefinition facet,
+      SearchFieldDefinitionResolver fieldDefinitionResolver,
+      Optional<FieldPath> returnScope)
+      throws AggregationValidationException {
+    if (facet.group() instanceof FacetDefinition.BoundaryFacetDefinition<?> boundary) {
+      validateBoundaryGroupingField(boundary, facet.path(), fieldDefinitionResolver, returnScope);
+    }
+    for (AggregationFacetDefinition child : facet.facets().values()) {
+      validateGroupingFieldDefinitions(child, fieldDefinitionResolver, returnScope);
+    }
+  }
+
+  private static void validateBoundaryGroupingField(
+      FacetDefinition.BoundaryFacetDefinition<?> boundary,
+      FieldPath path,
+      SearchFieldDefinitionResolver fieldDefinitionResolver,
+      Optional<FieldPath> returnScope)
+      throws AggregationValidationException {
+    Optional<FieldDefinition> fieldDefinition =
+        fieldDefinitionResolver.getFieldDefinition(path, returnScope);
+    boolean legacyOnly =
+        switch (boundary) {
+          case FacetDefinition.NumericFacetDefinition ignored ->
+              fieldDefinition.flatMap(FieldDefinition::numberFieldDefinition).isEmpty()
+                  && fieldDefinition
+                      .flatMap(FieldDefinition::numberFacetFieldDefinition)
+                      .isPresent();
+          case FacetDefinition.DateFacetDefinition ignored ->
+              fieldDefinition.flatMap(FieldDefinition::dateFieldDefinition).isEmpty()
+                  && fieldDefinition.flatMap(FieldDefinition::dateFacetFieldDefinition).isPresent();
+        };
+    if (legacyOnly) {
+      throw new AggregationValidationException(
+          String.format(
+              "Cannot aggregate on field \"%s\" because it is indexed as a legacy \"numberFacet\""
+                  + " or \"dateFacet\" field. Search aggregation requires a \"number\" or \"date\""
+                  + " field.",
+              path));
+    }
+  }
+}

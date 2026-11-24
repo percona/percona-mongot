@@ -102,7 +102,9 @@ public class LeaseTest {
                   UUID.fromString(COLLECTION_UUID),
                   COLLECTION_NAME),
               null,
-              Lease.CleanupState.NOT_ELIGIBLE));
+              Lease.CleanupState.NOT_ELIGIBLE,
+              // No epoch in the fixture (a legacy-shaped document): defaults to leaseVersion.
+              Lease.FIRST_LEASE_VERSION));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<Lease>
@@ -125,7 +127,9 @@ public class LeaseTest {
                       false, IndexStatus.StatusCode.INITIAL_SYNC)),
               new MaterializedViewCollectionMetadata(VERSION_ZERO, new UUID(0, 0), LEASE_ID),
               null,
-              Lease.CleanupState.NOT_ELIGIBLE));
+              Lease.CleanupState.NOT_ELIGIBLE,
+              // No epoch in the fixture (a legacy-shaped document): defaults to leaseVersion.
+              Lease.FIRST_LEASE_VERSION));
     }
   }
 
@@ -178,7 +182,8 @@ public class LeaseTest {
                       false, IndexStatus.StatusCode.INITIAL_SYNC)),
               customMetadata,
               null,
-              Lease.CleanupState.NOT_ELIGIBLE);
+              Lease.CleanupState.NOT_ELIGIBLE,
+              Lease.FIRST_EPOCH);
       return BsonSerializationTestSuite.TestSpec.create("leaseWithMaterializedViewMetadata", lease);
     }
 
@@ -202,7 +207,8 @@ public class LeaseTest {
               new MaterializedViewCollectionMetadata(
                   VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
               null,
-              Lease.CleanupState.NOT_ELIGIBLE);
+              Lease.CleanupState.NOT_ELIGIBLE,
+              Lease.FIRST_EPOCH);
       return BsonSerializationTestSuite.TestSpec.create(
           "leaseWithEmptyMaterializedViewMetadata", lease);
     }
@@ -217,7 +223,7 @@ public class LeaseTest {
       var indexCommitUserData =
           IndexCommitUserData.createChangeStreamResume(
               ChangeStreamResumeInfo.create(new MongoNamespace("test", "collection"), resumeToken),
-              IndexFormatVersion.CURRENT);
+              IndexFormatVersion.CURRENT.versionNumber);
 
       var lease = createLeaseWithCommitInfo(indexCommitUserData.toEncodedData().asString());
 
@@ -238,6 +244,30 @@ public class LeaseTest {
     }
 
     @Test
+    public void testIndexIdMatchesNameFormatLayout() {
+      // v1+ MV collection name: "<indexId>-<hash>-<nameFormatVersion>-<autoEmbeddingVersion>".
+      assertEquals(
+          "507f1f77bcf86cd799439011",
+          createLeaseWithId("507f1f77bcf86cd799439011-abc123-1-0").indexId());
+      // A future format version keeping the layout parses without a code change.
+      assertEquals(
+          "507f1f77bcf86cd799439011",
+          createLeaseWithId("507f1f77bcf86cd799439011-abc123-2-0").indexId());
+      // v0 MV collection name is just the indexId, with no delimiter.
+      assertEquals(
+          "507f1f77bcf86cd799439011", createLeaseWithId("507f1f77bcf86cd799439011").indexId());
+    }
+
+    @Test
+    public void testIndexIdUnknownNameLayoutKeptWhole() {
+      // An unrecognized layout returns the full id: the lease groups only with itself, so the GC
+      // current-version safeguard protects it rather than comparing it across indexes.
+      assertEquals(
+          "507f1f77bcf86cd799439011-abc123",
+          createLeaseWithId("507f1f77bcf86cd799439011-abc123").indexId());
+    }
+
+    @Test
     public void testWithNewIndexDefinitionVersionPreservesCommitInfoWhenReuseTrue() {
       // Set up a lease with steady state commitInfo (change stream resume)
       var opTime = new BsonTimestamp(9876543210L);
@@ -245,7 +275,7 @@ public class LeaseTest {
       var indexCommitUserData =
           IndexCommitUserData.createChangeStreamResume(
               ChangeStreamResumeInfo.create(new MongoNamespace("test", "collection"), resumeToken),
-              IndexFormatVersion.CURRENT);
+              IndexFormatVersion.CURRENT.versionNumber);
 
       var lease = createLeaseWithCommitInfo(indexCommitUserData.toEncodedData().asString());
 
@@ -264,7 +294,7 @@ public class LeaseTest {
       var indexCommitUserData =
           IndexCommitUserData.createChangeStreamResume(
               ChangeStreamResumeInfo.create(new MongoNamespace("test", "collection"), resumeToken),
-              IndexFormatVersion.CURRENT);
+              IndexFormatVersion.CURRENT.versionNumber);
 
       var lease = createLeaseWithCommitInfo(indexCommitUserData.toEncodedData().asString());
 
@@ -276,10 +306,10 @@ public class LeaseTest {
       var encodedUserData = EncodedUserData.fromString(v2Lease.commitInfo());
       var userData = IndexCommitUserData.fromEncodedData(encodedUserData, Optional.empty());
 
-      assertTrue(userData.getInitialSyncResumeInfo().isPresent());
-      assertEquals(opTime, userData.getInitialSyncResumeInfo().get().getResumeOperationTime());
+      assertTrue(userData.initialSyncResumeInfo().isPresent());
+      assertEquals(opTime, userData.initialSyncResumeInfo().get().getResumeOperationTime());
       // Verify scan position is reset to MIN_KEY
-      assertEquals(BsonUtils.MIN_KEY, userData.getInitialSyncResumeInfo().get().getResumeToken());
+      assertEquals(BsonUtils.MIN_KEY, userData.initialSyncResumeInfo().get().getResumeToken());
     }
 
     @Test
@@ -309,24 +339,21 @@ public class LeaseTest {
               EncodedUserData.EMPTY.asString(),
               "1",
               Map.of(
-                  "1",
-                  new Lease.IndexDefinitionVersionStatus(
-                      true, IndexStatus.StatusCode.STEADY)),
+                  "1", new Lease.IndexDefinitionVersionStatus(true, IndexStatus.StatusCode.STEADY)),
               new MaterializedViewCollectionMetadata(
                   VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
               null,
-              Lease.CleanupState.NOT_ELIGIBLE);
+              Lease.CleanupState.NOT_ELIGIBLE,
+              Lease.FIRST_EPOCH);
 
       // skipInitialSync=true (Lucene-only change): isQueryable should be preserved from V1.
-      var v2SkipSync =
-          lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), true);
+      var v2SkipSync = lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), true);
       assertTrue(
           "isQueryable should be preserved from latest version when skipInitialSync=true",
           v2SkipSync.indexDefinitionVersionStatusMap().get("2").isQueryable());
 
       // skipInitialSync=false (schema change): isQueryable should reset to false.
-      var v2NoSkip =
-          lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), false);
+      var v2NoSkip = lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), false);
       assertFalse(
           "isQueryable should be false when skipInitialSync=false",
           v2NoSkip.indexDefinitionVersionStatusMap().get("2").isQueryable());
@@ -359,8 +386,7 @@ public class LeaseTest {
               .append("commitInfo", new BsonString(EncodedUserData.EMPTY.asString()))
               .append("latestIndexDefinitionVersion", new BsonString("1"))
               .append(
-                  "indexDefinitionVersionStatusMap",
-                  new BsonDocument("1", statusWithUnknownField));
+                  "indexDefinitionVersionStatusMap", new BsonDocument("1", statusWithUnknownField));
 
       Lease lease = Lease.fromBson(leaseDoc);
 
@@ -394,8 +420,7 @@ public class LeaseTest {
               .append("commitInfo", new BsonString(EncodedUserData.EMPTY.asString()))
               .append("latestIndexDefinitionVersion", new BsonString("1"))
               .append(
-                  "indexDefinitionVersionStatusMap",
-                  new BsonDocument("1", statusWithUnknownEnum));
+                  "indexDefinitionVersionStatusMap", new BsonDocument("1", statusWithUnknownEnum));
 
       Lease lease = Lease.fromBson(leaseDoc);
 
@@ -560,7 +585,8 @@ public class LeaseTest {
                   "2", new Lease.IndexDefinitionVersionStatus(true, IndexStatus.StatusCode.STEADY)),
               originalMvMetadata,
               new BsonTimestamp(1234567890L),
-              Lease.CleanupState.NOT_ELIGIBLE);
+              Lease.CleanupState.NOT_ELIGIBLE,
+              3L);
 
       Lease updatedLease = originalLease.withResolvedMatViewUuid(newMatViewUuid);
 
@@ -592,14 +618,15 @@ public class LeaseTest {
       assertEquals(COLLECTION_NAME, updatedLease.collectionName());
       assertTrue(updatedLease.getSteadyAsOfOplogPosition().isPresent());
       assertEquals(new BsonTimestamp(1234567890L), updatedLease.getSteadyAsOfOplogPosition().get());
+      // withResolvedMatViewUuid is a metadata-only update; it must not touch epoch.
+      assertEquals(3L, updatedLease.epoch());
     }
 
     @Test
     public void testWithUpdatedStatus_isQueryableIsOneWayRatchet() {
       // Start with a lease at INITIAL_SYNC (not queryable)
       Lease lease = createLeaseWithSteadyPosition(null);
-      assertFalse(
-          lease.indexDefinitionVersionStatusMap().get("1").isQueryable());
+      assertFalse(lease.indexDefinitionVersionStatusMap().get("1").isQueryable());
 
       // Transition to STEADY — isQueryable becomes true
       Lease afterSteady = lease.withUpdatedStatus(IndexStatus.steady(), 1L, null);
@@ -655,8 +682,8 @@ public class LeaseTest {
     /**
      * Legacy documents written before the {@code cleanupState} field existed must parse without
      * error and default to {@link Lease.CleanupState#NOT_ELIGIBLE}. This is the load-bearing
-     * backwards-compat guarantee for the online migration: existing production leases stay
-     * readable after the new code rolls out.
+     * backwards-compat guarantee for the online migration: existing production leases stay readable
+     * after the new code rolls out.
      */
     @Test
     public void testFromBson_missingCleanupState_defaultsToNotEligible() throws Exception {
@@ -684,8 +711,8 @@ public class LeaseTest {
      * After a legacy lease is parsed and re-serialized through {@code toBson} (which is what every
      * write path — heartbeat renewal, status update, ownership change — already does), the
      * persisted document carries the new {@code cleanupState} field. This is the "free backfill"
-     * mechanism: no separate migration code path is needed because any write naturally upgrades
-     * the document.
+     * mechanism: no separate migration code path is needed because any write naturally upgrades the
+     * document.
      */
     @Test
     public void testFromBsonToBson_legacyDocIsUpgradedOnWrite() throws Exception {
@@ -705,12 +732,12 @@ public class LeaseTest {
     }
 
     /**
-     * A legacy lease (no cleanupState field in the persisted doc) can be marked
-     * {@link Lease.CleanupState#ELIGIBLE_FOR_CLEANUP} by {@link Lease#withCleanupState} and the
-     * mark survives the round-trip to BSON and back. This is the case the stale-lease scanner
-     * relies on: legacy/orphan leases — which never had a {@code cleanupState} field on disk — must
-     * still be mark-and-cleanable, because they will never get upgraded by a heartbeat (they have
-     * no heartbeater).
+     * A legacy lease (no cleanupState field in the persisted doc) can be marked {@link
+     * Lease.CleanupState#ELIGIBLE_FOR_CLEANUP} by {@link Lease#withCleanupState} and the mark
+     * survives the round-trip to BSON and back. This is the case the stale-lease scanner relies on:
+     * legacy/orphan leases — which never had a {@code cleanupState} field on disk — must still be
+     * mark-and-cleanable, because they will never get upgraded by a heartbeat (they have no
+     * heartbeater).
      */
     @Test
     public void testFromBsonWithCleanupStateToBson_legacyDocCanBeMarkedEligible() throws Exception {
@@ -732,10 +759,10 @@ public class LeaseTest {
     }
 
     /**
-     * Round-tripping a v1 document through fromBson → toBson upgrades it to include the
-     * status field. This is the durable-upgrade-by-write path: any write that goes through
-     * toBson() (heartbeat renewal, status update, etc.) carries the new field, so older documents
-     * naturally converge to the new shape without any explicit backfill code.
+     * Round-tripping a v1 document through fromBson → toBson upgrades it to include the status
+     * field. This is the durable-upgrade-by-write path: any write that goes through toBson()
+     * (heartbeat renewal, status update, etc.) carries the new field, so older documents naturally
+     * converge to the new shape without any explicit backfill code.
      */
     @Test
     public void testToBson_writesCleanupState() {
@@ -746,33 +773,51 @@ public class LeaseTest {
     }
 
     /**
-     * The {@code with*} builders preserve status when not explicitly changed. Failing any one
-     * of these would let a heartbeat or status update silently drop an ELIGIBLE_FOR_CLEANUP marker
-     * and the scanner would never get a chance to clean the lease up.
+     * Active-use builders — any write that extends the lease's expiration (renewal/acquisition,
+     * checkpoint, status update, new index-definition version) — clear an {@code
+     * ELIGIBLE_FOR_CLEANUP} mark back to {@code NOT_ELIGIBLE} (CLOUDP-411009): a lease being
+     * renewed or written to is in active replication use, so it must never remain a stale-cleanup
+     * target. A genuinely abandoned lease receives none of these writes, so the scanner's mark
+     * survives to the delete pass.
      */
     @Test
-    public void testWithBuilders_preserveCleanupState() {
+    public void testActiveUseBuilders_clearCleanupState() {
+      Lease eligibleLease =
+          createLeaseWithSteadyPosition(null)
+              .withCleanupState(Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+
+      assertEquals(
+          Lease.CleanupState.NOT_ELIGIBLE,
+          eligibleLease.withUpdatedCheckpoint(EncodedUserData.EMPTY).cleanupState());
+      assertEquals(
+          Lease.CleanupState.NOT_ELIGIBLE,
+          eligibleLease
+              .withRenewedExpiration(Instant.now().plusMillis(Lease.LEASE_EXPIRATION_MS))
+              .cleanupState());
+      assertEquals(
+          Lease.CleanupState.NOT_ELIGIBLE,
+          eligibleLease.withUpdatedStatus(IndexStatus.steady(), 1L, null).cleanupState());
+      assertEquals(
+          Lease.CleanupState.NOT_ELIGIBLE,
+          eligibleLease
+              .withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), false)
+              .cleanupState());
+    }
+
+    /**
+     * Builders that do not extend the lease's expiration leave the cleanup mark untouched: {@code
+     * withReleasedOwnership} (giving up the lease — it should stay a cleanup target if marked) and
+     * {@code withResolvedMatViewUuid} (a metadata-only update that is not a liveness signal).
+     */
+    @Test
+    public void testNonLivenessBuilders_preserveCleanupState() {
       Lease eligibleLease =
           createLeaseWithSteadyPosition(null)
               .withCleanupState(Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
 
       assertEquals(
           Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
-          eligibleLease.withUpdatedCheckpoint(EncodedUserData.EMPTY).cleanupState());
-      assertEquals(
-          Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
-          eligibleLease.withRenewedOwnership("new-owner").cleanupState());
-      assertEquals(
-          Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
           eligibleLease.withReleasedOwnership().cleanupState());
-      assertEquals(
-          Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
-          eligibleLease.withUpdatedStatus(IndexStatus.steady(), 1L, null).cleanupState());
-      assertEquals(
-          Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
-          eligibleLease
-              .withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), false)
-              .cleanupState());
       assertEquals(
           Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
           eligibleLease.withResolvedMatViewUuid(UUID.randomUUID()).cleanupState());
@@ -801,8 +846,8 @@ public class LeaseTest {
     }
 
     /**
-     * Constructing a Lease with a null status must fail at the call site rather than surface as
-     * an NPE deep inside the BSON writer (where toBson() does {@code Optional.of(this.status)}).
+     * Constructing a Lease with a null status must fail at the call site rather than surface as an
+     * NPE deep inside the BSON writer (where toBson() does {@code Optional.of(this.status)}).
      */
     @Test(expected = NullPointerException.class)
     public void testConstructor_nullCleanupState_throws() {
@@ -822,7 +867,301 @@ public class LeaseTest {
           new MaterializedViewCollectionMetadata(
               VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
           null,
-          /* status= */ null);
+          /* status= */ null,
+          Lease.FIRST_EPOCH);
+    }
+
+    /**
+     * A newly created lease (via {@link Lease#initialLease} or {@link Lease#newLease}) starts at
+     * {@link Lease#FIRST_EPOCH}.
+     */
+    @Test
+    public void testInitialLeaseAndNewLease_startAtFirstEpoch() {
+      var initial =
+          Lease.initialLease(
+              LEASE_ID,
+              UUID.fromString(COLLECTION_UUID),
+              COLLECTION_NAME,
+              "0",
+              IndexStatus.unknown(),
+              new MaterializedViewCollectionMetadata(
+                  VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME));
+      var fresh =
+          Lease.newLease(
+              LEASE_ID,
+              UUID.fromString(COLLECTION_UUID),
+              COLLECTION_NAME,
+              LEASE_OWNER,
+              "0",
+              IndexStatus.unknown(),
+              new MaterializedViewCollectionMetadata(
+                  VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME));
+
+      assertEquals(Lease.FIRST_EPOCH, initial.epoch());
+      assertEquals(Lease.FIRST_EPOCH, fresh.epoch());
+    }
+
+    /**
+     * {@link Lease#withNewTenure} is the only builder that bumps epoch, since it is the only one
+     * that represents an ownership transfer to a new tenure. Starting from a "synced" lease (epoch
+     * equal to leaseVersion, as every lease is immediately after an acquisition), a tenure change
+     * increments both together; renewals in between change neither, but the following tenure change
+     * still moves epoch strictly forward — never backward, never stuck.
+     */
+    @Test
+    public void testWithNewTenure_normalAcquisition_epochAndLeaseVersionIncreaseMonotonically() {
+      Lease synced = leaseWithVersionAndEpoch(5L, 5L);
+
+      Lease firstAcquisition = synced.withNewTenure("new-owner");
+      assertEquals(6L, firstAcquisition.leaseVersion());
+      assertEquals(6L, firstAcquisition.epoch());
+
+      // Renewals extend the lease but do not bump leaseVersion or epoch (CLOUDP-449935).
+      Instant renewalExp = Instant.now().plusMillis(Lease.LEASE_EXPIRATION_MS);
+      Lease afterRenewals =
+          firstAcquisition
+              .withRenewedExpiration(renewalExp)
+              .withRenewedExpiration(renewalExp)
+              .withRenewedExpiration(renewalExp);
+      assertEquals(6L, afterRenewals.leaseVersion());
+      assertEquals(6L, afterRenewals.epoch());
+
+      Lease secondAcquisition = afterRenewals.withNewTenure("another-owner");
+
+      assertEquals(7L, secondAcquisition.leaseVersion());
+      assertEquals(7L, secondAcquisition.epoch());
+      assertTrue(secondAcquisition.epoch() > firstAcquisition.epoch());
+      assertTrue(secondAcquisition.leaseVersion() > afterRenewals.leaseVersion());
+    }
+
+    /**
+     * A lease whose {@code epoch} has fallen behind {@code leaseVersion} — the ordinary
+     * in-between-tenures state, e.g. after renewals with no intervening tenure change — must have
+     * its next acquisition rebase {@code epoch} to {@code leaseVersion + 1} rather than just
+     * incrementing the stale value, so it never falls behind the {@code leaseVersion}-derived
+     * tokens already embedded in MV documents. (A document with {@code epoch} entirely absent is a
+     * separate case, healed at read time by {@link Lease#fromBson}; see {@link
+     * #testFromBson_missingEpoch_defaultsToLeaseVersion}.)
+     */
+    @Test
+    public void testWithNewTenure_epochBehindLeaseVersion_rebasesAboveLeaseVersion() {
+      Lease staleLease = leaseWithVersionAndEpoch(50L, Lease.FIRST_EPOCH);
+
+      Lease acquired = staleLease.withNewTenure("new-owner");
+
+      assertEquals(51L, acquired.leaseVersion());
+      assertEquals(51L, acquired.epoch());
+    }
+
+    /**
+     * Same-host reacquisition of an expired lease is still a new tenure, so {@link
+     * Lease#withNewTenure} bumps epoch even when the owner string does not change — and, when
+     * leaseVersion has advanced past epoch (e.g. from renewals since the last acquisition), the
+     * bump uses the rebased value rather than a plain increment of the stale epoch.
+     */
+    @Test
+    public void testWithNewTenure_sameHostReacquisition_usesRebasedEpoch() {
+      Lease lease = leaseWithVersionAndEpoch(20L, 5L);
+
+      Lease reacquired = lease.withNewTenure(lease.leaseOwner());
+
+      assertEquals(lease.leaseOwner(), reacquired.leaseOwner());
+      assertEquals(21L, reacquired.leaseVersion());
+      assertEquals(21L, reacquired.epoch());
+    }
+
+    /**
+     * An older writer that predates the epoch field drops it on write — its {@code toBson()} never
+     * emits the key — while leaseVersion keeps advancing normally through that writer's own
+     * renewals. Unlike a plain re-acquisition, this is healed at read time ({@link
+     * Lease#fromBson(BsonDocument)} defaults the missing field to leaseVersion), not by the next
+     * acquisition: the healed value is exactly what {@code add()}'s same-host/unexpired-lease fast
+     * path resumes leadership with, without ever calling {@link Lease#withNewTenure}. The next
+     * ordinary write (e.g. a renewal) durably persists that healed value, and the next real
+     * acquisition after that advances both leaseVersion and epoch together.
+     */
+    @Test
+    public void testFromBsonToBson_epochDroppedByOlderWriter_healedAtReadTime() throws Exception {
+      Lease beforeDowngrade = leaseWithVersionAndEpoch(30L, 30L);
+
+      // Simulate an older binary taking over: it round-trips every field it knows about but drops
+      // epoch entirely, and its own renewals advance leaseVersion further before roll-forward.
+      BsonDocument writtenByOlderBinary = beforeDowngrade.toBson();
+      writtenByOlderBinary.remove("epoch");
+      writtenByOlderBinary.put("leaseVersion", new BsonInt64(45L));
+
+      Lease readByNewerBinary = Lease.fromBson(writtenByOlderBinary);
+      assertEquals(45L, readByNewerBinary.leaseVersion());
+      // Healed immediately on read — no acquisition needed — so add()'s same-host/unexpired-lease
+      // fast path, which never calls withNewTenure, resumes with this same safe value.
+      assertEquals(45L, readByNewerBinary.epoch());
+
+      // The next ordinary write (e.g. a heartbeat renewal) persists the healed value durably;
+      // renewal no longer bumps leaseVersion (CLOUDP-449935).
+      Lease afterRenewal =
+          readByNewerBinary.withRenewedExpiration(
+              readByNewerBinary.leaseExpiration().plusMillis(Lease.LEASE_EXPIRATION_MS));
+      assertEquals(45L, afterRenewal.leaseVersion());
+      assertEquals(45L, afterRenewal.epoch());
+      BsonDocument persisted = afterRenewal.toBson();
+      assertEquals(45L, persisted.getInt64("epoch").getValue());
+
+      // The next real acquisition advances both leaseVersion and epoch together.
+      Lease nextAcquisition = afterRenewal.withNewTenure("new-owner");
+      assertEquals(46L, nextAcquisition.leaseVersion());
+      assertEquals(46L, nextAcquisition.epoch());
+    }
+
+    /**
+     * {@link Lease#withRenewedExpiration} is used for heartbeat renewal, which must not bump epoch
+     * or leaseVersion — only a new tenure does.
+     */
+    @Test
+    public void testWithRenewedExpiration_preservesEpochAndVersion() {
+      Lease lease = createLeaseWithSteadyPosition(null).withNewTenure(LEASE_OWNER);
+
+      Lease renewed =
+          lease.withRenewedExpiration(
+              lease.leaseExpiration().plusMillis(Lease.LEASE_EXPIRATION_MS));
+
+      assertEquals(lease.epoch(), renewed.epoch());
+      assertEquals(lease.leaseOwner(), renewed.leaseOwner());
+      assertEquals(lease.leaseVersion(), renewed.leaseVersion());
+      assertEquals(lease.commitInfo(), renewed.commitInfo());
+      assertEquals(Lease.CleanupState.NOT_ELIGIBLE, renewed.cleanupState());
+    }
+
+    /**
+     * Builders unrelated to ownership transfer — checkpoint, status, and index-definition-version
+     * updates — must preserve epoch.
+     */
+    @Test
+    public void testNonOwnershipBuilders_preserveEpoch() {
+      Lease lease = createLeaseWithSteadyPosition(null).withNewTenure(LEASE_OWNER);
+
+      assertEquals(lease.epoch(), lease.withUpdatedCheckpoint(EncodedUserData.EMPTY).epoch());
+      assertEquals(lease.epoch(), lease.withUpdatedStatus(IndexStatus.steady(), 1L, null).epoch());
+      assertEquals(
+          lease.epoch(),
+          lease.withNewIndexDefinitionVersion("2", IndexStatus.initialSync(), false).epoch());
+      assertEquals(lease.epoch(), lease.withRecordedIndexDefinitionVersion("2").epoch());
+      assertEquals(lease.epoch(), lease.withReleasedOwnership().epoch());
+      assertEquals(
+          lease.epoch(), lease.withCleanupState(Lease.CleanupState.ELIGIBLE_FOR_CLEANUP).epoch());
+    }
+
+    /**
+     * Legacy documents written before the {@code epoch} field existed must parse without error and
+     * default {@code epoch} to that document's own {@code leaseVersion} — a safe fencing floor —
+     * not to a fixed constant that could be lower than tenure changes the lease already went
+     * through before this field was introduced.
+     */
+    @Test
+    public void testFromBson_missingEpoch_defaultsToLeaseVersion() throws Exception {
+      Lease parsed = Lease.fromBson(legacyDocWithoutCleanupState());
+      assertEquals(parsed.leaseVersion(), parsed.epoch());
+    }
+
+    /**
+     * An explicitly present {@code epoch} lower than {@code leaseVersion} is legitimate (renewals
+     * advance {@code leaseVersion} between tenure changes) and must be read back exactly as stored
+     * — the {@code leaseVersion} fallback applies only when the field is absent.
+     */
+    @Test
+    public void testFromBsonToBson_presentEpochBelowLeaseVersion_isPreservedExactly()
+        throws Exception {
+      Lease lease = leaseWithVersionAndEpoch(20L, 5L);
+
+      Lease roundTripped = Lease.fromBson(lease.toBson());
+
+      assertEquals(5L, roundTripped.epoch());
+      assertEquals(20L, roundTripped.leaseVersion());
+    }
+
+    @Test
+    public void withRecordedIndexDefinitionVersion_missingVersion_addsEntryAndBumpsLatest() {
+      var lease =
+          createLeaseWithVersions(
+              "2",
+              Map.of(
+                  "2",
+                  new Lease.IndexDefinitionVersionStatus(true, IndexStatus.StatusCode.STEADY)));
+
+      var recorded = lease.withRecordedIndexDefinitionVersion("4");
+
+      assertEquals("4", recorded.latestIndexDefinitionVersion());
+      // Not queryable until the leader's status writes report the truth: the change behind the
+      // new version may require a resync.
+      assertEquals(
+          new Lease.IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.UNKNOWN),
+          recorded.indexDefinitionVersionStatusMap().get("4"));
+      // Everything else is untouched.
+      assertEquals(lease.leaseVersion(), recorded.leaseVersion());
+      assertEquals(lease.commitInfo(), recorded.commitInfo());
+      assertEquals(lease.leaseExpiration(), recorded.leaseExpiration());
+      assertEquals(lease.leaseOwner(), recorded.leaseOwner());
+      assertEquals(lease.cleanupState(), recorded.cleanupState());
+    }
+
+    @Test
+    public void withRecordedIndexDefinitionVersion_existingVersionStaleLatest_bumpsLatestOnly() {
+      // Production shape of the stuck lease: the status write landed but latest never bumped.
+      var lease =
+          createLeaseWithVersions(
+              "2",
+              Map.of(
+                  "2",
+                  new Lease.IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.UNKNOWN),
+                  "4",
+                  new Lease.IndexDefinitionVersionStatus(true, IndexStatus.StatusCode.STEADY)));
+
+      var recorded = lease.withRecordedIndexDefinitionVersion("4");
+
+      assertEquals("4", recorded.latestIndexDefinitionVersion());
+      assertEquals(
+          lease.indexDefinitionVersionStatusMap(), recorded.indexDefinitionVersionStatusMap());
+    }
+
+    @Test
+    public void withRecordedIndexDefinitionVersion_alreadyConsistent_returnsSameInstance() {
+      var lease =
+          createLeaseWithVersions(
+              "4",
+              Map.of(
+                  "4",
+                  new Lease.IndexDefinitionVersionStatus(true, IndexStatus.StatusCode.STEADY)));
+
+      assertEquals(lease, lease.withRecordedIndexDefinitionVersion("4"));
+      assertTrue(lease == lease.withRecordedIndexDefinitionVersion("4"));
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void withRecordedIndexDefinitionVersion_nullVersion_rejected() {
+      createLeaseWithVersions(
+              "4",
+              Map.of(
+                  "4", new Lease.IndexDefinitionVersionStatus(true, IndexStatus.StatusCode.STEADY)))
+          .withRecordedIndexDefinitionVersion(null);
+    }
+
+    private static Lease createLeaseWithVersions(
+        String latestVersion, Map<String, Lease.IndexDefinitionVersionStatus> versionStatusMap) {
+      return new Lease(
+          LEASE_ID,
+          Lease.SCHEMA_VERSION,
+          COLLECTION_UUID,
+          COLLECTION_NAME,
+          LEASE_OWNER,
+          Instant.now(),
+          7L,
+          "some-commit-info",
+          latestVersion,
+          versionStatusMap,
+          new MaterializedViewCollectionMetadata(
+              VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
+          null,
+          Lease.CleanupState.NOT_ELIGIBLE,
+          Lease.FIRST_EPOCH);
     }
 
     private static Lease createLeaseWithCommitInfo(String commitInfo) {
@@ -842,7 +1181,29 @@ public class LeaseTest {
           new MaterializedViewCollectionMetadata(
               VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
           null,
-          Lease.CleanupState.NOT_ELIGIBLE);
+          Lease.CleanupState.NOT_ELIGIBLE,
+          Lease.FIRST_EPOCH);
+    }
+
+    private static Lease createLeaseWithId(String id) {
+      return new Lease(
+          id,
+          Lease.SCHEMA_VERSION,
+          COLLECTION_UUID,
+          COLLECTION_NAME,
+          LEASE_OWNER,
+          Instant.now(),
+          Lease.FIRST_LEASE_VERSION,
+          "",
+          "1",
+          Map.of(
+              "1",
+              new Lease.IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.INITIAL_SYNC)),
+          new MaterializedViewCollectionMetadata(
+              VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
+          null,
+          Lease.CleanupState.NOT_ELIGIBLE,
+          Lease.FIRST_EPOCH);
     }
 
     private static Lease createLeaseWithSteadyPosition(@Nullable BsonTimestamp steadyPosition) {
@@ -862,7 +1223,30 @@ public class LeaseTest {
           new MaterializedViewCollectionMetadata(
               VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
           steadyPosition,
-          Lease.CleanupState.NOT_ELIGIBLE);
+          Lease.CleanupState.NOT_ELIGIBLE,
+          Lease.FIRST_EPOCH);
+    }
+
+    /** A lease with the given leaseVersion and epoch set independently, everything else default. */
+    private static Lease leaseWithVersionAndEpoch(long leaseVersion, long epoch) {
+      return new Lease(
+          LEASE_ID,
+          Lease.SCHEMA_VERSION,
+          COLLECTION_UUID,
+          COLLECTION_NAME,
+          LEASE_OWNER,
+          Instant.now(),
+          leaseVersion,
+          "",
+          "1",
+          Map.of(
+              "1",
+              new Lease.IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.INITIAL_SYNC)),
+          new MaterializedViewCollectionMetadata(
+              VERSION_ZERO, UUID.fromString(COLLECTION_UUID), COLLECTION_NAME),
+          null,
+          Lease.CleanupState.NOT_ELIGIBLE,
+          epoch);
     }
   }
 }

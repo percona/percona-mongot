@@ -17,16 +17,20 @@ import com.xgen.mongot.index.CountMetaBatchProducer;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.MeteredBatchProducer;
 import com.xgen.mongot.index.ReaderClosedException;
+import com.xgen.mongot.index.SearchAggregationMetricsReporter;
 import com.xgen.mongot.index.SearchIndexReader;
 import com.xgen.mongot.index.SearchResult;
 import com.xgen.mongot.index.VectorSearchResult;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
+import com.xgen.mongot.index.lucene.LuceneAggregationSearchManager.AggregationQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneFacetCollectorSearchManager.FacetCollectorQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneSearchManager.QueryInfo;
+import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.explain.explainers.FacetFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
+import com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.field.FieldValue;
 import com.xgen.mongot.index.lucene.quantization.BinaryQuantizedVectorRescorer;
@@ -34,6 +38,7 @@ import com.xgen.mongot.index.lucene.query.LuceneSearchQueryFactoryDistributor;
 import com.xgen.mongot.index.lucene.query.pushdown.project.ProjectFactory;
 import com.xgen.mongot.index.lucene.query.pushdown.project.ProjectSpec;
 import com.xgen.mongot.index.lucene.query.sort.IndexSortUtils;
+import com.xgen.mongot.index.lucene.query.util.DisableBulkScorerQuery;
 import com.xgen.mongot.index.lucene.searcher.LuceneIndexSearcher;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.query.CollectorQuery;
@@ -46,6 +51,9 @@ import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.ReturnScope;
 import com.xgen.mongot.index.query.SearchQuery;
 import com.xgen.mongot.index.query.VectorSearchQuery;
+import com.xgen.mongot.index.query.aggregation.ShardMergeAliasPlan;
+import com.xgen.mongot.index.query.collectors.AggregationCollector;
+import com.xgen.mongot.index.query.collectors.AggregationValidator;
 import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo;
@@ -54,6 +62,8 @@ import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.counts.Count;
 import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.sort.SequenceToken;
+import com.xgen.mongot.index.query.sort.SortSpec;
+import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import com.xgen.mongot.index.synonym.SynonymRegistry;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.util.Check;
@@ -78,6 +88,7 @@ import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TotalHits;
 
 /** This class reads from a single Lucene index. */
 @SuppressWarnings("GuardedBy") // Uses LockGuard instead
@@ -137,6 +148,12 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
   private final int indexPartitionId;
   private final FeatureFlags featureFlags;
 
+  /**
+   * Plan-time cap on a search aggregation query's estimated total bucket count.
+   * LuceneConfig.DEFAULT_AGGREGATION_MAX_BUCKETS is used if not configured.
+   */
+  private final int aggregationMaxBuckets;
+
   private LuceneSearchIndexReader(
       SearchIndexDefinition indexDefinition,
       LuceneSearchQueryFactoryDistributor queryFactory,
@@ -146,6 +163,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
       IndexMetricsUpdater.QueryingMetricsUpdater queryingMetricsUpdater,
       LuceneSearchManagerFactory luceneSearchManagerFactory,
       Optional<NamedExecutorService> concurrentSearchExecutor,
+      Optional<Integer> aggregationMaxBuckets,
       int indexPartitionId,
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
@@ -157,10 +175,13 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
     this.queryingMetricsUpdater = queryingMetricsUpdater;
     this.luceneSearchManagerFactory = luceneSearchManagerFactory;
     this.concurrentSearchExecutor = concurrentSearchExecutor;
-    this.metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, concurrentSearchExecutor);
+    this.metaResultsBuilder =
+        new LuceneMetaResultsBuilder(facetContext, concurrentSearchExecutor, queryFactory);
     this.indexPartitionId = indexPartitionId;
     this.featureFlags = featureFlags;
     this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+    this.aggregationMaxBuckets =
+        aggregationMaxBuckets.orElse(LuceneConfig.DEFAULT_AGGREGATION_MAX_BUCKETS);
 
     ReentrantReadWriteLock shutdownLock = new ReentrantReadWriteLock(true);
     this.shutdownExclusiveLock = shutdownLock.writeLock();
@@ -179,6 +200,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
       IndexMetricsUpdater.QueryingMetricsUpdater queryingMetricsUpdater,
       LuceneSearchManagerFactory luceneSearchManagerFactory,
       Optional<NamedExecutorService> concurrentSearchExecutor,
+      Optional<Integer> aggregationMaxBuckets,
       int indexPartitionId,
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
@@ -192,6 +214,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
         queryingMetricsUpdater,
         luceneSearchManagerFactory,
         concurrentSearchExecutor,
+        aggregationMaxBuckets,
         indexPartitionId,
         featureFlags,
         dynamicFeatureFlagRegistry);
@@ -208,6 +231,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
       Optional<NamedExecutorService> concurrentSearchExecutor,
       Optional<NamedExecutorService> concurrentVectorRescoringExecutor,
       boolean enableTextOperatorNewSynonymsSyntax,
+      Optional<Integer> aggregationMaxBuckets,
       int indexPartitionId,
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
@@ -241,9 +265,14 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
             new BinaryQuantizedVectorRescorer(concurrentVectorRescoringExecutor),
             queryingMetricsUpdater),
         concurrentSearchExecutor,
+        aggregationMaxBuckets,
         indexPartitionId,
         featureFlags,
         dynamicFeatureFlagRegistry);
+  }
+
+  SearchAggregationMetricsReporter getSearchAggregationMetricsReporter() {
+    return this.queryingMetricsUpdater.getSearchAggregationMetricsReporter();
   }
 
   @Override
@@ -305,6 +334,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
       }
       case SearchQuery searchQuery -> {
         Operator operator = getOperator(searchQuery);
+        @Var
         org.apache.lucene.search.Query luceneQuery =
             Explain.isEnabled()
                 ? this.queryFactory.createSearchExplainQuery(
@@ -346,8 +376,14 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
                 indexSearcher.getFieldToSortableTypesMapping(),
                 searchQuery.returnScope(),
                 queryOptimizationFlags,
-                indexSort);
+                indexSort,
+                searchQuery.sortDrivesAggregation(),
+                indexSearcher.getIndexReader(),
+                embeddedScopedSortEnabled(searchQuery));
         trackIndexSortMetrics(luceneSort, indexSort);
+
+        luceneQuery =
+            maybeDisableBulkScorerForSort(luceneQuery, luceneSort, this.dynamicFeatureFlagRegistry);
 
         yield switch (searchQuery) {
           case OperatorQuery operatorQuery ->
@@ -421,6 +457,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
     Operator operator = getOperator(query);
     LuceneIndexSearcher indexSearcher = searcherReference.getIndexSearcher();
 
+    @Var
     org.apache.lucene.search.Query luceneQuery =
         Explain.isEnabled()
             ? this.queryFactory.createSearchExplainQuery(
@@ -460,8 +497,14 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
             indexSearcher.getFieldToSortableTypesMapping(),
             query.returnScope(),
             queryOptimizationFlags,
-            indexSort);
+            indexSort,
+            query.sortDrivesAggregation(),
+            indexSearcher.getIndexReader(),
+            embeddedScopedSortEnabled(query));
     trackIndexSortMetrics(luceneSort, indexSort);
+
+    luceneQuery =
+        maybeDisableBulkScorerForSort(luceneQuery, luceneSort, this.dynamicFeatureFlagRegistry);
 
     return switch (query) {
       case OperatorQuery operatorQuery ->
@@ -557,11 +600,6 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
     }
   }
 
-  @Override
-  public long getRequiredMemoryForVectorData() throws ReaderClosedException {
-    return 0L;
-  }
-
   private SearchProducerAndMetaResults vectorSearchQuery(
       VectorSearchQuery query,
       org.apache.lucene.search.Query luceneQuery,
@@ -624,6 +662,76 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
         this.metaResultsBuilder.getCountMetaResults(queryInfo.topDocs, query.count().type()));
   }
 
+  /**
+   * Evaluated per query (not cached) so a runtime toggle of the dynamic flag takes effect on
+   * existing readers, matching how {@code DRILL_SIDEWAYS_FACETING} is evaluated.
+   */
+  private boolean embeddedScopedFacetsEnabled() {
+    return this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+        DynamicFeatureFlags.ENABLE_EMBEDDED_SCOPED_FACET);
+  }
+
+  /**
+   * Evaluated per query so a runtime toggle of the requested-bucket cap takes effect on existing
+   * readers.
+   */
+  private boolean enforceRequestedBucketLimit() {
+    return this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+        DynamicFeatureFlags.ENABLE_SEARCH_AGGREGATION_REQUESTED_BUCKET_LIMIT);
+  }
+
+  /** Evaluated per query so a runtime toggle takes effect, mirroring scoped facets. */
+  private boolean embeddedScopedSortEnabled(SearchQuery query) {
+    return query.rawSortSpec().stream()
+            .flatMap(sort -> sort.getSortFields().stream())
+            .anyMatch(
+                field ->
+                    field.options() instanceof UserFieldSortOptions options
+                        && options.embeddedScope().isPresent())
+        && this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.ENABLE_EMBEDDED_SCOPED_SORT);
+  }
+
+  /**
+   * Schema-checks the collector, lowers it once, and (when the DFF is on) rejects trees whose
+   * requested bucket space exceeds {@link
+   * com.xgen.mongot.index.query.aggregation.TopAggregationSpec#MAX_REQUESTED_BUCKETS} using that
+   * already-built spec.
+   */
+  private LuceneAggregationPlanResolver.AggregationPlan resolveValidatedAggregationPlan(
+      AggregationCollector aggregationCollector, CollectorQuery query)
+      throws InvalidQueryException {
+    try {
+      AggregationValidator.validateAggregationQuery(
+          aggregationCollector,
+          this.facetContext.getFieldDefinitionResolver(),
+          query.returnScope().map(ReturnScope::path),
+          this.featureFlags.isEnabled(Feature.SEARCH_AGGREGATION));
+      LuceneAggregationPlanResolver.AggregationPlan aggregationPlan =
+          LuceneAggregationPlanResolver.resolveAggregationPlan(
+              this.facetContext, aggregationCollector, query.returnStoredSource());
+      if (enforceRequestedBucketLimit()) {
+        AggregationValidator.validateRequestedBuckets(aggregationPlan.rootSpec());
+      }
+      return aggregationPlan;
+    } catch (AggregationValidator.AggregationValidationException e) {
+      throw new InvalidQueryException(e.getMessage());
+    }
+  }
+
+  private static void rejectScopedFacetsWithDrillSideways(FacetCollector facetCollector)
+      throws InvalidQueryException {
+    boolean hasScopedFacet =
+        facetCollector.facetDefinitions().values().stream()
+            .anyMatch(def -> def.embeddedDocument().isPresent());
+    if (hasScopedFacet) {
+      throw new InvalidQueryException(
+          "embeddedDocument-scoped facets are not supported together with drill-sideways "
+              + "(doesNotAffect) faceting. Remove the doesNotAffect option from the operator, or "
+              + "the embeddedDocument block from the facet.");
+    }
+  }
+
   @VisibleForTesting
   SearchProducerAndMetaResults collectorQuery(
       CollectorQuery query,
@@ -655,6 +763,10 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
         }
 
         if (drillSidewaysInfo.isPresent()) {
+          // Scoped facets are computed independently of the main operator, so they must not be
+          // routed through the drill-sideways path (which would bypass the scoped counter and its
+          // feature-flag gate, silently producing document-indexed counts). Reject the combination.
+          rejectScopedFacetsWithDrillSideways(facetCollector);
           QueryOptimizationStatus optimizationStatus = drillSidewaysInfo.get().optimizationStatus();
           if (optimizationStatus == QueryOptimizationStatus.GENERIC) {
             return genericDrillSidewaysQuery(
@@ -686,6 +798,20 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
                 queryOptimizationFlags);
           }
         }
+      }
+      case AggregationCollector aggregationCollector -> {
+        return aggregationCollectorQuery(
+            aggregationCollector,
+            query,
+            luceneQuery,
+            searcherReference,
+            batchSizeStrategy,
+            unifiedHighlighter,
+            scoreDetailsManager,
+            luceneSort,
+            searchAfter,
+            queryCursorOptions,
+            queryOptimizationFlags);
       }
     }
 
@@ -903,7 +1029,151 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
             collectorQueryInfo.topDocs,
             collectorQueryInfo.collector,
             query,
+            query.concurrent(),
+            embeddedScopedFacetsEnabled()));
+  }
+
+  @VisibleForTesting
+  SearchProducerAndMetaResults aggregationCollectorQuery(
+      AggregationCollector aggregationCollector,
+      CollectorQuery query,
+      org.apache.lucene.search.Query luceneQuery,
+      LuceneIndexSearcherReference searcherReference,
+      BatchSizeStrategy batchSizeStrategy,
+      Optional<LuceneUnifiedHighlighter> unifiedHighlighter,
+      Optional<LuceneScoreDetailsManager> scoreDetailsManager,
+      Optional<Sort> luceneSort,
+      Optional<SequenceToken> searchAfter,
+      QueryCursorOptions queryCursorOptions,
+      QueryOptimizationFlags queryOptimizationFlags)
+      throws IOException, InterruptedException, InvalidQueryException {
+    LuceneAggregationPlanResolver.AggregationPlan aggregationPlan =
+        resolveValidatedAggregationPlan(aggregationCollector, query);
+    validateAggregationBucketLimit(aggregationCollector, searcherReference);
+    // Always 0 here: a partitioned index routes aggregation through
+    // intermediateAggregationCollectorQuery instead, so this path only ever serves a
+    // single-partition index.
+    LuceneSearchManager<AggregationQueryInfo> aggregationSearchManager =
+        this.luceneSearchManagerFactory.newAggregationManager(
+            luceneQuery,
+            luceneSort,
+            // The same sort inverted, for $last; see AggregationContext#getInvertedSort for why
+            // the token and the index sort are left out.
+            this.queryFactory.createSort(
+                query.sortSpec().map(SortSpec::invert),
+                Optional.empty(),
+                searcherReference.getIndexSearcher().getFieldToSortableTypesMapping(),
+                query.returnScope(),
+                queryOptimizationFlags,
+                Optional.empty(),
+                query.sortDrivesAggregation(),
+                searcherReference.getIndexSearcher().getIndexReader(),
+                embeddedScopedSortEnabled(query)),
+            searchAfter,
+            aggregationPlan,
+            this.indexPartitionId,
+            // This result is never count-merged with another, so the reduce may prune to top-N
+            // before resolving terms.
+            /* applyLimitOnReduce= */ true);
+
+    AggregationQueryInfo collectorQueryInfo =
+        aggregationSearchManager.initialSearch(
+            searcherReference, batchSizeStrategy.adviseNextBatchSize());
+
+    return new SearchProducerAndMetaResults(
+        searchBatchProducer(
+            query,
+            aggregationSearchManager,
+            collectorQueryInfo.topDocs,
+            collectorQueryInfo.luceneExhausted,
+            batchSizeStrategy,
+            searcherReference,
+            unifiedHighlighter,
+            scoreDetailsManager,
+            queryCursorOptions,
+            queryOptimizationFlags),
+        this.metaResultsBuilder.buildAggregationMetaResults(
+            searcherReference,
+            collectorQueryInfo.topDocs,
+            collectorQueryInfo.getAggregationResult(),
+            query,
             query.concurrent()));
+  }
+
+  private SearchProducerAndMetaProducer intermediateAggregationCollectorQuery(
+      AggregationCollector aggregationCollector,
+      CollectorQuery query,
+      org.apache.lucene.search.Query luceneQuery,
+      LuceneIndexSearcherReference searcherReference,
+      BatchSizeStrategy batchSizeStrategy,
+      Optional<LuceneUnifiedHighlighter> unifiedHighlighter,
+      Optional<LuceneScoreDetailsManager> scoreDetailsManager,
+      Optional<Sort> luceneSort,
+      Optional<SequenceToken> searchAfter,
+      QueryCursorOptions queryCursorOptions,
+      QueryOptimizationFlags queryOptimizationFlags)
+      throws IOException, InterruptedException, InvalidQueryException {
+    LuceneAggregationPlanResolver.AggregationPlan aggregationPlan =
+        resolveValidatedAggregationPlan(aggregationCollector, query);
+    validateAggregationBucketLimit(aggregationCollector, searcherReference);
+    // The reader's own partition, since a partitioned index has one reader per partition and
+    // fans out over them. first/last need it because doc ids only order documents within a
+    // single partition.
+    LuceneSearchManager<AggregationQueryInfo> aggregationSearchManager =
+        this.luceneSearchManagerFactory.newAggregationManager(
+            luceneQuery,
+            luceneSort,
+            // The same sort inverted, for $last; see AggregationContext#getInvertedSort for why
+            // the token and the index sort are left out.
+            this.queryFactory.createSort(
+                query.sortSpec().map(SortSpec::invert),
+                Optional.empty(),
+                searcherReference.getIndexSearcher().getFieldToSortableTypesMapping(),
+                query.returnScope(),
+                queryOptimizationFlags,
+                Optional.empty(),
+                query.sortDrivesAggregation(),
+                searcherReference.getIndexSearcher().getIndexReader(),
+                embeddedScopedSortEnabled(query)),
+            searchAfter,
+            aggregationPlan,
+            this.indexPartitionId,
+            // Intermediate results are count-merged across partitions or shards afterwards, so
+            // they must carry full cardinality.
+            /* applyLimitOnReduce= */ false);
+
+    AggregationQueryInfo collectorQueryInfo =
+        aggregationSearchManager.initialSearch(
+            searcherReference, batchSizeStrategy.adviseNextBatchSize());
+
+    checkState(
+        collectorQueryInfo.topDocs.totalHits.relation() == TotalHits.Relation.EQUAL_TO,
+        "AggregationIntermediateBatchProducer requires an exact count.");
+
+    List<Integer> sortDirections =
+        query.sortSpec().map(LuceneSearchIndexReader::aggregationSortDirections).orElse(List.of());
+    ShardMergeAliasPlan aliasPlan =
+        ShardMergeAliasPlan.from(aggregationPlan.rootSpec(), sortDirections);
+
+    BatchProducer intermediateProducer =
+        new AggregationIntermediateBatchProducer(
+            collectorQueryInfo.getAggregationResult(),
+            collectorQueryInfo.topDocs.totalHits.value(),
+            aliasPlan);
+
+    return new SearchProducerAndMetaProducer(
+        searchBatchProducer(
+            query,
+            aggregationSearchManager,
+            collectorQueryInfo.topDocs,
+            collectorQueryInfo.luceneExhausted,
+            batchSizeStrategy,
+            searcherReference,
+            unifiedHighlighter,
+            scoreDetailsManager,
+            queryCursorOptions,
+            queryOptimizationFlags),
+        intermediateProducer);
   }
 
   private SearchProducerAndMetaProducer intermediateOperatorQuery(
@@ -970,6 +1240,10 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
         }
 
         if (drillSidewaysInfo.isPresent()) {
+          // Scoped facets are computed independently of the main operator, so they must not be
+          // routed through the drill-sideways path (which would bypass the scoped counter and its
+          // feature-flag gate, silently producing document-indexed counts). Reject the combination.
+          rejectScopedFacetsWithDrillSideways(facetCollector);
           QueryOptimizationStatus optimizationStatus = drillSidewaysInfo.get().optimizationStatus();
 
           if (optimizationStatus == QueryOptimizationStatus.OPTIMIZABLE) {
@@ -1002,6 +1276,20 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
                 queryOptimizationFlags);
           }
         }
+      }
+      case AggregationCollector aggregationCollector -> {
+        return intermediateAggregationCollectorQuery(
+            aggregationCollector,
+            query,
+            luceneQuery,
+            searcherReference,
+            batchSizeStrategy,
+            unifiedHighlighter,
+            scoreDetailsManager,
+            luceneSort,
+            searchAfter,
+            queryCursorOptions,
+            queryOptimizationFlags);
       }
     }
     return intermediateFacetCollectorQuery(
@@ -1310,7 +1598,9 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
         searcherReference,
         topDocs,
         facetsCollector,
-        concurrentSearchExecutor);
+        concurrentSearchExecutor,
+        this.queryFactory,
+        embeddedScopedFacetsEnabled());
   }
 
   private BatchProducer drillSidewaysFacetMetaBatchProducer(
@@ -1360,6 +1650,29 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
     }
   }
 
+  /**
+   * Mitigates a Lucene 10.4 {@code DenseConjunctionBulkScorer} regression on sorted searches. When
+   * a (non-relevance) {@code sort} is present, the search is collected by a {@code
+   * TopFieldCollector} whose competitive iterator makes sort-without-sorted-index cheap by pruning
+   * non-competitive docs. Lucene 10.4's {@code DenseConjunctionBulkScorer} streams every matching
+   * doc through a per-window bitset, defeating that pruning and causing over-collection. Wrapping
+   * the top-level query in {@link DisableBulkScorerQuery} forces {@code Weight.DefaultBulkScorer},
+   * which honors the collector's competitive iterator, restoring the Lucene 10.1 path. Gated by
+   * {@link DynamicFeatureFlags#DISABLE_BULK_SCORER_QUERY_FOR_SORT}.
+   */
+  @VisibleForTesting
+  static org.apache.lucene.search.Query maybeDisableBulkScorerForSort(
+      org.apache.lucene.search.Query luceneQuery,
+      Optional<Sort> luceneSort,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
+    if (luceneSort.isPresent()
+        && dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.DISABLE_BULK_SCORER_QUERY_FOR_SORT)) {
+      return new DisableBulkScorerQuery(luceneQuery);
+    }
+    return luceneQuery;
+  }
+
   private static Operator getOperator(SearchQuery query) {
     return switch (query) {
       case OperatorQuery operatorQuery -> operatorQuery.operator();
@@ -1370,6 +1683,7 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
   private static Operator getCollectorOperator(Collector collector) {
     return switch (collector) {
       case FacetCollector facetCollector -> facetCollector.operator();
+      case AggregationCollector aggregationCollector -> aggregationCollector.operator();
     };
   }
 
@@ -1380,6 +1694,30 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
    */
   public boolean maxFacetCardinalityMetricEnabled() {
     return this.featureFlags.isEnabled(Feature.MAX_STRING_FACET_CARDINALITY_METRIC);
+  }
+
+  /**
+   * Plan-time bucket-limit guard (gated by the {@code enableSearchAggregationBucketLimit} dynamic
+   * feature flag): rejects the aggregation before any bucket state is allocated when the estimated
+   * total bucket count exceeds {@code aggregationMaxBuckets}. The estimate assumes every unique
+   * grouping value survives the filter, so it over-rejects rather than risking an OOM.
+   */
+  private void validateAggregationBucketLimit(
+      AggregationCollector aggregationCollector, LuceneIndexSearcherReference searcherReference)
+      throws IOException, InvalidQueryException {
+    if (!this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+        DynamicFeatureFlags.SEARCH_AGGREGATION_BUCKET_LIMIT)) {
+      return;
+    }
+    try {
+      AggregationValidator.validateBucketLimit(
+          aggregationCollector,
+          searcherReference.getIndexSearcher().getIndexReader(),
+          this.aggregationMaxBuckets);
+    } catch (AggregationValidator.AggregationValidationException e) {
+      getSearchAggregationMetricsReporter().recordBucketLimitRejection();
+      throw new InvalidQueryException(e.getMessage());
+    }
   }
 
   /**
@@ -1419,5 +1757,41 @@ public class LuceneSearchIndexReader implements SearchIndexReader {
         return 0;
       }
     }
+  }
+
+  /**
+   * Snapshot of this partition's token-facets ordinal-map cache. Acquires the live searcher once so
+   * callers can read heap, entries, and hit/miss/eviction without five separate acquires. Returns
+   * {@link TokenFacetsStateCache.Snapshot#EMPTY} when the cache is disabled or the reader is
+   * closed.
+   */
+  @Override
+  public TokenFacetsStateCache.Snapshot getTokenFacetsStateCacheSnapshot() {
+    try (LockGuard ignored = LockGuard.with(this.shutdownSharedLock)) {
+      if (this.closed) {
+        return TokenFacetsStateCache.Snapshot.EMPTY;
+      }
+      try {
+        LuceneIndexSearcher searcher = this.searcherManager.acquire();
+        try {
+          return searcher
+              .getTokenFacetsStateCache()
+              .map(TokenFacetsStateCache::snapshot)
+              .orElse(TokenFacetsStateCache.Snapshot.EMPTY);
+        } finally {
+          this.searcherManager.release(searcher);
+        }
+      } catch (IOException e) {
+        FLOGGER.atWarning().atMostEvery(5, TimeUnit.MINUTES).withCause(e).log(
+            "IOException while reading token facets state cache metrics, returning empty snapshot");
+        return TokenFacetsStateCache.Snapshot.EMPTY;
+      }
+    }
+  }
+
+  private static List<Integer> aggregationSortDirections(SortSpec sortSpec) {
+    return sortSpec.getSortFields().stream()
+        .map(sortField -> sortField.options().order().intValue)
+        .toList();
   }
 }

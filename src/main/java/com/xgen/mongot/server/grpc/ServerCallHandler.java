@@ -5,13 +5,15 @@ import static com.xgen.mongot.util.Check.checkArg;
 
 import com.google.common.base.Stopwatch;
 import com.xgen.mongot.cursor.MongotCursorManager;
-import com.xgen.mongot.featureflag.Feature;
-import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.index.IndexUnavailableException;
+import com.xgen.mongot.index.QuarantinedIndexException;
 import com.xgen.mongot.index.query.InvalidQueryException;
+import com.xgen.mongot.metrics.ServerStatusDataExtractor.LoadSheddingMeterData;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.server.command.CommandFactory;
 import com.xgen.mongot.server.command.ParsedCommand;
+import com.xgen.mongot.server.command.registry.CommandNotFoundException;
 import com.xgen.mongot.server.command.registry.CommandRegistry;
 import com.xgen.mongot.server.executors.BulkheadCommandExecutor;
 import com.xgen.mongot.server.executors.CancelledStreamSkipException;
@@ -21,6 +23,7 @@ import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.mongodb.Errors;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import io.micrometer.core.instrument.Counter;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -41,8 +44,6 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
   private static final List<String> LOAD_SHEDDING_ERROR_LABELS =
       List.of("SystemOverloadedError", "RetryableError");
 
-  private static final int MAX_ENVOY_RETRY_ATTEMPTS = 3;
-
   private final CommandRegistry commandRegistry;
   private final BulkheadCommandExecutor commandExecutor;
   private final MongotCursorManager cursorManager;
@@ -53,7 +54,27 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
   // fallback of 1 on missing/malformed headers), and tests that bypass the interceptor construct
   // handlers directly with an explicit value, so a non-null int is a safe invariant here.
   private final int envoyAttemptCount;
-  private final FeatureFlags featureFlags;
+  // How many attempts search envoy's retry policy allows for this request, from the
+  // `x-envoy-max-attempt-count` header mms configures it to send. Owned by mms rather than mongot
+  // so that a change to the retry budget reaches both sides in the same xds update; the
+  // interceptor substitutes a default when search envoy is not in the request path.
+  private final int envoyMaxAttemptCount;
+  // True when this stream is a warm-up traffic shadow (envoy mirrors live traffic here to warm the
+  // node). Envoy discards the responses and its mirrored getMore/killCursors carry the primary's
+  // cursor ids, which never match this node, so cursors created here are killed as soon as the
+  // command response is built rather than lingering until the idle-cursor reaper runs.
+  private final boolean isShadow;
+  // Whether search envoy looks to be in front of this stream, from the presence of the
+  // `x-envoy-attempt-count` header. A retryable status is only worth sending to a caller that can
+  // fail over; direct callers get the error body instead. Not spoof-proof, but a forged header
+  // only costs that caller a bare status on its own query.
+  private final boolean envoyInRequestPath;
+  private final EnvoyRetryMetrics envoyRetryMetrics;
+  private final Counter indexUnavailableRetryCounter;
+  // Counts every incoming command regardless of outcome (success, rejection, error). Serves as
+  // the denominator for load-shedding / envoy-retry rates. Tagged retry=true when this stream's
+  // x-envoy-attempt-count is greater than 1 (an envoy retry), otherwise retry=false.
+  private final Counter totalRequestsCounter;
 
   // Newly created cursors in this gRPC stream.
   // 1. This variable is at most written once. Each stream will have at most one $search command.
@@ -67,20 +88,38 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
       MongotCursorManager cursorManager,
       SearchEnvoyMetadata searchEnvoyMetadata,
       int envoyAttemptCount,
-      FeatureFlags featureFlags,
+      int envoyMaxAttemptCount,
+      boolean isShadow,
+      boolean envoyInRequestPath,
       StreamObserver<T> responseObserver) {
     this.commandRegistry = commandRegistry;
     this.commandExecutor = commandExecutor;
     this.cursorManager = cursorManager;
     this.searchEnvoyMetadata = searchEnvoyMetadata;
     this.envoyAttemptCount = envoyAttemptCount;
-    this.featureFlags = featureFlags;
+    this.envoyMaxAttemptCount = envoyMaxAttemptCount;
+    this.isShadow = isShadow;
+    this.envoyInRequestPath = envoyInRequestPath;
     this.commandManager = new CommandManager<T>(responseObserver);
     this.createdCursorIds = Collections.emptyList();
+    this.envoyRetryMetrics =
+        new EnvoyRetryMetrics(commandExecutor.getMeterRegistry(), envoyMaxAttemptCount);
+    this.indexUnavailableRetryCounter =
+        commandExecutor.getMeterRegistry().counter("indexUnavailable.envoyRetry");
+    this.totalRequestsCounter =
+        commandExecutor
+            .getMeterRegistry()
+            .counter(
+                LoadSheddingMeterData.TOTAL_REQUESTS,
+                LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TAG,
+                this.envoyAttemptCount > 1
+                    ? LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TRUE
+                    : LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_FALSE);
   }
 
   @Override
   public void onNext(T requestMsg) {
+    this.totalRequestsCounter.increment();
     this.commandManager.onCommandStart();
     Stopwatch totalTime = Stopwatch.createStarted();
     HandlingContext handlingContext = new HandlingContext();
@@ -89,15 +128,9 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
             (replyMsg, cause) -> {
               if (cause != null) {
                 Throwable unwrapped = FutureUtils.unwrapCause(cause);
-                if (shouldRetryViaEnvoy(unwrapped)) {
-                  // Count this as a failure from the host's perspective so load-shedding
-                  // alerting/dashboards remain accurate. Envoy may retry on another host, but
-                  // this host did reject the command.
-                  handlingContext.commandRegistration.ifPresent(
-                      registration -> registration.failureCounter.increment());
-                  this.commandManager.onCommandFailure(
-                      Status.RESOURCE_EXHAUSTED.withDescription(
-                          "Search server at capacity"));
+                boolean retryViaEnvoy = shouldRetryViaEnvoy(unwrapped);
+                if (retryViaEnvoy) {
+                  this.commandManager.onCommandFailure(retryStatusFor(unwrapped));
                 } else {
                   this.commandManager.onCommandComplete(
                       getErrorMessage(requestMsg, cause),
@@ -105,10 +138,11 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
                         if (!(unwrapped instanceof InterruptedException)
                             && !(unwrapped instanceof CancelledStreamSkipException)) {
                           handlingContext.commandRegistration.ifPresent(
-                              registration -> registration.failureCounter.increment());
+                              registration -> registration.recordFailure(unwrapped));
                         }
                       });
                 }
+                recordEnvoyRetryMetricIfApplicable(unwrapped, retryViaEnvoy);
               } else {
                 Stopwatch serializationTime = Stopwatch.createStarted();
                 this.commandManager.onCommandComplete(
@@ -122,6 +156,10 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
                             commandRegistration.totalTimer.record(totalTime.elapsed());
                           });
                     });
+                // A warm-up shadow stream envoy discards this response, so kill it here.
+                if (this.isShadow) {
+                  killCreatedCursors();
+                }
               }
             });
   }
@@ -178,17 +216,15 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
 
   @Override
   public void onError(Throwable t) {
-    this.commandManager.onStreamCancellation(
-        () -> {
-          // After sending half-close to the client, we will try to kill all the cursors that are
-          // created in the gRPC stream.
-          // Cursors may already be killed/exhausted. If a cursor is killed/exhausted,
-          // `MongotCursorManager::killCursor` will be a no-op.
-          this.createdCursorIds.forEach(
-              cursorId -> {
-                this.cursorManager.killCursor(cursorId);
-              });
-        });
+    // After sending half-close to the client, we will try to kill all the cursors that are
+    // created in the gRPC stream.
+    this.commandManager.onStreamCancellation(this::killCreatedCursors);
+  }
+
+  // Kills every cursor this stream created. Cursors may already be killed/exhausted; if so,
+  // `MongotCursorManager::killCursor` is a no-op, so this is safe to call more than once.
+  private void killCreatedCursors() {
+    this.createdCursorIds.forEach(cursorId -> this.cursorManager.killCursor(cursorId));
   }
 
   @Override
@@ -205,15 +241,24 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
 
     // Load shedding rejection should include error code and labels for client retry handling
     if (cause instanceof LoadSheddingRejectedException) {
-      String message =
-          cause.getMessage() == null ? "Server is at capacity" : cause.getMessage();
+      String message = cause.getMessage() == null ? "Server is at capacity" : cause.getMessage();
       BsonDocument error =
           MessageUtils.createErrorBodyWithLabels(
               message, LOAD_SHEDDING_ERROR_LABELS, Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD);
       return serializeError(request, error);
     }
 
+    // A command this mongot does not know is expected while a newer client rolls out ahead of
+    // it. Return a code so the client can distinguish it from a failing known command, and skip
+    // the stack trace that "unexpected exception" would log for every such call.
+    if (cause instanceof CommandNotFoundException e) {
+      LOG.atDebug().addKeyValue("command", e.getCommandName()).log("Rejected unknown command");
+      return serializeError(
+          request, MessageUtils.createError(Errors.COMMAND_NOT_FOUND, e.errorMessage()));
+    }
+
     if (!(cause instanceof InvalidQueryException)
+        && !(cause instanceof IndexUnavailableException)
         && !(cause instanceof CancelledStreamSkipException)) {
       LOG.warn("unexpected exception", cause);
     }
@@ -227,14 +272,65 @@ abstract class ServerCallHandler<T> implements StreamObserver<T> {
 
   abstract T serializeError(T request, BsonDocument error);
 
+  /**
+   * Whether to answer this failure with a retryable gRPC status rather than an in-band error body.
+   *
+   * <p>Load shedding stays behind {@code OVERLOAD_RETRY_SIGNAL} because its {@code
+   * RESOURCE_EXHAUSTED} needs a matching envoy {@code retry_on} that mms rolls out with it. Index
+   * unavailability uses the existing UNAVAILABLE retry policy. Catalog-backed availability failures
+   * get one retry; quarantine retains the configured retry budget.
+   */
   private boolean shouldRetryViaEnvoy(Throwable cause) {
+    if (this.envoyAttemptCount >= this.envoyMaxAttemptCount) {
+      return false;
+    }
+    if (cause instanceof QuarantinedIndexException) {
+      return this.envoyInRequestPath;
+    }
+    if (cause instanceof IndexUnavailableException) {
+      return this.envoyInRequestPath
+          && this.envoyAttemptCount == 1
+          && this.commandExecutor.shouldRetryUnavailableIndexViaEnvoy();
+    }
+    if (cause instanceof LoadSheddingRejectedException) {
+      return this.commandExecutor.shouldRetryViaEnvoy();
+    }
+    return false;
+  }
+
+  /**
+   * The status that makes envoy retry against a peer: {@code UNAVAILABLE} for index unavailability,
+   * already envoy's default {@code retry_on}, {@code RESOURCE_EXHAUSTED} for load shedding. Only
+   * reached while the retry budget has room; the final attempt falls back to {@link
+   * #getErrorMessage} so the parse error, not a bare status, is what mongod ends up surfacing.
+   */
+  private Status retryStatusFor(Throwable cause) {
+    if (cause instanceof QuarantinedIndexException) {
+      return Status.UNAVAILABLE.withDescription("Index is quarantined on this node");
+    }
+    if (cause instanceof IndexUnavailableException) {
+      return Status.UNAVAILABLE.withDescription(cause.getMessage());
+    }
+    return Status.RESOURCE_EXHAUSTED.withDescription("Search server at capacity");
+  }
+
+  /** Counts index-unavailable retry signals and preserves the overload-retry outcome counters. */
+  private void recordEnvoyRetryMetricIfApplicable(Throwable cause, boolean retryViaEnvoy) {
+    if (cause instanceof IndexUnavailableException && retryViaEnvoy) {
+      this.indexUnavailableRetryCounter.increment();
+      return;
+    }
     if (!(cause instanceof LoadSheddingRejectedException)) {
-      return false;
+      return;
     }
-    if (!this.featureFlags.isEnabled(Feature.OVERLOAD_RETRY_SIGNAL)) {
-      return false;
+    if (!this.commandExecutor.shouldRetryViaEnvoy()) {
+      return;
     }
-    return this.envoyAttemptCount < MAX_ENVOY_RETRY_ATTEMPTS;
+    if (retryViaEnvoy) {
+      this.envoyRetryMetrics.recordRejected(this.envoyAttemptCount);
+    } else {
+      this.envoyRetryMetrics.recordExhausted(this.envoyAttemptCount);
+    }
   }
 
   static class HandlingContext {

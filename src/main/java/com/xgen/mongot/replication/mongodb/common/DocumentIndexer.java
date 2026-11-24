@@ -7,6 +7,7 @@ import com.xgen.mongot.index.definition.IndexDefinition;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * An interface for indexing and commit. Implementations should be thread-safe.
@@ -39,7 +40,29 @@ public interface DocumentIndexer {
    */
   void updateCommitUserData(IndexCommitUserData commitUserData);
 
-  /** Commits all pending changes to the index. */
+  /**
+   * Installs a supplier read at commit time, for writers whose resume position has to be assembled
+   * from live state instead of staged ahead of a batch. The parallel collection scan uses it: its
+   * partitions advance independently, so a blob staged per batch would carry one partition's
+   * position and roll the others back.
+   */
+  void updateCommitUserDataSupplier(Supplier<IndexCommitUserData> commitUserDataSupplier);
+
+  /**
+   * Publishes the current commit user data to the writer as its resume position, without requiring
+   * a commit. Called unconditionally as each replication batch completes, so implementations whose
+   * writer is not a {@link com.xgen.mongot.index.CommitDataStagingWriter} must treat this as a
+   * no-op rather than throw; for a staging writer, the engine persists the staged position on its
+   * own commit cadence.
+   */
+  void stageCommitUserData() throws IOException;
+
+  /**
+   * Commits all pending changes to the index. Whether everything is durable when this returns is up
+   * to the concrete {@link com.xgen.mongot.index.IndexWriter}: a writer whose engine schedules its
+   * own commits receives the commit user data here (staged, like {@link #stageCommitUserData}) and
+   * persists it with the engine's next scheduled commit.
+   */
   void commit() throws IOException;
 
   /** Clear the index and update the commit user data atomically. */

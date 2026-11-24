@@ -12,6 +12,7 @@ import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat.DEFAUL
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
@@ -19,10 +20,12 @@ import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
 import com.xgen.mongot.index.lucene.codec.bloom.MongotBloomFilteringPostingsFormat;
 import com.xgen.mongot.index.lucene.codec.flat.Float32AndByteFlatVectorsFormat;
+import com.xgen.mongot.index.lucene.codec.flat.ScalarQuantizedFlatVectorsFormat;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBinaryQuantizedVectorsFormat;
 import com.xgen.mongot.index.lucene.quantization.Mongot01042HnswBitVectorsFormat;
 import com.xgen.mongot.index.lucene.vector.Lucene99NativeHnswVectorsFormat;
+import com.xgen.mongot.index.lucene.vector.NativeHnswScalarQuantizedVectorsFormat;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import java.lang.reflect.Field;
@@ -30,21 +33,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.apache.lucene.backward_codecs.lucene99.Lucene94FieldInfosFormatV1;
-import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
 import org.apache.lucene.backward_codecs.lucene99.Lucene99PostingsFormat;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.PostingsFormat;
-import org.apache.lucene.codecs.lucene90.Lucene90CompoundFormat;
-import org.apache.lucene.codecs.lucene90.Lucene90DocValuesFormat;
-import org.apache.lucene.codecs.lucene90.Lucene90LiveDocsFormat;
-import org.apache.lucene.codecs.lucene90.Lucene90NormsFormat;
-import org.apache.lucene.codecs.lucene90.Lucene90PointsFormat;
-import org.apache.lucene.codecs.lucene90.Lucene90TermVectorsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99HnswScalarQuantizedVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
-import org.apache.lucene.codecs.lucene99.Lucene99SegmentInfoFormat;
-import org.apache.lucene.codecs.perfield.PerFieldDocValuesFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 import org.junit.Assert;
@@ -69,7 +61,7 @@ public class LuceneCodecTest {
           new TestSetup(KNN_VECTOR, Lucene99HnswVectorsFormat.class, 32, 200),
           new TestSetup(KNN_BYTE, Lucene99NativeHnswVectorsFormat.class, 128, 100),
           new TestSetup(KNN_BIT, Mongot01042HnswBitVectorsFormat.class, 512, 1000),
-          new TestSetup(KNN_F32_Q7, Lucene99HnswScalarQuantizedVectorsFormat.class, 2, 30),
+          new TestSetup(KNN_F32_Q7, NativeHnswScalarQuantizedVectorsFormat.class, 2, 30),
           new TestSetup(KNN_F32_Q1, Mongot01042HnswBinaryQuantizedVectorsFormat.class, 49, 66));
 
   @Theory
@@ -189,58 +181,18 @@ public class LuceneCodecTest {
     Assert.assertTrue(vectorsFormat instanceof Float32AndByteFlatVectorsFormat);
   }
 
-  /**
-   * Checks every subformat of LuceneCodec to its expected implementation. This is an intentional
-   * change-detector test: it should break whenever a Lucene upgrade changes a codec subformat.
-   * Breaking this test means a codec subformat changed. This could break forward compatibility that
-   * old subformats cannot read segments written by newer versions, which means rollbacks will
-   * require reindexing.
-   *
-   * <p>For the per-field formats (postings, docValues, knnVectors), we check both the wrapper class
-   * and its registered name (written into segment metadata), as well as the underlying per-field
-   * delegate class. For the remaining formats, we check the implementation class.
-   */
   @Test
-  public void subformatNames_defaultCodec_matchExpectedLucene99Formats() {
-    LuceneCodec codec = new LuceneCodec();
+  public void
+      getKnnVectorsFormatForField_withFlatAlgo_producesScalarQuantizedFlatFormat_forKnnQ7() {
+    FieldPath path = FieldPath.parse("vector");
+    VectorFieldSpecification specification = createFlatScalarQuantizedVectorFieldDefinition();
 
-    assertEquals("Lucene99", codec.getName());
+    LuceneCodec codec = new LuceneCodec(Map.of(path, specification));
+    PerFieldKnnVectorsFormat format = (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+    KnnVectorsFormat vectorsFormat =
+        format.getKnnVectorsFormatForField(KNN_F32_Q7.getLuceneFieldName(path, Optional.empty()));
 
-    // Per-field formats: check wrapper class, registered name, and underlying delegate.
-    // The registered name is written into FieldInfo attributes and must stay stable across
-    // upgrades.
-    assertThat(codec.postingsFormat()).isInstanceOf(PerFieldPostingsFormat.class);
-    PerFieldPostingsFormat postingsFormat = (PerFieldPostingsFormat) codec.postingsFormat();
-    assertEquals("PerField40", postingsFormat.getName());
-    assertThat(postingsFormat.getPostingsFormatForField("any"))
-        .isInstanceOf(Lucene99PostingsFormat.class);
-
-    assertThat(codec.docValuesFormat()).isInstanceOf(PerFieldDocValuesFormat.class);
-    PerFieldDocValuesFormat docValuesFormat = (PerFieldDocValuesFormat) codec.docValuesFormat();
-    assertEquals("PerFieldDV40", docValuesFormat.getName());
-    assertThat(docValuesFormat.getDocValuesFormatForField("any"))
-        .isInstanceOf(Lucene90DocValuesFormat.class);
-
-    // knnVectorsFormat requires a typed field name because LuceneCodec.getKnnVectorsFormatForField
-    // parses the type prefix to resolve the format.
-    assertThat(codec.knnVectorsFormat()).isInstanceOf(PerFieldKnnVectorsFormat.class);
-    PerFieldKnnVectorsFormat knnVectorsFormat = (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
-    assertEquals("PerFieldVectors90", knnVectorsFormat.getName());
-    assertThat(
-            knnVectorsFormat.getKnnVectorsFormatForField(
-                KNN_VECTOR.getLuceneFieldName(FieldPath.parse("any"), Optional.empty())))
-        .isInstanceOf(Lucene99HnswVectorsFormat.class);
-
-    // Remaining formats delegated from Lucene99Codec (except storedFieldsFormat, which LuceneCodec
-    // overrides with its own LuceneStoredFieldsFormat).
-    assertThat(codec.storedFieldsFormat()).isInstanceOf(LuceneStoredFieldsFormat.class);
-    assertThat(codec.fieldInfosFormat()).isInstanceOf(Lucene94FieldInfosFormatV1.class);
-    assertThat(codec.segmentInfoFormat()).isInstanceOf(Lucene99SegmentInfoFormat.class);
-    assertThat(codec.termVectorsFormat()).isInstanceOf(Lucene90TermVectorsFormat.class);
-    assertThat(codec.liveDocsFormat()).isInstanceOf(Lucene90LiveDocsFormat.class);
-    assertThat(codec.compoundFormat()).isInstanceOf(Lucene90CompoundFormat.class);
-    assertThat(codec.normsFormat()).isInstanceOf(Lucene90NormsFormat.class);
-    assertThat(codec.pointsFormat()).isInstanceOf(Lucene90PointsFormat.class);
+    Assert.assertTrue(vectorsFormat instanceof ScalarQuantizedFlatVectorsFormat);
   }
 
   @Test
@@ -266,7 +218,8 @@ public class LuceneCodecTest {
   public void postingsFormat_idField_dynamicToggle_switchesFormatAtRuntime() {
     AtomicBoolean bloomEnabled = new AtomicBoolean(false);
     LuceneCodec codec =
-        LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), bloomEnabled::get, Optional.empty());
+        LuceneCodec.Factory.forIndexWithBloomFilter(
+            Map.of(), bloomEnabled::get, Optional.empty(), FeatureFlags.getDefault());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -287,7 +240,8 @@ public class LuceneCodecTest {
   public void postingsFormat_bloomFilterDelegate_reusesPostingsFormatFromDelegateCodec()
       throws NoSuchFieldException, IllegalAccessException {
     LuceneCodec codec =
-        LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), () -> true, Optional.empty());
+        LuceneCodec.Factory.forIndexWithBloomFilter(
+            Map.of(), () -> true, Optional.empty(), FeatureFlags.getDefault());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -302,8 +256,6 @@ public class LuceneCodecTest {
     PostingsFormat defaultFormat = format.getPostingsFormatForField("someOtherField");
 
     assertThat(bloomDelegate).isSameInstanceAs(defaultFormat);
-    assertThat(bloomDelegate.getName())
-        .isEqualTo(new Lucene99Codec().getPostingsFormatForField(idField).getName());
   }
 
   @Test
@@ -311,7 +263,7 @@ public class LuceneCodecTest {
     var metricsUpdater = SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH);
     LuceneCodec codec =
         LuceneCodec.Factory.forIndexWithBloomFilter(
-            Map.of(), () -> true, Optional.of(metricsUpdater));
+            Map.of(), () -> true, Optional.of(metricsUpdater), FeatureFlags.getDefault());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -327,7 +279,7 @@ public class LuceneCodecTest {
     var metricsUpdater = SearchIndex.mockIndexingMetricsUpdater(IndexDefinition.Type.SEARCH);
     LuceneCodec codec =
         LuceneCodec.Factory.forIndexWithBloomFilter(
-            Map.of(), () -> false, Optional.of(metricsUpdater));
+            Map.of(), () -> false, Optional.of(metricsUpdater), FeatureFlags.getDefault());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
     String idField = FieldName.MetaField.ID.getLuceneFieldName();
 
@@ -344,7 +296,7 @@ public class LuceneCodecTest {
       boolean isBloomEnabled, String fieldName, Class<? extends PostingsFormat> expectedType) {
     LuceneCodec codec =
         LuceneCodec.Factory.forIndexWithBloomFilter(
-            Map.of(), () -> isBloomEnabled, Optional.empty());
+            Map.of(), () -> isBloomEnabled, Optional.empty(), FeatureFlags.getDefault());
     PerFieldPostingsFormat format = (PerFieldPostingsFormat) codec.postingsFormat();
 
     PostingsFormat idFormat = format.getPostingsFormatForField(fieldName);
@@ -357,6 +309,14 @@ public class LuceneCodecTest {
         1024,
         VectorSimilarity.DOT_PRODUCT,
         VectorQuantization.NONE,
+        new VectorIndexingAlgorithm.FlatIndexingAlgorithm());
+  }
+
+  private VectorFieldSpecification createFlatScalarQuantizedVectorFieldDefinition() {
+    return new VectorFieldSpecification(
+        1024,
+        VectorSimilarity.DOT_PRODUCT,
+        VectorQuantization.SCALAR,
         new VectorIndexingAlgorithm.FlatIndexingAlgorithm());
   }
 }

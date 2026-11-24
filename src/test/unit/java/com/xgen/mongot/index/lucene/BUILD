@@ -12,10 +12,8 @@ mongot_java_unit_test_suite(
     timeouts = {
         # Background: https://jira.mongodb.org/browse/CLOUDP-246113
         "LuceneSearchBatchProducerTest.java": "moderate",
-        # Below tests deal with 10k vectors so take more time.
-        # "long" (15m) needed on slower CI runners (e.g. GitHub Actions);
-        # "moderate" (5m) is often insufficient there.
-        "VectorIndexingAndQueryingLargeScaleTest.java": "long",
+        # Below tests deal with 10k vectors so take more time
+        "VectorIndexingAndQueryingLargeScaleTest.java": "moderate",
     },
     deps = [
         "commons-codec:commons-codec",
@@ -52,6 +50,7 @@ mongot_java_unit_test_suite(
         "//src/main/java/com/xgen/mongot/index/ingestion",
         "//src/main/java/com/xgen/mongot/index/lucene",
         "//src/main/java/com/xgen/mongot/index/lucene/abortable",
+        "//src/main/java/com/xgen/mongot/index/lucene/analyzer",
         "//src/main/java/com/xgen/mongot/index/lucene/codec",
         "//src/main/java/com/xgen/mongot/index/lucene/codec/bloom",
         "//src/main/java/com/xgen/mongot/index/lucene/commit",
@@ -61,6 +60,7 @@ mongot_java_unit_test_suite(
         "//src/main/java/com/xgen/mongot/index/lucene/document/builder",
         "//src/main/java/com/xgen/mongot/index/lucene/explain/explainers",
         "//src/main/java/com/xgen/mongot/index/lucene/extension",
+        "//src/main/java/com/xgen/mongot/index/lucene/facet",
         "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/lucene/merge",
         "//src/main/java/com/xgen/mongot/index/lucene/quantization",
@@ -70,6 +70,7 @@ mongot_java_unit_test_suite(
         "//src/main/java/com/xgen/mongot/index/lucene/query/pushdown/project",
         "//src/main/java/com/xgen/mongot/index/lucene/query/range",
         "//src/main/java/com/xgen/mongot/index/lucene/query/sort",
+        "//src/main/java/com/xgen/mongot/index/lucene/query/sort/comparator",
         "//src/main/java/com/xgen/mongot/index/lucene/query/sort/mixed",
         "//src/main/java/com/xgen/mongot/index/lucene/searcher",
         "//src/main/java/com/xgen/mongot/index/lucene/similarity",
@@ -92,6 +93,7 @@ mongot_java_unit_test_suite(
         "//src/main/java/com/xgen/mongot/util/bson",
         "//src/main/java/com/xgen/mongot/util/bson/parser",
         "//src/main/java/com/xgen/mongot/util/concurrent",
+        "//src/main/java/com/xgen/mongot/util/regex",
         "//src/main/java/com/xgen/testing",
         "//src/main/java/com/xgen/testing/fakes",
         "//src/main/java/com/xgen/testing/mongot/cursor/batch",

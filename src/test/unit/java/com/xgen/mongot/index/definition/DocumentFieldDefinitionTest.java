@@ -203,6 +203,51 @@ public class DocumentFieldDefinitionTest {
     }
 
     @Test
+    public void testContainsSearchAutoEmbedField() {
+      FieldDefinition autoEmbed =
+          FieldDefinitionBuilder.builder()
+              .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+              .build();
+      FieldDefinition nestedAutoEmbed =
+          FieldDefinitionBuilder.builder()
+              .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+              .build();
+      FieldDefinition plain =
+          FieldDefinitionBuilder.builder()
+              .date(DateFieldDefinitionBuilder.builder().build())
+              .build();
+
+      DocumentFieldDefinition topLevel =
+          DocumentFieldDefinitionBuilder.builder().field("content", autoEmbed).build();
+      Assert.assertTrue("top-level auto-embed", topLevel.containsSearchAutoEmbedField());
+
+      DocumentFieldDefinition nested =
+          DocumentFieldDefinitionBuilder.builder()
+              .field(
+                  "parent",
+                  FieldDefinitionBuilder.builder()
+                      .document(
+                          DocumentFieldDefinitionBuilder.builder()
+                              .field("content", nestedAutoEmbed)
+                              .build())
+                      .build())
+              .build();
+      Assert.assertTrue("auto-embed nested under document", nested.containsSearchAutoEmbedField());
+
+      DocumentFieldDefinition without =
+          DocumentFieldDefinitionBuilder.builder()
+              .field("title", plain)
+              .field(
+                  "parent",
+                  FieldDefinitionBuilder.builder()
+                      .document(
+                          DocumentFieldDefinitionBuilder.builder().field("title", plain).build())
+                      .build())
+              .build();
+      Assert.assertFalse("no auto-embed anywhere", without.containsSearchAutoEmbedField());
+    }
+
+    @Test
     public void testEquals() {
       TestUtils.assertEqualityGroups(
           () -> DocumentFieldDefinitionBuilder.builder().dynamic(false).build(),

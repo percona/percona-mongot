@@ -20,12 +20,13 @@ import static org.mockito.Mockito.when;
 import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexStats;
-import com.xgen.mongot.catalogservice.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.IndexStatusMapper;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerState;
-import com.xgen.mongot.catalogservice.ServerStateEntry;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.schema.ServerStateEntry;
 import com.xgen.mongot.config.manager.CachedIndexInfoProvider;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.IndexDetailedStatus;
@@ -764,6 +765,7 @@ public class CommunityMetadataUpdaterTest {
         new IndexDetailedStatus.Search(
             Collections.emptyMap(),
             definition,
+            List.of(),
             status,
             Generation.CURRENT.generationId(definition.getIndexId()),
             Optional.empty());
@@ -772,7 +774,7 @@ public class CommunityMetadataUpdaterTest {
         definition,
         status,
         Collections.emptyList(),
-        new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L),
+        new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L, 0L),
         Optional.of(detailedStatus),
         Optional.empty(),
         Collections.emptyMap());
@@ -791,7 +793,7 @@ public class CommunityMetadataUpdaterTest {
         definition,
         status,
         Collections.emptyList(),
-        new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L),
+        new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L, 0L),
         Optional.of(detailedStatus),
         Optional.empty());
   }
@@ -803,7 +805,9 @@ public class CommunityMetadataUpdaterTest {
         IndexDefinition.Type.SEARCH,
         Optional.of(
             new IndexStatsEntry.DetailedIndexStats(
-                status, definition, Optional.of(Collections.emptyMap()))),
+                IndexStatusMapper.toPersisted(status),
+                definition,
+                Optional.of(Collections.emptyMap()))),
         Optional.empty());
   }
 

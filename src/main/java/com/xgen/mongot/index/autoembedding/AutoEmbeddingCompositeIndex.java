@@ -2,6 +2,7 @@ package com.xgen.mongot.index.autoembedding;
 
 import static com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration.MIN_VERSION_FOR_MATERIALIZED_VIEW_EMBEDDING;
 
+import com.google.errorprone.annotations.Var;
 import com.mongodb.lang.Nullable;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.index.EncodedUserData;
@@ -16,6 +17,7 @@ import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.apache.commons.codec.DecoderException;
 import org.bson.BsonTimestamp;
@@ -35,24 +37,73 @@ public class AutoEmbeddingCompositeIndex implements Index {
 
   // Track previous status to log only on transitions
   @Nullable private StatusCode previousConsolidatedStatus = null;
-  // One-way ratchet: true once the composite can service queries.
-  // Initialized from the persisted lease so restarts don't reset the ratchet.
+  // One-way ratchet: set to true at runtime only when the MV itself is STEADY and the
+  // composite canServiceQueries(). Also pre-initialized from the persisted lease at
+  // construction, so a previously-queryable index is not regressed by an MV initialization
+  // gap on restart (e.g. forceDisableReplication) — the path where MV is UNKNOWN but
+  // Lucene is STEADY does not flip this ratchet; the lease handles it instead.
   private final AtomicBoolean compositeWasQueryable;
+
+  // Live check for whether replication is currently stopped (cluster pause / disk-full /
+  // forceDisableReplication). Gates the (UNKNOWN/NOT_STARTED MV, STEADY Lucene) → synthetic STEADY
+  // fallthrough in computeConsolidatedStatus: without this gate the fallthrough also fires for
+  // followers at startup (whose MV is legitimately UNKNOWN because the leader owns it), which
+  // breaks host-failover takeover by reporting STEADY before the follower has any MV state.
+  private final BooleanSupplier isReplicationStoppedSupplier;
+  private final Optional<AutoEmbeddingGenerationMetrics> generationMetrics;
 
   public AutoEmbeddingCompositeIndex(
       InitializedMaterializedViewIndex matViewIndex,
       Index derivedIndex,
-      Supplier<Optional<InitializedIndex>> initializedIndexSupplier) {
+      Supplier<Optional<InitializedIndex>> initializedIndexSupplier,
+      BooleanSupplier isReplicationStoppedSupplier) {
+    this(
+        matViewIndex,
+        derivedIndex,
+        initializedIndexSupplier,
+        isReplicationStoppedSupplier,
+        Optional.empty());
+  }
+
+  AutoEmbeddingCompositeIndex(
+      InitializedMaterializedViewIndex matViewIndex,
+      Index derivedIndex,
+      Supplier<Optional<InitializedIndex>> initializedIndexSupplier,
+      BooleanSupplier isReplicationStoppedSupplier,
+      AutoEmbeddingGenerationMetrics generationMetrics) {
+    this(
+        matViewIndex,
+        derivedIndex,
+        initializedIndexSupplier,
+        isReplicationStoppedSupplier,
+        Optional.of(generationMetrics));
+  }
+
+  private AutoEmbeddingCompositeIndex(
+      InitializedMaterializedViewIndex matViewIndex,
+      Index derivedIndex,
+      Supplier<Optional<InitializedIndex>> initializedIndexSupplier,
+      BooleanSupplier isReplicationStoppedSupplier,
+      Optional<AutoEmbeddingGenerationMetrics> generationMetrics) {
     this.matViewIndex = matViewIndex;
     this.derivedIndex = derivedIndex;
     this.initializedIndexSupplier = initializedIndexSupplier;
+    this.isReplicationStoppedSupplier = isReplicationStoppedSupplier;
+    this.generationMetrics = generationMetrics;
     this.compositeWasQueryable =
         new AtomicBoolean(matViewIndex.isCurrentVersionQueryablePerLease());
   }
 
   public AutoEmbeddingCompositeIndex(
+      InitializedMaterializedViewIndex matViewIndex,
+      Index derivedIndex,
+      Supplier<Optional<InitializedIndex>> initializedIndexSupplier) {
+    this(matViewIndex, derivedIndex, initializedIndexSupplier, () -> false);
+  }
+
+  public AutoEmbeddingCompositeIndex(
       InitializedMaterializedViewIndex matViewIndex, Index derivedIndex) {
-    this(matViewIndex, derivedIndex, Optional::empty);
+    this(matViewIndex, derivedIndex, Optional::empty, () -> false);
   }
 
   @Override
@@ -109,8 +160,32 @@ public class AutoEmbeddingCompositeIndex implements Index {
 
   @Override
   public void close() throws IOException {
-    this.matViewIndex.close();
-    this.derivedIndex.close();
+    try {
+      @Var Exception first = null;
+      // Try each index independently so one close failure does not skip the other.
+      try {
+        this.matViewIndex.close();
+      } catch (IOException | RuntimeException e) {
+        first = e;
+      }
+      try {
+        this.derivedIndex.close();
+      } catch (IOException | RuntimeException e) {
+        if (first == null) {
+          first = e;
+        } else {
+          first.addSuppressed(e);
+        }
+      }
+      if (first instanceof IOException ioException) {
+        throw ioException;
+      }
+      if (first instanceof RuntimeException runtimeException) {
+        throw runtimeException;
+      }
+    } finally {
+      this.generationMetrics.ifPresent(AutoEmbeddingGenerationMetrics::close);
+    }
   }
 
   public MaterializedViewSchemaMetadata getSchemaMetadata() {
@@ -156,7 +231,7 @@ public class AutoEmbeddingCompositeIndex implements Index {
     IndexCommitUserData userData =
         IndexCommitUserData.fromEncodedData(commitData, Optional.empty());
     return userData
-        .getResumeInfo()
+        .resumeInfo()
         .map(
             info -> {
               try {
@@ -176,7 +251,10 @@ public class AutoEmbeddingCompositeIndex implements Index {
     IndexStatus result = computeConsolidatedStatus(mvStatus, luceneStatus);
     StatusCode newStatus = result.getStatusCode();
 
-    if (result.canServiceQueries()) {
+    // Only set compositeWasQueryable when both MV and Lucene statuses are STEADY. The
+    // (UNKNOWN/NOT_STARTED, STEADY) fallthrough in computeConsolidatedStatus() returns a
+    // synthetic STEADY so that processReplicationStatus() can apply the STEADY→STALE transition.
+    if (result.canServiceQueries() && mvStatus == StatusCode.STEADY) {
       this.compositeWasQueryable.set(true);
     }
 
@@ -228,9 +306,26 @@ public class AutoEmbeddingCompositeIndex implements Index {
       return new IndexStatus(StatusCode.INITIAL_SYNC);
     }
 
-    // UNKNOWN or NOT_STARTED on any component propagates
+    // UNKNOWN or NOT_STARTED on the MV component propagates, except when Lucene is STEADY AND
+    // replication is currently stopped. When Lucene is STEADY but MV hasn't (re-)initialized
+    // because replication is disabled (e.g. forceDisableReplication on restart), returning UNKNOWN
+    // causes isTransient()=true in MMS, which filters the index before processReplicationStatus()
+    // can apply the STEADY→STALE transition. Falling through to STEADY in that specific case lets
+    // MMS correctly mark the index STALE. The replication-stopped gate is required to avoid the
+    // same fallthrough firing for followers at normal startup (MV legitimately UNKNOWN because the
+    // leader owns it) — without the gate, followers would report a synthetic STEADY before they
+    // had any MV state, breaking host-failover takeover (CLOUDP-405298).
     if (mvStatus == StatusCode.UNKNOWN || mvStatus == StatusCode.NOT_STARTED) {
-      return new IndexStatus(mvStatus);
+      if (luceneStatus != StatusCode.STEADY || !this.isReplicationStoppedSupplier.getAsBoolean()) {
+        return new IndexStatus(mvStatus);
+      }
+      LOG.atInfo()
+          .addKeyValue("generationId", this.matViewIndex.getGenerationId())
+          .addKeyValue("mvStatus", mvStatus)
+          .addKeyValue("luceneStatus", luceneStatus)
+          .log(
+              "Status fallthrough: returning synthetic STEADY because replication is stopped;"
+                  + " lets MMS apply the STEADY→STALE transition");
     }
     if (luceneStatus == StatusCode.UNKNOWN || luceneStatus == StatusCode.NOT_STARTED) {
       return new IndexStatus(luceneStatus);
