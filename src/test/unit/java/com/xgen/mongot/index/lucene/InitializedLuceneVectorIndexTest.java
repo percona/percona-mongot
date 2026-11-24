@@ -78,7 +78,6 @@ public class InitializedLuceneVectorIndexTest {
             indexPath,
             directoryFactory.getMetadataPath(),
             directoryFactory.getConfig(),
-            FeatureFlags.getDefault(),
             new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
             new TieredMergePolicy(),
             mock(QueryCacheProvider.class),
@@ -86,7 +85,7 @@ public class InitializedLuceneVectorIndexTest {
             Optional.empty(),
             Optional.empty(),
             VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             VectorIndex.mockMetricsFactory());
     InitializedLuceneVectorIndex initializedIndex =
@@ -121,7 +120,6 @@ public class InitializedLuceneVectorIndexTest {
                 indexPath,
                 metadataPath,
                 directoryFactory.getConfig(),
-                FeatureFlags.getDefault(),
                 new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
                 new TieredMergePolicy(),
                 mock(QueryCacheProvider.class),
@@ -129,7 +127,7 @@ public class InitializedLuceneVectorIndexTest {
                 Optional.empty(),
                 Optional.empty(),
                 VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 indexDirectoryHelper.getIndexRemover(),
                 new PerIndexMetricsFactory(
                     "test",
@@ -181,7 +179,6 @@ public class InitializedLuceneVectorIndexTest {
                 indexPath,
                 metadataPath,
                 directoryFactory.getConfig(),
-                FeatureFlags.getDefault(),
                 new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
                 new TieredMergePolicy(),
                 mock(QueryCacheProvider.class),
@@ -189,7 +186,7 @@ public class InitializedLuceneVectorIndexTest {
                 Optional.empty(),
                 Optional.empty(),
                 VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 indexDirectoryHelper.getIndexRemover(),
                 new PerIndexMetricsFactory(
                     "test",
@@ -243,7 +240,6 @@ public class InitializedLuceneVectorIndexTest {
                 indexPath,
                 metadataPath,
                 directoryFactory.getConfig(),
-                FeatureFlags.getDefault(),
                 new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
                 new TieredMergePolicy(),
                 mock(QueryCacheProvider.class),
@@ -251,7 +247,7 @@ public class InitializedLuceneVectorIndexTest {
                 Optional.empty(),
                 Optional.empty(),
                 VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 indexDirectoryHelper.getIndexRemover(),
                 new PerIndexMetricsFactory(
                     "test",
@@ -299,7 +295,6 @@ public class InitializedLuceneVectorIndexTest {
                 indexPath,
                 metadataPath,
                 directoryFactory.getConfig(),
-                FeatureFlags.getDefault(),
                 new InstrumentedConcurrentMergeScheduler(meterRegistry),
                 new TieredMergePolicy(),
                 mock(QueryCacheProvider.class),
@@ -307,7 +302,7 @@ public class InitializedLuceneVectorIndexTest {
                 Optional.empty(),
                 Optional.empty(),
                 VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 indexDirectoryHelper.getIndexRemover(),
                 new PerIndexMetricsFactory(
                     "test",
@@ -384,6 +379,52 @@ public class InitializedLuceneVectorIndexTest {
     }
     shutdownSequence.verify(writer).close();
     shutdownSequence.verify(directory, times(1)).close();
+  }
+
+  @Test
+  public void testCloseReleasesInitializedResourcesWhenUnderlyingIndexAlreadyClosed()
+      throws IOException {
+    var directory = mock(Directory.class);
+    var writer = mock(SingleLuceneIndexWriter.class);
+    var reader = mock(MeteredVectorIndexReader.class);
+    var refresher = mock(PeriodicLuceneIndexRefresher.class);
+    ImmutableList<ReferenceManager<?>> searcherManagers =
+        ImmutableList.of(
+            spy(new LuceneVectorIndexTest.NoopSearcherManager()),
+            spy(new LuceneVectorIndexTest.NoopSearcherManager()));
+
+    var index =
+        new LuceneVectorIndex(
+            VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
+            new AtomicReference<>(IndexStatus.steady()),
+            mock(LuceneVectorIndex.VectorIndexProperties.class));
+    InitializedLuceneVectorIndex initializedIndex =
+        new InitializedLuceneVectorIndex(
+            MOCK_INDEX_DEFINITION_GENERATION.getGenerationId(),
+            index,
+            List.of(directory),
+            writer,
+            reader,
+            refresher,
+            searcherManagers,
+            IndexMetricsUpdaterBuilder.builder()
+                .metricsFactory(SearchIndex.mockMetricsFactory())
+                .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+                .build());
+
+    index.close();
+    initializedIndex.close();
+
+    var shutdownSequence =
+        inOrder(
+            refresher, reader, writer, directory, searcherManagers.get(0), searcherManagers.get(1));
+    shutdownSequence.verify(refresher).close();
+    shutdownSequence.verify(reader).close();
+    for (var manager : searcherManagers) {
+      shutdownSequence.verify((LuceneVectorIndexTest.NoopSearcherManager) manager).afterClose();
+    }
+    shutdownSequence.verify(writer).close();
+    shutdownSequence.verify(directory).close();
   }
 
   @Test
@@ -477,7 +518,6 @@ public class InitializedLuceneVectorIndexTest {
             indexPath,
             metadataPath,
             directoryFactory.getConfig(),
-            FeatureFlags.getDefault(),
             new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
             new TieredMergePolicy(),
             mock(QueryCacheProvider.class),
@@ -485,7 +525,7 @@ public class InitializedLuceneVectorIndexTest {
             Optional.empty(),
             Optional.empty(),
             VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             indexDirectoryHelper.getIndexRemover(),
             VectorIndex.mockMetricsFactory());
     InitializedLuceneVectorIndex initializedIndex =
@@ -563,7 +603,6 @@ public class InitializedLuceneVectorIndexTest {
             indexPath,
             metadataPath,
             directoryFactory.getConfig(),
-            FeatureFlags.getDefault(),
             new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
             new TieredMergePolicy(),
             mock(QueryCacheProvider.class),
@@ -571,7 +610,7 @@ public class InitializedLuceneVectorIndexTest {
             Optional.empty(),
             Optional.empty(),
             VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             VectorIndex.mockMetricsFactory());
     InitializedLuceneVectorIndex initializedLuceneVectorIndex =
@@ -606,7 +645,6 @@ public class InitializedLuceneVectorIndexTest {
         indexPath,
         metadataPath,
         config,
-        FeatureFlags.getDefault(),
         new InstrumentedConcurrentMergeScheduler(new SimpleMeterRegistry()),
         new TieredMergePolicy(),
         mock(QueryCacheProvider.class),
@@ -614,7 +652,7 @@ public class InitializedLuceneVectorIndexTest {
         Optional.of(Mockito.mock(NamedExecutorService.class)),
         Optional.of(Mockito.mock(NamedExecutorService.class)),
         VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-        VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+        VectorIndex.MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
         new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
         metricsFactory);
   }

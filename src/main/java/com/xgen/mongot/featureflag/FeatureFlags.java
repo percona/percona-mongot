@@ -3,6 +3,7 @@ package com.xgen.mongot.featureflag;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.RestrictedApi;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.xgen.mongot.util.bson.JsonCodec;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
@@ -62,13 +63,15 @@ import org.bson.BsonDocument;
  */
 public class FeatureFlags implements DocumentEncodable {
   private static final FeatureFlags DEFAULT_INSTANCE = withDefaults().build();
+
   /**
-   * Process-wide {@link FeatureFlags} for non-DI code paths. Set exactly once by
-   * {@link #initializeProcessInstance} at bootstrap, read via {@link #getStatic};
-   * all access guarded by the {@code FeatureFlags.class} monitor.
+   * Process-wide {@link FeatureFlags} for non-DI code paths. Set exactly once by {@link
+   * #initializeProcessInstance} at bootstrap, read via {@link #getStatic}; all access guarded by
+   * the {@code FeatureFlags.class} monitor.
    */
   @GuardedBy("FeatureFlags.class")
   private static Optional<FeatureFlags> globalFeatureFlags = Optional.empty();
+
   private final EnumMap<Feature, Feature.State> featureStates;
 
   /**
@@ -264,6 +267,7 @@ public class FeatureFlags implements DocumentEncodable {
    *   <li>{@link Feature#INDEX_FEATURE_VERSION_FOUR}
    *   <li>{@link Feature#SORTED_INDEX}
    *   <li>{@link Feature#NESTED_VECTOR}
+   *   <li>{@link Feature#BYTE_BINARY_QUANTIZATION}
    * </ul>
    *
    * @return a FeatureFlags with query features enabled
@@ -276,12 +280,11 @@ public class FeatureFlags implements DocumentEncodable {
         .enable(Feature.INDEX_FEATURE_VERSION_FOUR)
         .enable(Feature.SORTED_INDEX)
         .enable(Feature.NESTED_VECTOR)
+        .enable(Feature.BYTE_BINARY_QUANTIZATION)
         .build();
   }
 
-  /**
-   * Returns the Community mongot feature-flag defaults
-   */
+  /** Returns the Community mongot feature-flag defaults */
   public static FeatureFlags communityDefaults() {
     return FeatureFlags.withDefaults()
         .enable(Feature.FACETING_OVER_TOKEN_FIELDS)
@@ -300,6 +303,29 @@ public class FeatureFlags implements DocumentEncodable {
         .enable(Feature.CACHE_WARMER)
         .enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH)
         .enable(Feature.CANCEL_MERGE)
+        .build();
+  }
+
+  /** Returns the Enterprise mongot feature-flag defaults */
+  public static FeatureFlags enterpriseDefaults() {
+    return FeatureFlags.withDefaults()
+        .enable(Feature.FACETING_OVER_TOKEN_FIELDS)
+        .enable(Feature.NEW_EMBEDDED_SEARCH_CAPABILITIES)
+        .enable(Feature.ACCURATE_NUM_EMBEDDED_ROOT_DOCS_METRIC)
+        .enable(Feature.INDEX_FEATURE_VERSION_FOUR)
+        .enable(Feature.SORTED_INDEX)
+        .enable(Feature.STALE_STATE_TRANSITION)
+        .enable(Feature.RETAIN_FAILED_INDEX_DATA_ON_DISK)
+        .enable(Feature.REMOVE_ABSENT_INDEXES_BEFORE_INITIALIZATION)
+        .enable(Feature.SHUT_DOWN_REPLICATION_WHEN_COLLECTION_NOT_FOUND)
+        .enable(Feature.FLOOR_SEGMENT_MB)
+        .enable(Feature.TRUNCATE_AUTOCOMPLETE_TOKENS)
+        .enable(Feature.FTDC_EXECUTOR_METRICS_TO_PROMETHEUS)
+        .enable(Feature.INDEX_SIZE_QUANTIZATION_METRICS)
+        .enable(Feature.CACHE_WARMER)
+        .enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH)
+        .enable(Feature.CANCEL_MERGE)
+        .enable(Feature.OIDC_AUTH)
         .build();
   }
 
@@ -323,6 +349,7 @@ public class FeatureFlags implements DocumentEncodable {
       throw new IllegalStateException("global FeatureFlags already initialized");
     }
     globalFeatureFlags = Optional.of(featureFlags);
+    JsonCodec.setLosslessWriterSupplier(() -> featureFlags.isEnabled(Feature.LOSSLESS_JSON_CODEC));
   }
 
   /**
@@ -353,12 +380,13 @@ public class FeatureFlags implements DocumentEncodable {
       link = "https://jira.mongodb.org/browse/CLOUDP-411746",
       allowedOnPath = ".*/index/lucene/(codec|quantization)/.*|.*FeatureFlagsTest\\.java")
   public static synchronized FeatureFlags getStatic() {
-    return globalFeatureFlags.orElseThrow(() -> new IllegalStateException(
-        "global FeatureFlags not initialized or has been reset"));
+    return globalFeatureFlags.orElseThrow(
+        () -> new IllegalStateException("global FeatureFlags not initialized or has been reset"));
   }
 
   @VisibleForTesting
   static synchronized void resetForTest() {
     globalFeatureFlags = Optional.empty();
+    JsonCodec.setLosslessWriterSupplier(() -> false);
   }
 }

@@ -3,10 +3,11 @@ package com.xgen.mongot.server.command.management.aic;
 import static com.xgen.mongot.server.command.management.definition.common.CommonDefinitions.OK_RESPONSE;
 
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.schema.IndexEntry;
 import com.xgen.mongot.config.provider.community.embedding.AutoEmbeddingIndexValidator;
 import com.xgen.mongot.config.util.Invariants;
 import com.xgen.mongot.config.util.Invariants.AnalyzerInvariants;
@@ -17,10 +18,13 @@ import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.config.IndexDefinitionConfig;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.server.command.management.definition.UpdateSearchIndexCommandDefinition;
+import com.xgen.mongot.server.command.management.definition.common.UserIndexDefinition;
 import com.xgen.mongot.server.command.management.definition.common.UserViewDefinition;
 import com.xgen.mongot.server.command.management.util.IndexMapper;
 import com.xgen.mongot.server.message.MessageUtils;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
 import java.time.Instant;
@@ -109,15 +113,15 @@ public class AicUpdateSearchIndexCommand implements Command {
       Optional<String> viewName = this.view.map(UserViewDefinition::name);
       Optional<ObjectId> indexId = this.definition.id();
       Optional<String> indexName = this.definition.name();
-      Optional<IndexDefinition> matchingIndex =
-          this.authoritativeIndexCatalog.listIndexDefinitions(this.collectionUuid).stream()
+      Optional<IndexEntry> matchingEntry =
+          this.authoritativeIndexCatalog.listIndexes(this.collectionUuid).stream()
               .filter(
-                  index ->
-                      indexName.map(index.getName()::equals).orElse(true)
-                          && indexId.map(index.getIndexId()::equals).orElse(true))
+                  entry ->
+                      indexName.map(entry.indexKey().indexName()::equals).orElse(true)
+                          && indexId.map(entry.indexId()::equals).orElse(true))
               .findAny();
 
-      if (matchingIndex.isEmpty()) {
+      if (matchingEntry.isEmpty()) {
         String idType = this.definition.name().isPresent() ? "name" : "id";
         Object idValue =
             this.definition.name().map(Object.class::cast).or(this.definition::id).orElseThrow();
@@ -128,12 +132,33 @@ public class AicUpdateSearchIndexCommand implements Command {
                 idType, idValue, this.db, viewName.orElse(this.collectionName)));
       }
 
-      IndexDefinition oldIndex = matchingIndex.get();
+      IndexDefinition oldIndex;
+      try (var parser = BsonDocumentParser.fromRoot(matchingEntry.get().definitionBson()).build()) {
+        oldIndex = IndexDefinition.fromBson(parser);
+      } catch (BsonParseException e) {
+        LOG.atWarn()
+            .addKeyValue("indexEntry", matchingEntry.get())
+            .setCause(e)
+            .log("Index definition is stored in an unrecognized format and cannot be updated");
+        return MessageUtils.createError(
+            Errors.COMMAND_FAILED,
+            "Index definition is stored in an unrecognized format and cannot be updated.");
+      }
+      UserIndexDefinition newUserDefinition;
+      try {
+        newUserDefinition = this.definition.indexDefinition(oldIndex.getType());
+      } catch (BsonParseException e) {
+        // The requested definition is client input, so a definition that cannot be parsed is a
+        // client error rather than an internal failure; report it like the other definition-level
+        // rejections below.
+        return MessageUtils.createError(Errors.BAD_VALUE, e.getMessage());
+      }
+
       IndexDefinition newIndex =
           IndexMapper.toInternal(
               oldIndex.getName(),
               Optional.of(oldIndex.getIndexId()),
-              this.definition.indexDefinition(oldIndex.getType()),
+              newUserDefinition,
               oldIndex.getCollectionUuid(),
               this.db,
               this.collectionName,
@@ -151,7 +176,7 @@ public class AicUpdateSearchIndexCommand implements Command {
       List<IndexDefinition> allIndexes = this.authoritativeIndexCatalog.listIndexDefinitions();
       var searchList = new ArrayList<SearchIndexDefinition>();
       var vectorList = new ArrayList<VectorIndexDefinition>();
-      this.authoritativeIndexCatalog.listIndexDefinitions().stream()
+      allIndexes.stream()
           .filter(definition -> !definition.getIndexId().equals(oldIndex.getIndexId()))
           .forEach(
               definition -> {
@@ -164,41 +189,57 @@ public class AicUpdateSearchIndexCommand implements Command {
         case SearchIndexDefinition search -> searchList.add(search);
         case VectorIndexDefinition vector -> vectorList.add(vector);
       }
-      Invariants.validateInvariants(List.of(), searchList, vectorList, allIndexes);
 
       if (newIndex instanceof SearchIndexDefinition searchIndex) {
         try {
           searchIndex.validateEmbeddedDocumentsNestingLevel(
               this.indexDefinitionConfig.getMaxEmbeddedDocumentsNestingLevel());
+          searchIndex.validateSortDefinition();
         } catch (InvalidIndexDefinitionException e) {
           return MessageUtils.createError(Errors.BAD_VALUE, e.getMessage());
         }
         AnalyzerInvariants.validate(searchList, List.of());
         AnalyzerInvariants.validateFieldAnalyzerReferences(searchIndex, Set.of(), Set.of());
+        AnalyzerInvariants.validateSynonymAnalyzersAreReferenceable(searchIndex);
       }
       if (newIndex instanceof VectorIndexDefinition vectorIndex) {
         Invariants.validateVectorNestedRootReferences(List.of(vectorIndex));
       }
 
-      // Validate auto-embedding index update restrictions
-      if (oldIndex instanceof VectorIndexDefinition oldVector
-          && newIndex instanceof VectorIndexDefinition newVector) {
-        AutoEmbeddingIndexValidator.validateNoAutoEmbeddingTypeConversion(oldVector, newVector);
-        if (oldVector.isAutoEmbeddingIndex() && newVector.isAutoEmbeddingIndex()) {
-          AutoEmbeddingIndexValidator.validateNoAutoEmbeddingFieldChanges(oldVector, newVector);
+      // Validate auto-embedding index updates. Converting a type:autoEmbed index to type:vector
+      // is rejected; all other updates (including changes to auto-embedding field values such as
+      // path, model, or quantization) are allowed. The new definition is re-validated like create
+      // (registered models, no mixed vector types) so an update cannot persist a definition that
+      // create would reject; the superseded MV is cleaned up by GC. Failures of these
+      // auto-embedding checks are client errors (BAD_VALUE), matching the same checks in the
+      // create workflow; the catalog/analyzer invariants below return COMMAND_FAILED on create
+      // and update alike.
+      try {
+        if (oldIndex instanceof VectorIndexDefinition oldVector
+            && newIndex instanceof VectorIndexDefinition newVector) {
+          AutoEmbeddingIndexValidator.validateNoAutoEmbeddingTypeConversion(oldVector, newVector);
+          if (newVector.isAutoEmbeddingIndex()) {
+            AutoEmbeddingIndexValidator.validate(newVector);
+          }
+        } else if (oldIndex instanceof SearchIndexDefinition
+            && newIndex instanceof SearchIndexDefinition newSearch) {
+          if (newSearch.isAutoEmbeddingIndex()) {
+            AutoEmbeddingIndexValidator.validate(newSearch);
+          }
+        } else {
+          throw new IllegalStateException(
+              "Cannot compare index definitions of different types: "
+                  + oldIndex.getClass().getSimpleName()
+                  + " vs "
+                  + newIndex.getClass().getSimpleName());
         }
-      } else if (oldIndex instanceof SearchIndexDefinition oldSearch
-          && newIndex instanceof SearchIndexDefinition newSearch) {
-        if (oldSearch.isAutoEmbeddingIndex() && newSearch.isAutoEmbeddingIndex()) {
-          AutoEmbeddingIndexValidator.validateNoAutoEmbeddingFieldChanges(oldSearch, newSearch);
-        }
-      } else {
-        throw new IllegalStateException(
-            "Cannot compare index definitions of different types: "
-                + oldIndex.getClass().getSimpleName()
-                + " vs "
-                + newIndex.getClass().getSimpleName());
+      } catch (InvalidIndexDefinitionException e) {
+        return MessageUtils.createError(Errors.BAD_VALUE, e.getMessage());
       }
+
+      // Run the catalog invariants after the definition-level checks above so a definition that
+      // also violates an invariant reports the same BAD_VALUE error on update as on create.
+      Invariants.validateInvariants(List.of(), searchList, vectorList, allIndexes);
 
       this.authoritativeIndexCatalog.updateIndex(
           new AuthoritativeIndexKey(this.collectionUuid, newIndex.getName()),

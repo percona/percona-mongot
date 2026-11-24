@@ -9,6 +9,7 @@ import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.operators.TextOperator;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
+import com.xgen.mongot.index.query.operators.mql.MqlFilterOperator;
 import com.xgen.mongot.index.query.scores.Score;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import com.xgen.mongot.index.status.IndexStatus;
@@ -16,6 +17,7 @@ import com.xgen.mongot.metrics.micrometer.SerializableTimer;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Enums;
+import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentEncodable;
@@ -145,7 +147,9 @@ public record IndexMetrics(
       Map<FieldName.TypeField, Double> numFieldsPerDatatype,
       Optional<SerializableTimer> batchIndexingTimer,
       Bytes requiredMemory,
-      int numNestedVectorFields)
+      int numNestedVectorFields,
+      long coldStorageSizeBytes,
+      long warmCacheSizeBytes)
       implements DocumentEncodable {
 
     private static class Fields {
@@ -210,6 +214,18 @@ public record IndexMetrics(
 
       private static final Field.WithDefault<Integer> NUM_NESTED_VECTOR_FIELDS =
           Field.builder("numNestedVectorFields").intField().optional().withDefault(0);
+
+      private static final Field.WithDefault<Long> COLD_STORAGE_SIZE_BYTES =
+          Field.builder(VectorliteIndexMetrics.TieredStorageMetrics.COLD_STORAGE_SIZE_BYTES)
+              .longField()
+              .optional()
+              .withDefault(0L);
+
+      private static final Field.WithDefault<Long> WARM_CACHE_SIZE_BYTES =
+          Field.builder(VectorliteIndexMetrics.TieredStorageMetrics.WARM_CACHE_SIZE_BYTES)
+              .longField()
+              .optional()
+              .withDefault(0L);
     }
 
     static IndexingMetrics create(
@@ -228,7 +244,8 @@ public record IndexMetrics(
         long numMongoDbDocs,
         Timer batchIndexingTimer,
         long requiredMemory,
-        int numNestedVectorFields) {
+        int numNestedVectorFields,
+        VectorliteIndexMetrics.TieredStorageMetrics tiered) {
       return new IndexingMetrics(
           getCurrentStatsFromCounters(DocumentEvent.EventType.class, documentEventTypeCounterMap),
           initialSyncExceptionCounter.count(),
@@ -246,7 +263,9 @@ public record IndexMetrics(
           getCurrentStatsFromDouble(FieldName.TypeField.class, numFieldsPerDatatype),
           Optional.of(SerializableTimer.create(batchIndexingTimer)),
           Bytes.ofBytes(requiredMemory),
-          numNestedVectorFields);
+          numNestedVectorFields,
+          tiered.coldStorageSizeBytes(),
+          tiered.warmCacheSizeBytes());
     }
 
     @Override
@@ -271,6 +290,8 @@ public record IndexMetrics(
           .field(Fields.BATCH_INDEXING_TIMER, this.batchIndexingTimer)
           .field(Fields.REQUIRED_MEMORY, this.requiredMemory.toBytes())
           .field(Fields.NUM_NESTED_VECTOR_FIELDS, this.numNestedVectorFields)
+          .field(Fields.COLD_STORAGE_SIZE_BYTES, this.coldStorageSizeBytes)
+          .field(Fields.WARM_CACHE_SIZE_BYTES, this.warmCacheSizeBytes)
           .build();
     }
 
@@ -295,7 +316,9 @@ public record IndexMetrics(
               parser.getField(Fields.NUM_FIELDS_PER_DATATYPE).unwrap(), FieldName.TypeField.class),
           parser.getField(Fields.BATCH_INDEXING_TIMER).unwrap(),
           Bytes.ofBytes(parser.getField(Fields.REQUIRED_MEMORY).unwrap()),
-          parser.getField(Fields.NUM_NESTED_VECTOR_FIELDS).unwrap());
+          parser.getField(Fields.NUM_NESTED_VECTOR_FIELDS).unwrap(),
+          parser.getField(Fields.COLD_STORAGE_SIZE_BYTES).unwrap(),
+          parser.getField(Fields.WARM_CACHE_SIZE_BYTES).unwrap());
     }
   }
 
@@ -307,7 +330,9 @@ public record IndexMetrics(
       SerializableTimer searchResultBatchLatencyStats,
       Optional<SerializableTimer> tokenFacetsStateRefreshLatency,
       Optional<SerializableTimer> stringFacetsStateRefreshLatency,
-      QueryFeaturesMetrics queryFeaturesMetrics)
+      QueryFeaturesMetrics queryFeaturesMetrics,
+      long warmQueriesCount,
+      long coldQueriesCount)
       implements DocumentEncodable {
 
     private static class Fields {
@@ -350,6 +375,20 @@ public record IndexMetrics(
               .disallowUnknownFields()
               .optional()
               .noDefault();
+
+      /** See {@link VectorliteIndexMetrics.TieredStorageMetrics#warmQueriesCount()}. */
+      private static final Field.WithDefault<Long> WARM_QUERIES_COUNT =
+          Field.builder(VectorliteIndexMetrics.TieredStorageMetrics.WARM_QUERIES_COUNT)
+              .longField()
+              .optional()
+              .withDefault(0L);
+
+      /** See {@link VectorliteIndexMetrics.TieredStorageMetrics#coldQueriesCount()}. */
+      private static final Field.WithDefault<Long> COLD_QUERIES_COUNT =
+          Field.builder(VectorliteIndexMetrics.TieredStorageMetrics.COLD_QUERIES_COUNT)
+              .longField()
+              .optional()
+              .withDefault(0L);
     }
 
     static QueryingMetrics create(
@@ -360,7 +399,8 @@ public record IndexMetrics(
         Timer searchResultBatchLatencyTimer,
         Timer tokenFacetsStateRefreshLatencyTimer,
         Timer stringFacetsStateRefreshLatencyTimer,
-        QueryFeaturesMetrics queryFeaturesMetrics) {
+        QueryFeaturesMetrics queryFeaturesMetrics,
+        VectorliteIndexMetrics.TieredStorageMetrics tiered) {
 
       return new QueryingMetrics(
           totalQueryCounter.count(),
@@ -370,7 +410,9 @@ public record IndexMetrics(
           SerializableTimer.create(searchResultBatchLatencyTimer),
           Optional.of(SerializableTimer.create(tokenFacetsStateRefreshLatencyTimer)),
           Optional.of(SerializableTimer.create(stringFacetsStateRefreshLatencyTimer)),
-          queryFeaturesMetrics);
+          queryFeaturesMetrics,
+          tiered.warmQueriesCount(),
+          tiered.coldQueriesCount());
     }
 
     @Override
@@ -383,8 +425,10 @@ public record IndexMetrics(
               .field(Fields.SEARCH_GET_MORE_COMMAND_COUNT, this.searchGetMoreCommandCount)
               .field(Fields.SEARCH_GET_RESULT_BATCH_LATENCY, this.searchResultBatchLatencyStats)
               .field(Fields.TOKEN_FACET_STATE_REFRESH_LATENCY, this.tokenFacetsStateRefreshLatency)
-              .field(Fields.STRING_FACET_STATE_REFRESH_LATENCY,
-                  this.stringFacetsStateRefreshLatency)
+              .field(
+                  Fields.STRING_FACET_STATE_REFRESH_LATENCY, this.stringFacetsStateRefreshLatency)
+              .field(Fields.WARM_QUERIES_COUNT, this.warmQueriesCount)
+              .field(Fields.COLD_QUERIES_COUNT, this.coldQueriesCount)
               .build();
 
       queryingStats.putAll(this.queryFeaturesMetrics.toBson());
@@ -401,7 +445,9 @@ public record IndexMetrics(
           parser.getField(Fields.SEARCH_GET_RESULT_BATCH_LATENCY).unwrap(),
           parser.getField(Fields.TOKEN_FACET_STATE_REFRESH_LATENCY).unwrap(),
           parser.getField(Fields.STRING_FACET_STATE_REFRESH_LATENCY).unwrap(),
-          QueryFeaturesMetrics.fromBson(parser));
+          QueryFeaturesMetrics.fromBson(parser),
+          parser.getField(Fields.WARM_QUERIES_COUNT).unwrap(),
+          parser.getField(Fields.COLD_QUERIES_COUNT).unwrap());
     }
 
     public record QueryFeaturesMetrics(
@@ -413,6 +459,9 @@ public record IndexMetrics(
         Map<VectorSearchCriteria.Type, Double> vectorSearchQueryTypeCountMap,
         Map<Operator.Type, Double> knnBetaFilterOperatorTypeCounterMap,
         Map<Operator.Type, Double> searchVectorSearchFilterOperatorTypeCounterMap,
+        Map<MqlFilterOperator.Category, Double> vectorSearchFilterOperatorCategoryCountMap,
+        Map<Vector.BsonEncoding, Double> vectorSearchQueryVectorEncodingCountMap,
+        double vectorSearchFilterCount,
         double synonymCount,
         double textSynonymCount,
         double textSynonymsWithoutMatchCriteriaCount,
@@ -429,6 +478,8 @@ public record IndexMetrics(
         double sortCount,
         double trackingCount,
         double returnScopeCount,
+        double embeddedScopedFacetCount,
+        double embeddedScopedSortCount,
         double facetDrillSidewaysOptimizableCount,
         double facetDrillSidewaysGenericCount)
         implements DocumentEncodable {
@@ -488,6 +539,12 @@ public record IndexMetrics(
         private static final Field.WithDefault<Double> RETURNSCOPE_COUNT =
             Field.builder("returnScopeCount").doubleField().optional().withDefault(0.0);
 
+        private static final Field.WithDefault<Double> EMBEDDED_SCOPED_FACET_COUNT =
+            Field.builder("embeddedScopedFacetCount").doubleField().optional().withDefault(0.0);
+
+        private static final Field.WithDefault<Double> EMBEDDED_SCOPED_SORT_COUNT =
+            Field.builder("embeddedScopedSortCount").doubleField().optional().withDefault(0.0);
+
         private static final Field.Required<BsonDocument> COLLECTOR_TYPE_COUNT =
             Field.builder("collectorTypeCount").documentField().required();
 
@@ -530,6 +587,25 @@ public record IndexMetrics(
                     .optional()
                     .withDefault(statsMapToBson(statsMapWithDefault(Operator.Type.class, 0.0)));
 
+        private static final Field.WithDefault<BsonDocument>
+            VECTOR_SEARCH_FILTER_OPERATOR_CATEGORY_COUNT =
+                Field.builder("vectorSearchFilterOperatorCategoryCount")
+                    .documentField()
+                    .optional()
+                    .withDefault(
+                        statsMapToBson(statsMapWithDefault(MqlFilterOperator.Category.class, 0.0)));
+
+        private static final Field.WithDefault<BsonDocument>
+            VECTOR_SEARCH_QUERY_VECTOR_ENCODING_COUNT =
+                Field.builder("vectorSearchQueryVectorEncodingCount")
+                    .documentField()
+                    .optional()
+                    .withDefault(
+                        statsMapToBson(statsMapWithDefault(Vector.BsonEncoding.class, 0.0)));
+
+        private static final Field.WithDefault<Double> VECTOR_SEARCH_FILTER_COUNT =
+            Field.builder("vectorSearchFilterCount").doubleField().optional().withDefault(0.0);
+
         private static final Field.WithDefault<Double> FACET_DRILL_SIDEWAYS_OPTIMIZABLE_COUNT =
             Field.builder("facetDrillSidewaysOptimizableCount")
                 .doubleField()
@@ -552,6 +628,9 @@ public record IndexMetrics(
           Map<VectorSearchCriteria.Type, Counter> vectorSearchQueryCounterMap,
           Map<Operator.Type, Counter> knnBetaFilterOperatorTypeCounterMap,
           Map<Operator.Type, Counter> searchVectorSearchFilterOperatorTypeCounterMap,
+          Map<MqlFilterOperator.Category, Counter> vectorSearchFilterOperatorCategoryCounterMap,
+          Map<Vector.BsonEncoding, Counter> vectorSearchQueryVectorEncodingCounterMap,
+          Counter vectorSearchFilterCounter,
           Counter synonymCounter,
           Counter textSynonymCounter,
           Counter textSynonymsWithoutMatchCriteriaCounter,
@@ -568,6 +647,8 @@ public record IndexMetrics(
           Counter trackingCounter,
           Counter requireSequenceTokensCounter,
           Counter returnScopeCounter,
+          Counter embeddedScopedFacetCounter,
+          Counter embeddedScopedSortCounter,
           double facetDrillSidewaysOptimizableCount,
           double facetDrillSidewaysGenericCount) {
         return new QueryFeaturesMetrics(
@@ -582,6 +663,11 @@ public record IndexMetrics(
             getCurrentStatsFromCounters(Operator.Type.class, knnBetaFilterOperatorTypeCounterMap),
             getCurrentStatsFromCounters(
                 Operator.Type.class, searchVectorSearchFilterOperatorTypeCounterMap),
+            getCurrentStatsFromCounters(
+                MqlFilterOperator.Category.class, vectorSearchFilterOperatorCategoryCounterMap),
+            getCurrentStatsFromCounters(
+                Vector.BsonEncoding.class, vectorSearchQueryVectorEncodingCounterMap),
+            vectorSearchFilterCounter.count(),
             synonymCounter.count(),
             textSynonymCounter.count(),
             textSynonymsWithoutMatchCriteriaCounter.count(),
@@ -598,6 +684,8 @@ public record IndexMetrics(
             sortCounter.count(),
             trackingCounter.count(),
             returnScopeCounter.count(),
+            embeddedScopedFacetCounter.count(),
+            embeddedScopedSortCounter.count(),
             facetDrillSidewaysOptimizableCount,
             facetDrillSidewaysGenericCount);
       }
@@ -612,7 +700,6 @@ public record IndexMetrics(
             .field(Fields.FUZZY_COUNT, this.fuzzyCount)
             .field(Fields.WILDCARD_PATH_COUNT, this.wildcardPathCount)
             .field(Fields.HIGHLIGHTING_COUNT, this.highlightingCount)
-            .field(Fields.HIGHLIGHTING_COUNT, this.highlightingCount)
             .field(Fields.CONCURRENT_COUNT, this.concurrentCount)
             .field(Fields.RETURN_STORED_SOURCE_COUNT, this.returnStoredSourceCount)
             .field(Fields.SEQUENCE_TOKEN_COUNT, this.sequenceTokenCount)
@@ -622,6 +709,8 @@ public record IndexMetrics(
             .field(Fields.SORT_COUNT, this.sortCount)
             .field(Fields.TRACKING_COUNT, this.trackingCount)
             .field(Fields.RETURNSCOPE_COUNT, this.returnScopeCount)
+            .field(Fields.EMBEDDED_SCOPED_FACET_COUNT, this.embeddedScopedFacetCount)
+            .field(Fields.EMBEDDED_SCOPED_SORT_COUNT, this.embeddedScopedSortCount)
             .field(Fields.COLLECTOR_TYPE_COUNT, statsMapToBson(this.collectorTypeCountMap))
             .field(Fields.OPERATOR_TYPE_COUNT, statsMapToBson(this.operatorTypeCountMap))
             .field(Fields.SCORE_TYPE_COUNT, statsMapToBson(this.scoreTypeCountMap))
@@ -636,7 +725,15 @@ public record IndexMetrics(
             .field(
                 Fields.SEARCH_VECTOR_SEARCH_FILTER_OPERATOR_TYPE_COUNT,
                 statsMapToBson(this.searchVectorSearchFilterOperatorTypeCounterMap))
-            .field(Fields.FACET_DRILL_SIDEWAYS_OPTIMIZABLE_COUNT,
+            .field(
+                Fields.VECTOR_SEARCH_FILTER_OPERATOR_CATEGORY_COUNT,
+                statsMapToBson(this.vectorSearchFilterOperatorCategoryCountMap))
+            .field(
+                Fields.VECTOR_SEARCH_QUERY_VECTOR_ENCODING_COUNT,
+                statsMapToBson(this.vectorSearchQueryVectorEncodingCountMap))
+            .field(Fields.VECTOR_SEARCH_FILTER_COUNT, this.vectorSearchFilterCount)
+            .field(
+                Fields.FACET_DRILL_SIDEWAYS_OPTIMIZABLE_COUNT,
                 this.facetDrillSidewaysOptimizableCount)
             .field(Fields.FACET_DRILL_SIDEWAYS_GENERIC_COUNT, this.facetDrillSidewaysGenericCount)
             .build();
@@ -665,6 +762,13 @@ public record IndexMetrics(
             bsonToStatsMap(
                 parser.getField(Fields.SEARCH_VECTOR_SEARCH_FILTER_OPERATOR_TYPE_COUNT).unwrap(),
                 Operator.Type.class),
+            bsonToStatsMap(
+                parser.getField(Fields.VECTOR_SEARCH_FILTER_OPERATOR_CATEGORY_COUNT).unwrap(),
+                MqlFilterOperator.Category.class),
+            bsonToStatsMap(
+                parser.getField(Fields.VECTOR_SEARCH_QUERY_VECTOR_ENCODING_COUNT).unwrap(),
+                Vector.BsonEncoding.class),
+            parser.getField(Fields.VECTOR_SEARCH_FILTER_COUNT).unwrap(),
             parser.getField(Fields.SYNONYM_COUNT).unwrap(),
             parser.getField(Fields.TEXT_SYNONYM_COUNT).unwrap(),
             parser.getField(Fields.TEXT_DEPRECATED_SYNONYM_COUNT).unwrap(),
@@ -681,6 +785,8 @@ public record IndexMetrics(
             parser.getField(Fields.SORT_COUNT).unwrap(),
             parser.getField(Fields.TRACKING_COUNT).unwrap(),
             parser.getField(Fields.RETURNSCOPE_COUNT).unwrap(),
+            parser.getField(Fields.EMBEDDED_SCOPED_FACET_COUNT).unwrap(),
+            parser.getField(Fields.EMBEDDED_SCOPED_SORT_COUNT).unwrap(),
             parser.getField(Fields.FACET_DRILL_SIDEWAYS_OPTIMIZABLE_COUNT).unwrap(),
             parser.getField(Fields.FACET_DRILL_SIDEWAYS_GENERIC_COUNT).unwrap());
       }
@@ -717,8 +823,8 @@ public record IndexMetrics(
             Collectors.toMap(
                 entry -> Enums.convertNameTo(CaseFormat.LOWER_CAMEL, entry.getKey()),
                 entry -> new BsonDouble(entry.getValue()),
-                (prevCountBson, newCountBson) -> Check.unreachable(
-                    "Duplicate enum key should not occur"),
+                (prevCountBson, newCountBson) ->
+                    Check.unreachable("Duplicate enum key should not occur"),
                 BsonDocument::new));
   }
 

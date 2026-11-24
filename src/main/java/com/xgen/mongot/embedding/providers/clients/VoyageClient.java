@@ -40,6 +40,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import javax.net.ssl.SSLException;
+import org.apache.commons.lang3.StringUtils;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.jetbrains.annotations.Nullable;
@@ -72,6 +73,22 @@ public class VoyageClient implements ClientInterface {
   private static final Duration HTTP_CLIENT_SHUTDOWN_NOW_AWAIT = Duration.ofSeconds(2);
   private static final String BATCH_SIZE_TOO_LARGE_ERROR_MESSAGE =
       "Please lower the number of tokens in the batch";
+
+  /**
+   * Above this many input tokens, Voyage serves the request from its document-tier serving queue
+   * (the one indexing workloads share) regardless of the {@value #VOYAGE_HEADER_TIER} header we
+   * sent; at or under it, Voyage serves from the query-dedicated queue. This is an implicit
+   * agreement with Voyage, not something mongot can discover dynamically, so it is hardcoded rather
+   * than configured.
+   */
+  private static final int VOYAGE_LATENCY_TIER_TOKEN_THRESHOLD = 512;
+
+  /**
+   * Bucket boundaries (seconds) for {@code embeddingRequestLatencySeconds}; must include exact 1s
+   * and 5s cutoffs to match the auto-embedding-query-latency SLO thresholds.
+   */
+  private static final double[] REQUEST_LATENCY_SECONDS_BUCKETS = {0.1, 0.25, 0.5, 1, 2, 5, 10};
+
   private final String inputType;
   private final String modelId;
   private URI endpoint;
@@ -79,6 +96,12 @@ public class VoyageClient implements ClientInterface {
   private final Counter invalidRequestCounter;
   private final Counter congestionEventCounter;
   private final Counter aimdSuccessCounter;
+  // AutoEmbedding counters published to the search-auto-embedding MaaS usecase.
+  private final Counter maasTokenUsageCounter;
+  // embeddingRequests is split by outcome via a status tag (success|failed); failed series also
+  // carry an errorCode tag, so they are resolved dynamically off this sibling factory.
+  private final Counter maasEmbeddingRequestsSuccessCounter;
+  private final MetricsFactory maasEmbeddingMetricsFactory;
   private final MetricsFactory metricsFactory;
   private @Nullable DynamicSemaphore congestionSemaphore;
 
@@ -109,6 +132,14 @@ public class VoyageClient implements ClientInterface {
 
   private static final int MAX_INDEX_NAME_LENGTH = 256;
 
+  /**
+   * Caps how much of a Voyage error response body is embedded in the {@link
+   * EmbeddingProviderTransientException} message for an otherwise-unhandled 400, since that body
+   * can echo request input and the message ends up in a log line (see {@code
+   * EmbeddingIndexingWorkScheduler}'s BLOCK/SKIP logging).
+   */
+  private static final int MAX_LOGGED_RESPONSE_BODY_LENGTH = 500;
+
   @VisibleForTesting public static final String VOYAGE_API_FLEX_TIER = "flex";
 
   /**
@@ -129,9 +160,7 @@ public class VoyageClient implements ClientInterface {
     return VOYAGE_MODELS_SUPPORTING_FLEX_TIER.contains(modelId.toLowerCase(Locale.ROOT));
   }
 
-  /**
-   * HTTP headers for Voyage Client API
-   */
+  /** HTTP headers for Voyage Client API */
   @VisibleForTesting public static final String VOYAGE_HEADER_MODEL = "X-Voyage-Model";
 
   @VisibleForTesting public static final String VOYAGE_HEADER_TIER = "X-Voyage-Tier";
@@ -144,9 +173,7 @@ public class VoyageClient implements ClientInterface {
   /** Value for {@link #VOYAGE_HEADER_TIER} for document workloads (non-query, non-flex). */
   private static final String VOYAGE_TIER_HEADER_DOCUMENT = "document";
 
-  /**
-   * Long timeout for flex (any tier) or non-query workloads; short only for query without flex.
-   */
+  /** Long timeout for flex (any tier) or non-query workloads; short only for query without flex. */
   private static Duration resolveVoyageHttpTimeout(
       EmbeddingServiceConfig.ServiceTier tier, boolean useFlexTier) {
     if (useFlexTier) {
@@ -195,6 +222,23 @@ public class VoyageClient implements ClientInterface {
     this.invalidRequestCounter = metricsFactory.counter("invalidRequestCounter");
     this.congestionEventCounter = metricsFactory.counter("aimdCongestionEvents");
     this.aimdSuccessCounter = metricsFactory.counter("aimdSuccessfulRequests");
+    // Sibling factory drops the parent's 3-value "workload" tag so these MaaS metrics
+    // carry only {provider, canonicalModel, phase} for the search-auto-embedding usecase.
+    MetricsFactory maasMetricsFactory =
+        metricsFactory.siblingMetricsFactory(
+            "autoEmbedding",
+            Tags.of(
+                "provider", embeddingModelConfig.provider().name(),
+                "canonicalModel", embeddingModelConfig.name(),
+                "phase", tier.phase()));
+    this.maasTokenUsageCounter = maasMetricsFactory.counter("tokenUsage");
+    // errorCode="none" on success keeps this series' tag-key set identical to the failed series
+    // ({..., status, errorCode}); Prometheus-backed registries reject one metric name with two
+    // differing key sets.
+    this.maasEmbeddingRequestsSuccessCounter =
+        maasMetricsFactory.counter(
+            "embeddingRequests", Tags.of("status", "success", "errorCode", "none"));
+    this.maasEmbeddingMetricsFactory = maasMetricsFactory;
     updateConfig(workloadParams);
 
     // Dedicated clusters must have credentialToken set
@@ -216,7 +260,8 @@ public class VoyageClient implements ClientInterface {
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
           recordProviderErrorMetric(
-              EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL);
+              EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL,
+              context.isRebatchAttempt());
           throw new EmbeddingProviderTransientException(
               "Interrupted while acquiring semaphore",
               EmbeddingProviderTransientException.Reason.CLIENT_SIDE_CONGESTION_CONTROL);
@@ -232,7 +277,7 @@ public class VoyageClient implements ClientInterface {
 
       // Extract tenant ID if needed and select appropriate credentials
       Optional<String> tenantId = extractTenantIdIfNeeded(context);
-      String apiToken = selectApiToken(tenantId);
+      String apiToken = selectApiToken(tenantId, context.isRebatchAttempt());
 
       LOG.debug(
           "Sending Voyage embedding request: model={}, endpoint={},"
@@ -253,12 +298,22 @@ public class VoyageClient implements ClientInterface {
         IllegalArgumentException cleanedException =
             new IllegalArgumentException(cleanedMessage, e.getCause());
         LOG.error("HTTP Request Error", cleanedException);
-        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR);
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR,
+            context.isRebatchAttempt());
         throw new EmbeddingProviderTransientException(
             cleanedException, EmbeddingProviderTransientException.Reason.HTTP_REQUEST_ERROR);
       }
       renewHttpClientIfStale();
       HttpClient clientForRequest = this.voyageHttpClient;
+      // Each provider call actually issued (post input-validation, pre-send) is counted once in
+      // the finally below, tagged by outcome (status=success|failed) and, on failure, the HTTP
+      // errorCode.
+      @Var boolean requestSucceeded = false;
+      // HTTP status of a failure (e.g. 408/429/500); "none" when the failure carries no HTTP
+      // status.
+      @Var String failureErrorCode = "none";
+      long requestStartNanos = System.nanoTime();
       try {
         HttpResponse<String> response =
             clientForRequest.send(request, HttpResponse.BodyHandlers.ofString());
@@ -267,8 +322,10 @@ public class VoyageClient implements ClientInterface {
             this.modelId,
             response.statusCode(),
             filteredInput.size());
-        var vectorResponse = extractVectorsFromResponse(response, inputs, context);
+        var vectorResponse =
+            extractVectorsFromResponse(response, inputs, context, requestStartNanos);
         isAck = true;
+        requestSucceeded = true;
         return vectorResponse;
       } catch (HttpTimeoutException e) {
         if (e instanceof HttpConnectTimeoutException) {
@@ -276,23 +333,31 @@ public class VoyageClient implements ClientInterface {
         }
         LOG.error("Got timeout when sending voyage API request", e);
         isAck = false;
+        failureErrorCode = "408";
         recordProviderErrorMetric(
-            EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT, Optional.of(408));
+            EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT,
+            Optional.of(408),
+            context.isRebatchAttempt());
         throw new EmbeddingProviderTransientException(
             e, EmbeddingProviderTransientException.Reason.HTTP_TIMEOUT);
       } catch (EmbeddingProviderRateLimitException e) {
         LOG.error("Got rate-limit error when sending voyage API request", e);
         isAck = false;
+        failureErrorCode = "429";
         // EmbeddingProviderRateLimitException is only thrown from the HTTP 429 branch in
         // extractVectorsFromResponse, so the status code is always 429.
         recordProviderErrorMetric(
-            EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED, Optional.of(429));
-        throw new EmbeddingProviderTransientException(
-            e, EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED);
+            EmbeddingProviderTransientException.Reason.RATE_LIMIT_EXCEEDED,
+            Optional.of(429),
+            context.isRebatchAttempt());
+        // Rethrow the original subclass to preserve the UserFacingException marker.
+        throw e;
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         LOG.error("Got an error when sending voyage API request", e);
-        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED);
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED,
+            context.isRebatchAttempt());
         throw new EmbeddingProviderTransientException(
             e, EmbeddingProviderTransientException.Reason.THREAD_INTERRUPTED);
       } catch (IOException e) {
@@ -300,12 +365,24 @@ public class VoyageClient implements ClientInterface {
           renewHttpClientAfterConnectionFailure(e, clientForRequest);
         }
         LOG.error("Got an error when sending voyage API request", e);
-        recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION);
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION,
+            context.isRebatchAttempt());
         throw new EmbeddingProviderTransientException(
             e, EmbeddingProviderTransientException.Reason.HTTP_IO_EXCEPTION);
       } catch (EmbeddingProviderTransientException e) {
         LOG.error("Got an error when processing voyage API response", e);
+        failureErrorCode = e.getHttpStatusCode().map(Object::toString).orElse("none");
         throw e;
+      } finally {
+        if (requestSucceeded) {
+          this.maasEmbeddingRequestsSuccessCounter.increment();
+        } else {
+          this.maasEmbeddingMetricsFactory
+              .counter(
+                  "embeddingRequests", Tags.of("status", "failed", "errorCode", failureErrorCode))
+              .increment();
+        }
       }
     } finally {
       if (this.useFlexTier && this.congestionSemaphore != null) {
@@ -324,8 +401,9 @@ public class VoyageClient implements ClientInterface {
     }
   }
 
-  private void recordProviderErrorMetric(EmbeddingProviderTransientException.Reason reason) {
-    recordProviderErrorMetric(reason, Optional.empty());
+  private void recordProviderErrorMetric(
+      EmbeddingProviderTransientException.Reason reason, boolean isRebatchAttempt) {
+    recordProviderErrorMetric(reason, Optional.empty(), isRebatchAttempt);
   }
 
   /**
@@ -333,11 +411,18 @@ public class VoyageClient implements ClientInterface {
    * when the failure is a Voyage HTTP error response (e.g. 408, 429, 500). When there is no HTTP
    * error response — network errors, client-side request-build failures, or parse errors on
    * otherwise-successful (2xx) responses — it is empty and the {@code errorCode} tag is set to
-   * {@code "none"}. Both server-side HTTP 408 and client-side request timeouts are tagged as
-   * {@code 408}.
+   * {@code "none"}. Both server-side HTTP 408 and client-side request timeouts are tagged as {@code
+   * 408}.
+   *
+   * <p>{@code isRebatchAttempt} (from {@link EmbeddingRequestContext#isRebatchAttempt()})
+   * distinguishes a payload-too-large failure that persists even after {@link
+   * com.xgen.mongot.embedding.providers.EmbeddingServiceManager} rebatches at a smaller size from
+   * the original oversized-batch attempt, which self-heals via that rebatch.
    */
   private void recordProviderErrorMetric(
-      EmbeddingProviderTransientException.Reason reason, Optional<Integer> httpStatusCode) {
+      EmbeddingProviderTransientException.Reason reason,
+      Optional<Integer> httpStatusCode,
+      boolean isRebatchAttempt) {
     this.metricsFactory
         .counter(
             "embeddingProviderErrors",
@@ -347,7 +432,9 @@ public class VoyageClient implements ClientInterface {
                 "reason",
                 reason.name().toLowerCase(Locale.ROOT),
                 "errorCode",
-                httpStatusCode.map(Object::toString).orElse("none")))
+                httpStatusCode.map(Object::toString).orElse("none"),
+                "rebatchAttempt",
+                String.valueOf(isRebatchAttempt)))
         .increment();
   }
 
@@ -375,7 +462,7 @@ public class VoyageClient implements ClientInterface {
    * Select the appropriate API token based on cluster type and tenant ID. For dedicated clusters,
    * use the default credentialToken. For MTM clusters, look up tenant-specific credentials.
    */
-  private String selectApiToken(Optional<String> tenantId)
+  private String selectApiToken(Optional<String> tenantId, boolean isRebatchAttempt)
       throws EmbeddingProviderTransientException, IllegalStateException {
     if (this.isDedicatedCluster) {
       if (this.credentialToken == null) {
@@ -390,7 +477,8 @@ public class VoyageClient implements ClientInterface {
       if (tenantId.isEmpty()) {
         LOG.error("Unable to extract tenant ID from database name for MTM cluster");
         recordProviderErrorMetric(
-            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE,
+            isRebatchAttempt);
         throw new EmbeddingProviderTransientException(
             "Unable to extract tenant ID from database name for MTM cluster. "
                 + "Database name must be in format 'tenantId_dbName'.",
@@ -404,7 +492,8 @@ public class VoyageClient implements ClientInterface {
             tenant,
             this.tenantCredentials.keySet());
         recordProviderErrorMetric(
-            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
+            EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE,
+            isRebatchAttempt);
         throw new EmbeddingProviderTransientException(
             String.format("Unable to find credentials for tenant: %s", tenant),
             EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE);
@@ -702,30 +791,68 @@ public class VoyageClient implements ClientInterface {
   }
 
   private List<VectorOrError> extractVectorsFromResponse(
-      HttpResponse<String> response, List<String> inputs, EmbeddingRequestContext context)
+      HttpResponse<String> response,
+      List<String> inputs,
+      EmbeddingRequestContext context,
+      long requestStartNanos)
       throws EmbeddingProviderTransientException,
           EmbeddingProviderBatchingException,
           HttpTimeoutException {
     int statusCode = response.statusCode();
     if (statusCode == 400) {
-      String errorMessage =
-          String.format(
-              "Got invalid request, fail fast and give up retries." + " Response body: %s.",
-              response.body());
       // TODO(CLOUDP-344098): Formalize the voyage response format or error code to avoid
       // miscategorizing the oversized batch request (VOYAGE-471)
       if (response.body().contains(BATCH_SIZE_TOO_LARGE_ERROR_MESSAGE)) {
-        throw new EmbeddingProviderBatchingException(errorMessage);
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.PAYLOAD_TOO_LARGE,
+            Optional.of(400),
+            context.isRebatchAttempt());
+        throw new EmbeddingProviderBatchingException(
+            String.format(
+                "Got invalid request, fail fast and give up retries. Response body: %s.",
+                response.body()));
+      } else if (this.serviceTier == EmbeddingServiceConfig.ServiceTier.QUERY) {
+        // Query-time embedding is synchronous, not retried, and has no BLOCK/SKIP concept - the
+        // caller (VectorSearchCommand) translates this VectorOrError's errorMessage into its own
+        // query error. Throwing here would escape uncaught as an internal error instead, since
+        // EmbeddingProviderTransientException isn't a UserFacingException. Preserve the pre-fix
+        // swallow behavior for this tier only; indexing tiers (below) still throw.
+        this.invalidRequestCounter.increment();
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.HTTP_INVALID_REQUEST,
+            Optional.of(400),
+            context.isRebatchAttempt());
+        String errorMessage =
+            String.format(
+                "Got invalid request, fail fast and give up retries. Response body: %s.",
+                response.body());
+        return inputs.stream().map(ignored -> new VectorOrError(errorMessage)).toList();
       } else {
-        LOG.warn(errorMessage);
         // TODO(CLOUDP-344098): Add alerts in Control Plane to notify clients directly.
         this.invalidRequestCounter.increment();
-        return inputs.stream().map(ignored -> new VectorOrError(errorMessage)).toList();
+        recordProviderErrorMetric(
+            EmbeddingProviderTransientException.Reason.HTTP_INVALID_REQUEST,
+            Optional.of(400),
+            context.isRebatchAttempt());
+        // Retried indefinitely at the index's checkpoint (BLOCK) unless AUTO_EMBEDDING_400_SKIP
+        // is enabled for this index; not logged here to avoid spamming the raw response body on
+        // every retry — the rate-limited logging in EmbeddingIndexingWorkScheduler covers it.
+        // The response body is bounded before it's embedded in the message below, since it can
+        // echo input text and this message is what ends up in that rate-limited log line.
+        throw new EmbeddingProviderTransientException(
+            String.format(
+                "Got invalid request from embedding provider (HTTP 400); index will block and"
+                    + " retry at its checkpoint until resolved or AUTO_EMBEDDING_400_SKIP is"
+                    + " enabled. Response body: %s.",
+                StringUtils.abbreviate(response.body(), MAX_LOGGED_RESPONSE_BODY_LENGTH)),
+            EmbeddingProviderTransientException.Reason.HTTP_INVALID_REQUEST);
       }
     }
     if (statusCode == 429) {
+      // Message is user-facing; keep it free of raw provider response bodies.
+      LOG.warn("Voyage 429 response body: {}", response.body());
       throw new EmbeddingProviderRateLimitException(
-          String.format("Rate limit exceeded (HTTP 429). Response body: %s", response.body()));
+          "Embedding provider rate limit exceeded, retry later");
     }
     if (statusCode == 408) {
       throw new HttpTimeoutException(
@@ -733,10 +860,13 @@ public class VoyageClient implements ClientInterface {
     }
     if (statusCode > 400) {
       recordProviderErrorMetric(
-          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS, Optional.of(statusCode));
+          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS,
+          Optional.of(statusCode),
+          context.isRebatchAttempt());
       throw new EmbeddingProviderTransientException(
           String.format("Got non OK status from response, status code: %s", statusCode),
-          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS);
+          EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS,
+          Optional.of(statusCode));
     }
     try {
       String outputDataType = getOutputDataType(context.autoEmbedQuantization());
@@ -747,6 +877,7 @@ public class VoyageClient implements ClientInterface {
                   .build(),
               outputDataType);
       this.inputTokenDistribution.record(embedResponse.embedUsage.totalTokens);
+      this.maasTokenUsageCounter.increment(embedResponse.embedUsage.totalTokens);
       List<VectorOrError> results = new ArrayList<>();
       var iterator = embedResponse.data.iterator();
       for (String input : inputs) {
@@ -756,11 +887,31 @@ public class VoyageClient implements ClientInterface {
           results.add(new VectorOrError(iterator.next().embedding));
         }
       }
+      // Recorded only once results are fully built, so a schema-valid response with too few
+      // data entries (iterator.next() throws) isn't counted as a successful latency sample.
+      double elapsedSeconds = (System.nanoTime() - requestStartNanos) / 1_000_000_000.0;
+      // The declared X-Voyage-Tier only gets silently overridden to "document" when we
+      // declared "query" and the input is over the token threshold; indexing tiers (which
+      // always declare "document") and flex-tier requests are never subject to this
+      // token-based override, so they keep whatever tier they actually declared.
+      @Var String actualTier = voyageTierHeaderValue();
+      if (VOYAGE_TIER_HEADER_QUERY.equals(actualTier)
+          && embedResponse.embedUsage.totalTokens > VOYAGE_LATENCY_TIER_TOKEN_THRESHOLD) {
+        actualTier = VOYAGE_TIER_HEADER_DOCUMENT;
+      }
+      this.metricsFactory
+          .histogram(
+              "embeddingRequestLatencySeconds",
+              Tags.of("tier", actualTier),
+              REQUEST_LATENCY_SECONDS_BUCKETS)
+          .record(elapsedSeconds);
       return results;
     } catch (BsonParseException e) {
       // The Voyage HTTP response itself succeeded; only the body failed to parse, so there is no
       // meaningful error code to report.
-      recordProviderErrorMetric(EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR);
+      recordProviderErrorMetric(
+          EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR,
+          context.isRebatchAttempt());
       throw new EmbeddingProviderTransientException(
           e, EmbeddingProviderTransientException.Reason.RESPONSE_PARSE_ERROR);
     }

@@ -1,5 +1,8 @@
 package com.xgen.mongot.index.query;
 
+import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.index.query.collectors.AggregationCollector;
+import com.xgen.mongot.index.query.collectors.AggregationValidator;
 import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.counts.Count;
 import com.xgen.mongot.index.query.highlights.UnresolvedHighlight;
@@ -9,6 +12,7 @@ import com.xgen.mongot.index.query.sort.SequenceToken;
 import com.xgen.mongot.index.query.sort.Sort;
 import com.xgen.mongot.index.query.sort.SortBetaV1;
 import com.xgen.mongot.index.query.sort.SortSpec;
+import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import com.xgen.mongot.trace.Tracing;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
@@ -78,18 +82,24 @@ public sealed interface SearchQuery extends Query permits CollectorQuery, Operat
     return fromBson(document, QueryOptimizationFlags.DEFAULT_OPTIONS);
   }
 
+  /**
+   * Parses a search query with {@link SearchQueryParseOptions#DEFAULT}. This overload has no
+   * feature-flag registry, so it does not evaluate DFFs; {@code search} and {@code
+   * planShardedSearch} pass explicit {@link SearchQueryParseOptions}.
+   */
   static SearchQuery fromBson(BsonDocument document, QueryOptimizationFlags queryOptimizationFlags)
       throws BsonParseException {
-    return fromBson(document, queryOptimizationFlags, false);
+    return fromBson(document, queryOptimizationFlags, SearchQueryParseOptions.DEFAULT);
   }
 
   private static SearchQuery fromBson(
       DocumentParser parser,
       QueryOptimizationFlags queryOptimizationFlags,
-      boolean allow10k)
+      SearchQueryParseOptions parseOptions,
+      boolean useAggregation)
       throws BsonParseException {
     var operator = Operator.atMostOneFromBson(parser);
-    var collector = Collector.atMostOneFromBson(parser, allow10k);
+    var collector = Collector.atMostOneFromBson(parser, parseOptions.allow10k(), useAggregation);
     if (operator.isPresent() && collector.isPresent()) {
       parser
           .getContext()
@@ -101,10 +111,31 @@ public sealed interface SearchQuery extends Query permits CollectorQuery, Operat
             .getGroup()
             .atMostOneOf(parser.getField(Fields.SORT_BETA_V1), parser.getField(Fields.SORT));
 
+    var returnScope = parser.getField(Fields.RETURN_SCOPE);
+    // Gate at the query boundary as well as execution, including planShardedSearch and searchMeta.
+    if (sortSpec.isPresent()) {
+      for (var sortField : sortSpec.get().getSortFields()) {
+        if (sortField.options() instanceof UserFieldSortOptions options
+            && options.embeddedScope().isPresent()) {
+          var scopeContext =
+              parser
+                  .getContext()
+                  .child(getSortBsonField(sortSpec.get()).getName())
+                  .child(sortField.field().toString())
+                  .child("embeddedDocument");
+          if (!parseOptions.embeddedScopedSortEnabled()) {
+            scopeContext.handleSemanticError("is not currently supported on this cluster");
+          }
+          if (returnScope.unwrap().isPresent()) {
+            scopeContext.handleSemanticError("cannot be used with returnScope");
+          }
+        }
+      }
+    }
+
     var searchBefore = parser.getField(Fields.SEARCH_BEFORE);
     var searchAfter = parser.getField(Fields.SEARCH_AFTER);
     var sequenceToken = parser.getGroup().atMostOneOf(searchAfter, searchBefore);
-    var returnScope = parser.getField(Fields.RETURN_SCOPE);
     var returnStoredSource = parser.getField(Fields.STORED_SOURCE);
     // Don't care about the value, just want to validate deserialization
     parser.getField(Query.Fields.SEARCH_NODE_PREFERENCE).unwrap();
@@ -148,8 +179,18 @@ public sealed interface SearchQuery extends Query permits CollectorQuery, Operat
         validator.validate(
             collector.get().getOperator().get(), returnScope.unwrap().map(ReturnScope::path));
       }
+      // The global sort on an aggregation collector is borrowed solely to order first/last
+      // metrics; it is rejected when no facet tree carries one, rather than being silently
+      // ignored. Legacy facet requests are untouched: a sort there stays accepted-and-ignored
+      // exactly as today, in both feature-flag states.
+      @Var Collector resolvedCollector = collector.get();
+      if (resolvedCollector instanceof AggregationCollector aggregationCollector) {
+        AggregationValidator validator = new AggregationValidator(parser.getContext());
+        validator.validateSort(aggregationCollector, sortSpec);
+        resolvedCollector = aggregationCollector.withSortSpec(sortSpec);
+      }
       return new CollectorQuery(
-          collector.get(),
+          resolvedCollector,
           parser.getField(Query.Fields.INDEX).unwrap(),
           parser.getField(Fields.COUNT).unwrap(),
           parser.getField(Fields.HIGHLIGHT).unwrap(),
@@ -168,14 +209,25 @@ public sealed interface SearchQuery extends Query permits CollectorQuery, Operat
     return parser.getContext().handleSemanticError(errorDescription);
   }
 
+  /**
+   * Parses a search query with the given feature gates, optionally routing an aggregation-capable
+   * {@code facet} request onto the aggregation path.
+   *
+   * @param document the search query document to parse
+   * @param queryOptimizationFlags optimization flags applied while building the parsed query
+   * @param parseOptions feature gates for 10k facet bounds and search aggregation
+   */
   static SearchQuery fromBson(
       BsonDocument document,
       QueryOptimizationFlags queryOptimizationFlags,
-      boolean allow10k)
+      SearchQueryParseOptions parseOptions)
       throws BsonParseException {
+    boolean useAggregation =
+        parseOptions.searchAggregationEnabled()
+            && AggregationCollector.isAggregationCapable(document);
     try (var guard = Tracing.simpleSpanGuard("Query.fromBson")) {
       try (var parser = BsonDocumentParser.fromRoot(document).build()) {
-        return fromBson(parser, queryOptimizationFlags, allow10k);
+        return fromBson(parser, queryOptimizationFlags, parseOptions, useAggregation);
       }
     }
   }
@@ -200,6 +252,19 @@ public sealed interface SearchQuery extends Query permits CollectorQuery, Operat
       return this.rawSortSpec().map(SortSpec::invert).or(() -> Optional.of(Sort.REVERSE_RELEVANCE));
     }
     return this.rawSortSpec();
+  }
+
+  /**
+   * Whether the query's sort is consumed by a {@code first} or {@code last} aggregation metric,
+   * which orders the documents within each bucket to pick that bucket's winner.
+   *
+   * <p>Unlike ordering the returned documents, this is meta output, so it survives {@code
+   * $searchMeta}.
+   */
+  default boolean sortDrivesAggregation() {
+    return this instanceof CollectorQuery collectorQuery
+        && collectorQuery.collector() instanceof AggregationCollector aggregationCollector
+        && aggregationCollector.usesFirstOrLast();
   }
 
   /**

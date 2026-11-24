@@ -1,6 +1,7 @@
 package com.xgen.mongot.server.grpc;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -12,8 +13,9 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.cursor.MongotCursorManager;
-import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.metrics.ServerStatusDataExtractor.LoadSheddingMeterData;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.server.command.CommandFactory;
@@ -26,13 +28,17 @@ import com.xgen.mongot.server.message.MessageMessage;
 import com.xgen.mongot.server.message.MessageSection;
 import com.xgen.mongot.server.message.MessageSectionBody;
 import com.xgen.mongot.server.message.OpCode;
+import com.xgen.mongot.util.ErrorType;
 import com.xgen.mongot.util.mongodb.Errors;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.cumulative.CumulativeTimer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -71,7 +77,9 @@ public class StreamingMessageHandlerTest {
           this.cursorManager,
           SearchEnvoyMetadata.getDefaultInstance(),
           /* envoyAttemptCount */ 1,
-          FeatureFlags.getDefault(),
+          /* envoyMaxAttemptCount */ 3,
+          /* isShadow */ false,
+          /* envoyInRequestPath */ false,
           this.responseObserver);
 
   final InOrder inOrder = Mockito.inOrder(this.responseObserver, this.cursorManager);
@@ -98,16 +106,105 @@ public class StreamingMessageHandlerTest {
     this.inOrder.verify(this.responseObserver, timeout(5000).times(1)).onCompleted();
   }
 
+  private double commandFailureCount(
+      String commandName, Class<? extends Throwable> exceptionClass, ErrorType errorType) {
+    var counter =
+        this.meterRegistry
+            .find("command." + commandName + "CommandFailure")
+            .tags(
+                "exceptionName",
+                exceptionClass.getSimpleName(),
+                ErrorType.METRIC_TAG_KEY,
+                errorType.toString())
+            .counter();
+    return counter == null ? 0 : counter.count();
+  }
+
+  private static double counterTotal(MeterRegistry registry, String name) {
+    return registry.find(name).counters().stream().mapToDouble(Counter::count).sum();
+  }
+
+  private static double envoyRetryTotal(MeterRegistry registry, String outcome) {
+    return registry
+        .find(LoadSheddingMeterData.ENVOY_RETRY)
+        .tag(LoadSheddingMeterData.ENVOY_RETRY_OUTCOME_TAG, outcome)
+        .counters()
+        .stream()
+        .mapToDouble(Counter::count)
+        .sum();
+  }
+
+  private static double totalRequests(MeterRegistry registry, String retryLabel) {
+    return registry
+        .find(LoadSheddingMeterData.TOTAL_REQUESTS)
+        .tag(LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TAG, retryLabel)
+        .counters()
+        .stream()
+        .mapToDouble(Counter::count)
+        .sum();
+  }
+
+  @Test
+  public void commandFailureMetric_hasPrometheusCompatibleTagKeys() {
+    var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+    var commandRegistry = CommandRegistry.create(registry);
+    commandRegistry.registerCommand(
+        ThrowExceptionCommand.Name,
+        (CommandFactory) ignored -> new ThrowExceptionCommand(Command.ExecutionPolicy.SYNC),
+        true);
+    var registration = commandRegistry.getCommandRegistration(ThrowExceptionCommand.Name);
+
+    registration.recordFailure(new RuntimeException("exception"));
+    registration.recordFailure(new OutOfMemoryError("error"));
+
+    Assert.assertEquals(
+        1.0,
+        registry
+            .find("command." + ThrowExceptionCommand.Name + "CommandFailure")
+            .tags(
+                "exceptionName",
+                RuntimeException.class.getSimpleName(),
+                ErrorType.METRIC_TAG_KEY,
+                ErrorType.INTERNAL_ERROR.toString())
+            .counter()
+            .count(),
+        0.0);
+    Assert.assertEquals(
+        1.0,
+        registry
+            .find("command." + ThrowExceptionCommand.Name + "CommandFailure")
+            .tags(
+                "exceptionName",
+                OutOfMemoryError.class.getSimpleName(),
+                ErrorType.METRIC_TAG_KEY,
+                ErrorType.INTERNAL_ERROR.toString())
+            .counter()
+            .count(),
+        0.0);
+  }
+
   /**
    * Verifies that a single {@link MessageMessage} that wraps an error message is sent to the {@code
    * responseObserver}.
    */
   private void verifyServerErrorResponse(String expectedErrorMessage) {
+    captureServerErrorResponse(expectedErrorMessage);
+  }
+
+  /** Like {@link #verifyServerErrorResponse(String)} but also checks the error code fields. */
+  private void verifyServerErrorResponse(String expectedErrorMessage, Errors.Error expectedError) {
+    var bsonDocument = captureServerErrorResponse(expectedErrorMessage);
+    Assert.assertEquals(expectedError.code, bsonDocument.getInt32("code").getValue());
+    Assert.assertEquals(expectedError.name, bsonDocument.getString("codeName").getValue());
+  }
+
+  private BsonDocument captureServerErrorResponse(String expectedErrorMessage) {
     ArgumentCaptor<MessageMessage> captor = ArgumentCaptor.forClass(MessageMessage.class);
     this.inOrder.verify(this.responseObserver, timeout(5000).times(1)).onNext(captor.capture());
     var bsonDocument = ((MessageSectionBody) captor.getValue().sections().get(0)).body;
     Assert.assertEquals(0, bsonDocument.getInt32("ok").getValue());
     Assert.assertEquals(expectedErrorMessage, bsonDocument.getString("errmsg").getValue());
+    return bsonDocument;
   }
 
   /** Verifies that {@code responseObserver} is not called. */
@@ -253,6 +350,26 @@ public class StreamingMessageHandlerTest {
     }
   }
 
+  private static class ThrowErrorCommand implements Command {
+
+    private static final String Name = "throwErrorCommand";
+
+    @Override
+    public String name() {
+      return Name;
+    }
+
+    @Override
+    public BsonDocument run() {
+      throw new OutOfMemoryError("throw error by command");
+    }
+
+    @Override
+    public ExecutionPolicy getExecutionPolicy() {
+      return ExecutionPolicy.ASYNC;
+    }
+  }
+
   private static class CreateCursorsCommand implements Command {
 
     private static final String Name = "createCursorsCommand";
@@ -332,6 +449,38 @@ public class StreamingMessageHandlerTest {
   }
 
   @Test
+  public void onNext_envoyAttemptGreaterThanOne_labelsTotalRequestsAsRetry() {
+    this.commandRegistry.registerCommand(
+        IdentityCommand.Name,
+        (CommandFactory) args -> new IdentityCommand(args, Command.ExecutionPolicy.SYNC),
+        true);
+    WireMessageCallHandler retryHandler =
+        new WireMessageCallHandler(
+            this.commandRegistry,
+            this.executorManager.commandExecutor,
+            this.cursorManager,
+            SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 2,
+            /* envoyMaxAttemptCount */ 3,
+            /* isShadow */ false,
+            /* envoyInRequestPath */ false,
+            this.responseObserver);
+
+    BsonDocument document = new BsonDocument().append(IdentityCommand.Name, new BsonString("foo"));
+    retryHandler.onNext(createOpMsgFromBsonDocument(document));
+    verifyServerResponse(document);
+
+    Assert.assertEquals(
+        1.0,
+        totalRequests(this.meterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TRUE),
+        0.0);
+    Assert.assertEquals(
+        0.0,
+        totalRequests(this.meterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_FALSE),
+        0.0);
+  }
+
+  @Test
   public void handleAsyncCommand() {
     this.commandRegistry.registerCommand(
         IdentityCommand.Name,
@@ -363,7 +512,8 @@ public class StreamingMessageHandlerTest {
   public void invalidCommandName() {
     BsonDocument document = new BsonDocument().append("invalidCommandName", BsonBoolean.TRUE);
     this.messageHandler.onNext(createOpMsgFromBsonDocument(document));
-    verifyServerErrorResponse("no command registered for invalidCommandName");
+    verifyServerErrorResponse(
+        "no command registered for invalidCommandName", Errors.COMMAND_NOT_FOUND);
 
     this.messageHandler.onCompleted();
     verifyServerHalfClosed();
@@ -373,9 +523,7 @@ public class StreamingMessageHandlerTest {
   public void invalidFactoryType() {
     String testSessionCommandName = "saslStart";
     this.commandRegistry.registerInsecureCommand(
-        testSessionCommandName,
-        () -> CommandFactoryMarker.Type.SESSION_COMMAND_FACTORY,
-        true);
+        testSessionCommandName, () -> CommandFactoryMarker.Type.SESSION_COMMAND_FACTORY, true);
     BsonDocument document =
         new BsonDocument().append(testSessionCommandName, new BsonString("foo"));
     this.messageHandler.onNext(createOpMsgFromBsonDocument(document));
@@ -383,7 +531,8 @@ public class StreamingMessageHandlerTest {
         "do not know how to work with the command factory of " + testSessionCommandName);
     Assert.assertEquals(
         1.00,
-        this.commandRegistry.getCommandRegistration(testSessionCommandName).failureCounter.count(),
+        commandFailureCount(
+            testSessionCommandName, IllegalArgumentException.class, ErrorType.USER_FACING_ERROR),
         0.0);
 
     this.messageHandler.onCompleted();
@@ -401,10 +550,8 @@ public class StreamingMessageHandlerTest {
     verifyServerErrorResponse("throw exception by command");
     Assert.assertEquals(
         1.00,
-        this.commandRegistry
-            .getCommandRegistration(ThrowExceptionCommand.Name)
-            .failureCounter
-            .count(),
+        commandFailureCount(
+            ThrowExceptionCommand.Name, RuntimeException.class, ErrorType.INTERNAL_ERROR),
         0.0);
 
     this.messageHandler.onCompleted();
@@ -428,10 +575,23 @@ public class StreamingMessageHandlerTest {
     this.executorManager.commandExecutor.close();
     Assert.assertEquals(
         1.00,
-        this.commandRegistry
-            .getCommandRegistration(ThrowExceptionCommand.Name)
-            .failureCounter
-            .count(),
+        commandFailureCount(
+            ThrowExceptionCommand.Name, RuntimeException.class, ErrorType.INTERNAL_ERROR),
+        0.0);
+  }
+
+  @Test
+  public void throwErrorInAsyncCommand_recordsTaggedCommandFailure() {
+    this.commandRegistry.registerCommand(
+        ThrowErrorCommand.Name, (CommandFactory) ignored -> new ThrowErrorCommand(), true);
+    BsonDocument document = new BsonDocument().append(ThrowErrorCommand.Name, BsonBoolean.TRUE);
+
+    this.messageHandler.onNext(createOpMsgFromBsonDocument(document));
+    verifyServerErrorResponse("throw error by command");
+    Assert.assertEquals(
+        1.00,
+        commandFailureCount(
+            ThrowErrorCommand.Name, OutOfMemoryError.class, ErrorType.INTERNAL_ERROR),
         0.0);
   }
 
@@ -487,6 +647,44 @@ public class StreamingMessageHandlerTest {
     this.messageHandler.onError(Status.CANCELLED.asRuntimeException());
     verifyServerHalfClosed();
     verifyKilledCursors(CreateCursorsCommand.SEARCH_CURSOR_ID, CreateCursorsCommand.META_CURSOR_ID);
+  }
+
+  @Test
+  public void onNext_shadowStream_killsCreatedCursorsAfterResponse() {
+    this.commandRegistry.registerCommand(
+        CreateCursorsCommand.Name, (CommandFactory) args -> new CreateCursorsCommand(), true);
+    WireMessageCallHandler shadowHandler =
+        new WireMessageCallHandler(
+            this.commandRegistry,
+            this.executorManager.commandExecutor,
+            this.cursorManager,
+            SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 1,
+            /* envoyMaxAttemptCount */ 3,
+            /* isShadow */ true,
+            /* envoyInRequestPath */ false,
+            this.responseObserver);
+    BsonDocument document = new BsonDocument().append(CreateCursorsCommand.Name, BsonBoolean.TRUE);
+
+    shadowHandler.onNext(createOpMsgFromBsonDocument(document));
+
+    // Envoy discards the shadow response and never sends a getMore/killCursors here, so the cursors
+    // are killed as soon as the response is built rather than waiting for stream cancellation.
+    verifyServerResponse(new BsonDocument());
+    verifyKilledCursors(CreateCursorsCommand.SEARCH_CURSOR_ID, CreateCursorsCommand.META_CURSOR_ID);
+  }
+
+  @Test
+  public void onNext_normalStream_keepsCursorsAliveUntilStreamCloses() {
+    this.commandRegistry.registerCommand(
+        CreateCursorsCommand.Name, (CommandFactory) args -> new CreateCursorsCommand(), true);
+    BsonDocument document = new BsonDocument().append(CreateCursorsCommand.Name, BsonBoolean.TRUE);
+
+    this.messageHandler.onNext(createOpMsgFromBsonDocument(document));
+
+    // A non-shadow stream expects a follow-up getMore, so nothing is killed until cancellation.
+    verifyServerResponse(new BsonDocument());
+    verify(this.cursorManager, after(1000).never()).killCursor(anyLong());
   }
 
   @Test
@@ -582,8 +780,7 @@ public class StreamingMessageHandlerTest {
     RegularBlockingRequestSettings settings =
         RegularBlockingRequestSettings.create(
             Optional.of(0.001), Optional.of(0.001), Optional.of(false));
-    ExecutorManager boundedExecutorManager =
-        new ExecutorManager(boundedMeterRegistry, settings);
+    ExecutorManager boundedExecutorManager = new ExecutorManager(boundedMeterRegistry, settings);
 
     StreamObserver<MessageMessage> boundedResponseObserver =
         mock(MessageMessageStreamObserver.class);
@@ -594,7 +791,9 @@ public class StreamingMessageHandlerTest {
             this.cursorManager,
             SearchEnvoyMetadata.getDefaultInstance(),
             /* envoyAttemptCount */ 1,
-            FeatureFlags.getDefault(),
+            /* envoyMaxAttemptCount */ 3,
+            /* isShadow */ false,
+            /* envoyInRequestPath */ false,
             boundedResponseObserver);
 
     CountDownLatch blockingLatch = new CountDownLatch(1);
@@ -666,8 +865,7 @@ public class StreamingMessageHandlerTest {
             && bsonDocument.getInt32("ok").getValue() == 0
             && bsonDocument.containsKey("errmsg")) {
           String errorMsg = bsonDocument.getString("errmsg").getValue();
-          if (errorMsg.contains("Query rejected")
-              && errorMsg.contains("currently at capacity")) {
+          if (errorMsg.contains("Query rejected") && errorMsg.contains("currently at capacity")) {
             rejectionErrorDoc = bsonDocument;
             break;
           }
@@ -680,8 +878,11 @@ public class StreamingMessageHandlerTest {
       Assert.assertTrue(
           "Expected code field in rejection response", rejectionErrorDoc.containsKey("code"));
       Assert.assertEquals(
-          "Expected error code " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
-              + " (" + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.name + ")",
+          "Expected error code "
+              + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
+              + " ("
+              + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.name
+              + ")",
           Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code,
           rejectionErrorDoc.getInt32("code").getValue());
       Assert.assertTrue(
@@ -716,8 +917,7 @@ public class StreamingMessageHandlerTest {
       }
       Assert.assertTrue(
           "Expected SystemOverloadedError label in rejection response", hasSystemOverloadedError);
-      Assert.assertTrue(
-          "Expected RetryableError label in rejection response", hasRetryableError);
+      Assert.assertTrue("Expected RetryableError label in rejection response", hasRetryableError);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();
@@ -732,12 +932,10 @@ public class StreamingMessageHandlerTest {
     RegularBlockingRequestSettings settings =
         RegularBlockingRequestSettings.create(
             Optional.of(0.001), Optional.of(0.001), Optional.of(false));
-    ExecutorManager boundedExecutorManager =
-        new ExecutorManager(boundedMeterRegistry, settings);
+    ExecutorManager boundedExecutorManager = new ExecutorManager(boundedMeterRegistry, settings);
     StreamObserver<MessageMessage> boundedResponseObserver =
         mock(MessageMessageStreamObserver.class);
 
-    FeatureFlags flagsOff = FeatureFlags.getDefault();
     // attempt count = 1 would trigger retry if the flag were on.
     WireMessageCallHandler boundedHandler =
         new WireMessageCallHandler(
@@ -746,7 +944,9 @@ public class StreamingMessageHandlerTest {
             this.cursorManager,
             SearchEnvoyMetadata.getDefaultInstance(),
             /* envoyAttemptCount */ 1,
-            flagsOff,
+            /* envoyMaxAttemptCount */ 3,
+            /* isShadow */ false,
+            /* envoyInRequestPath */ false,
             boundedResponseObserver);
 
     CountDownLatch blockingLatch = new CountDownLatch(1);
@@ -784,30 +984,62 @@ public class StreamingMessageHandlerTest {
         true);
 
     try {
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
       taskStartedLatch.await(5, TimeUnit.SECONDS);
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
       Thread.sleep(50);
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
 
       // Should get BSON error via onNext, not gRPC error via onError
       ArgumentCaptor<MessageMessage> captor = ArgumentCaptor.forClass(MessageMessage.class);
       verify(boundedResponseObserver, timeout(5000).atLeast(1)).onNext(captor.capture());
       verify(boundedResponseObserver, after(1000).never()).onError(any());
 
-      boolean foundBsonError = captor.getAllValues().stream().anyMatch(msg -> {
-        BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
-        return doc.containsKey("code")
-            && doc.getInt32("code").getValue()
-                == Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code;
-      });
+      boolean foundBsonError =
+          captor.getAllValues().stream()
+              .anyMatch(
+                  msg -> {
+                    BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
+                    return doc.containsKey("code")
+                        && doc.getInt32("code").getValue()
+                            == Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code;
+                  });
       Assert.assertTrue(
-          "Expected BSON error with code " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
+          "Expected BSON error with code "
+              + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
               + " when flag is off",
           foundBsonError);
+
+      // With the retry flag off, rejections are plain load shedding and register no envoy-retry
+      // series.
+      Assert.assertEquals(
+          "expected no envoyRetry rejected total when flag off",
+          0.0,
+          envoyRetryTotal(boundedMeterRegistry, LoadSheddingMeterData.ENVOY_RETRY_REJECTED),
+          0.0);
+      Assert.assertEquals(
+          "expected no envoyRetry exhausted total when flag off",
+          0.0,
+          envoyRetryTotal(boundedMeterRegistry, LoadSheddingMeterData.ENVOY_RETRY_EXHAUSTED),
+          0.0);
+      Assert.assertTrue(
+          "expected totalRequests >= 1",
+          counterTotal(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS) >= 1.0);
+      Assert.assertTrue(
+          "expected first-attempt totalRequests (retry=false)",
+          totalRequests(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_FALSE)
+              >= 1.0);
+      Assert.assertEquals(
+          "expected no retry-labeled totalRequests on attempt 1",
+          0.0,
+          totalRequests(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TRUE),
+          0.0);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();
@@ -823,12 +1055,16 @@ public class StreamingMessageHandlerTest {
         RegularBlockingRequestSettings.create(
             Optional.of(0.001), Optional.of(0.001), Optional.of(false));
     ExecutorManager boundedExecutorManager =
-        new ExecutorManager(boundedMeterRegistry, settings);
+        new ExecutorManager(
+            boundedMeterRegistry,
+            settings,
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            Optional.empty(),
+            true);
     StreamObserver<MessageMessage> boundedResponseObserver =
         mock(MessageMessageStreamObserver.class);
 
-    FeatureFlags flagsOn =
-        FeatureFlags.withDefaults().enable(Feature.OVERLOAD_RETRY_SIGNAL).build();
     // attempt count = 1 (< 3), so rejection should trigger gRPC RESOURCE_EXHAUSTED.
     WireMessageCallHandler boundedHandler =
         new WireMessageCallHandler(
@@ -837,7 +1073,9 @@ public class StreamingMessageHandlerTest {
             this.cursorManager,
             SearchEnvoyMetadata.getDefaultInstance(),
             /* envoyAttemptCount */ 1,
-            flagsOn,
+            /* envoyMaxAttemptCount */ 3,
+            /* isShadow */ false,
+            /* envoyInRequestPath */ false,
             boundedResponseObserver);
 
     CountDownLatch blockingLatch = new CountDownLatch(1);
@@ -875,28 +1113,55 @@ public class StreamingMessageHandlerTest {
         true);
 
     try {
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
       taskStartedLatch.await(5, TimeUnit.SECONDS);
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
       Thread.sleep(50);
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
 
       // Should get gRPC RESOURCE_EXHAUSTED via onError
       ArgumentCaptor<Throwable> errorCaptor = ArgumentCaptor.forClass(Throwable.class);
       verify(boundedResponseObserver, timeout(5000).atLeastOnce()).onError(errorCaptor.capture());
 
-      boolean foundResourceExhausted = errorCaptor.getAllValues().stream().anyMatch(t -> {
-        if (t instanceof StatusRuntimeException sre) {
-          return sre.getStatus().getCode() == Status.Code.RESOURCE_EXHAUSTED;
-        }
-        return false;
-      });
+      boolean foundResourceExhausted =
+          errorCaptor.getAllValues().stream()
+              .anyMatch(
+                  t -> {
+                    if (t instanceof StatusRuntimeException sre) {
+                      return sre.getStatus().getCode() == Status.Code.RESOURCE_EXHAUSTED;
+                    }
+                    return false;
+                  });
       Assert.assertTrue(
-          "Expected gRPC RESOURCE_EXHAUSTED when flag on and attempt < 3",
-          foundResourceExhausted);
+          "Expected gRPC RESOURCE_EXHAUSTED when flag on and attempt < 3", foundResourceExhausted);
+
+      // A retryable rejection (attempt < 3) records the "rejected" outcome, never "exhausted".
+      Assert.assertTrue(
+          "expected envoyRetry rejected total > 0",
+          envoyRetryTotal(boundedMeterRegistry, LoadSheddingMeterData.ENVOY_RETRY_REJECTED) >= 1.0);
+      Assert.assertEquals(
+          "expected no envoyRetry exhausted total for retryable attempts",
+          0.0,
+          envoyRetryTotal(boundedMeterRegistry, LoadSheddingMeterData.ENVOY_RETRY_EXHAUSTED),
+          0.0);
+      Assert.assertTrue(
+          "expected totalRequests >= 1",
+          counterTotal(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS) >= 1.0);
+      Assert.assertTrue(
+          "expected first-attempt totalRequests (retry=false)",
+          totalRequests(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_FALSE)
+              >= 1.0);
+      Assert.assertEquals(
+          "expected no retry-labeled totalRequests on attempt 1",
+          0.0,
+          totalRequests(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TRUE),
+          0.0);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();
@@ -912,13 +1177,17 @@ public class StreamingMessageHandlerTest {
         RegularBlockingRequestSettings.create(
             Optional.of(0.001), Optional.of(0.001), Optional.of(false));
     ExecutorManager boundedExecutorManager =
-        new ExecutorManager(boundedMeterRegistry, settings);
+        new ExecutorManager(
+            boundedMeterRegistry,
+            settings,
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            Optional.empty(),
+            true);
     StreamObserver<MessageMessage> boundedResponseObserver =
         mock(MessageMessageStreamObserver.class);
 
-    FeatureFlags flagsOn =
-        FeatureFlags.withDefaults().enable(Feature.OVERLOAD_RETRY_SIGNAL).build();
-    // attempt count = 3 (>= MAX_ENVOY_RETRY_ATTEMPTS), so rejection should return BSON error.
+    // attempt count = 3 is the whole budget, so rejection should return BSON error.
     WireMessageCallHandler boundedHandler =
         new WireMessageCallHandler(
             boundedCommandRegistry,
@@ -926,7 +1195,9 @@ public class StreamingMessageHandlerTest {
             this.cursorManager,
             SearchEnvoyMetadata.getDefaultInstance(),
             /* envoyAttemptCount */ 3,
-            flagsOn,
+            /* envoyMaxAttemptCount */ 3,
+            /* isShadow */ false,
+            /* envoyInRequestPath */ false,
             boundedResponseObserver);
 
     CountDownLatch blockingLatch = new CountDownLatch(1);
@@ -964,30 +1235,161 @@ public class StreamingMessageHandlerTest {
         true);
 
     try {
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
       taskStartedLatch.await(5, TimeUnit.SECONDS);
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
       Thread.sleep(50);
-      boundedHandler.onNext(createOpMsgFromBsonDocument(
-          new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
 
       // Should get BSON error via onNext, not gRPC error
       ArgumentCaptor<MessageMessage> captor = ArgumentCaptor.forClass(MessageMessage.class);
       verify(boundedResponseObserver, timeout(5000).atLeast(1)).onNext(captor.capture());
       verify(boundedResponseObserver, after(1000).never()).onError(any());
 
-      boolean foundBsonError = captor.getAllValues().stream().anyMatch(msg -> {
-        BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
-        return doc.containsKey("code")
-            && doc.getInt32("code").getValue()
-                == Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code;
-      });
+      boolean foundBsonError =
+          captor.getAllValues().stream()
+              .anyMatch(
+                  msg -> {
+                    BsonDocument doc = ((MessageSectionBody) msg.sections().get(0)).body;
+                    return doc.containsKey("code")
+                        && doc.getInt32("code").getValue()
+                            == Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code;
+                  });
       Assert.assertTrue(
-          "Expected BSON error with code " + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
+          "Expected BSON error with code "
+              + Errors.SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD.code
               + " when attempt >= 3",
           foundBsonError);
+
+      // The final attempt (attempt >= 3) records the "exhausted" outcome, never "rejected".
+      Assert.assertTrue(
+          "expected envoyRetry exhausted total > 0",
+          envoyRetryTotal(boundedMeterRegistry, LoadSheddingMeterData.ENVOY_RETRY_EXHAUSTED)
+              >= 1.0);
+      Assert.assertEquals(
+          "expected no envoyRetry rejected total for the final attempt",
+          0.0,
+          envoyRetryTotal(boundedMeterRegistry, LoadSheddingMeterData.ENVOY_RETRY_REJECTED),
+          0.0);
+      Assert.assertTrue(
+          "expected totalRequests >= 1",
+          counterTotal(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS) >= 1.0);
+      Assert.assertTrue(
+          "expected retry-labeled totalRequests (retry=true) on attempt 3",
+          totalRequests(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_TRUE)
+              >= 1.0);
+      Assert.assertEquals(
+          "expected no first-attempt totalRequests on attempt 3",
+          0.0,
+          totalRequests(boundedMeterRegistry, LoadSheddingMeterData.TOTAL_REQUESTS_RETRY_FALSE),
+          0.0);
+    } finally {
+      blockingLatch.countDown();
+      boundedExecutorManager.commandExecutor.close();
+    }
+  }
+
+  @Test
+  public void onNext_loadShedding_flagEnabled_budgetRaisedByEnvoy_sendsResourceExhausted()
+      throws InterruptedException {
+    SimpleMeterRegistry boundedMeterRegistry = new SimpleMeterRegistry();
+    CommandRegistry boundedCommandRegistry = CommandRegistry.create(boundedMeterRegistry);
+    RegularBlockingRequestSettings settings =
+        RegularBlockingRequestSettings.create(
+            Optional.of(0.001), Optional.of(0.001), Optional.of(false));
+    ExecutorManager boundedExecutorManager =
+        new ExecutorManager(
+            boundedMeterRegistry,
+            settings,
+            FeatureFlags.getDefault(),
+            DynamicFeatureFlagRegistry.empty(),
+            Optional.empty(),
+            true);
+    StreamObserver<MessageMessage> boundedResponseObserver =
+        mock(MessageMessageStreamObserver.class);
+
+    // Attempt 3 would exhaust the default budget, but search envoy advertised 5 attempts, so this
+    // rejection is still retriable.
+    WireMessageCallHandler boundedHandler =
+        new WireMessageCallHandler(
+            boundedCommandRegistry,
+            boundedExecutorManager.commandExecutor,
+            this.cursorManager,
+            SearchEnvoyMetadata.getDefaultInstance(),
+            /* envoyAttemptCount */ 3,
+            /* envoyMaxAttemptCount */ 5,
+            /* isShadow */ false,
+            /* envoyInRequestPath */ false,
+            boundedResponseObserver);
+
+    CountDownLatch blockingLatch = new CountDownLatch(1);
+    CountDownLatch taskStartedLatch = new CountDownLatch(1);
+    boundedCommandRegistry.registerCommand(
+        "blockingCommand",
+        (CommandFactory)
+            ignored ->
+                new Command() {
+                  @Override
+                  public String name() {
+                    return "blockingCommand";
+                  }
+
+                  @Override
+                  public BsonDocument run() {
+                    taskStartedLatch.countDown();
+                    try {
+                      blockingLatch.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                    }
+                    return new BsonDocument();
+                  }
+
+                  @Override
+                  public ExecutionPolicy getExecutionPolicy() {
+                    return ExecutionPolicy.ASYNC;
+                  }
+                },
+        true);
+    boundedCommandRegistry.registerCommand(
+        IdentityCommand.Name,
+        (CommandFactory) args -> new IdentityCommand(args, Command.ExecutionPolicy.ASYNC),
+        true);
+
+    try {
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append("blockingCommand", BsonBoolean.TRUE)));
+      taskStartedLatch.await(5, TimeUnit.SECONDS);
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, BsonBoolean.TRUE)));
+      Thread.sleep(50);
+      boundedHandler.onNext(
+          createOpMsgFromBsonDocument(
+              new BsonDocument().append(IdentityCommand.Name, new BsonString("rejected"))));
+
+      ArgumentCaptor<Throwable> errorCaptor = ArgumentCaptor.forClass(Throwable.class);
+      verify(boundedResponseObserver, timeout(5000).atLeastOnce()).onError(errorCaptor.capture());
+
+      boolean foundResourceExhausted =
+          errorCaptor.getAllValues().stream()
+              .anyMatch(
+                  t -> {
+                    if (t instanceof StatusRuntimeException sre) {
+                      return sre.getStatus().getCode() == Status.Code.RESOURCE_EXHAUSTED;
+                    }
+                    return false;
+                  });
+      Assert.assertTrue(
+          "Expected gRPC RESOURCE_EXHAUSTED when envoy advertises a budget above the attempt",
+          foundResourceExhausted);
     } finally {
       blockingLatch.countDown();
       boundedExecutorManager.commandExecutor.close();

@@ -14,6 +14,7 @@ java_library(
         "Condition.java",
         "Crash.java",
         "CumulativeDuration.java",
+        "DeploymentEnvironment.java",
         "DirectorySize.java",
         "DurationUtils.java",
         "Enums.java",

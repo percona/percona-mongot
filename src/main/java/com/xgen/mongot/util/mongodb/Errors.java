@@ -28,8 +28,11 @@ public class Errors {
   public static final Error INDEX_NOT_FOUND = new Error(27, "IndexNotFound");
 
   public static final Error CURSOR_NOT_FOUND = new Error(43, "CursorNotFound");
+  public static final Error NAMESPACE_EXISTS = new Error(48, "NamespaceExists");
 
   public static final Error MAX_TIME_MS_EXPIRED = new Error(50, "MaxTimeMSExpired");
+
+  public static final Error COMMAND_NOT_FOUND = new Error(59, "CommandNotFound");
 
   public static final Error INDEX_ALREADY_EXISTS = new Error(68, "IndexAlreadyExists");
   public static final Error AUTH_SCHEMA_INCOMPATIBLE = new Error(69, "AuthSchemaIncompatible");
@@ -60,6 +63,11 @@ public class Errors {
   public static final Error SEARCH_REQUEST_REJECTED_DUE_TO_OVERLOAD =
       new Error(489, "SearchRequestRejectedDueToOverload");
 
+  // Returned by mongod's search index management coordinator when it cannot reach mongot (e.g.
+  // mongot is still answering UNAVAILABLE in the brief window after a restart).
+  public static final Error SEARCH_INDEX_MANAGEMENT_HOST_UNREACHABLE =
+      new Error(508, "SearchIndexManagementHostUnreachable");
+
   public static final Error USER_WRITES_BLOCKED = new Error(371, "UserWritesBlocked");
 
   // SystemOverloadedError category — server under resource pressure.
@@ -77,16 +85,48 @@ public class Errors {
   public static final Error IDL_UNKNOWN_FIELD = new Error(40415, "IDLUnknownField");
 
   public static final Error IDL_FAILED_TO_PARSE = new Error(40414, "IDLFailedToParse");
+
+  // Returned by mongod when a replication command (e.g. the collection scan or change stream
+  // aggregate) is blocked because it matches an operation rejection filter configured via
+  // setQuerySettings (reject: true). Resyncing keeps hitting the same rejection until the filter
+  // is removed.
+  public static final Error QUERY_REJECTED_BY_SETTINGS = new Error(411, "QueryRejectedBySettings");
+
   public static final Error INITIAL_SYNC_ID_MISMATCH = new Error(8132701, "InitialSyncIdMismatch");
   public static final Error NO_QUERY_EXECUTION_PLANS = new Error(291, "NoQueryExecutionPlans");
 
   public static final Set<Integer> RETRYABLE_ERROR_CODES =
       Set.of(
-          6, 7, 63, 89, 91, 133, 150, 189, 234, 262, 462, 489, 9001, 10107, 11600, 11602, 13388,
-          13435, 13436);
+          6, 7, 63, 89, 91, 133, 150, 189, 234, 262, 433, 462, 473, 489, 9001, 10107, 11600, 11602,
+          13388, 13435, 13436);
 
-  // SystemOverloadedError codes that are not already in RETRYABLE_ERROR_CODES (462 and 489 are).
-  // These indicate the server is under resource pressure and writes should be retried.
+  // Codes returned when Mongotune sheds load, and eligible for the same-cursor retry: the request
+  // never started executing, so the cursor is untouched.
+  //
+  // 462 is the ingress rate limiter refusing the request outright. 433 is Execution Control
+  // rejecting the operation at ticket acquisition -- also before it runs, so the cursor survives
+  // (CLOUDP-450070). It can only occur when the low-priority queue is bounded, which is
+  // non-default. 473 is deliberately excluded: it interrupts a *running* operation, and mongod
+  // proactively deletes the cursor afterwards (cursor_manager.cpp removes it on
+  // InterruptedDueToOverload), so the retry would just fail with CursorNotFound.
+  public static final Set<Integer> THROTTLING_ERROR_CODES =
+      Set.of(Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code, Errors.ADMISSION_QUEUE_OVERFLOW.code);
+
+  // Codes that mean mongod refused the request because it is overloaded, counted per replication
+  // phase by OverloadRejectionMetrics (CLOUDP-441246). Broader than THROTTLING_ERROR_CODES, which
+  // gates the same-cursor retry: 473 also indicates shed load, but arrives by a path that kills the
+  // cursor, so it is worth counting even though it cannot be retried in place. Including 433 keeps
+  // execution control observable even where the retry covers it.
+  public static final Set<Integer> OVERLOAD_REJECTION_ERROR_CODES =
+      Set.of(
+          Errors.INGRESS_REQUEST_RATE_LIMIT_EXCEEDED.code,
+          Errors.INTERRUPTED_DUE_TO_OVERLOAD.code,
+          Errors.ADMISSION_QUEUE_OVERFLOW.code);
+
+  // SystemOverloadedError codes. These indicate the server is under resource pressure and writes
+  // should be retried. Note 433, 462, 473 and 489 are also in RETRYABLE_ERROR_CODES: 433 is thrown
+  // when an execution-control ticket wait queue exceeds its configured depth, which is transient
+  // load shedding rather than a reason to resync.
   public static final Set<Integer> SYSTEM_OVERLOADED_ERROR_CODES =
       Set.of(
           Errors.ADMISSION_QUEUE_OVERFLOW.code,

@@ -74,6 +74,7 @@ public class FtdcScheduledReporter {
    *     executor metrics
    * @param maxMeterCount the maximum number of meters before FTDC reporting is skipped. Use {@link
    *     Integer#MAX_VALUE} to disable the limit.
+   * @param threadPoolResourceBindings bindings used to attribute the reporter's own executor
    * @return the newly created FtdcScheduledReporter
    */
   public static FtdcScheduledReporter create(
@@ -81,11 +82,13 @@ public class FtdcScheduledReporter {
       CompositeMeterRegistry combinedMeterRegistry,
       Ftdc ftdc,
       boolean useCombinedRegistryForExecutorMetrics,
-      int maxMeterCount) {
+      int maxMeterCount,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
     Check.argIsPositive(maxMeterCount, "maxMeterCount");
     MeterRegistry executorRegistry =
         useCombinedRegistryForExecutorMetrics ? combinedMeterRegistry : reportingMeterRegistry;
-    return new FtdcScheduledReporter(executorRegistry, reportingMeterRegistry, ftdc, maxMeterCount);
+    return new FtdcScheduledReporter(
+        executorRegistry, reportingMeterRegistry, ftdc, maxMeterCount, threadPoolResourceBindings);
   }
 
   /**
@@ -99,14 +102,16 @@ public class FtdcScheduledReporter {
    *     ftdcRegistry to ensure only FTDC-specific metrics are reported.
    * @param ftdc the FTDC instance to write metrics to
    * @param maxMeterCount the maximum number of meters before FTDC reporting is skipped
+   * @param threadPoolResourceBindings bindings used to attribute the reporter's own executor
    */
   private FtdcScheduledReporter(
       MeterRegistry executorRegistry,
       MeterRegistry reportingRegistry,
       Ftdc ftdc,
-      int maxMeterCount) {
+      int maxMeterCount,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
     this.executor = Executors.singleThreadScheduledExecutor("ftdc-reporter", executorRegistry);
-    ThreadPoolResourceMetrics.create("ftdc").register(this.executor, executorRegistry);
+    threadPoolResourceBindings.forSubsystem("ftdc").register(this.executor, executorRegistry);
     this.reporter = new Reporter(executorRegistry, reportingRegistry, ftdc, maxMeterCount);
   }
 
@@ -221,8 +226,17 @@ public class FtdcScheduledReporter {
         } catch (IOException e) {
           // We catch an IOException here because this could just be a transient error and we do not
           // want to fail the ScheduledReporter entirely
-          LOG.error("error adding ftdc sample", e);
-          ftdcFailureCounter("ioExceptionDuringAddSample", this.executorRegistry).increment();
+          if (isDiskFull(e)) {
+            // A full disk is not an FTDC failure: the node is already past the disk-full crash
+            // threshold and is covered by the disk monitor and customer-facing disk alerts. Do not
+            // increment the counter that pages the on-call, and do not log at ERROR once per
+            // second while the disk stays full.
+            FLOGGER.atWarning().withCause(e).atMostEvery(5, TimeUnit.MINUTES).log(
+                "Skipping ftdc sample: no space left on device");
+          } else {
+            LOG.error("error adding ftdc sample", e);
+            ftdcFailureCounter("ioExceptionDuringAddSample", this.executorRegistry).increment();
+          }
         }
       } catch (Exception e) {
         // Catch any exceptions during metric collection or document creation to prevent them from
@@ -232,6 +246,23 @@ public class FtdcScheduledReporter {
 
         ftdcFailureCounter("exceptionDuringReport", this.executorRegistry).increment();
       }
+    }
+
+    /**
+     * Returns whether the throwable (or any of its causes) is an out-of-disk-space error. The JDK
+     * has no dedicated exception for ENOSPC, so we match on the {@code strerror(errno)} reason the
+     * OS reports, the same way {@link com.xgen.mongot.util.Crash#assignCrashCategory} classifies
+     * disk-full crashes.
+     */
+    @VisibleForTesting
+    static boolean isDiskFull(Throwable t) {
+      for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+        String message = cause.getMessage();
+        if (message != null && message.contains("No space left on device")) {
+          return true;
+        }
+      }
+      return false;
     }
 
     private void addToDoc(BsonDocument doc, Map.Entry<String, Meter> entry) {

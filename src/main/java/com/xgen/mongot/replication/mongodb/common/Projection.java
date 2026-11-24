@@ -117,7 +117,7 @@ public class Projection {
             return Optional.empty();
           }
 
-          indexedPaths = lookupIndexedPathsForProject(mappings, "");
+          indexedPaths = new ArrayList<>(lookupIndexedPathsForProject(mappings, ""));
           // requesting full document if $project filter is not possible for top-level field
           // mappings
           if (indexedPaths.isEmpty()) {
@@ -135,6 +135,15 @@ public class Projection {
             }
             indexedPaths.add(path.get().toString());
           }
+
+          if (vectorIndexDefinition.getIndexNamespace().isPresent()) {
+            Optional<FieldPath> namespacePath =
+                filterInvalidVectorPaths(vectorIndexDefinition.getIndexNamespace().get().path());
+            if (namespacePath.isEmpty()) {
+              return Optional.empty();
+            }
+            indexedPaths.add(namespacePath.get().toString());
+          }
         }
       }
 
@@ -149,8 +158,8 @@ public class Projection {
 
           var includes =
               filterPathCollisions(
-                  CollectionUtils.concat(
-                      configuredIncludedPaths, type.getDefaultIncludedPaths(definition)))
+                      CollectionUtils.concat(
+                          configuredIncludedPaths, type.getDefaultIncludedPaths(definition)))
                   .stream()
                   .map(Projections::include)
                   .collect(toList());

@@ -25,7 +25,6 @@ import com.xgen.mongot.index.MeteredSearchIndexReader;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.lucene.backing.IndexBackingStrategy;
-import com.xgen.mongot.index.lucene.codec.LuceneCodec;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryFactory;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryHelper;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
@@ -56,11 +55,14 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.lucene.backward_codecs.lucene99.Lucene99Codec;
+import org.apache.lucene.codecs.FilterCodec;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
@@ -103,7 +105,7 @@ public class InitializedLuceneSearchIndexTest {
                 Executors.namedExecutor(
                     "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
             MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             AnalyzerRegistryBuilder.empty(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             SearchIndex.mockMetricsFactory(),
@@ -168,6 +170,113 @@ public class InitializedLuceneSearchIndexTest {
     }
     shutdownSequence.verify(writer).close();
     shutdownSequence.verify(directory, times(1)).close();
+  }
+
+  @Test
+  public void testCloseReleasesInitializedResourcesWhenUnderlyingIndexAlreadyClosed()
+      throws IOException {
+    var directory = mock(Directory.class);
+    var writer = mock(SingleLuceneIndexWriter.class);
+    var reader = mock(MeteredSearchIndexReader.class);
+    var refresher = mock(PeriodicLuceneIndexRefresher.class);
+    ImmutableList<ReferenceManager<?>> searcherManagers =
+        ImmutableList.of(spy(new NoopSearcherManager()), spy(new NoopSearcherManager()));
+    var index =
+        new LuceneSearchIndex(
+            SearchIndexDefinitionBuilder.VALID_INDEX,
+            new AtomicReference<>(IndexStatus.steady()),
+            getIndexProperties());
+    var initializedIndex =
+        new InitializedLuceneSearchIndex(
+            MOCK_INDEX_GENERATION_ID,
+            index,
+            List.of(directory),
+            writer,
+            reader,
+            refresher,
+            searcherManagers,
+            IndexMetricsUpdaterBuilder.builder()
+                .metricsFactory(SearchIndex.mockMetricsFactory())
+                .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+                .build());
+
+    index.close();
+    initializedIndex.close();
+
+    var shutdownSequence =
+        inOrder(
+            refresher, reader, writer, directory, searcherManagers.get(0), searcherManagers.get(1));
+    shutdownSequence.verify(refresher).close();
+    shutdownSequence.verify(reader).close();
+    for (var manager : searcherManagers) {
+      shutdownSequence.verify((NoopSearcherManager) manager).afterClose();
+    }
+    shutdownSequence.verify(writer).close();
+    shutdownSequence.verify(directory).close();
+  }
+
+  @Test
+  public void close_writerCloseFails_stillClosesDirectories() throws IOException {
+    var directory = mock(Directory.class);
+    var writer = mock(SingleLuceneIndexWriter.class);
+    doThrow(new NoSuchFileException("index")).when(writer).close();
+    var index =
+        new LuceneSearchIndex(
+            SearchIndexDefinitionBuilder.VALID_INDEX,
+            new AtomicReference<>(IndexStatus.steady()),
+            getIndexProperties());
+    var initializedIndex =
+        new InitializedLuceneSearchIndex(
+            MOCK_INDEX_GENERATION_ID,
+            index,
+            List.of(directory),
+            writer,
+            mock(MeteredSearchIndexReader.class),
+            mock(PeriodicLuceneIndexRefresher.class),
+            ImmutableList.of(spy(new NoopSearcherManager())),
+            IndexMetricsUpdaterBuilder.builder()
+                .metricsFactory(SearchIndex.mockMetricsFactory())
+                .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+                .build());
+
+    Assert.assertThrows(NoSuchFileException.class, initializedIndex::close);
+
+    verify(directory).close();
+  }
+
+  @Test
+  public void close_writerAndDirectoryCloseFail_keepsWriterExceptionWithDirectorySuppressed()
+      throws IOException {
+    var firstDirectory = mock(Directory.class);
+    var secondDirectory = mock(Directory.class);
+    var writer = mock(SingleLuceneIndexWriter.class);
+    IOException writerFailure = new IOException("writer");
+    doThrow(writerFailure).when(writer).close();
+    doThrow(new NoSuchFileException("index")).when(firstDirectory).close();
+    var index =
+        new LuceneSearchIndex(
+            SearchIndexDefinitionBuilder.VALID_INDEX,
+            new AtomicReference<>(IndexStatus.steady()),
+            getIndexProperties());
+    var initializedIndex =
+        new InitializedLuceneSearchIndex(
+            MOCK_INDEX_GENERATION_ID,
+            index,
+            List.of(firstDirectory, secondDirectory),
+            writer,
+            mock(MeteredSearchIndexReader.class),
+            mock(PeriodicLuceneIndexRefresher.class),
+            ImmutableList.of(spy(new NoopSearcherManager())),
+            IndexMetricsUpdaterBuilder.builder()
+                .metricsFactory(SearchIndex.mockMetricsFactory())
+                .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+                .build());
+
+    IOException thrown = Assert.assertThrows(IOException.class, initializedIndex::close);
+
+    Assert.assertSame(writerFailure, thrown);
+    Assert.assertTrue(thrown.getSuppressed()[0] instanceof NoSuchFileException);
+    verify(secondDirectory).close();
   }
 
   @Test
@@ -240,7 +349,7 @@ public class InitializedLuceneSearchIndexTest {
                 Executors.namedExecutor(
                     "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
             MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             AnalyzerRegistryBuilder.empty(),
             indexDirectoryHelper.getIndexRemover(),
             SearchIndex.mockMetricsFactory(),
@@ -306,7 +415,7 @@ public class InitializedLuceneSearchIndexTest {
                     Executors.namedExecutor(
                         "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
                 MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 AnalyzerRegistryBuilder.empty(),
                 directoryRemover,
                 SearchIndex.mockMetricsFactory(),
@@ -371,7 +480,7 @@ public class InitializedLuceneSearchIndexTest {
                     Executors.namedExecutor(
                         "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
                 MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 AnalyzerRegistryBuilder.empty(),
                 new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
                 SearchIndex.mockMetricsFactory(),
@@ -432,7 +541,7 @@ public class InitializedLuceneSearchIndexTest {
                     Executors.namedExecutor(
                         "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
                 MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 AnalyzerRegistryBuilder.empty(),
                 new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
                 SearchIndex.mockMetricsFactory(),
@@ -502,7 +611,7 @@ public class InitializedLuceneSearchIndexTest {
                     Executors.namedExecutor(
                         "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
                 MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 AnalyzerRegistryBuilder.empty(),
                 indexDirectoryHelper.getIndexRemover(),
                 SearchIndex.mockMetricsFactory(),
@@ -555,7 +664,7 @@ public class InitializedLuceneSearchIndexTest {
             Optional.of(Mockito.mock(NamedExecutorService.class)),
             Optional.of(Mockito.mock(NamedExecutorService.class)),
             MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             AnalyzerRegistryBuilder.empty(),
             indexDirectoryHelper.getIndexRemover(),
             SearchIndex.mockMetricsFactory(),
@@ -601,9 +710,13 @@ public class InitializedLuceneSearchIndexTest {
     var indexPath = directoryFactory.getPath();
     var metadataPath = directoryFactory.getMetadataPath();
 
-    // Create an IndexWriter with an unregistered Codec.
+    // Create an IndexWriter with an unregistered Codec: any codec whose recorded name has no SPI
+    // entry reproduces the incompatible-codec state on read.
     IndexWriter writer =
-        new IndexWriter(directory, new IndexWriterConfig().setCodec(new LuceneCodec("Lucene9999")));
+        new IndexWriter(
+            directory,
+            new IndexWriterConfig()
+                .setCodec(new FilterCodec("Lucene9999", new Lucene99Codec()) {}));
 
     // Add a document using the IndexWriter.
     BsonDocument bson = new BsonDocument().append("_id", new BsonInt32(0));
@@ -644,7 +757,7 @@ public class InitializedLuceneSearchIndexTest {
                     Executors.namedExecutor(
                         "rescoring", TestingExecutors.noOpScheduledExecutor(), meterRegistry)),
                 MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 AnalyzerRegistryBuilder.empty(),
                 new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
                 SearchIndex.mockMetricsFactory(),
@@ -734,7 +847,7 @@ public class InitializedLuceneSearchIndexTest {
         Optional.of(Mockito.mock(NamedExecutorService.class)),
         Optional.of(Mockito.mock(NamedExecutorService.class)),
         MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-        MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+        MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
         AnalyzerRegistryBuilder.empty(),
         new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
         metricsFactory,
@@ -775,6 +888,7 @@ public class InitializedLuceneSearchIndexTest {
         Optional.empty(),
         false,
         false,
+        Optional.empty(),
         Optional.empty(),
         IndexFormatVersion.CURRENT,
         mock(PerIndexMetricsFactory.class),

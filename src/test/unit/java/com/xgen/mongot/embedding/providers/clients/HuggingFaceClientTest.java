@@ -13,7 +13,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.MongotMetadata;
 import com.xgen.mongot.embedding.VectorOrError;
@@ -27,6 +26,7 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.Huggin
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.FloatVector;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -417,8 +417,7 @@ public class HuggingFaceClientTest {
               () -> client.embed(List.of("a"), context(3)));
       assertTrue(e.getMessage().contains("HTTP " + status));
       // exception text can surface beyond logs; the endpoint may carry credentials
-      assertFalse(
-          e.getMessage().contains(client.requestConfigForTesting().endpoint().toString()));
+      assertFalse(e.getMessage().contains(client.requestConfigForTesting().endpoint().toString()));
     }
   }
 
@@ -499,8 +498,7 @@ public class HuggingFaceClientTest {
       HuggingFaceClient.injectHttpClient(client, failing);
 
       assertThrows(
-          EmbeddingProviderTransientException.class,
-          () -> client.embed(List.of("a"), context(3)));
+          EmbeddingProviderTransientException.class, () -> client.embed(List.of("a"), context(3)));
       assertNotSame(failure.getMessage(), failing, client.httpClientForTesting());
     }
   }
@@ -522,8 +520,7 @@ public class HuggingFaceClientTest {
     HuggingFaceClient.injectHttpClient(client, throwingHttpClient(new InterruptedException()));
     try {
       assertThrows(
-          EmbeddingProviderTransientException.class,
-          () -> client.embed(List.of("a"), context(3)));
+          EmbeddingProviderTransientException.class, () -> client.embed(List.of("a"), context(3)));
       assertTrue(Thread.currentThread().isInterrupted());
     } finally {
       Thread.interrupted();

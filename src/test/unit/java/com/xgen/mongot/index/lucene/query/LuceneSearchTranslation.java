@@ -36,6 +36,7 @@ import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
@@ -146,6 +147,12 @@ class LuceneSearchTranslation {
         Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(featureFlags));
   }
 
+  static LuceneSearchTranslation mappedWithDynamicFeatureFlags(
+      DocumentFieldDefinition mapping, DynamicFeatureFlagRegistry registry) {
+    return new LuceneSearchTranslation(
+        Optional.empty(), Optional.of(mapping), Optional.empty(), Optional.empty(), registry);
+  }
+
   static LuceneSearchTranslation gatedWithDynamicFeatureFlags(DynamicFeatureFlags dff) {
     DynamicFeatureFlagConfig config =
         new DynamicFeatureFlagConfig(
@@ -197,6 +204,30 @@ class LuceneSearchTranslation {
             Optional.of(new ObjectId()));
     return new LuceneSearchTranslation(
         Optional.empty(), Optional.of(mapping), Optional.empty(), Optional.empty(), registry);
+  }
+
+  /**
+   * Same as {@link #get()} but with the given cluster-invariant {@link DynamicFeatureFlags}
+   * explicitly disabled (cluster phase). Useful for asserting the unwrapped translation of a flag
+   * whose fallback is {@code true} (on by default).
+   */
+  static LuceneSearchTranslation getWithDynamicFeatureFlagDisabled(DynamicFeatureFlags dff) {
+    DynamicFeatureFlagConfig config =
+        new DynamicFeatureFlagConfig(
+            dff.getName(),
+            DynamicFeatureFlagConfig.Phase.DISABLED,
+            List.of(),
+            List.of(),
+            0,
+            DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER);
+    DynamicFeatureFlagRegistry registry =
+        new DynamicFeatureFlagRegistry(
+            Optional.of(List.of(config)),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(new ObjectId()));
+    return new LuceneSearchTranslation(
+        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), registry);
   }
 
   static LuceneSearchTranslation synonyms(
@@ -253,6 +284,65 @@ class LuceneSearchTranslation {
     return getLuceneQuery(operator, Optional.empty());
   }
 
+  /**
+   * Translates with the given raw Lucene documents indexed first, for translations whose shape
+   * depends on index state (e.g., the hasNoArrayData() check).
+   */
+  Query translateWithLuceneDocuments(Operator operator, List<Document> documents)
+      throws IOException, InvalidQueryException {
+    return translateWithLuceneDocuments(operator, documents, reader -> reader);
+  }
+
+  /**
+   * Variant of {@link #translateWithLuceneDocuments(Operator, List)} that wraps the reader before
+   * translation, e.g., to inject index read failures.
+   */
+  Query translateWithLuceneDocuments(
+      Operator operator, List<Document> documents, ReaderWrapper readerWrapper)
+      throws IOException, InvalidQueryException {
+    setUp();
+    for (Document document : documents) {
+      index(document);
+    }
+
+    // Opened as its own resource so a throwing wrap() does not leak it.
+    try (var opened = DirectoryReader.open(this.directory);
+        var reader = readerWrapper.wrap(opened)) {
+      return createFactory()
+          .createQuery(operator, reader, Optional.empty(), QueryOptimizationFlags.DEFAULT_OPTIONS);
+    } finally {
+      tearDown();
+    }
+  }
+
+  /** Wraps the freshly opened reader before translation; wrapping itself may fail. */
+  interface ReaderWrapper {
+    DirectoryReader wrap(DirectoryReader reader) throws IOException;
+  }
+
+  /**
+   * Translates with the given raw Lucene documents indexed first, then counts the documents the
+   * translated query matches — for asserting result parity when the translation itself is expected
+   * to change shape.
+   */
+  int countMatchesWithLuceneDocuments(Operator operator, List<Document> documents)
+      throws IOException, InvalidQueryException {
+    setUp();
+    for (Document document : documents) {
+      index(document);
+    }
+
+    try (var reader = DirectoryReader.open(this.directory)) {
+      Query query =
+          createFactory()
+              .createQuery(
+                  operator, reader, Optional.empty(), QueryOptimizationFlags.DEFAULT_OPTIONS);
+      return new IndexSearcher(reader).count(query);
+    } finally {
+      tearDown();
+    }
+  }
+
   Query translateWithIndexedFields(Operator operator, List<String> fieldNames)
       throws IOException, InvalidQueryException {
     setUp();
@@ -266,25 +356,28 @@ class LuceneSearchTranslation {
 
   private Query getLuceneQuery(Operator operator, Optional<FieldPath> embeddedRoot)
       throws IOException, InvalidQueryException {
-    LuceneSearchQueryFactoryDistributor factory =
-        LuceneSearchQueryFactoryDistributor.create(
-            this.indexDefinition,
-            IndexFormatVersion.CURRENT,
-            this.analyzerRegistry,
-            this.synonymRegistry,
-            new IndexMetricsUpdater.QueryingMetricsUpdater(SearchIndex.mockMetricsFactory()),
-            false,
-            this.featureFlags,
-            this.dynamicFeatureFlagRegistry);
     try (var reader = DirectoryReader.open(this.directory)) {
-      return factory.createQuery(
-          operator,
-          reader,
-          embeddedRoot.map(ReturnScope::new),
-          QueryOptimizationFlags.DEFAULT_OPTIONS);
+      return createFactory()
+          .createQuery(
+              operator,
+              reader,
+              embeddedRoot.map(ReturnScope::new),
+              QueryOptimizationFlags.DEFAULT_OPTIONS);
     } finally {
       tearDown();
     }
+  }
+
+  private LuceneSearchQueryFactoryDistributor createFactory() {
+    return LuceneSearchQueryFactoryDistributor.create(
+        this.indexDefinition,
+        IndexFormatVersion.CURRENT,
+        this.analyzerRegistry,
+        this.synonymRegistry,
+        new IndexMetricsUpdater.QueryingMetricsUpdater(SearchIndex.mockMetricsFactory()),
+        false,
+        this.featureFlags,
+        this.dynamicFeatureFlagRegistry);
   }
 
   private static SearchIndexDefinition getIndexDefinition(

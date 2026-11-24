@@ -6,6 +6,7 @@ import static com.xgen.testing.mongot.mock.cursor.MongotCursorBatches.mockMongot
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.truth.Truth;
@@ -26,6 +27,8 @@ import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.server.command.CommandFactory;
 import com.xgen.mongot.server.command.search.definition.request.GetMoreCommandDefinition;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import com.xgen.testing.mongot.index.lucene.explain.information.QueryExplainInformationBuilder;
 import com.xgen.testing.mongot.index.lucene.explain.information.TermQueryBuilder;
 import com.xgen.testing.mongot.index.lucene.explain.tracing.FakeExplain;
@@ -47,6 +50,65 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 @RunWith(MockitoJUnitRunner.class)
 public class GetMoreCommandTest {
+  private final MetricsFactory metricsFactory =
+      new MetricsFactory("search_metrics", new SimpleMeterRegistry());
+
+  private double regexFailureCount() {
+    return this.metricsFactory
+        .counter("regexAnalysisLimitExceeded", Tags.of("command", "getMore"))
+        .count();
+  }
+
+  @Test
+  public void run_regexLimit_returnsUserErrorAndKillsCursor() throws Exception {
+    var cursorManager = getThrowableCursorManager(RegexLimitExceededException::new);
+    var command =
+        new GetMoreCommand.Factory(
+                cursorManager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory)
+            .create(
+                new BsonDocument(
+                    GetMoreCommandDefinition.NAME, new BsonInt64(MOCK_SEARCH_CURSOR_ID)));
+
+    BsonDocument result = command.run();
+
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Assert.assertEquals(
+        new RegexLimitExceededException().getMessage(), result.getString("errmsg").getValue());
+    verify(cursorManager).killCursor(MOCK_SEARCH_CURSOR_ID);
+    Truth.assertThat(regexFailureCount()).isEqualTo(1.0);
+  }
+
+  @Test
+  public void run_regexInterrupted_doesNotCountAsLimitFailure() throws Exception {
+    var cursorManager = getThrowableCursorManager(RegexInterruptedException::new);
+    var command =
+        new GetMoreCommand.Factory(
+                cursorManager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory)
+            .create(
+                new BsonDocument(
+                    GetMoreCommandDefinition.NAME, new BsonInt64(MOCK_SEARCH_CURSOR_ID)));
+
+    BsonDocument result = command.run();
+
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Truth.assertThat(regexFailureCount()).isEqualTo(0.0);
+    verify(cursorManager).killCursor(MOCK_SEARCH_CURSOR_ID);
+  }
+
+  @Test
+  public void run_repeatedFailures_shareFactoryCounter() throws Exception {
+    var cursorManager = getThrowableCursorManager(RegexLimitExceededException::new);
+    var factory =
+        new GetMoreCommand.Factory(
+            cursorManager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
+    var args =
+        new BsonDocument(GetMoreCommandDefinition.NAME, new BsonInt64(MOCK_SEARCH_CURSOR_ID));
+
+    factory.create(args).run();
+    factory.create(args).run();
+
+    Truth.assertThat(regexFailureCount()).isEqualTo(2.0);
+  }
 
   private static final long INVALID_CURSOR_ID = MOCK_SEARCH_CURSOR_ID + 1;
 
@@ -112,10 +174,6 @@ public class GetMoreCommandTest {
     return cursorManager;
   }
 
-  private static MetricsFactory mockMetricsFactory() {
-    return new MetricsFactory("mockNamespace", new SimpleMeterRegistry());
-  }
-
   /** Creates a MongotCursorManager that throws an IOException when getting the batch. */
   private MongotCursorManager getThrowableCursorManager(
       Supplier<? extends Throwable> throwableSupplier) throws Exception {
@@ -133,13 +191,14 @@ public class GetMoreCommandTest {
 
     CommandFactory commandFactory =
         new GetMoreCommand.Factory(
-            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, mockMetricsFactory());
+            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
     BsonDocument result = command.run();
     BsonDocument expected = mockMongotCursorBatch().toBson();
 
     Assert.assertEquals(expected, result);
+    Truth.assertThat(regexFailureCount()).isEqualTo(0.0);
   }
 
   @Test
@@ -157,7 +216,7 @@ public class GetMoreCommandTest {
 
     CommandFactory commandFactory =
         new GetMoreCommand.Factory(
-            manager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, mockMetricsFactory());
+            manager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
     command.run();
@@ -175,7 +234,7 @@ public class GetMoreCommandTest {
 
     CommandFactory commandFactory =
         new GetMoreCommand.Factory(
-            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, mockMetricsFactory());
+            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
     BsonDocument result = command.run();
@@ -216,7 +275,7 @@ public class GetMoreCommandTest {
             explainInformation)) {
       CommandFactory commandFactory =
           new GetMoreCommand.Factory(
-              cursorManager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, mockMetricsFactory());
+              cursorManager, CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
 
       Command command = commandFactory.create(mockArgs);
       BsonDocument result = command.run();
@@ -235,12 +294,13 @@ public class GetMoreCommandTest {
 
     CommandFactory commandFactory =
         new GetMoreCommand.Factory(
-            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, mockMetricsFactory());
+            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
     BsonDocument result = command.run();
 
     Assert.assertEquals(INVALID_CURSOR_RESPONSE, result);
+    Truth.assertThat(regexFailureCount()).isEqualTo(0.0);
   }
 
   @Test
@@ -252,36 +312,29 @@ public class GetMoreCommandTest {
         new GetMoreCommand.Factory(
             getThrowableCursorManager(() -> new IOException("IO error")),
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
-            mockMetricsFactory());
+            this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
     BsonDocument result = command.run();
 
     Assert.assertEquals(IO_ERROR_RESPONSE, result);
+    Truth.assertThat(regexFailureCount()).isEqualTo(0.0);
   }
 
   @Test
-  public void nextBatch_unreachableErrorThrown_metricIncremented() throws Exception {
+  public void nextBatch_unreachableErrorThrown() throws Exception {
     BsonDocument mockArgs =
         new BsonDocument().append(GetMoreCommandDefinition.NAME, new BsonInt64(INVALID_CURSOR_ID));
 
-    var metricsFactory = mockMetricsFactory();
     CommandFactory commandFactory =
         new GetMoreCommand.Factory(
             getThrowableCursorManager(Check::unreachableError),
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
-            metricsFactory);
+            this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
 
     Assert.assertThrows(AssertionError.class, command::run);
-    Truth.assertThat(
-            metricsFactory
-                .counter(
-                    "GetMoreCommandInternalFailures",
-                    Tags.of("throwableName", AssertionError.class.getSimpleName()))
-                .count())
-        .isEqualTo(1.0);
   }
 
   @Test
@@ -292,7 +345,7 @@ public class GetMoreCommandTest {
 
     CommandFactory commandFactory =
         new GetMoreCommand.Factory(
-            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, mockMetricsFactory());
+            getCursorManager(), CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT, this.metricsFactory);
 
     Command command = commandFactory.create(mockArgs);
     Assert.assertFalse(

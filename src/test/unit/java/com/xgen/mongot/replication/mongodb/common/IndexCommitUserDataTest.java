@@ -3,18 +3,23 @@ package com.xgen.mongot.replication.mongodb.common;
 import static com.xgen.testing.BsonSerializationTestSuite.fromEncodable;
 
 import com.mongodb.MongoNamespace;
+import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
+import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.status.IndexStatus.Reason;
 import com.xgen.mongot.index.status.IndexStatus.StatusCode;
 import com.xgen.mongot.index.status.StaleStatusReason;
 import com.xgen.mongot.index.version.IndexFormatVersion;
+import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonSerializationTestSuite;
 import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.bson.BsonBinary;
+import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonInt64;
 import org.bson.BsonString;
@@ -35,10 +40,14 @@ import org.junit.runners.Suite;
     })
 public class IndexCommitUserDataTest {
 
+  // No factory builds a record carrying the format version alone, so this one is assembled
+  // directly.
+  @IndexCommitUserData.TestOnlyShape
   private static final IndexCommitUserData USER_DATA_WITH_INDEX_FORMAT_VERSION_ONLY =
       new IndexCommitUserData(
           Optional.empty(),
-          Optional.of(IndexFormatVersion.CURRENT),
+          Optional.of(IndexFormatVersion.CURRENT.versionNumber),
+          Optional.empty(),
           Optional.empty(),
           Optional.empty(),
           Optional.empty(),
@@ -50,16 +59,16 @@ public class IndexCommitUserDataTest {
           ChangeStreamResumeInfo.create(
               new MongoNamespace("database", "collection"),
               new BsonDocument("_data", new BsonString("resume token"))),
-          IndexFormatVersion.CURRENT);
+          IndexFormatVersion.CURRENT.versionNumber);
 
   private static final IndexCommitUserData USER_DATA_WITH_INITIAL_SYNC_RESUME =
       IndexCommitUserData.createInitialSyncResume(
-          IndexFormatVersion.CURRENT,
+          IndexFormatVersion.CURRENT.versionNumber,
           new BufferlessIdOrderInitialSyncResumeInfo(
               new BsonTimestamp(1234567890L), new BsonString("a")));
   private static final IndexCommitUserData USER_DATA_WITH_NATURAL_ORDER_INITIAL_SYNC_RESUME =
       IndexCommitUserData.createInitialSyncResume(
-          IndexFormatVersion.CURRENT,
+          IndexFormatVersion.CURRENT.versionNumber,
           new BufferlessNaturalOrderInitialSyncResumeInfo(
               new BsonTimestamp(1234567890L),
               new BsonDocument()
@@ -82,7 +91,7 @@ public class IndexCommitUserDataTest {
                   ChangeStreamResumeInfo.create(
                       new MongoNamespace("database", "collection"),
                       ChangeStreamUtils.resumeToken(new BsonTimestamp(1234567890L))),
-                  IndexFormatVersion.SIX)));
+                  IndexFormatVersion.SIX.versionNumber)));
 
   private static final IndexCommitUserData USER_DATA_WITH_INDEX_STATE_INFO =
       IndexCommitUserData.createFromIndexStateInfo(
@@ -306,11 +315,116 @@ public class IndexCommitUserDataTest {
               EncodedUserData.fromString(userData.toJson()), Optional.empty());
 
       // Verify that the known fields were correctly parsed
-      Assert.assertTrue(parsed.getStaleStateInfo().isPresent());
+      Assert.assertTrue(parsed.staleStateInfo().isPresent());
       Assert.assertEquals(
-          new BsonTimestamp(1234567890L), parsed.getStaleStateInfo().get().getLastOptime());
+          new BsonTimestamp(1234567890L), parsed.staleStateInfo().get().getLastOptime());
       Assert.assertEquals(
-          StaleStatusReason.DOCS_EXCEEDED, parsed.getStaleStateInfo().get().getReason());
+          StaleStatusReason.DOCS_EXCEEDED, parsed.staleStateInfo().get().getReason());
+    }
+
+    @Test
+    public void testAutoEmbeddingMetadataRoundTrips() {
+      IndexCommitUserData data =
+          USER_DATA_WITH_CHANGE_STREAM_RESUME_INFO.withAutoEmbeddingMetadata(
+              new AutoEmbeddingCommitMetadata(true));
+      Assert.assertEquals(
+          Optional.of(new AutoEmbeddingCommitMetadata(true)), data.autoEmbeddingMetadata());
+
+      IndexCommitUserData decoded =
+          IndexCommitUserData.fromEncodedData(data.toEncodedData(), Optional.empty());
+      Assert.assertEquals(data, decoded);
+      Assert.assertEquals(
+          Optional.of(new AutoEmbeddingCommitMetadata(true)), decoded.autoEmbeddingMetadata());
+    }
+
+    @Test
+    public void testAutoEmbeddingMetadataAbsentByDefault() {
+      Assert.assertEquals(Optional.empty(), IndexCommitUserData.EMPTY.autoEmbeddingMetadata());
+      Assert.assertEquals(
+          Optional.empty(), USER_DATA_WITH_CHANGE_STREAM_RESUME_INFO.autoEmbeddingMetadata());
+    }
+
+    /**
+     * Rollback compatibility: a binary that predates a top-level field sees that field as unknown.
+     * Current code simulates that by reading an arbitrary future top-level field; an older binary
+     * would treat autoEmbeddingMetadata the same way.
+     */
+    @Test
+    public void testUnknownTopLevelFieldReturnsEmptyForRollbackCompatibility() {
+      BsonDocument userData = USER_DATA_WITH_CHANGE_STREAM_RESUME_INFO.toBson();
+      userData.append("futureTopLevelField", new BsonString("value"));
+
+      Assert.assertEquals(
+          IndexCommitUserData.EMPTY,
+          IndexCommitUserData.fromEncodedData(
+              EncodedUserData.fromString(userData.toJson()), Optional.empty()));
+    }
+
+    /**
+     * Forwards compatibility: an autoEmbeddingMetadata sub-document written by a newer mongot with
+     * an extra inner field must still be parseable by a binary that predates that field. The
+     * top-level key is known, and the sub-document is parsed with allowUnknownFields().
+     */
+    @Test
+    public void testAutoEmbeddingMetadataForwardsCompatibility_unknownFieldsIgnored() {
+      BsonDocument metadataWithUnknownField =
+          new BsonDocument()
+              .append("wasMatViewReady", BsonBoolean.TRUE)
+              .append("futureUnknownField", new BsonString("value"));
+      BsonDocument userData =
+          new BsonDocument().append("autoEmbeddingMetadata", metadataWithUnknownField);
+
+      IndexCommitUserData parsed =
+          IndexCommitUserData.fromEncodedData(
+              EncodedUserData.fromString(userData.toJson()), Optional.empty());
+
+      Assert.assertEquals(
+          Optional.of(new AutoEmbeddingCommitMetadata(true)), parsed.autoEmbeddingMetadata());
+    }
+
+    @Test
+    public void testAutoEmbeddingMetadataWithCollectionMetadataRoundTrips() {
+      AutoEmbeddingCommitMetadata metadata =
+          new AutoEmbeddingCommitMetadata(
+              true,
+              Optional.of("acme___mdb_internal_search"),
+              Optional.of(
+                  new MaterializedViewCollectionMetadata(
+                      new MaterializedViewSchemaMetadata(
+                          1L,
+                          Map.of(FieldPath.parse("title"), FieldPath.parse("_autoEmbed.title"))),
+                      UUID.fromString("390a604a-4979-4d10-9f4f-3d2552224aee"),
+                      "123")));
+      IndexCommitUserData data =
+          USER_DATA_WITH_CHANGE_STREAM_RESUME_INFO.withAutoEmbeddingMetadata(metadata);
+
+      IndexCommitUserData decoded =
+          IndexCommitUserData.fromEncodedData(data.toEncodedData(), Optional.empty());
+      Assert.assertEquals(data, decoded);
+      Assert.assertEquals(Optional.of(metadata), decoded.autoEmbeddingMetadata());
+    }
+
+    @Test
+    public void testAutoEmbeddingMetadataWithoutCollectionMetadataIsAbsent() {
+      // A derived Lucene last committed by a binary that wrote wasMatViewReady alone (before the
+      // reconstruction metadata existed) must still parse, with the metadata reported absent.
+      BsonDocument metadataWithoutBundle =
+          new BsonDocument().append("wasMatViewReady", BsonBoolean.TRUE);
+      BsonDocument userData =
+          new BsonDocument().append("autoEmbeddingMetadata", metadataWithoutBundle);
+
+      IndexCommitUserData parsed =
+          IndexCommitUserData.fromEncodedData(
+              EncodedUserData.fromString(userData.toJson()), Optional.empty());
+
+      Assert.assertEquals(
+          Optional.of(new AutoEmbeddingCommitMetadata(true)), parsed.autoEmbeddingMetadata());
+      Assert.assertTrue(
+          parsed
+              .autoEmbeddingMetadata()
+              .orElseThrow()
+              .materializedViewCollectionMetadata()
+              .isEmpty());
     }
   }
 }

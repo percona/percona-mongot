@@ -89,6 +89,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.of(1000L),
               Optional.of(2000L),
               Optional.of(3000L),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty()));
     }
 
@@ -114,6 +117,7 @@ public class AutoEmbeddingMaterializedViewConfigTest {
       assertFalse(config.enableSplitLargeChangeStreamEvents);
       assertEquals(List.of(), config.excludedChangestreamFields);
       assertFalse(config.matchCollectionUuidForUpdateLookup);
+      assertFalse(config.forceChangeStreamFullUpdate());
 
       // maxConcurrentEmbeddingInitialSyncs = Math.min(numCpus, 1) = 1
       assertEquals(1, config.maxConcurrentEmbeddingInitialSyncs);
@@ -164,10 +168,64 @@ public class AutoEmbeddingMaterializedViewConfigTest {
       assertEquals(30_000L, config.materializedViewStatusRefreshIntervalMs);
       assertEquals(10_000L, config.materializedViewOptimeUpdateIntervalMs);
 
-      assertEquals(
-          Duration.ofSeconds(60).toMillis(), config.materializedViewWriterSocketTimeoutMs);
+      assertEquals(Duration.ofSeconds(60).toMillis(), config.materializedViewWriterSocketTimeoutMs);
+
+      assertEquals(Duration.ofMinutes(5).toMillis(), config.staleLeaseScanIntervalMs);
+      assertEquals(Duration.ofMinutes(30).toMillis(), config.staleLeaseMarkGracePeriodMs);
+      assertEquals(Duration.ofDays(2).toMillis(), config.staleLeaseDeleteGracePeriodMs);
 
       assertEquals(1L, config.defaultMaterializedViewNameFormatVersion);
+    }
+
+    @Test
+    public void controlKnobEvaluator_isNotSerialized() {
+      AutoEmbeddingMaterializedViewConfig config = AutoEmbeddingMaterializedViewConfig.getDefault();
+      BsonDocument serializedConfig = config.toBson();
+
+      assertFalse(config.forceChangeStreamFullUpdate());
+      config.setControlKnobEvaluator(controlKnob -> true);
+      assertTrue(config.forceChangeStreamFullUpdate());
+      assertEquals(serializedConfig, config.toBson());
+    }
+
+    @Test
+    public void staleLeaseGraces_deleteGraceBelowMarkGrace_fallsBackToDefaults() {
+      AutoEmbeddingMaterializedViewConfig config =
+          AutoEmbeddingMaterializedViewConfig.create(
+              CommonReplicationConfig.defaultGlobalReplicationConfig(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              // socketTimeout, scan interval, then an invalid grace pair (delete < mark)
+              Optional.empty(),
+              Optional.empty(),
+              Optional.of(Duration.ofMinutes(10).toMillis()),
+              Optional.of(Duration.ofMinutes(1).toMillis()));
+      // Invalid ordering (delete grace < mark grace) must fall back to defaults for BOTH graces,
+      // never letting a lease become delete-eligible before it can be marked.
+      assertEquals(Duration.ofMinutes(30).toMillis(), config.staleLeaseMarkGracePeriodMs);
+      assertEquals(Duration.ofDays(2).toMillis(), config.staleLeaseDeleteGracePeriodMs);
     }
 
     @Test
@@ -192,6 +250,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.of(50),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
@@ -235,6 +296,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
                   Optional.empty(),
                   Optional.empty(),
                   Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty(),
                   Optional.empty()));
     }
 
@@ -267,11 +331,13 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty());
       BsonDocument bsonWith = configWith.toBson();
       assertTrue(
-          "BSON should contain mvWriteRateLimitRps",
-          bsonWith.containsKey("mvWriteRateLimitRps"));
+          "BSON should contain mvWriteRateLimitRps", bsonWith.containsKey("mvWriteRateLimitRps"));
       assertEquals(75, bsonWith.getInt32("mvWriteRateLimitRps").getValue());
 
       AutoEmbeddingMaterializedViewConfig configWithout =
@@ -315,6 +381,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty());
       assertEquals(8, config.matViewWriterMaxConnections);
     }
@@ -328,6 +397,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               runtime,
               new CommonReplicationConfig.GlobalReplicationConfig(
                   false, List.of(), false, false, List.of(), false),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
@@ -385,6 +457,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.of(5000L),
               Optional.of(15000L),
               Optional.of(3000L),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty());
       assertEquals(5000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(15000L, config.materializedViewStatusRefreshIntervalMs);
@@ -420,6 +495,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.of(0L),
               Optional.of(0L),
               Optional.of(0L),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty());
       assertEquals(30_000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(30_000L, config.materializedViewStatusRefreshIntervalMs);
@@ -455,6 +533,9 @@ public class AutoEmbeddingMaterializedViewConfigTest {
               Optional.of(-1L),
               Optional.of(-100L),
               Optional.of(-50L),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty());
       assertEquals(30_000L, config.leaseManagerHeartbeatIntervalMs);
       assertEquals(30_000L, config.materializedViewStatusRefreshIntervalMs);
@@ -492,7 +573,10 @@ public class AutoEmbeddingMaterializedViewConfigTest {
                   Optional.empty(),
                   Optional.empty(),
                   Optional.empty(),
-                  Optional.of(0L)));
+                  Optional.of(0L),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty()));
     }
 
     @Test
@@ -526,7 +610,10 @@ public class AutoEmbeddingMaterializedViewConfigTest {
                   Optional.empty(),
                   Optional.empty(),
                   Optional.empty(),
-                  Optional.of((long) Integer.MAX_VALUE + 1)));
+                  Optional.of((long) Integer.MAX_VALUE + 1),
+                  Optional.empty(),
+                  Optional.empty(),
+                  Optional.empty()));
     }
   }
 }

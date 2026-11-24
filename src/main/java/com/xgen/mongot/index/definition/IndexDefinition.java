@@ -3,8 +3,11 @@ package com.xgen.mongot.index.definition;
 import com.google.common.collect.ImmutableMap;
 import com.google.errorprone.annotations.DoNotMock;
 import com.mongodb.MongoNamespace;
+import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.index.version.IndexCapabilities;
+import com.xgen.mongot.index.version.IndexEngine;
 import com.xgen.mongot.index.version.IndexFormatVersion;
+import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
@@ -26,6 +29,10 @@ import org.bson.types.ObjectId;
 public sealed interface IndexDefinition extends DocumentEncodable
     permits VectorIndexDefinition, SearchIndexDefinition {
 
+  /**
+   * Field declarations shared by both index-definition implementations. When adding a field here,
+   * see docs/internal/development/patterns/config-journal-schema-change.md for the full workflow.
+   */
   class Fields {
 
     public static final WithDefault<Type> TYPE =
@@ -79,6 +86,9 @@ public sealed interface IndexDefinition extends DocumentEncodable
 
     static final Field.Optional<String> DEFINITION_VERSION_CREATED_AT =
         Field.builder("definitionVersionCreatedAt").stringField().optional().noDefault();
+
+    public static final Field.Optional<ObjectId> DEFINITION_VERSION_ID =
+        Field.builder("definitionVersionId").objectIdField().optional().noDefault();
 
     static final Field.Optional<StoredSourceDefinition> STORED_SOURCE =
         Field.builder("storedSource")
@@ -135,9 +145,19 @@ public sealed interface IndexDefinition extends DocumentEncodable
 
   FieldDefinitionResolver createFieldDefinitionResolver(IndexFormatVersion indexFormatVersion);
 
+  /** Engine that stores indexes built from this definition. */
+  IndexEngine engine();
+
+  /** The generation a new index built from this definition starts at. */
+  default Generation newGeneration(UserIndexVersion userIndexVersion) {
+    return Generation.current(engine(), userIndexVersion);
+  }
+
   Optional<Long> getDefinitionVersion();
 
   Optional<Instant> getDefinitionVersionCreatedAt();
+
+  Optional<ObjectId> getDefinitionVersionId();
 
   /**
    * The index_feature_version specified in the {@link SearchIndexDefinition} or in the {@link
@@ -153,13 +173,13 @@ public sealed interface IndexDefinition extends DocumentEncodable
    *
    * <p>Auto-embedding is supported in both {@link VectorIndexDefinition} (via {@link
    * VectorIndexFieldDefinition.Type#TEXT} or {@link VectorIndexFieldDefinition.Type#AUTO_EMBED})
-   * and {@link SearchIndexDefinition} (via {@link FieldTypeDefinition.Type#AUTO_EMBED_VECTOR}).
+   * and {@link SearchIndexDefinition} (via {@link FieldTypeDefinition.Type#AUTO_EMBED}).
    */
   boolean isAutoEmbeddingIndex();
 
   /**
-   * Returns the auto-embedding feature version. Returns 0 if not an auto-embedding index. Returns
-   * 1 for legacy text-type auto-embedding (vector indexes only). Returns 2+ for materialized
+   * Returns the auto-embedding feature version. Returns 0 if not an auto-embedding index. Returns 1
+   * for legacy text-type auto-embedding (vector indexes only). Returns 2+ for materialized
    * view-based auto-embedding.
    */
   int getParsedAutoEmbeddingFeatureVersion();

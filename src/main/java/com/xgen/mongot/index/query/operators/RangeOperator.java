@@ -34,9 +34,25 @@ import org.bson.BsonValue;
  * @param score score specification.
  * @param paths path(s) for this predicate.
  * @param bounds bounds of this range.
+ * @param fusedByOptimizer true only for operators synthesized by the optimizer. Not parseable from
+ *     user input. Not serialized.
  */
-public record RangeOperator(Score score, List<FieldPath> paths, RangeBound<?> bounds,
-                            Optional<List<String>> doesNotAffect) implements Operator {
+public record RangeOperator(
+    Score score,
+    List<FieldPath> paths,
+    RangeBound<?> bounds,
+    Optional<List<String>> doesNotAffect,
+    boolean fusedByOptimizer)
+    implements Operator {
+
+  /** Creates a user-written range operator. (Not a synthetic operator from the optimizer.) */
+  public RangeOperator(
+      Score score,
+      List<FieldPath> paths,
+      RangeBound<?> bounds,
+      Optional<List<String>> doesNotAffect) {
+    this(score, paths, bounds, doesNotAffect, false);
+  }
 
   public static class Fields {
     private static Field.Optional<Point> pointField(String name) {
@@ -84,7 +100,9 @@ public record RangeOperator(Score score, List<FieldPath> paths, RangeBound<?> bo
         boundsFromDefinition(parser.getContext(), lower, upper, lowerInclusive, upperInclusive);
 
     return new RangeOperator(
-        Operators.parseScore(parser), Operators.parseFieldPath(parser), bounds,
+        Operators.parseScore(parser),
+        Operators.parseFieldPath(parser),
+        bounds,
         parser.getField(Fields.DOES_NOT_AFFECT).unwrap());
   }
 

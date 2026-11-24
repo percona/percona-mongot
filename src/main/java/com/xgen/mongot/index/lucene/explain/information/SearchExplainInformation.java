@@ -17,12 +17,17 @@ public record SearchExplainInformation(
     Optional<CollectorExplainInformation> collectStats,
     Optional<HighlightStats> highlightStats,
     Optional<ResultMaterializationStats> resultMaterialization,
+    Optional<AggregationStats> aggregation,
     Optional<MetadataExplainInformation> metadata,
     Optional<ResourceUsageOutput> resourceUsage,
     Optional<List<VectorSearchTracingSpec>> vectorSearchTracingInfo,
     Optional<List<VectorSearchSegmentStatsSpec>> vectorSearchSegmentStats,
+    Optional<BsonDocument> vectorliteStats,
+    Optional<BsonDocument> vectorliteTrace,
+    Optional<VectorSearchNumCandidatesSpec> numCandidates,
     Optional<List<SearchExplainInformation>> indexPartitionExplainInformation,
-    Optional<List<FeatureFlagEvaluationSpec>> dynamicFeatureFlags)
+    Optional<List<FeatureFlagEvaluationSpec>> dynamicFeatureFlags,
+    Optional<List<String>> optimizerRulesFired)
     implements DocumentEncodable {
 
   static class Fields {
@@ -69,6 +74,13 @@ public record SearchExplainInformation(
             .optional()
             .noDefault();
 
+    static final Field.Optional<AggregationStats> AGGREGATION =
+        Field.builder("aggregation")
+            .classField(AggregationStats::fromBson)
+            .allowUnknownFields()
+            .optional()
+            .noDefault();
+
     static final Field.Optional<List<VectorSearchSegmentStatsSpec>>
         VECTOR_SEARCH_LUCENE_SEGMENT_STATS =
             Field.builder("luceneVectorSegmentStats")
@@ -89,6 +101,18 @@ public record SearchExplainInformation(
             .optional()
             .noDefault();
 
+    static final Field.Optional<BsonDocument> VECTORLITE_STATS =
+        Field.builder("vectorliteStats").documentField().optional().noDefault();
+
+    static final Field.Optional<BsonDocument> VECTORLITE_TRACE =
+        Field.builder("vectorliteTrace").documentField().optional().noDefault();
+    static final Field.Optional<VectorSearchNumCandidatesSpec> NUM_CANDIDATES =
+        Field.builder("numCandidates")
+            .classField(VectorSearchNumCandidatesSpec::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
+
     static final Field.Optional<List<SearchExplainInformation>>
         INDEX_PARTITION_EXPLAIN_INFORMATION =
             Field.builder("indexPartitionExplain")
@@ -106,6 +130,9 @@ public record SearchExplainInformation(
             .asList()
             .optional()
             .noDefault();
+
+    static final Field.Optional<List<String>> OPTIMIZER_RULES_FIRED =
+        Field.builder("optimizerRulesFired").stringField().asList().optional().noDefault();
   }
 
   public static SearchExplainInformation fromBson(DocumentParser parser) throws BsonParseException {
@@ -114,19 +141,22 @@ public record SearchExplainInformation(
         parser.getField(Fields.COLLECT_STATS).unwrap(),
         parser.getField(Fields.HIGHLIGHT).unwrap(),
         parser.getField(Fields.RESULT_MATERIALIZATION).unwrap(),
+        parser.getField(Fields.AGGREGATION).unwrap(),
         parser.getField(Fields.METADATA).unwrap(),
         parser.getField(Fields.RESOURCE_USAGE).unwrap(),
         parser.getField(Fields.VECTOR_TRACING).unwrap(),
         parser.getField(Fields.VECTOR_SEARCH_LUCENE_SEGMENT_STATS).unwrap(),
+        parser.getField(Fields.VECTORLITE_STATS).unwrap(),
+        parser.getField(Fields.VECTORLITE_TRACE).unwrap(),
+        parser.getField(Fields.NUM_CANDIDATES).unwrap(),
         parser.getField(Fields.INDEX_PARTITION_EXPLAIN_INFORMATION).unwrap(),
-        parser.getField(Fields.DYNAMIC_FEATURE_FLAGS).unwrap());
+        parser.getField(Fields.DYNAMIC_FEATURE_FLAGS).unwrap(),
+        parser.getField(Fields.OPTIMIZER_RULES_FIRED).unwrap());
   }
-
 
   @Override
   public BsonDocument toBson() {
-    var cmp = Comparator.comparing(
-        (QueryExplainInformation sub) -> JsonCodec.toJson(sub.toBson()));
+    var cmp = Comparator.comparing((QueryExplainInformation sub) -> JsonCodec.toJson(sub.toBson()));
 
     Optional<List<QueryExplainInformation>> list =
         this.query.map(lst -> lst.stream().map(q -> q.sortedArgs(cmp)).toList());
@@ -136,12 +166,17 @@ public record SearchExplainInformation(
         .field(Fields.COLLECT_STATS, this.collectStats)
         .field(Fields.HIGHLIGHT, this.highlightStats)
         .field(Fields.RESULT_MATERIALIZATION, this.resultMaterialization)
+        .field(Fields.AGGREGATION, this.aggregation)
         .field(Fields.METADATA, this.metadata)
         .field(Fields.RESOURCE_USAGE, this.resourceUsage)
         .field(Fields.VECTOR_TRACING, this.vectorSearchTracingInfo)
         .field(Fields.VECTOR_SEARCH_LUCENE_SEGMENT_STATS, this.vectorSearchSegmentStats)
+        .field(Fields.VECTORLITE_STATS, this.vectorliteStats)
+        .field(Fields.VECTORLITE_TRACE, this.vectorliteTrace)
+        .field(Fields.NUM_CANDIDATES, this.numCandidates)
         .field(Fields.INDEX_PARTITION_EXPLAIN_INFORMATION, this.indexPartitionExplainInformation)
         .field(Fields.DYNAMIC_FEATURE_FLAGS, this.dynamicFeatureFlags)
+        .field(Fields.OPTIMIZER_RULES_FIRED, this.optimizerRulesFired)
         .build();
   }
 

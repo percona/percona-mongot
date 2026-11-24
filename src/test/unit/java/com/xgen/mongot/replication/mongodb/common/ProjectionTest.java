@@ -5,10 +5,12 @@ import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITI
 import static org.junit.Assert.assertEquals;
 
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
 import com.xgen.mongot.index.definition.StoredSourceDefinition;
 import com.xgen.testing.mongot.index.definition.BooleanFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.DateFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.EmbeddingModelCatalogTestUtils;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.StringFieldDefinitionBuilder;
@@ -20,9 +22,15 @@ import java.util.Set;
 import org.bson.BsonDocument;
 import org.bson.conversions.Bson;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 
 public class ProjectionTest {
+
+  @Before
+  public void registerEmbeddingModels() {
+    EmbeddingModelCatalogTestUtils.resetCatalogAndRegisterAutoEmbedModel("voyage-3-large");
+  }
 
   private enum ProjectionType {
     INCLUDE(1),
@@ -142,6 +150,58 @@ public class ProjectionTest {
   }
 
   @Test
+  public void testVectorDefinitionWithIndexNamespaceForFindQuery() {
+
+    var definition =
+        VectorIndexDefinitionBuilder.builder()
+            .withFilterPath("b")
+            .withCustomEngineVectorField("d1.d2", 3)
+            .indexNamespace("meta.tenant")
+            .build();
+
+    Optional<Bson> projection = Projection.forRegularQuery(definition);
+    assertProjection(
+        ProjectionType.INCLUDE,
+        projection,
+        getDefaultFindQueryPaths(definition),
+        "b",
+        "d1.d2",
+        "meta.tenant");
+  }
+
+  @Test
+  public void testVectorDefinitionWithIndexNamespaceForChangeStreamQuery() {
+
+    var definition =
+        VectorIndexDefinitionBuilder.builder()
+            .withFilterPath("b")
+            .withCustomEngineVectorField("d1.d2", 3)
+            .indexNamespace("meta.tenant")
+            .build();
+
+    Optional<Bson> projection = Projection.forChangeStream(definition);
+    assertProjection(
+        ProjectionType.INCLUDE,
+        projection,
+        getDefaultChangeStreamPaths(definition),
+        "fullDocument.b",
+        "fullDocument.d1.d2",
+        "fullDocument.meta.tenant");
+  }
+
+  @Test
+  public void testVectorDefinitionWithDollarSignIndexNamespace() {
+    var definition =
+        VectorIndexDefinitionBuilder.builder()
+            .withCustomEngineVectorField("good_vector", 3)
+            .indexNamespace("$bad_namespace")
+            .build();
+
+    Assert.assertTrue(Projection.forRegularQuery(definition).isEmpty());
+    Assert.assertTrue(Projection.forChangeStream(definition).isEmpty());
+  }
+
+  @Test
   public void testFlatFieldsAreProjectedIndependently() {
 
     var mappings =
@@ -177,6 +237,89 @@ public class ProjectionTest {
         getDefaultChangeStreamPaths(definition),
         "fullDocument.firstName",
         "fullDocument.lastName");
+  }
+
+  @Test
+  public void testSearchAutoEmbedProjectsSourcePath() {
+    // CLOUDP-353553: the auto-embed key is the source path ("body"). Embedding reads the text
+    // from that path, so the projection must include "body"; otherwise the source text is
+    // stripped from the scanned document and no vector is generated.
+    var mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "body",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .build();
+    var definition =
+        SearchIndexDefinitionBuilder.from(MOCK_INDEX_DEFINITION)
+            .mappings(mappings)
+            .autoEmbeddingDefinitionVersion(0L)
+            .build();
+
+    assertThat(getDocument(Projection.forRegularQuery(definition)).keySet()).contains("body");
+    assertThat(getDocument(Projection.forChangeStream(definition)).keySet())
+        .contains("fullDocument.body");
+  }
+
+  @Test
+  public void testNestedSearchAutoEmbedProjectsPath() {
+    // Nested-only autoEmbed: the source path is the full dotted key ("product.description") and
+    // must be projected.
+    var mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "product",
+                FieldDefinitionBuilder.builder()
+                    .document(
+                        DocumentFieldDefinitionBuilder.builder()
+                            .dynamic(false)
+                            .field(
+                                "description",
+                                FieldDefinitionBuilder.builder()
+                                    .searchAutoEmbed(
+                                        new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                                    .build())
+                            .build())
+                    .build())
+            .build();
+    var definition =
+        SearchIndexDefinitionBuilder.from(MOCK_INDEX_DEFINITION)
+            .mappings(mappings)
+            .autoEmbeddingDefinitionVersion(0L)
+            .build();
+
+    assertThat(getDocument(Projection.forRegularQuery(definition)).keySet())
+        .contains("product.description");
+    assertThat(getDocument(Projection.forChangeStream(definition)).keySet())
+        .contains("fullDocument.product.description");
+  }
+
+  @Test
+  public void testSearchAutoEmbedWithScalarAlternativeProjectsSourcePath() {
+    // Dual role: one key ("body") carries both an autoEmbed and a scalar string alternative, so
+    // the single shared path must be projected to keep the scalar data and the embed text.
+    var mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "body",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .string(StringFieldDefinitionBuilder.builder().build())
+                    .build())
+            .build();
+    var definition =
+        SearchIndexDefinitionBuilder.from(MOCK_INDEX_DEFINITION)
+            .mappings(mappings)
+            .autoEmbeddingDefinitionVersion(0L)
+            .build();
+
+    var keys = getDocument(Projection.forRegularQuery(definition)).keySet();
+    assertThat(keys).contains("body");
   }
 
   @Test

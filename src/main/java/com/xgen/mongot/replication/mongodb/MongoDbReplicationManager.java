@@ -6,7 +6,6 @@ import static com.xgen.mongot.util.Check.checkState;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
-import com.mongodb.ConnectionString;
 import com.mongodb.client.MongoClient;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
@@ -16,6 +15,7 @@ import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
+import com.xgen.mongot.index.autoembedding.DerivedLocalIndexGeneration;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -23,6 +23,7 @@ import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.replication.ReplicationManager;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
+import com.xgen.mongot.replication.mongodb.common.CollectionStatsMongoClient;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.DefaultDocumentIndexer;
@@ -31,6 +32,7 @@ import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
 import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.ReplicationOptimeUpdater;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
+import com.xgen.mongot.replication.mongodb.common.SourceCollectionCountUpdater;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
@@ -45,7 +47,6 @@ import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.mongot.util.mongodb.BatchMongoClient;
 import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.MongoClientBuilder;
-import com.xgen.mongot.util.mongodb.SslContextFactory;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
@@ -131,6 +132,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   private final Duration commitInterval;
 
   private final ReplicationOptimeUpdater replicationOptimeUpdater;
+  private final SourceCollectionCountUpdater sourceCollectionCountUpdater;
 
   // TODO(CLOUDP-231027): Remove after separating from LifecycleManager.
   private final InitializedIndexCatalog initializedIndexCatalog;
@@ -148,6 +150,12 @@ public class MongoDbReplicationManager implements ReplicationManager {
 
   /** A flag indicating whether natural order scan is enabled for initial sync */
   private final boolean enableNaturalOrderScan;
+
+  /**
+   * Wires a {@link RecyclableReplicationIndexManager}'s leadership sink to its native engine. Empty
+   * in builds without a custom vector engine (e.g. community).
+   */
+  private final Optional<LeaderStatusRegistrar> leaderStatusRegistrar;
 
   /** private constructor - Use static factory methods to construct instances. */
   private MongoDbReplicationManager(
@@ -169,10 +177,12 @@ public class MongoDbReplicationManager implements ReplicationManager {
       Map<GenerationId, IndexManager> indexManagers,
       NamedScheduledExecutorService commitExecutor,
       ReplicationOptimeUpdater replicationOptimeUpdater,
+      SourceCollectionCountUpdater sourceCollectionCountUpdater,
       InitializedIndexCatalog initializedIndexCatalog,
       Duration commitInterval,
       Duration requestRateLimitBackoffDuration,
-      boolean enableNaturalOrderScan) {
+      boolean enableNaturalOrderScan,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
     this.lifecycleExecutor = lifecycleExecutor;
     this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
     this.cursorManager = cursorManager;
@@ -192,9 +202,11 @@ public class MongoDbReplicationManager implements ReplicationManager {
     this.syncSourceConfig = syncSourceConfig;
     this.featureFlags = featureFlags;
     this.replicationOptimeUpdater = replicationOptimeUpdater;
+    this.sourceCollectionCountUpdater = sourceCollectionCountUpdater;
     this.initializedIndexCatalog = initializedIndexCatalog;
     this.requestRateLimitBackoffDuration = requestRateLimitBackoffDuration;
     this.enableNaturalOrderScan = enableNaturalOrderScan;
+    this.leaderStatusRegistrar = leaderStatusRegistrar;
     this.shutdown = false;
     this.metricsFactory = new MetricsFactory("replication.mongodb", meterRegistry);
     this.managerUp = this.metricsFactory.numGauge("manager", Tags.of("type", "normal"));
@@ -221,10 +233,12 @@ public class MongoDbReplicationManager implements ReplicationManager {
       Map<GenerationId, IndexManager> indexManagers,
       NamedScheduledExecutorService commitExecutor,
       ReplicationOptimeUpdater replicationOptimeUpdater,
+      SourceCollectionCountUpdater sourceCollectionCountUpdater,
       InitializedIndexCatalog initializedIndexCatalog,
       Duration commitInterval,
       Duration requestRateLimitBackoffDuration,
-      boolean enableNaturalOrderScan) {
+      boolean enableNaturalOrderScan,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
     MongoDbReplicationManager manager =
         new MongoDbReplicationManager(
             lifecycleExecutor,
@@ -245,10 +259,12 @@ public class MongoDbReplicationManager implements ReplicationManager {
             indexManagers,
             commitExecutor,
             replicationOptimeUpdater,
+            sourceCollectionCountUpdater,
             initializedIndexCatalog,
             commitInterval,
             requestRateLimitBackoffDuration,
-            enableNaturalOrderScan);
+            enableNaturalOrderScan,
+            leaderStatusRegistrar);
 
     // Register gauges after construction is complete
     createStateGauges(manager, manager.metricsFactory);
@@ -272,7 +288,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       Duration replicationOptimeUpdaterInterval,
       BatchMongoClient syncBatchMongoClient,
-      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier) {
+      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
     if (syncSourceConfig.isEmpty()) {
       throw new IllegalArgumentException("syncSourceConfig must be provided");
     }
@@ -283,13 +300,21 @@ public class MongoDbReplicationManager implements ReplicationManager {
     meterRegistry.gauge("replication.manager", 1);
     boolean enableLifecycleAttributionMetrics =
         featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS);
+    Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings =
+        enableLifecycleAttributionMetrics
+            ? Optional.of(meterAndFtdcRegistry.threadPoolResourceBindings())
+            : Optional.empty();
+    boolean enableChangeStreamPriorityScheduling =
+        featureFlags.isEnabled(Feature.CHANGE_STREAM_PRIORITY_SCHEDULING);
+    boolean enableChangeStreamActivityObserver =
+        featureFlags.isEnabled(Feature.CHANGE_STREAM_ACTIVITY_OBSERVER);
 
     var lifecycleExecutor =
         Executors.fixedSizeThreadPool(
             "indexing-lifecycle", Math.max(1, Runtime.INSTANCE.getNumCpus() / 4), meterRegistry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("replication").register(lifecycleExecutor, meterRegistry);
-    }
+    attributionBindings.ifPresent(
+        bindings ->
+            bindings.forSubsystem("replication").register(lifecycleExecutor, meterRegistry));
 
     var indexingWorkSchedulerFactory =
         embeddingServiceManagerSupplier
@@ -299,27 +324,24 @@ public class MongoDbReplicationManager implements ReplicationManager {
                         replicationConfig.numIndexingThreads,
                         supplier,
                         meterRegistry,
-                        enableLifecycleAttributionMetrics))
+                        attributionBindings))
             .orElseGet(
                 () ->
                     IndexingWorkSchedulerFactory.createWithoutEmbeddingStrategy(
-                        replicationConfig.numIndexingThreads,
-                        meterRegistry,
-                        enableLifecycleAttributionMetrics));
+                        replicationConfig.numIndexingThreads, meterRegistry, attributionBindings));
 
     var decodingWorkScheduler =
         DecodingWorkScheduler.create(
             replicationConfig.numChangeStreamDecodingThreads,
             CommonReplicationConfig.Type.DEFAULT,
             meterRegistry,
-            enableLifecycleAttributionMetrics);
+            attributionBindings);
 
     var sessionRefreshExecutor =
         Executors.singleThreadScheduledExecutor("session-refresh", meterRegistry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("replication")
-          .register(sessionRefreshExecutor, meterRegistry);
-    }
+    attributionBindings.ifPresent(
+        bindings ->
+            bindings.forSubsystem("replication").register(sessionRefreshExecutor, meterRegistry));
 
     // There should only be one sync source host
     var syncSourceHost = getSyncSourceHost(syncSourceConfig.get());
@@ -348,10 +370,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       synonymsMongoClient =
           Optional.of(
               getSynonymsMongoClient(
-                  mongosSingleHostUri.uri(),
-                  mongosSingleHostUri.sslContextFactory(),
-                  replicationConfig.numConcurrentSynonymSyncs,
-                  meterRegistry));
+                  mongosSingleHostUri, replicationConfig.numConcurrentSynonymSyncs, meterRegistry));
     } else {
       synonymsMongoClient = Optional.empty();
     }
@@ -375,10 +394,11 @@ public class MongoDbReplicationManager implements ReplicationManager {
             initialSyncConfig,
             dataPath,
             initialSyncGate,
+            featureFlags,
             Optional.empty());
 
     SteadyStateReplicationConfig steadyStateReplicationConfig =
-        getSteadyStateReplicationConfig(replicationConfig);
+        getSteadyStateReplicationConfig(replicationConfig, featureFlags);
 
     var steadyStateManager =
         SteadyStateManager.create(
@@ -389,7 +409,9 @@ public class MongoDbReplicationManager implements ReplicationManager {
             syncBatchMongoClient,
             decodingWorkScheduler,
             steadyStateReplicationConfig,
-            enableLifecycleAttributionMetrics);
+            enableLifecycleAttributionMetrics,
+            enableChangeStreamPriorityScheduling,
+            enableChangeStreamActivityObserver);
 
     var synonymManager =
         SynonymManager.create(
@@ -402,9 +424,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
     var commitExecutor =
         Executors.fixedSizeThreadScheduledExecutor(
             "index-commit", durabilityConfig.numCommittingThreads, meterRegistry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("replication").register(commitExecutor, meterRegistry);
-    }
+    attributionBindings.ifPresent(
+        bindings -> bindings.forSubsystem("replication").register(commitExecutor, meterRegistry));
 
     var replicationOptimeMetricUpdater =
         ReplicationOptimeUpdater.create(
@@ -413,7 +434,16 @@ public class MongoDbReplicationManager implements ReplicationManager {
             syncSourceConfig,
             replicationOptimeUpdaterInterval,
             meterRegistry,
-            enableLifecycleAttributionMetrics);
+            attributionBindings);
+
+    var sourceCollectionCountUpdater =
+        SourceCollectionCountUpdater.create(
+            indexCatalog,
+            initializedIndexCatalog,
+            new CollectionStatsMongoClient(syncMongoClient),
+            SourceCollectionCountUpdater.DEFAULT_UPDATE_INTERVAL,
+            featureFlags,
+            meterRegistry);
 
     return MongoDbReplicationManager.create(
         lifecycleExecutor,
@@ -434,10 +464,12 @@ public class MongoDbReplicationManager implements ReplicationManager {
         new ConcurrentHashMap<>(), // ConcurrentHashMap to make copy without locks
         commitExecutor,
         replicationOptimeMetricUpdater,
+        sourceCollectionCountUpdater,
         initializedIndexCatalog,
         durabilityConfig.commitInterval,
         Duration.ofMillis(replicationConfig.requestRateLimitBackoffMs),
-        initialSyncConfig.enableNaturalOrderScan());
+        initialSyncConfig.enableNaturalOrderScan(),
+        leaderStatusRegistrar);
   }
 
   @VisibleForTesting
@@ -454,7 +486,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
       InitializedIndexCatalog initializedIndexCatalog,
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       Duration replicationOptimeUpdaterInterval,
-      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier) {
+      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
     if (syncSourceConfig.isEmpty()) {
       throw new IllegalArgumentException("syncSourceConfig must be provided");
     }
@@ -482,7 +515,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
         meterAndFtdcRegistry,
         replicationOptimeUpdaterInterval,
         syncBatchMongoClient,
-        embeddingServiceManagerSupplier);
+        embeddingServiceManagerSupplier,
+        leaderStatusRegistrar);
   }
 
   public static MongoDbReplicationManager create(
@@ -497,7 +531,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
       InitializedIndexCatalog initializedIndexCatalog,
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       Gate initialSyncGate,
-      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier) {
+      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
     return create(
         dataPath,
         initialSyncGate,
@@ -511,7 +546,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
         initializedIndexCatalog,
         meterAndFtdcRegistry,
         ReplicationOptimeUpdater.DEFAULT_UPDATE_INTERVAL,
-        embeddingServiceManagerSupplier);
+        embeddingServiceManagerSupplier,
+        leaderStatusRegistrar);
   }
 
   /** Creates gauges to track the number of index replication managers by state */
@@ -530,7 +566,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
   // lock is not needed because we iterate through a copy of managers
   private double gaugeReplicationManagers(IndexManager.State state) {
     return this.getIndexManagers().entrySet().stream()
-        .filter(m -> m.getValue().getState() == state)
+        .filter(m -> m.getValue().getStateWithoutLock() == state)
         .count();
   }
 
@@ -539,8 +575,7 @@ public class MongoDbReplicationManager implements ReplicationManager {
       String metricsNamespacePrefix,
       MeterRegistry meterRegistry,
       int maxConnections) {
-    return MongoClientBuilder.builder(syncSource.uri(), metricsNamespacePrefix, meterRegistry)
-        .sslContextFactory(syncSource.sslContextFactory())
+    return MongoClientBuilder.builder(syncSource, metricsNamespacePrefix, meterRegistry)
         .description("initial sync and session refresh")
         .maxConnections(maxConnections)
         .buildSyncClient();
@@ -647,12 +682,8 @@ public class MongoDbReplicationManager implements ReplicationManager {
   }
 
   private static com.mongodb.client.MongoClient getSynonymsMongoClient(
-      ConnectionString connectionString,
-      Optional<SslContextFactory> sslContextFactory,
-      int numConcurrentSynonymSyncs,
-      MeterRegistry meterRegistry) {
-    return MongoClientBuilder.builder(connectionString, meterRegistry)
-        .sslContextFactory(sslContextFactory)
+      ConnectionInfo connectionInfo, int numConcurrentSynonymSyncs, MeterRegistry meterRegistry) {
+    return MongoClientBuilder.builder(connectionInfo, meterRegistry)
         .description("mongos synonym sync")
         .maxConnections(numConcurrentSynonymSyncs)
         .buildSyncClient();
@@ -663,19 +694,33 @@ public class MongoDbReplicationManager implements ReplicationManager {
       int numConcurrentChangeStreams,
       String metricsNamespacePrefix,
       MeterRegistry meterRegistry) {
-    return MongoClientBuilder.builder(
-            syncSourceConfig.mongodClusterReplicationUri.uri(),
-            metricsNamespacePrefix,
-            meterRegistry)
-        .sslContextFactory(syncSourceConfig.mongodClusterReplicationUri.sslContextFactory())
+    var connectionInfo = syncSourceConfig.mongodClusterReplicationUri;
+    return MongoClientBuilder.builder(connectionInfo, metricsNamespacePrefix, meterRegistry)
         .description("steady state sync")
         .maxConnections(numConcurrentChangeStreams)
         .buildSyncBatchClient();
   }
 
+  /**
+   * Derives the steady-state replication config from the given {@link MongoDbReplicationConfig}.
+   */
   public static SteadyStateReplicationConfig getSteadyStateReplicationConfig(
       MongoDbReplicationConfig replicationConfig) {
+    return getSteadyStateReplicationConfig(replicationConfig, FeatureFlags.getDefault());
+  }
+
+  /**
+   * Derives the steady-state replication config, resolving the feature flags the steady-state path
+   * needs so the change stream managers do not each have to take {@link FeatureFlags}.
+   */
+  public static SteadyStateReplicationConfig getSteadyStateReplicationConfig(
+      MongoDbReplicationConfig replicationConfig, FeatureFlags featureFlags) {
     return SteadyStateReplicationConfig.builder()
+        .setRetryThrottledGetMoreOnSameCursor(
+            featureFlags.isEnabled(Feature.RETRY_THROTTLED_GETMORE_ON_SAME_CURSOR))
+        .setEnableParallelChangeStreamReaders(
+            featureFlags.isEnabled(Feature.PARALLEL_CHANGE_STREAM_READERS))
+        .setNumParallelChangeStreamReaders(replicationConfig.getNumParallelChangeStreamReaders())
         .setNumConcurrentChangeStreams(replicationConfig.numConcurrentChangeStreams)
         .setChangeStreamQueryMaxTimeMs(replicationConfig.changeStreamMaxTimeMs)
         .setChangeStreamCursorMaxTimeSec(replicationConfig.changeStreamCursorMaxTimeSec)
@@ -687,6 +732,14 @@ public class MongoDbReplicationManager implements ReplicationManager {
             replicationConfig.getMatchCollectionUuidForUpdateLookup())
         .setEnableSplitLargeChangeStreamEvents(
             replicationConfig.getEnableSplitLargeChangeStreamEvents())
+        .setSteadyStateSchedulingMethod(replicationConfig.getSteadyStateSchedulingMethod())
+        .setSteadyStatePriorityRatio(replicationConfig.getSteadyStatePriorityRatio())
+        .setSteadyStatePriorityOptimeThresholdSeconds(
+            replicationConfig.getSteadyStatePriorityOptimeThresholdSeconds())
+        .setChangeStreamInactivityThresholdSec(
+            replicationConfig.getChangeStreamInactivityThresholdSec())
+        .setChangeStreamKeepAliveIntervalSec(
+            replicationConfig.getChangeStreamKeepAliveIntervalSec())
         .build();
   }
 
@@ -717,11 +770,15 @@ public class MongoDbReplicationManager implements ReplicationManager {
       return;
     }
 
-    DefaultDocumentIndexer indexer = DefaultDocumentIndexer.create(initializedIndex.get());
+    DefaultDocumentIndexer indexer =
+        indexGeneration instanceof DerivedLocalIndexGeneration derivedGeneration
+            ? DefaultDocumentIndexer.create(
+                initializedIndex.get(), derivedGeneration.getCommitMetadataSupplier())
+            : DefaultDocumentIndexer.create(initializedIndex.get());
 
     IndexManager indexManager =
         ReplicationIndexManagerFactory.forIndexGeneration(
-                indexGeneration, this.replicationIndexManagerFactory)
+                indexGeneration, this.replicationIndexManagerFactory, this.leaderStatusRegistrar)
             .create(
                 this.lifecycleExecutor,
                 this.cursorManager,
@@ -764,6 +821,15 @@ public class MongoDbReplicationManager implements ReplicationManager {
             .map(IndexManager::shutdown)
             .collect(Collectors.toList());
 
+    // Abort any in-flight replication reads before we start awaiting the shutdown futures above.
+    // The synchronous mongo driver ignores Thread.interrupt() during a blocking socket read, so the
+    // only way to unblock a hung getMore/find (e.g. when the sync source is unhealthy) is to close
+    // the client, which closes the socket. Doing this early lets the initial-sync, steady-state and
+    // synonym worker threads unwind so their executors terminate before Executors.shutdownOrFail
+    // hits its hard timeout and crashes mongot. The later .close() calls in the chain below become
+    // idempotent no-ops.
+    abortReplicationMongoClients();
+
     // Need to create a separate executor to run the shutdown tasks, otherwise it may end up running
     // on the indexing executor. As one of the shutdown tasks is shutting down that executor, this
     // will hang forever.
@@ -805,8 +871,32 @@ public class MongoDbReplicationManager implements ReplicationManager {
         .thenRunAsync(() -> Executors.shutdownOrFail(this.commitExecutor), shutdownExecutor)
         .thenRunAsync(() -> Executors.shutdownOrFail(this.lifecycleExecutor), shutdownExecutor)
         .thenRunAsync(this.replicationOptimeUpdater::close, shutdownExecutor)
+        .thenRunAsync(this.sourceCollectionCountUpdater::close, shutdownExecutor)
         .thenRunAsync(this::deregisterGauges, shutdownExecutor)
         .whenComplete((result, throwable) -> shutdownExecutor.shutdown());
+  }
+
+  /**
+   * Closes all replication mongo clients to abort any in-flight reads. Closing a client closes its
+   * sockets, which is the only reliable way to unblock a synchronous-driver read that is hung on an
+   * unhealthy sync source. Every client's {@code close()} is idempotent, so it is safe for this to
+   * run before the later close stages of {@link #shutdown()}.
+   */
+  private void abortReplicationMongoClients() {
+    LOG.info("Aborting replication mongo clients to unblock in-flight reads.");
+
+    // Mark the session refreshers as stopping before closing the clients so that a refresh racing
+    // with the close is recognized as an expected shutdown failure rather than being counted.
+    this.clientSessionRecordMap
+        .values()
+        .forEach(clientSessionRecord -> clientSessionRecord.sessionRefresher().markStopping());
+    this.synonymsSessionRefresher.ifPresent(SessionRefresher::markStopping);
+
+    this.clientSessionRecordMap
+        .values()
+        .forEach(clientSessionRecord -> clientSessionRecord.syncMongoClient().close());
+    this.syncBatchMongoClient.close();
+    this.synonymsSyncClient.ifPresent(MongoClient::close);
   }
 
   @Override

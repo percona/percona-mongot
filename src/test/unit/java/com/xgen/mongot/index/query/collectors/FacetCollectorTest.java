@@ -4,6 +4,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.testing.BsonDeserializationTestSuite.fromDocument;
 
 import com.xgen.mongot.index.query.operators.AllDocumentsOperator;
+import com.xgen.mongot.index.query.operators.EmbeddedDocumentScope;
 import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.points.LongPoint;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
@@ -25,9 +26,11 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import org.bson.BsonDateTime;
+import org.bson.BsonDocument;
 import org.bson.BsonDouble;
 import org.bson.BsonInt32;
 import org.bson.BsonNumber;
+import org.bson.BsonString;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -243,24 +246,23 @@ public class FacetCollectorTest {
   public static class RegularSuite {
     @Test
     public void containsDoesNotAffect_whenOperatorWithDoesNotAffectDefined_returnsTrue() {
-      var equalsOperator = OperatorBuilder.equals()
-          .path("field1")
-          .value("value")
-          .doesNotAffect("facet1")
-          .build();
+      var equalsOperator =
+          OperatorBuilder.equals().path("field1").value("value").doesNotAffect("facet1").build();
 
-      var inOperator = OperatorBuilder.in()
-          .path("field2")
-          .strings(Arrays.asList("value1", "value2", "value3"))
-          .doesNotAffect("facet2")
-          .build();
+      var inOperator =
+          OperatorBuilder.in()
+              .path("field2")
+              .strings(Arrays.asList("value1", "value2", "value3"))
+              .doesNotAffect("facet2")
+              .build();
 
-      var rangeOperator = OperatorBuilder.range()
-          .path("field3")
-          .numericBounds(Optional.of(new LongPoint(10)), Optional.of(new LongPoint(20)),
-              true, false)
-          .doesNotAffect("facet3")
-          .build();
+      var rangeOperator =
+          OperatorBuilder.range()
+              .path("field3")
+              .numericBounds(
+                  Optional.of(new LongPoint(10)), Optional.of(new LongPoint(20)), true, false)
+              .doesNotAffect("facet3")
+              .build();
 
       assertThat(FacetCollector.containsDoesNotAffect(equalsOperator)).isTrue();
       assertThat(FacetCollector.containsDoesNotAffect(inOperator)).isTrue();
@@ -270,21 +272,20 @@ public class FacetCollectorTest {
     @Test
     public void containsDoesNotAffect_whenOperatorWithoutDoesNotAffect_returnsFalse() {
       // Create operators without `doesNotAffect`
-      var equalsOperator = OperatorBuilder.equals()
-          .path("field4")
-          .value("value")
-          .build();
+      var equalsOperator = OperatorBuilder.equals().path("field4").value("value").build();
 
-      var inOperator = OperatorBuilder.in()
-          .path("field5")
-          .strings(Arrays.asList("value1", "value2", "value3"))
-          .build();
+      var inOperator =
+          OperatorBuilder.in()
+              .path("field5")
+              .strings(Arrays.asList("value1", "value2", "value3"))
+              .build();
 
-      var rangeOperator = OperatorBuilder.range()
-          .path("field3")
-          .numericBounds(Optional.of(new LongPoint(10)), Optional.of(new LongPoint(20)),
-              true, false)
-          .build();
+      var rangeOperator =
+          OperatorBuilder.range()
+              .path("field3")
+              .numericBounds(
+                  Optional.of(new LongPoint(10)), Optional.of(new LongPoint(20)), true, false)
+              .build();
 
       assertThat(FacetCollector.containsDoesNotAffect(equalsOperator)).isFalse();
       assertThat(FacetCollector.containsDoesNotAffect(inOperator)).isFalse();
@@ -294,25 +295,21 @@ public class FacetCollectorTest {
     @Test
     public void containsDoesNotAffect_whenCompoundOrEmbeddedReturnsTrue() {
       // Create compound and embedded operators
-      var compoundOperator = OperatorBuilder.compound()
-          .should(
-              OperatorBuilder.equals()
-                  .path("field1")
-                  .value("value")
-                  .build()
-          )
-          .build();
+      var compoundOperator =
+          OperatorBuilder.compound()
+              .should(OperatorBuilder.equals().path("field1").value("value").build())
+              .build();
 
-      var embeddedOperator = OperatorBuilder.embeddedDocument()
-          .path("field2")
-          .operator(
-              OperatorBuilder.range()
-                  .path("field3")
-                  .numericBounds(Optional.of(new LongPoint(1)),
-                      Optional.of(new LongPoint(3)), true, false)
-                  .build()
-          )
-          .build();
+      var embeddedOperator =
+          OperatorBuilder.embeddedDocument()
+              .path("field2")
+              .operator(
+                  OperatorBuilder.range()
+                      .path("field3")
+                      .numericBounds(
+                          Optional.of(new LongPoint(1)), Optional.of(new LongPoint(3)), true, false)
+                      .build())
+              .build();
 
       // Verify that these operators always return true
       assertThat(FacetCollector.containsDoesNotAffect(compoundOperator)).isTrue();
@@ -321,10 +318,8 @@ public class FacetCollectorTest {
 
     @Test
     public void containsDoesNotAffect_whenAutocompleteReturnsFalse() {
-      var autocompleteOperator = OperatorBuilder.autocomplete()
-          .path("description")
-          .query("pizza")
-          .build();
+      var autocompleteOperator =
+          OperatorBuilder.autocomplete().path("description").query("pizza").build();
 
       assertThat(FacetCollector.containsDoesNotAffect(autocompleteOperator)).isFalse();
     }
@@ -332,10 +327,7 @@ public class FacetCollectorTest {
     @Test
     public void buildDrillSidewaysInfo_operatorDoesNotContainDoesNotAffect_returnsEmptyOptional() {
       long value = 1;
-      Operator operator = OperatorBuilder.equals()
-          .path("color")
-          .value(value)
-          .build();
+      Operator operator = OperatorBuilder.equals().path("color").value(value).build();
 
       Map<String, FacetDefinition> facetDefinitions = getFacetDefinitions();
 
@@ -410,8 +402,7 @@ public class FacetCollectorTest {
     /** When allow10k is false (DFF off), string facet numBuckets 2000 throws BsonParseException. */
     @Test
     public void stringFacetNumBuckets2000_fromBsonWithAllow10kFalse_throwsBsonParseException() {
-      var definition =
-          FacetDefinitionBuilder.string().numBuckets(2000).path("director").build();
+      var definition = FacetDefinitionBuilder.string().numBuckets(2000).path("director").build();
 
       var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build();
       TestUtils.assertThrows(
@@ -424,8 +415,7 @@ public class FacetCollectorTest {
     @Test
     public void stringFacetNumBuckets2000_fromBsonWithAllow10kTrue_succeeds()
         throws BsonParseException {
-      var definition =
-          FacetDefinitionBuilder.string().numBuckets(2000).path("director").build();
+      var definition = FacetDefinitionBuilder.string().numBuckets(2000).path("director").build();
 
       var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build();
       FacetDefinition result = FacetDefinition.fromBson(parser, true);
@@ -433,6 +423,187 @@ public class FacetCollectorTest {
       assertThat(result).isInstanceOf(FacetDefinition.StringFacetDefinition.class);
       assertThat(((FacetDefinition.StringFacetDefinition) result).numBuckets()).isEqualTo(2000);
       assertThat(result.path()).isEqualTo("director");
+    }
+
+    /**
+     * A string facet carrying an inline {@code embeddedDocument} block round-trips through
+     * toBson/fromBson, preserving the scope path and child operator.
+     */
+    @Test
+    public void scopedStringFacet_roundTripsThroughBson() throws BsonParseException {
+      var childOperator = OperatorBuilder.equals().path("variants.inStock").value(true).build();
+      var scopedDefinition =
+          new FacetDefinition.StringFacetDefinition(
+              "variants.color",
+              10,
+              Optional.of(
+                  new EmbeddedDocumentScope(
+                      com.xgen.mongot.util.FieldPath.parse("variants"), childOperator)));
+
+      // try-with-resources so parser.close() runs and asserts every field was consumed (the
+      // no-unknown-fields invariant is only enforced on close).
+      try (var parser =
+          BsonDocumentParser.fromRoot(scopedDefinition.toBson().asDocument()).build()) {
+        FacetDefinition result = FacetDefinition.fromBson(parser);
+
+        assertThat(result).isEqualTo(scopedDefinition);
+        assertThat(result.embeddedDocument()).isPresent();
+        assertThat(result.embeddedDocument().get().path().toString()).isEqualTo("variants");
+        assertThat(result.embeddedDocument().get().operator()).isEqualTo(childOperator);
+      }
+    }
+
+    /** A string facet with no {@code embeddedDocument} block parses to an empty scope. */
+    @Test
+    public void unscopedStringFacet_hasEmptyEmbeddedDocument() throws BsonParseException {
+      var definition = FacetDefinitionBuilder.string().path("director").build();
+
+      try (var parser = BsonDocumentParser.fromRoot(definition.toBson().asDocument()).build()) {
+        FacetDefinition result = FacetDefinition.fromBson(parser);
+
+        assertThat(result.embeddedDocument()).isEmpty();
+      }
+    }
+
+    /**
+     * The scope's operator selects children of {@code embeddedDocument.path}, so an operator whose
+     * path is not under that path is rejected at parse (mirrors {@code EmbeddedDocumentOperator}).
+     */
+    @Test
+    public void scopedStringFacet_operatorPathNotUnderScopePath_isRejected() {
+      var scopedStringFacet =
+          new BsonDocument()
+              .append("type", new BsonString("string"))
+              .append("path", new BsonString("variants.color"))
+              .append(
+                  "embeddedDocument",
+                  new BsonDocument()
+                      .append("path", new BsonString("variants"))
+                      .append(
+                          "operator",
+                          new BsonDocument()
+                              .append(
+                                  "range",
+                                  new BsonDocument()
+                                      .append("path", new BsonString("reviews.rating"))
+                                      .append("gte", new BsonInt32(1)))));
+
+      var parser = BsonDocumentParser.fromRoot(scopedStringFacet).build();
+      TestUtils.assertThrows(
+          "is not a subfield of", BsonParseException.class, () -> FacetDefinition.fromBson(parser));
+    }
+
+    /**
+     * An unrecognized field on a facet (e.g. the common {@code embeddedDocuments} plural typo)
+     * lists the expected fields, making the fix obvious.
+     */
+    @Test
+    public void unrecognizedFacetField_listsExpectedFields() {
+      var facetWithTypo =
+          new BsonDocument()
+              .append("type", new BsonString("string"))
+              .append("path", new BsonString("variants.color"))
+              .append(
+                  "embeddedDocuments", // plural typo; the field is "embeddedDocument"
+                  new BsonDocument().append("path", new BsonString("variants")));
+      var collector =
+          new BsonDocument()
+              .append(
+                  "operator",
+                  new BsonDocument()
+                      .append(
+                          "text",
+                          new BsonDocument()
+                              .append("path", new BsonString("title"))
+                              .append("query", new BsonString("jacket"))))
+              .append("facets", new BsonDocument().append("colorFacet", facetWithTypo));
+
+      var parser = BsonDocumentParser.fromRoot(collector).build();
+      BsonParseException ex =
+          TestUtils.assertThrows(
+              "unrecognized field \"embeddedDocuments\"",
+              BsonParseException.class,
+              () -> FacetCollector.fromBson(parser));
+      assertThat(ex)
+          .hasMessageThat()
+          .contains("Expected fields are: embeddedDocument, numBuckets, path, type");
+    }
+
+    /**
+     * A number facet carrying an inline {@code embeddedDocument} block round-trips through
+     * toBson/fromBson, preserving the scope path and child operator.
+     */
+    @Test
+    public void scopedNumberFacet_roundTripsThroughBson() throws BsonParseException {
+      var childOperator = OperatorBuilder.equals().path("variants.inStock").value(true).build();
+      var scopedDefinition =
+          new FacetDefinition.NumericFacetDefinition(
+              "variants.price",
+              Optional.empty(),
+              List.of(new BsonInt32(0), new BsonInt32(50)),
+              Optional.of(
+                  new EmbeddedDocumentScope(
+                      com.xgen.mongot.util.FieldPath.parse("variants"), childOperator)));
+
+      try (var parser =
+          BsonDocumentParser.fromRoot(scopedDefinition.toBson().asDocument()).build()) {
+        FacetDefinition result = FacetDefinition.fromBson(parser);
+
+        assertThat(result).isEqualTo(scopedDefinition);
+        assertThat(result.embeddedDocument()).isPresent();
+        assertThat(result.embeddedDocument().get().path().toString()).isEqualTo("variants");
+        assertThat(result.embeddedDocument().get().operator()).isEqualTo(childOperator);
+      }
+    }
+
+    /**
+     * A date facet carrying an inline {@code embeddedDocument} block round-trips through
+     * toBson/fromBson, preserving the scope path and child operator.
+     */
+    @Test
+    public void scopedDateFacet_roundTripsThroughBson() throws BsonParseException {
+      var childOperator = OperatorBuilder.equals().path("branches.inScope").value(true).build();
+      var scopedDefinition =
+          new FacetDefinition.DateFacetDefinition(
+              "branches.startDate",
+              Optional.empty(),
+              List.of(new BsonDateTime(0), new BsonDateTime(1_000_000)),
+              Optional.of(
+                  new EmbeddedDocumentScope(
+                      com.xgen.mongot.util.FieldPath.parse("branches"), childOperator)));
+
+      try (var parser =
+          BsonDocumentParser.fromRoot(scopedDefinition.toBson().asDocument()).build()) {
+        FacetDefinition result = FacetDefinition.fromBson(parser);
+
+        assertThat(result).isEqualTo(scopedDefinition);
+        assertThat(result.embeddedDocument()).isPresent();
+        assertThat(result.embeddedDocument().get().path().toString()).isEqualTo("branches");
+        assertThat(result.embeddedDocument().get().operator()).isEqualTo(childOperator);
+      }
+    }
+
+    /**
+     * Embedded-scoped facets report count only — per-bucket value accumulators are not part of the
+     * facet syntax. A stray accumulator field (e.g. {@code sum}) is rejected by the
+     * no-unknown-field invariant, which is enforced on {@code close()}.
+     */
+    @Test
+    public void numberFacetWithAccumulatorField_isRejected() {
+      var definition =
+          new FacetDefinition.NumericFacetDefinition(
+              "variants.price", Optional.empty(), List.of(new BsonInt32(0), new BsonInt32(50)));
+      BsonDocument doc =
+          definition.toBson().asDocument().append("sum", new BsonString("variants.price"));
+
+      TestUtils.assertThrows(
+          "unrecognized field \"sum\"",
+          BsonParseException.class,
+          () -> {
+            try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
+              FacetDefinition.fromBson(parser);
+            }
+          });
     }
 
     /** FacetCollector.fromBson (1k limit) rejects numBuckets 2000 with BsonParseException. */
@@ -450,9 +621,7 @@ public class FacetCollectorTest {
       var parser =
           BsonDocumentParser.fromRoot(facetCollector.collectorToBson().asDocument()).build();
       TestUtils.assertThrows(
-          "must be within bounds",
-          BsonParseException.class,
-          () -> FacetCollector.fromBson(parser));
+          "must be within bounds", BsonParseException.class, () -> FacetCollector.fromBson(parser));
     }
 
     /** When allow10k is false, number facet boundaries length 2000 throws BsonParseException. */
@@ -588,9 +757,7 @@ public class FacetCollectorTest {
           CollectorBuilder.facet()
               .operator(OperatorBuilder.text().path("q").query("x").build())
               .facetDefinitions(
-                  Map.of(
-                      "a",
-                      FacetDefinitionBuilder.string().numBuckets(100).path("f1").build()))
+                  Map.of("a", FacetDefinitionBuilder.string().numBuckets(100).path("f1").build()))
               .build();
       assertThat(oneString.getTotalRequestedFacetBuckets()).isEqualTo(100);
 
@@ -601,9 +768,7 @@ public class FacetCollectorTest {
                   Map.of(
                       "n",
                       FacetDefinitionBuilder.numeric()
-                          .boundaries(
-                              List.of(
-                                  new BsonInt32(1), new BsonInt32(2), new BsonInt32(3)))
+                          .boundaries(List.of(new BsonInt32(1), new BsonInt32(2), new BsonInt32(3)))
                           .path("f2")
                           .build()))
               .build();
@@ -640,9 +805,7 @@ public class FacetCollectorTest {
                       FacetDefinitionBuilder.date()
                           .boundaries(
                               List.of(
-                                  new BsonDateTime(1L),
-                                  new BsonDateTime(2L),
-                                  new BsonDateTime(3L)))
+                                  new BsonDateTime(1L), new BsonDateTime(2L), new BsonDateTime(3L)))
                           .path("f3")
                           .build()))
               .build();

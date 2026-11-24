@@ -3,7 +3,6 @@ package com.xgen.mongot.server.grpc;
 import static org.mockito.Mockito.mock;
 
 import com.xgen.mongot.cursor.MongotCursorManager;
-import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.registry.CommandRegistry;
 import com.xgen.mongot.server.executors.BulkheadCommandExecutor;
@@ -28,7 +27,9 @@ public class BsonMessageCallHandlerTest {
         mock(MongotCursorManager.class),
         SearchEnvoyMetadata.getDefaultInstance(),
         /* envoyAttemptCount */ 1,
-        FeatureFlags.getDefault(),
+        /* envoyMaxAttemptCount */ 3,
+        /* isShadow */ false,
+        /* envoyInRequestPath */ false,
         mock(StreamObserver.class));
   }
 
@@ -84,9 +85,7 @@ public class BsonMessageCallHandlerTest {
     RawBsonDocument result = handler.serializeResponse(toRaw(new BsonDocument()), response);
 
     RawBsonDocument reference = toRaw(response);
-    Assert.assertArrayEquals(
-        getBytes(reference),
-        getBytes(result));
+    Assert.assertArrayEquals(getBytes(reference), getBytes(result));
   }
 
   @Test

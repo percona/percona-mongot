@@ -6,12 +6,16 @@ import static com.xgen.mongot.util.Check.checkState;
 
 import com.xgen.mongot.config.util.IndexDefinitions;
 import com.xgen.mongot.index.Index;
+import com.xgen.mongot.index.IndexFactory;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexGenerationFactory;
+import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.analyzer.InvalidAnalyzerDefinitionException;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory;
+import com.xgen.mongot.index.autoembedding.UnresolvedAutoEmbeddingIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Crash;
@@ -81,19 +85,94 @@ public class IndexActions {
     // let config manager decide whether to retry on each update cycle.
     this.configState.indexCatalog.addIndex(indexGeneration);
     if (isAutoEmbeddingResolutionFailed(indexGeneration)) {
-      // Skips lifecycle for this unresolved indexGeneration,
-      LOG.atWarn()
+      // Skips lifecycle for this unresolved indexGeneration. Registering a generation id the
+      // initialized-index catalog already holds would throw and take the process down with it; the
+      // checkState above rejects a duplicate indexId, so the generation id here is always fresh.
+      registerOfflineServingIndex(indexGeneration);
+      if (indexGeneration.getIndex().getStatus().isCollectionNotFound()) {
+        // Expected, quiet steady state on a shard that does not host the source collection (e.g.
+        // an unsharded collection on a non-owner shard) -- not a failure, so don't WARN.
+        LOG.atDebug()
+            .addKeyValue("indexId", generationId.indexId)
+            .addKeyValue("generationId", generationId)
+            .log("Source collection not found on this shard; skipping replication.");
+      } else {
+        LOG.atWarn()
+            .addKeyValue("indexId", generationId.indexId)
+            .addKeyValue("generationId", generationId)
+            .log(
+                "Unable to create auto-embedding index, "
+                    + "Skips replication for this definition at this time.");
+      }
+      return;
+    }
+
+    if (deferInitializationUntilReady(this.configState.indexFactory, indexGeneration)) {
+      // Keep the index in the catalog while its initialization prerequisites are unavailable. A
+      // later promotion sweep enqueues it once ready.
+      LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
-          .log(
-              "Unable to create auto-embedding index, "
-                  + "Skips replication for this definition at this time.");
+          .log("Leaving custom vector engine index uninitialized; waiting for prerequisites");
       return;
     }
 
     if (this.withReplication) {
       this.configState.getLifecycleManager().add(indexGeneration);
     }
+  }
+
+  /**
+   * Registers what an unresolved auto-embedding generation reconstructed from its last commit, so
+   * queries resolve it like any other index. Such a generation skips the lifecycle that would
+   * otherwise register it, and registering cannot start replication because that is gated on the
+   * generation reporting itself closed. Only a generation serving offline carries a reconstructed
+   * index; failed ones hold an unopened handle and stay unregistered.
+   *
+   * <p>Each add path already rejects clobbering an existing index id and recovery stages a new
+   * attempt under a distinct generation id, so the registration is always fresh. Registering a
+   * generation id the catalog already holds throws, which fails the whole update cycle, so this
+   * skips instead of letting that happen -- but loudly, since reaching it means one of those
+   * guarantees no longer holds. Only the config manager registers, single-threaded, so nothing can
+   * take the id between the check and the add.
+   */
+  private void registerOfflineServingIndex(IndexGeneration indexGeneration) {
+    if (!(indexGeneration.getIndex() instanceof UnresolvedAutoEmbeddingIndex unresolved)) {
+      return;
+    }
+    Optional<InitializedIndex> reconstructed = unresolved.getReconstructedDerivedIndex();
+    if (reconstructed.isEmpty()) {
+      return;
+    }
+    // The key the catalog would store under, rather than the generation's own id, so the check
+    // matches the add even if the derived generation id ever stops mirroring the raw one.
+    GenerationId generationId = reconstructed.get().getGenerationId();
+    if (this.configState.initializedIndexCatalog.getIndex(generationId).isPresent()) {
+      LOG.atWarn()
+          .addKeyValue("indexId", generationId.indexId)
+          .addKeyValue("generationId", generationId)
+          .log(
+              "Initialized-index catalog already holds this generation id; keeping the registered"
+                  + " index and skipping the offline-serving registration.");
+      return;
+    }
+    this.configState.initializedIndexCatalog.addIndex(reconstructed.get());
+  }
+
+  /**
+   * Whether initialization of {@code indexGeneration} should be deferred because it is a custom
+   * vector engine index that is not yet ready to initialize.
+   *
+   * <p>When {@code true}, callers must skip {@link com.xgen.mongot.lifecycle.LifecycleManager#add}
+   * and leave the index in the catalog (reported as {@code NOT_STARTED}). A promotion sweep
+   * enqueues it once {@link IndexFactory#isReadyToInitialize} returns true. Availability of custom
+   * vector engine indexes is controlled externally, so no mongot feature flag is consulted here.
+   */
+  static boolean deferInitializationUntilReady(
+      IndexFactory indexFactory, IndexGeneration indexGeneration) {
+    return indexGeneration.getDefinition() instanceof VectorIndexDefinition vectorDefinition
+        && vectorDefinition.isCustomVectorEngineIndex()
+        && !indexFactory.isReadyToInitialize(indexGeneration.getDefinitionGeneration());
   }
 
   void addStagedIndexes(List<IndexDefinitionGeneration> definitions)
@@ -122,13 +201,33 @@ public class IndexActions {
     IndexGeneration indexGeneration = getIndexGenerationByDefinitionType(definitionGeneration);
     this.configState.staged.addIndex(indexGeneration);
     if (isAutoEmbeddingResolutionFailed(indexGeneration)) {
-      // Skips lifecycle for this unresolved indexGeneration,
-      LOG.atWarn()
+      // Skips lifecycle for this unresolved indexGeneration.
+      registerOfflineServingIndex(indexGeneration);
+      if (indexGeneration.getIndex().getStatus().isCollectionNotFound()) {
+        // Expected, quiet steady state on a shard that does not host the source collection (e.g.
+        // an unsharded collection on a non-owner shard) -- not a failure, so don't WARN.
+        LOG.atDebug()
+            .addKeyValue("indexId", generationId.indexId)
+            .addKeyValue("generationId", generationId)
+            .log("Source collection not found on this shard; skipping staged replication.");
+      } else {
+        LOG.atWarn()
+            .addKeyValue("indexId", generationId.indexId)
+            .addKeyValue("generationId", generationId)
+            .log(
+                "Unable to create auto-embedding stage index, "
+                    + "Skips replication for this definition at this time.");
+      }
+      return;
+    }
+    if (deferInitializationUntilReady(this.configState.indexFactory, indexGeneration)) {
+      // See addIndex: staged custom vector engine indexes use the same readiness gate.
+      LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
           .log(
-              "Unable to create auto-embedding stage index, "
-                  + "Skips replication for this definition at this time.");
+              "Leaving custom vector engine staged index uninitialized; waiting for"
+                  + " prerequisites");
       return;
     }
     if (this.withReplication) {
@@ -180,6 +279,29 @@ public class IndexActions {
     dropAllOrFail(indexes);
   }
 
+  /**
+   * Deletes the persisted data of quarantined generations, identified by generation id alone
+   * because their definition could not be parsed. Nothing to detach first: a quarantined index
+   * never reaches the index catalog, the lifecycle manager or the cursor manager.
+   */
+  void dropQuarantined(List<GenerationId> generationIds) {
+    if (generationIds.isEmpty()) {
+      return;
+    }
+
+    Crash.because("failed to drop quarantined indexes")
+        .ifThrows(
+            () -> {
+              for (GenerationId generationId : generationIds) {
+                LOG.atInfo()
+                    .addKeyValue("indexId", generationId.indexId)
+                    .addKeyValue("generationId", generationId)
+                    .log("dropping quarantined index");
+                this.configState.indexFactory.deleteGenerationData(generationId);
+              }
+            });
+  }
+
   private void dropAllOrFail(List<IndexGeneration> indexes) {
     List<CompletableFuture<?>> dropFutures =
         indexes.stream().map(this::dropIndex).collect(Collectors.toList());
@@ -199,7 +321,13 @@ public class IndexActions {
     Index index = indexGeneration.getIndex();
     CompletableFuture<Void> replicationDropFuture;
 
-    if (this.withReplication) {
+    if (isAutoEmbeddingResolutionFailed(indexGeneration)) {
+      // An unresolved auto-embedding generation never entered the lifecycle, so a lifecycle drop
+      // has nothing to do and would only log a spurious "not added" warning. Kill its cursors here
+      // so they do not outlive the reconstructed reader closed below.
+      this.configState.cursorManager.killIndexCursors(generationId);
+      replicationDropFuture = CompletableFuture.completedFuture(null);
+    } else if (this.withReplication) {
       // This will look up the index in InitializedIndexCatalog to kill cursors
       replicationDropFuture = this.configState.getLifecycleManager().dropIndex(generationId);
     } else {
@@ -320,7 +448,8 @@ public class IndexActions {
           Check.isPresent(
               this.configState.materializedViewIndexFactory, "materializedViewIndexFactory"),
           definitionGeneration,
-          this.configState.initializedIndexCatalog);
+          this.configState.initializedIndexCatalog,
+          () -> !this.configState.getLifecycleManager().isReplicationSupported());
     } else {
       return IndexGenerationFactory.getIndexGeneration(
           this.configState.indexFactory, definitionGeneration);

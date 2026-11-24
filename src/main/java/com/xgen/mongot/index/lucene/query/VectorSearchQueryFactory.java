@@ -1,21 +1,26 @@
 package com.xgen.mongot.index.lucene.query;
 
+import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
+import com.xgen.mongot.index.definition.quantization.VectorTypeFieldResolver;
+import com.xgen.mongot.index.lucene.explain.information.VectorSearchNumCandidatesSpec;
 import com.xgen.mongot.index.lucene.explain.knn.InstrumentableKnnByteVectorQuery;
 import com.xgen.mongot.index.lucene.explain.knn.InstrumentableKnnFloatVectorQuery;
 import com.xgen.mongot.index.lucene.explain.knn.KnnInstrumentationHelper;
 import com.xgen.mongot.index.lucene.explain.knn.VectorSearchExplainer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
-import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.query.context.QueryFactoryContext;
 import com.xgen.mongot.index.lucene.query.custom.MongotKnnByteQuery;
 import com.xgen.mongot.index.lucene.query.custom.MongotKnnFloatQuery;
 import com.xgen.mongot.index.lucene.query.util.MetaIdRetriever;
 import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.mongot.index.lucene.util.LuceneDocumentIdEncoder;
+import com.xgen.mongot.index.query.AutoEmbedQueryVectorReconciler;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.operators.ApproximateVectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.ExactVectorSearchCriteria;
@@ -25,6 +30,7 @@ import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.BitVector;
 import com.xgen.mongot.util.bson.ByteVector;
+import com.xgen.mongot.util.bson.Float16Vector;
 import com.xgen.mongot.util.bson.FloatVector;
 import com.xgen.mongot.util.bson.Vector;
 import java.io.IOException;
@@ -55,26 +61,32 @@ class VectorSearchQueryFactory {
   private final QueryFactoryContext factoryContext;
   private final VectorSearchFilterQueryFactory vectorSearchFilterQueryFactory;
 
+  // Not read yet -- threaded in ahead of the dynamic feature flag gate for exact-search off-heap
+  // bulk scoring added in CLOUDP-316058, so that follow-up PR doesn't also need this DI plumbing.
+  @SuppressWarnings("unused")
+  private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
+
   VectorSearchQueryFactory(
       QueryFactoryContext factoryContext,
-      VectorSearchFilterQueryFactory vectorSearchFilterQueryFactory) {
+      VectorSearchFilterQueryFactory vectorSearchFilterQueryFactory,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     this.factoryContext = factoryContext;
     this.vectorSearchFilterQueryFactory = vectorSearchFilterQueryFactory;
+    this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
   }
 
   Query fromQuery(VectorSearchCriteria criteria, SingleQueryContext queryContext)
       throws InvalidQueryException, IOException {
 
     FieldPath path = criteria.path();
-    Vector queryVector = Check.isPresent(criteria.queryVector(), "queryVector");
+    @Var Vector queryVector = Check.isPresent(criteria.queryVector(), "queryVector");
 
     // Check if this is an embedded vector field
     Optional<FieldPath> embeddedRoot = determineEmbeddedRoot(path, queryContext);
 
     if (embeddedRoot.isPresent()
         && !this.factoryContext.getFeatureFlags().isEnabled(Feature.NESTED_VECTOR)) {
-      throw new InvalidQueryException(
-          "Nested vector search is not supported on this cluster");
+      throw new InvalidQueryException("Nested vector search is not supported on this cluster");
     }
 
     // nestedOptions is optional for embedded vector fields; defaults to scoreMode=max
@@ -91,11 +103,20 @@ class VectorSearchQueryFactory {
         .getQueryTimeMappingChecks()
         .validateVectorField(path, embeddedRoot, queryVector.numDimensions());
 
+    // Reconcile with the indexed embedding encoding; see AutoEmbedQueryVectorReconciler.
+    Optional<VectorAutoEmbedQuantization> autoEmbedQuantization =
+        this.factoryContext.getAutoEmbedQuantization(path);
+    if (autoEmbedQuantization.isPresent()) {
+      queryVector =
+          AutoEmbedQueryVectorReconciler.reconcile(queryVector, autoEmbedQuantization.get(), path);
+    }
+    // TODO(CLOUDP-413841): regular type:vector (BYOV) queryVectors are not validated here, so a
+    // dtype mismatch (e.g. an int8 query against a float-indexed field) silently returns 0 results
+    // instead of a clear error.
+
     // Create query context with embedded root if this is an embedded vector query
     SingleQueryContext effectiveQueryContext =
-        embeddedRoot.isPresent()
-            ? queryContext.withEmbeddedRoot(embeddedRoot.get())
-            : queryContext;
+        embeddedRoot.isPresent() ? queryContext.withEmbeddedRoot(embeddedRoot.get()) : queryContext;
 
     // Create filter query (applies at leaf/embedded document level)
     Optional<Query> luceneFilter =
@@ -132,6 +153,11 @@ class VectorSearchQueryFactory {
               + indexedVectorSimilarity);
     }
 
+    if (queryVector.getVectorType() == Vector.VectorType.FLOAT16) {
+      throw new InvalidQueryException(
+          "float16 query vectors are not supported by the Lucene engine");
+    }
+
     String fieldName = getLuceneFieldName(path, embeddedRoot, queryVector.getVectorType());
 
     Query childQuery;
@@ -142,13 +168,20 @@ class VectorSearchQueryFactory {
               "Query must be run in explain mode, because 'explainOptions' are present.");
         }
 
+        // Whether the user omitted numCandidates. The explain path reports the resolved value as
+        // AUTO; the regular query path ignores this flag.
+        boolean isAutoNumCandidates = approximateCriteria.isAutoNumCandidates();
+
         // Note on numCandidates for embedded vector queries:
         // For embedded vectors, numCandidates limits the number of child documents retrieved.
         // After block-join aggregation, multiple children may collapse into the same parent,
         // potentially returning fewer than `limit` parent documents. This is expected behavior,
         // consistent with how embeddedDocuments works in search indexes. Users can increase
         // numCandidates to improve recall when documents have many embedded vectors.
-        int numCandidates = approximateCriteria.numCandidates();
+        //
+        // In auto mode (user omitted numCandidates) this resolves to clamp(8 * limit, 100, 10000);
+        // otherwise it is the user-supplied value. See ApproximateVectorSearchCriteria.
+        int numCandidates = approximateCriteria.resolveNumCandidates();
         int limit = approximateCriteria.limit();
         ApproximateVectorQueryCreator queryCreator =
             ApproximateVectorQueryCreator.get(
@@ -157,28 +190,54 @@ class VectorSearchQueryFactory {
                 effectiveQueryContext.getIndexReader(),
                 this.factoryContext.getFeatureFlags(),
                 this.factoryContext.getMetrics());
-        childQuery = switch (queryVector) {
-          case FloatVector floatVector ->
-              queryCreator.query(floatVector, fieldName, numCandidates, limit, luceneFilter);
-          case ByteVector byteVector ->
-              queryCreator.query(byteVector, fieldName, numCandidates, limit, luceneFilter);
-          case BitVector bitVector ->
-              queryCreator.query(bitVector, fieldName, numCandidates, limit, luceneFilter);
-        };
+        childQuery =
+            switch (queryVector) {
+              case FloatVector floatVector ->
+                  queryCreator.query(
+                      floatVector,
+                      fieldName,
+                      numCandidates,
+                      limit,
+                      luceneFilter,
+                      isAutoNumCandidates);
+              case ByteVector byteVector ->
+                  queryCreator.query(
+                      byteVector,
+                      fieldName,
+                      numCandidates,
+                      limit,
+                      luceneFilter,
+                      isAutoNumCandidates);
+              case BitVector bitVector ->
+                  queryCreator.query(
+                      bitVector,
+                      fieldName,
+                      numCandidates,
+                      limit,
+                      luceneFilter,
+                      isAutoNumCandidates);
+              // float16 query vectors are only supported by the vectorlite engine.
+              // This should be unreachable as we catch this condition before we get the lucene
+              // field name.
+              case Float16Vector unusedFloat16 ->
+                  throw new InvalidQueryException(
+                      "float16 query vectors are not supported by the Lucene engine");
+            };
         break;
 
       case ExactVectorSearchCriteria unused:
         Query vectorFieldExistsQuery = new FieldExistsQuery(fieldName);
-        childQuery = new com.xgen.mongot.index.lucene.query.custom.ExactVectorSearchQuery(
-            fieldName,
-            queryVector,
-            indexedVectorSimilarity.getLuceneSimilarityFunction(),
-            luceneFilter.isPresent()
-                ? new BooleanQuery.Builder()
-                    .add(vectorFieldExistsQuery, BooleanClause.Occur.FILTER)
-                    .add(luceneFilter.get(), BooleanClause.Occur.FILTER)
-                    .build()
-                : vectorFieldExistsQuery);
+        childQuery =
+            new com.xgen.mongot.index.lucene.query.custom.ExactVectorSearchQuery(
+                fieldName,
+                queryVector,
+                indexedVectorSimilarity.getLuceneSimilarityFunction(),
+                luceneFilter.isPresent()
+                    ? new BooleanQuery.Builder()
+                        .add(vectorFieldExistsQuery, BooleanClause.Occur.FILTER)
+                        .add(luceneFilter.get(), BooleanClause.Occur.FILTER)
+                        .build()
+                    : vectorFieldExistsQuery);
         break;
     }
 
@@ -189,9 +248,8 @@ class VectorSearchQueryFactory {
     // - Child documents have $meta/embeddedPath: "<path>" (via addEmbeddedPathField)
     // - Documents are written as Lucene blocks with children preceding the parent
     if (embeddedRoot.isPresent()) {
-      ScoreMode scoreMode = criteria.embeddedOptions()
-          .map(this::getScoreMode)
-          .orElse(ScoreMode.Max);
+      ScoreMode scoreMode =
+          criteria.embeddedOptions().map(this::getScoreMode).orElse(ScoreMode.Max);
       BitSetProducer parentFilterBitSet = new QueryBitSetProducer(parentFilter());
 
       Query blockJoinQuery =
@@ -231,11 +289,29 @@ class VectorSearchQueryFactory {
 
   private interface ApproximateVectorQueryCreator {
 
-    Query query(FloatVector vector, String field, int k, int limit, Optional<Query> filter);
+    Query query(
+        FloatVector vector,
+        String field,
+        int k,
+        int limit,
+        Optional<Query> filter,
+        boolean isAutoNumCandidates);
 
-    Query query(ByteVector vector, String field, int k, int limit, Optional<Query> filter);
+    Query query(
+        ByteVector vector,
+        String field,
+        int k,
+        int limit,
+        Optional<Query> filter,
+        boolean isAutoNumCandidates);
 
-    Query query(BitVector vector, String field, int k, int limit, Optional<Query> filter);
+    Query query(
+        BitVector vector,
+        String field,
+        int k,
+        int limit,
+        Optional<Query> filter,
+        boolean isAutoNumCandidates);
 
     static ApproximateVectorQueryCreator get(
         ApproximateVectorSearchCriteria criteria,
@@ -308,9 +384,17 @@ class VectorSearchQueryFactory {
         this.flags = flags;
       }
 
+      // isAutoNumCandidates is only consumed by the explain path (see
+      // InstrumentableApproximateVectorQueryCreator); the regular query path uses the query-level
+      // resolved k directly.
       @Override
       public Query query(
-          FloatVector vector, String field, int k, int limit, Optional<Query> filter) {
+          FloatVector vector,
+          String field,
+          int k,
+          int limit,
+          Optional<Query> filter,
+          boolean isAutoNumCandidates) {
         float[] target = vector.getFloatVector();
         return new MongotKnnFloatQuery(
             this.metrics, this.flags, field, target, k, filter.orElse(null));
@@ -318,13 +402,24 @@ class VectorSearchQueryFactory {
 
       @Override
       public Query query(
-          ByteVector vector, String field, int k, int limit, Optional<Query> filter) {
+          ByteVector vector,
+          String field,
+          int k,
+          int limit,
+          Optional<Query> filter,
+          boolean isAutoNumCandidates) {
         byte[] target = vector.getByteVector();
         return new MongotKnnByteQuery(this.metrics, field, target, k, filter.orElse(null));
       }
 
       @Override
-      public Query query(BitVector vector, String field, int k, int limit, Optional<Query> filter) {
+      public Query query(
+          BitVector vector,
+          String field,
+          int k,
+          int limit,
+          Optional<Query> filter,
+          boolean isAutoNumCandidates) {
         byte[] target = vector.getBitVector();
         return new MongotKnnByteQuery(this.metrics, field, target, k, filter.orElse(null));
       }
@@ -348,11 +443,25 @@ class VectorSearchQueryFactory {
         this.metrics = metrics;
       }
 
+      private void setAutoNumCandidatesExplain(int k, boolean isAutoNumCandidates) {
+        if (!isAutoNumCandidates) {
+          return;
+        }
+        this.tracingExplainer.setNumCandidates(
+            new VectorSearchNumCandidatesSpec(VectorSearchNumCandidatesSpec.Mode.AUTO, k));
+      }
+
       @Override
       public Query query(
-          FloatVector vector, String field, int k, int limit, Optional<Query> filter) {
+          FloatVector vector,
+          String field,
+          int k,
+          int limit,
+          Optional<Query> filter,
+          boolean isAutoNumCandidates) {
         float[] target = vector.getFloatVector();
         boolean filterPresent = filter.isPresent();
+        setAutoNumCandidatesExplain(k, isAutoNumCandidates);
         KnnInstrumentationHelper instrumentationHelper =
             new KnnInstrumentationHelper(this.tracingExplainer, field, limit, filterPresent);
 
@@ -362,9 +471,15 @@ class VectorSearchQueryFactory {
 
       @Override
       public Query query(
-          ByteVector vector, String field, int k, int limit, Optional<Query> filter) {
+          ByteVector vector,
+          String field,
+          int k,
+          int limit,
+          Optional<Query> filter,
+          boolean isAutoNumCandidates) {
         byte[] target = vector.getByteVector();
         boolean filterPresent = filter.isPresent();
+        setAutoNumCandidatesExplain(k, isAutoNumCandidates);
         KnnInstrumentationHelper instrumentationHelper =
             new KnnInstrumentationHelper(this.tracingExplainer, field, limit, filterPresent);
 
@@ -376,9 +491,16 @@ class VectorSearchQueryFactory {
       }
 
       @Override
-      public Query query(BitVector vector, String field, int k, int limit, Optional<Query> filter) {
+      public Query query(
+          BitVector vector,
+          String field,
+          int k,
+          int limit,
+          Optional<Query> filter,
+          boolean isAutoNumCandidates) {
         byte[] target = vector.getBitVector();
         boolean filterPresent = filter.isPresent();
+        setAutoNumCandidatesExplain(k, isAutoNumCandidates);
         KnnInstrumentationHelper instrumentationHelper =
             new KnnInstrumentationHelper(this.tracingExplainer, field, limit, filterPresent);
 
@@ -394,15 +516,9 @@ class VectorSearchQueryFactory {
   private String getLuceneFieldName(
       FieldPath fieldPath, Optional<FieldPath> embeddedRoot, Vector.VectorType vectorType)
       throws InvalidQueryException {
-    return switch (vectorType) {
-      case FLOAT ->
-          this.factoryContext
-              .getIndexedQuantization(fieldPath, embeddedRoot)
-              .toTypeField()
-              .getLuceneFieldName(fieldPath, embeddedRoot);
-      case BYTE -> FieldName.TypeField.KNN_BYTE.getLuceneFieldName(fieldPath, embeddedRoot);
-      case BIT -> FieldName.TypeField.KNN_BIT.getLuceneFieldName(fieldPath, embeddedRoot);
-    };
+    return VectorTypeFieldResolver.resolveTypeField(
+            this.factoryContext.getIndexedQuantization(fieldPath, embeddedRoot), vectorType)
+        .getLuceneFieldName(fieldPath, embeddedRoot);
   }
 
   /**

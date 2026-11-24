@@ -32,10 +32,13 @@ import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
 import org.bson.BsonTimestamp;
+import org.bson.BsonValue;
 import org.bson.RawBsonDocument;
 
 public abstract class CollectionScanCommandMongoClient<E extends Exception>
     implements CollectionScanMongoClient<E> {
+
+  private static final String INITIAL_SYNC_ID_FIELD = "$initialSyncId";
 
   protected enum State {
     OPEN_CURSOR,
@@ -87,7 +90,7 @@ public abstract class CollectionScanCommandMongoClient<E extends Exception>
     this.refreshingSession = refreshingSession;
     // TODO(CLOUDP-289914): Remove this getMoreTimer after switching to new one by
     // IndexMetricsUpdater
-    this.getMoreTimer = metricsFactory.timer("getMoreDurations");
+    this.getMoreTimer = metricsFactory.timerSec("getMoreDurations");
     this.namespace = namespace;
     this.namespaceChangeCheck = namespaceChangeCheck;
     this.futureWrapper = futureWrapper;
@@ -245,24 +248,17 @@ public abstract class CollectionScanCommandMongoClient<E extends Exception>
       if (resumeToken.isEmpty()) {
         throw getMissingFieldMongoCommandException("postBatchResumeToken");
       }
-      if (resumeToken.get().getBinary("$initialSyncId").isNull()) {
+      // A sync source with no initial sync id, such as a disaggregated storage cluster, omits the
+      // field from the token; others report it as BsonNull. Without it a resync of the sync
+      // source cannot be detected mid-scan, so restart with an _id scan rather than fail the index.
+      BsonValue initialSyncId = resumeToken.get().get(INITIAL_SYNC_ID_FIELD);
+      if (initialSyncId == null || !initialSyncId.isBinary()) {
         throw getMissingFieldMongoCommandException("initialSyncId");
       }
-      if (!resumeToken
-          .get()
-          .getBinary("$initialSyncId")
-          .equals(this.postBatchResumeToken.get().getBinary("$initialSyncId"))) {
-        throw getInitialSyncMismatchMongoCommandException();
+      if (!initialSyncId.equals(this.postBatchResumeToken.get().get(INITIAL_SYNC_ID_FIELD))) {
+        throw InitialSyncException.initialSyncIdMismatch();
       }
     }
-  }
-
-  public MongoCommandException getInitialSyncMismatchMongoCommandException() {
-    return new MongoCommandException(
-        new BsonDocument()
-            .append("code", new BsonInt32(Errors.INITIAL_SYNC_ID_MISMATCH.code))
-            .append("codeName", new BsonString(Errors.INITIAL_SYNC_ID_MISMATCH.name)),
-        new ServerAddress("mongot", 0));
   }
 
   public MongoCommandException getMissingFieldMongoCommandException(String field) {

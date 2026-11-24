@@ -21,6 +21,8 @@ scripts/silkbomb/third-party-tools/*
 
 scripts/copybara/copy.bara.sky
 scripts/copybara/copybara_credentials.yaml
+scripts/copybara/release_archive_credentials.yaml
+scripts/release/release_notes_credentials.yaml
 scripts/copybara/mongodb-bot.gitconfig
 scripts/netty-tcnative/output
 
@@ -38,15 +40,29 @@ community-quick-start/mongot-community-local-docker.tar
 community-quick-start/tls/
 
 scripts/tests/copybara/test-results/
+scripts/tests/upgrade/bloom-downgrade-test-info.json
 
 .cache/
 
+# search-system-oncall-triage incident reports (cluster ids, hostnames, customer context)
+# Unanchored: an agent started in a subdirectory writes here too.
+search-system-oncall-triage-reports/
+
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/agent-memory/
+.claude/worktrees/
 CLAUDE.local.md
 
+# Local Codex MCP connections and hooks
+/.codex/config.toml
+/.codex/hooks.json
+
+state-*.json
 scripts/enterprise/state-*.json
 scripts/enterprise/manifest-*.yaml
 scripts/enterprise/manifest_*.yaml
 !scripts/enterprise/manifest_template.yaml
+scripts/enterprise/kind/.mongot-enterprise-kind.yaml
 tmp/
+.venv-kind/

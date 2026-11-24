@@ -6,25 +6,24 @@ import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Projections;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector.ChangeStreamMode;
+import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.mongodb.ChangeStreamAggregateCommand;
 import java.util.List;
+import org.bson.BsonTimestamp;
 
 public class ChangeStreamAggregateOperationFactory {
 
   private final IndexDefinition indexDefinition;
-  private final int maxTimeMs;
   private final List<String> excludedFields;
   private final boolean matchCollectionUuidForUpdateLookup;
   private final boolean enableSplitLargeChangeStreamEvents;
 
   public ChangeStreamAggregateOperationFactory(
       IndexDefinition indexDefinition,
-      int maxTimeMs,
       List<String> excludedFields,
       boolean matchCollectionUuidForUpdateLookup,
       boolean enableSplitLargeChangeStreamEvents) {
     this.indexDefinition = indexDefinition;
-    this.maxTimeMs = maxTimeMs;
     this.excludedFields = excludedFields;
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
     this.enableSplitLargeChangeStreamEvents = enableSplitLargeChangeStreamEvents;
@@ -54,7 +53,6 @@ public class ChangeStreamAggregateOperationFactory {
     ChangeStreamAggregateOperationBuilder builder =
         new ChangeStreamAggregateOperationBuilder(namespace)
             .batchSize(0)
-            .maxTimeMs(this.maxTimeMs)
             .fullDocument(ChangeStreamAggregateCommand.FullDocument.UPDATE_LOOKUP)
             .splitLargeEvent(this.enableSplitLargeChangeStreamEvents)
             .metadataAddFieldsStage(
@@ -91,5 +89,47 @@ public class ChangeStreamAggregateOperationFactory {
   public ChangeStreamAggregateOperationBuilder.AggregateOperationTemplate fromResumeInfo(
       ChangeStreamResumeInfo resumeInfo, ChangeStreamMode mode) {
     return builder(mode, resumeInfo.getNamespace()).startAfter(resumeInfo.getResumeToken()).build();
+  }
+
+  /**
+   * Like {@link #fromResumeInfo(ChangeStreamResumeInfo, ChangeStreamMode)} but adds a partition
+   * {@code $match} for one partial stream.
+   */
+  public ChangeStreamAggregateOperationBuilder.AggregateOperationTemplate fromResumeInfo(
+      ChangeStreamResumeInfo resumeInfo, ChangeStreamMode mode, ChangeStreamPartition partition) {
+    Check.argNotNull(partition, "partition");
+    return builder(mode, resumeInfo.getNamespace())
+        .startAfter(resumeInfo.getResumeToken())
+        .partition(partition)
+        .build();
+  }
+
+  /**
+   * Starts a change stream at {@code operationTime} (inclusive) without a partition match (the
+   * single-stream pipeline shape).
+   */
+  public ChangeStreamAggregateOperationBuilder.AggregateOperationTemplate fromOperationTime(
+      MongoNamespace namespace, BsonTimestamp operationTime, ChangeStreamMode mode) {
+    Check.argNotNull(namespace, "namespace");
+    Check.argNotNull(operationTime, "operationTime");
+    return builder(mode, namespace).startAtOperationTime(operationTime).build();
+  }
+
+  /**
+   * Like {@link #fromOperationTime(MongoNamespace, BsonTimestamp, ChangeStreamMode)} but adds a
+   * partition {@code $match} for one partial stream.
+   */
+  public ChangeStreamAggregateOperationBuilder.AggregateOperationTemplate fromOperationTime(
+      MongoNamespace namespace,
+      BsonTimestamp operationTime,
+      ChangeStreamMode mode,
+      ChangeStreamPartition partition) {
+    Check.argNotNull(namespace, "namespace");
+    Check.argNotNull(operationTime, "operationTime");
+    Check.argNotNull(partition, "partition");
+    return builder(mode, namespace)
+        .startAtOperationTime(operationTime)
+        .partition(partition)
+        .build();
   }
 }

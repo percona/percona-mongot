@@ -7,14 +7,17 @@ import static com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils.POST
 import static com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils.toRawBsonDocuments;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -38,11 +41,14 @@ import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamBatch;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamDocumentUtils.ChangeStreamEventCheckException;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamPartition;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
+import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
+import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamProgressTracker;
 import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException.Type;
@@ -50,6 +56,8 @@ import com.xgen.mongot.replication.mongodb.steadystate.changestream.ChangeStream
 import com.xgen.mongot.replication.mongodb.steadystate.changestream.ChangeStreamIndexManager.DocumentMetricsUpdater;
 import com.xgen.mongot.util.Condition;
 import com.xgen.mongot.util.FutureUtils;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.version.GenerationIdBuilder;
 import com.xgen.testing.mongot.mock.index.IndexMetricsSupplier;
@@ -62,6 +70,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -103,13 +112,68 @@ public class ChangeStreamIndexManagerTest {
           .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
           .build();
 
-  private static final DocumentMetricsUpdater NOOP_DOCUMENT_METRICS_UPDATER = (x, y, z) -> {};
+  private static final DocumentMetricsUpdater NOOP_DOCUMENT_METRICS_UPDATER = batch -> {};
 
   private static final Timer NOOP_TIMER =
       Timer.builder("dummy").register(new SimpleMeterRegistry());
 
   @RunWith(Parameterized.class)
   public static class SharedTests {
+
+    @Test
+    public void indexBatch_regexLimit_translatesWithoutAdvancingResumeInfo() throws Exception {
+      assertRegexFailureTranslation(
+          new RegexLimitExceededException(), Type.ANALYSIS_LIMIT_EXCEEDED);
+    }
+
+    @Test
+    public void indexBatch_regexInterrupted_translatesToShutdown() throws Exception {
+      assertRegexFailureTranslation(new RegexInterruptedException(), Type.SHUT_DOWN);
+    }
+
+    private void assertRegexFailureTranslation(RuntimeException failure, Type expectedType)
+        throws Exception {
+      IndexingWorkScheduler scheduler = mock(IndexingWorkScheduler.class);
+      when(scheduler.schedule(any(), any(), any(), any(), any(), any(), any()))
+          .thenReturn(CompletableFuture.failedFuture(failure));
+      AtomicReference<ChangeStreamResumeInfo> resumeInfo = new AtomicReference<>();
+      // Shutdown must interrupt the real Thread, not a Mockito spy with copied Thread state.
+      var decodingScheduler = DecodingWorkScheduler.create(2, new SimpleMeterRegistry());
+      ChangeStreamIndexManager manager =
+          ChangeStreamManager.indexManagerFactoryWithDecodingScheduler(decodingScheduler)
+              .create(
+                  MOCK_INDEX_DEFINITION,
+                  scheduler,
+                  indexer(),
+                  ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getNamespace(),
+                  resumeInfo::set,
+                  IGNORE_METRICS,
+                  new CompletableFuture<>(),
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
+      try {
+        var future =
+            manager.indexBatch(
+                    new ChangeStreamBatch(
+                        List.of(), POST_BATCH_RESUME_TOKEN, Optional.of(new BsonTimestamp())),
+                    NOOP_DOCUMENT_METRICS_UPDATER,
+                    NOOP_TIMER)
+                .indexingFuture;
+
+        var exception =
+            Assert.assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
+
+        assertThat(exception.getCause()).isInstanceOf(SteadyStateException.class);
+        assertThat(((SteadyStateException) exception.getCause()).getType()).isEqualTo(expectedType);
+        assertThat(resumeInfo.get()).isNull();
+      } finally {
+        try {
+          manager.shutdown().get(5, TimeUnit.SECONDS);
+        } finally {
+          decodingScheduler.shutdown().get(5, TimeUnit.SECONDS);
+        }
+      }
+    }
 
     @Parameters(name = "{0}")
     public static List<TestParameter> params() {
@@ -154,14 +218,15 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   metricsUpdater,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
                   new ChangeStreamBatch(
                       Collections.emptyList(),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -183,6 +248,263 @@ public class ChangeStreamIndexManagerTest {
               .gauge()
               .value(),
           0);
+    }
+
+    private static final ChangeStreamPartition PARTITION_0 = new ChangeStreamPartition(0, 2);
+    private static final ChangeStreamPartition PARTITION_1 = new ChangeStreamPartition(1, 2);
+    private static final BsonDocument SEED_TOKEN = ChangeStreamUtils.POST_BATCH_RESUME_TOKEN;
+
+    private static PartitionedChangeStreamProgressTracker twoPartitionTracker() {
+      return new PartitionedChangeStreamProgressTracker(
+          Map.of(PARTITION_0, SEED_TOKEN, PARTITION_1, SEED_TOKEN));
+    }
+
+    private static ChangeStreamBatch emptyBatch(
+        ChangeStreamPartition partition, BsonDocument postBatchResumeToken) {
+      return new ChangeStreamBatch(
+          Collections.emptyList(),
+          postBatchResumeToken,
+          Optional.of(new BsonTimestamp()),
+          Optional.of(partition));
+    }
+
+    /** Captures each scheduled batch's commit data; readable from the test thread. */
+    private static IndexingWorkScheduler capturingScheduler(
+        List<Optional<IndexCommitUserData>> committed, CompletableFuture<Void> schedulerFuture) {
+      IndexingWorkScheduler scheduler = mock(IndexingWorkScheduler.class);
+      when(scheduler.schedule(any(), any(), any(), any(), any(), any(), any()))
+          .thenAnswer(
+              invocation -> {
+                // Batches with no safe position schedule with empty commit data.
+                committed.add(invocation.<Optional<IndexCommitUserData>>getArgument(5));
+                return schedulerFuture;
+              });
+      return scheduler;
+    }
+
+    /**
+     * Waits for {@link #capturingScheduler} to record a scheduled batch. Mockito registers an
+     * invocation before running its stubbing answer, so a {@code timeout()} verification can return
+     * before the answer has captured the commit data; reading the captured list directly races
+     * (CLOUDP-460171).
+     */
+    private static Optional<IndexCommitUserData> awaitCapturedCommitData(
+        List<Optional<IndexCommitUserData>> committed) throws InterruptedException {
+      long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+      while (committed.isEmpty() && System.nanoTime() < deadline) {
+        Thread.sleep(10);
+      }
+      return committed.stream()
+          .findFirst()
+          .orElseThrow(() -> new AssertionError("timed out waiting for the batch to be scheduled"));
+    }
+
+    private ChangeStreamIndexManager partitionedManager(
+        IndexingWorkScheduler scheduler,
+        AtomicReference<ChangeStreamResumeInfo> resumeInfoReference,
+        Optional<PartitionedChangeStreamProgressTracker> tracker) {
+      return getChangeStreamIndexManagerFactory()
+          .create(
+              MOCK_INDEX_DEFINITION,
+              scheduler,
+              indexer(),
+              ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getNamespace(),
+              resumeInfoReference::set,
+              IGNORE_METRICS,
+              new CompletableFuture<>(),
+              GenerationIdBuilder.create(),
+              tracker);
+    }
+
+    @Test
+    public void indexBatch_partitionedBatch_acksOnlyAfterIndexingCompletes() throws Exception {
+      List<Optional<IndexCommitUserData>> committed =
+          Collections.synchronizedList(new ArrayList<>());
+      CompletableFuture<Void> schedulerFuture = new CompletableFuture<>();
+      IndexingWorkScheduler scheduler = capturingScheduler(committed, schedulerFuture);
+      var tracker = twoPartitionTracker();
+      ChangeStreamIndexManager manager =
+          partitionedManager(scheduler, new AtomicReference<>(), Optional.of(tracker));
+      var partitionToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(2, 0));
+
+      CompletableFuture<Void> indexFuture =
+          manager.indexBatch(
+                  emptyBatch(PARTITION_1, partitionToken),
+                  NOOP_DOCUMENT_METRICS_UPDATER,
+                  NOOP_TIMER)
+              .indexingFuture;
+      verify(scheduler, timeout(1000)).schedule(any(), any(), any(), any(), any(), any(), any());
+
+      // Scheduled but not yet indexed: nothing is confirmed past the seed positions.
+      Assert.assertEquals(
+          Map.of(PARTITION_0, SEED_TOKEN, PARTITION_1, SEED_TOKEN), tracker.snapshot());
+      IndexCommitUserData commitData = awaitCapturedCommitData(committed).orElseThrow();
+      Assert.assertEquals(SEED_TOKEN, commitData.resumeInfo().orElseThrow().getResumeToken());
+
+      schedulerFuture.complete(null);
+      indexFuture.get(300, TimeUnit.MILLISECONDS);
+
+      Assert.assertEquals(partitionToken, tracker.snapshot().get(PARTITION_1));
+      Assert.assertEquals(SEED_TOKEN, tracker.snapshot().get(PARTITION_0));
+    }
+
+    @Test
+    public void indexBatch_partitionsAtDifferentPositions_commitsMinimumPosition()
+        throws Exception {
+      List<Optional<IndexCommitUserData>> committed =
+          Collections.synchronizedList(new ArrayList<>());
+      IndexingWorkScheduler scheduler =
+          capturingScheduler(committed, CompletableFuture.completedFuture(null));
+      var tracker = twoPartitionTracker();
+      ChangeStreamIndexManager manager =
+          partitionedManager(scheduler, new AtomicReference<>(), Optional.of(tracker));
+      var aheadToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(5, 0));
+      var behindToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(3, 0));
+
+      // Partition 1 indexes and advances first; partition 0 then commits.
+      manager
+          .indexBatch(
+              emptyBatch(PARTITION_1, aheadToken), NOOP_DOCUMENT_METRICS_UPDATER, NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+      manager
+          .indexBatch(
+              emptyBatch(PARTITION_0, behindToken), NOOP_DOCUMENT_METRICS_UPDATER, NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+
+      // The checkpoint is the minimum: partition 0 had not confirmed past the seed when the
+      // second batch was scheduled, even though partition 1 is ahead.
+      IndexCommitUserData secondCommit = committed.get(1).orElseThrow();
+      Assert.assertEquals(SEED_TOKEN, secondCommit.resumeInfo().orElseThrow().getResumeToken());
+
+      // Both acked: each partition at its own position, not the seed.
+      Assert.assertEquals(
+          Map.of(PARTITION_0, behindToken, PARTITION_1, aheadToken), tracker.snapshot());
+
+      // A third batch commits the minimum of the two advanced positions (3, not the seed and not
+      // 5) — which a "commit the seed" or "commit one partition's token" implementation can't.
+      manager
+          .indexBatch(
+              emptyBatch(PARTITION_1, ChangeStreamUtils.resumeToken(new BsonTimestamp(7, 0))),
+              NOOP_DOCUMENT_METRICS_UPDATER,
+              NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+      IndexCommitUserData thirdCommit = committed.get(2).orElseThrow();
+      Assert.assertEquals(behindToken, thirdCommit.resumeInfo().orElseThrow().getResumeToken());
+    }
+
+    @Test
+    public void indexBatch_partitionedBatchIndexed_reportsLowWaterMarkNotPartitionToken()
+        throws Exception {
+      IndexingWorkScheduler scheduler =
+          capturingScheduler(
+              Collections.synchronizedList(new ArrayList<>()),
+              CompletableFuture.completedFuture(null));
+      AtomicReference<ChangeStreamResumeInfo> resumeInfoReference = new AtomicReference<>();
+      ChangeStreamIndexManager manager =
+          partitionedManager(scheduler, resumeInfoReference, Optional.of(twoPartitionTracker()));
+      var aheadToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(5, 0));
+
+      manager
+          .indexBatch(
+              emptyBatch(PARTITION_1, aheadToken), NOOP_DOCUMENT_METRICS_UPDATER, NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+
+      // Partition 0 is still at the seed, so reporting partition 1's token would skip its
+      // events on a transient restart.
+      Assert.assertEquals(SEED_TOKEN, resumeInfoReference.get().getResumeToken());
+
+      // Once partition 0 advances, the retry position moves to the new minimum (3, not 5) —
+      // proving it tracks the low-water mark rather than staying at the seed.
+      var behindToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(3, 0));
+      manager
+          .indexBatch(
+              emptyBatch(PARTITION_0, behindToken), NOOP_DOCUMENT_METRICS_UPDATER, NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+      Assert.assertEquals(behindToken, resumeInfoReference.get().getResumeToken());
+    }
+
+    @Test
+    public void indexBatch_partitionedIndexingFails_doesNotAdvanceConfirmedPosition()
+        throws Exception {
+      CompletableFuture<Void> schedulerFuture = new CompletableFuture<>();
+      IndexingWorkScheduler scheduler =
+          capturingScheduler(Collections.synchronizedList(new ArrayList<>()), schedulerFuture);
+      var tracker = twoPartitionTracker();
+      ChangeStreamIndexManager manager =
+          partitionedManager(scheduler, new AtomicReference<>(), Optional.of(tracker));
+
+      CompletableFuture<Void> indexFuture =
+          manager.indexBatch(
+                  emptyBatch(PARTITION_1, ChangeStreamUtils.resumeToken(new BsonTimestamp(2, 0))),
+                  NOOP_DOCUMENT_METRICS_UPDATER,
+                  NOOP_TIMER)
+              .indexingFuture;
+      RuntimeException indexingFailure = new RuntimeException("indexing failed");
+      schedulerFuture.completeExceptionally(indexingFailure);
+
+      ExecutionException failure =
+          Assert.assertThrows(
+              ExecutionException.class, () -> indexFuture.get(300, TimeUnit.MILLISECONDS));
+      Assert.assertEquals("indexing failed", failure.getCause().getMessage());
+      Assert.assertEquals(
+          Map.of(PARTITION_0, SEED_TOKEN, PARTITION_1, SEED_TOKEN), tracker.snapshot());
+    }
+
+    @Test
+    public void indexBatch_partitionedBatchWithoutTracker_commitsSingleReaderResumeInfo()
+        throws Exception {
+      List<Optional<IndexCommitUserData>> committed =
+          Collections.synchronizedList(new ArrayList<>());
+      IndexingWorkScheduler scheduler =
+          capturingScheduler(committed, CompletableFuture.completedFuture(null));
+      ChangeStreamIndexManager manager =
+          partitionedManager(scheduler, new AtomicReference<>(), Optional.empty());
+      var token = ChangeStreamUtils.resumeToken(new BsonTimestamp(2, 0));
+
+      manager
+          .indexBatch(emptyBatch(PARTITION_1, token), NOOP_DOCUMENT_METRICS_UPDATER, NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+
+      IndexCommitUserData commitData = committed.get(0).orElseThrow();
+      Assert.assertEquals(token, commitData.resumeInfo().orElseThrow().getResumeToken());
+    }
+
+    @Test
+    public void indexBatch_partitionedAllInvalidatingBatch_doesNotRegisterWithTracker()
+        throws Exception {
+      List<Optional<IndexCommitUserData>> committed =
+          Collections.synchronizedList(new ArrayList<>());
+      IndexingWorkScheduler scheduler =
+          capturingScheduler(committed, CompletableFuture.completedFuture(null));
+      var tracker = twoPartitionTracker();
+      AtomicReference<ChangeStreamResumeInfo> resumeInfoReference = new AtomicReference<>();
+      ChangeStreamIndexManager manager =
+          partitionedManager(scheduler, resumeInfoReference, Optional.of(tracker));
+      ChangeStreamBatch batch =
+          new ChangeStreamBatch(
+              toRawBsonDocuments(List.of(ChangeStreamUtils.dropEvent(0))),
+              ChangeStreamUtils.resumeToken(new BsonTimestamp(2, 0)),
+              Optional.of(new BsonTimestamp()),
+              Optional.of(PARTITION_1));
+
+      manager
+          .indexBatch(batch, NOOP_DOCUMENT_METRICS_UPDATER, NOOP_TIMER)
+          .indexingFuture
+          .get(1, TimeUnit.SECONDS);
+
+      // No safe position, so nothing to confirm and no commit data: the drop ends this attempt,
+      // and the in-memory resume info must not move to this batch's (unsafe) token.
+      Assert.assertEquals(1, committed.size());
+      Assert.assertTrue(committed.get(0).isEmpty());
+      Assert.assertNull(resumeInfoReference.get());
+      Assert.assertEquals(
+          Map.of(PARTITION_0, SEED_TOKEN, PARTITION_1, SEED_TOKEN), tracker.snapshot());
     }
 
     @Test
@@ -215,7 +537,8 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   metricsUpdater,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
@@ -224,7 +547,7 @@ public class ChangeStreamIndexManagerTest {
                           Collections.singletonList(
                               ChangeStreamUtils.insertEvent(1, MOCK_INDEX_DEFINITION))),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -258,6 +581,91 @@ public class ChangeStreamIndexManagerTest {
     }
 
     @Test
+    public void testRecordsEventSizesOnDecodingPath() throws Exception {
+      // The per-event size metric must be recorded from the decoding task (CLOUDP-353521), not
+      // synchronously on the IO/dispatch thread that calls indexBatch. To guard that behavior
+      // (rather than merely that recording happens at all), capture the thread each
+      // recordDocumentSizeBytes call runs on and assert it is a decoding-executor thread, distinct
+      // from the thread that invoked indexBatch. If the recording were done synchronously in
+      // indexBatch, it would run on the caller thread here and this test would fail.
+      IndexingWorkScheduler scheduler = mock(IndexingWorkScheduler.class);
+      when(scheduler.schedule(any(), any(), any(), any(), any(), any(), any()))
+          .thenReturn(CompletableFuture.completedFuture(null));
+      CompletableFuture<Void> future = new CompletableFuture<>();
+
+      DocumentIndexer indexer = indexer();
+
+      var metricsFactory = SearchIndex.mockMetricsFactory();
+      IndexMetricsUpdater realUpdater =
+          IndexMetricsUpdaterBuilder.builder()
+              .metricsFactory(metricsFactory)
+              .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+              .build();
+      var spyIndexingMetricsUpdater = spy(realUpdater.getIndexingMetricsUpdater());
+      IndexMetricsUpdater metricsUpdater = spy(realUpdater);
+      doReturn(spyIndexingMetricsUpdater).when(metricsUpdater).getIndexingMetricsUpdater();
+
+      // Record the thread that each recordDocumentSizeBytes call runs on (still exercising the real
+      // recording logic).
+      List<String> recordingThreads = Collections.synchronizedList(new ArrayList<>());
+      doAnswer(
+              invocation -> {
+                recordingThreads.add(Thread.currentThread().getName());
+                return invocation.callRealMethod();
+              })
+          .when(spyIndexingMetricsUpdater)
+          .recordDocumentSizeBytes(anyInt());
+
+      ChangeStreamIndexManager manager =
+          getChangeStreamIndexManagerFactory()
+              .create(
+                  MOCK_INDEX_DEFINITION,
+                  scheduler,
+                  indexer,
+                  ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getNamespace(),
+                  resumeInfo -> {},
+                  metricsUpdater,
+                  future,
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
+
+      List<ChangeStreamDocument<RawBsonDocument>> events =
+          Arrays.asList(
+              ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION),
+              ChangeStreamUtils.insertEvent(1, MOCK_INDEX_DEFINITION));
+
+      String indexBatchThread = Thread.currentThread().getName();
+      CompletableFuture<Void> indexFuture =
+          manager.indexBatch(
+                  new ChangeStreamBatch(
+                      toRawBsonDocuments(events),
+                      ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
+                      Optional.of(new BsonTimestamp())),
+                  NOOP_DOCUMENT_METRICS_UPDATER,
+                  NOOP_TIMER)
+              .indexingFuture;
+
+      indexFuture.get(5, TimeUnit.SECONDS);
+
+      // One recording per raw event in the batch, performed on the decoding task.
+      verify(spyIndexingMetricsUpdater, timeout(5000).times(events.size()))
+          .recordDocumentSizeBytes(anyInt());
+
+      // Every recording ran on a decoding-executor thread, not the thread that called indexBatch.
+      assertEquals(events.size(), recordingThreads.size());
+      for (String recordingThread : recordingThreads) {
+        assertNotEquals(
+            "event size metric was recorded on the indexBatch (IO/dispatch) thread",
+            indexBatchThread,
+            recordingThread);
+        assertTrue(
+            "expected event size metric to be recorded on a decoding thread but was "
+                + recordingThread,
+            recordingThread.contains("decoding"));
+      }
+    }
+
+    @Test
     public void testExceptionalBatchIndexingFailsIndexingFuture() throws Exception {
       IndexingWorkScheduler scheduler = mock(IndexingWorkScheduler.class);
       AtomicReference<ChangeStreamResumeInfo> resumeInfoReference = new AtomicReference<>();
@@ -278,7 +686,8 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   IGNORE_METRICS,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
@@ -287,7 +696,7 @@ public class ChangeStreamIndexManagerTest {
                           Collections.singletonList(
                               ChangeStreamUtils.insertEvent(1, MOCK_INDEX_DEFINITION))),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -359,7 +768,8 @@ public class ChangeStreamIndexManagerTest {
                   ignoredResumeInfo -> {},
                   IGNORE_METRICS,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> shutdownFuture = manager.shutdown();
 
@@ -376,7 +786,7 @@ public class ChangeStreamIndexManagerTest {
                           Collections.singletonList(
                               ChangeStreamUtils.insertEvent(1, MOCK_INDEX_DEFINITION))),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -406,7 +816,8 @@ public class ChangeStreamIndexManagerTest {
                   ignoreResumeInfo -> {},
                   IGNORE_METRICS,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> shutdownFuture = manager.shutdown();
 
@@ -450,7 +861,8 @@ public class ChangeStreamIndexManagerTest {
                   ignoreResumeInfo -> {},
                   metricsUpdater,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
@@ -459,7 +871,7 @@ public class ChangeStreamIndexManagerTest {
                           Collections.singletonList(
                               ChangeStreamUtils.insertEvent(1, MOCK_INDEX_DEFINITION))),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -527,14 +939,15 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   metricsUpdater,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
                   new ChangeStreamBatch(
                       toRawBsonDocuments(events),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -642,7 +1055,8 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   metricsUpdater,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
@@ -653,7 +1067,7 @@ public class ChangeStreamIndexManagerTest {
                               ChangeStreamUtils.renameEvent(1),
                               ChangeStreamUtils.invalidateEvent(2))),
                       ChangeStreamUtils.PRE_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -696,7 +1110,8 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   metricsUpdater,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
@@ -706,7 +1121,7 @@ public class ChangeStreamIndexManagerTest {
                               ChangeStreamUtils.renameEvent(1),
                               ChangeStreamUtils.invalidateEvent(2))),
                       ChangeStreamUtils.PRE_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -760,12 +1175,15 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   IGNORE_METRICS,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
                   new ChangeStreamBatch(
-                      events, ChangeStreamUtils.POST_BATCH_RESUME_TOKEN, new BsonTimestamp()),
+                      events,
+                      ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -777,7 +1195,7 @@ public class ChangeStreamIndexManagerTest {
           new ChangeStreamBatch(
               toRawBsonDocuments(List.of(invalidateEvent)),
               invalidateEvent.getResumeToken(),
-              new BsonTimestamp()),
+              Optional.of(new BsonTimestamp())),
           NOOP_DOCUMENT_METRICS_UPDATER,
           NOOP_TIMER);
 
@@ -822,14 +1240,15 @@ public class ChangeStreamIndexManagerTest {
                   ignoreResumeInfo -> {},
                   IGNORE_METRICS,
                   lifecycleFuture,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
                   new ChangeStreamBatch(
                       Collections.emptyList(),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -1294,13 +1713,14 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   IGNORE_METRICS,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       manager.indexBatch(
           new ChangeStreamBatch(
               toRawBsonDocuments(events),
               ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-              new BsonTimestamp()),
+              Optional.of(new BsonTimestamp())),
           NOOP_DOCUMENT_METRICS_UPDATER,
           NOOP_TIMER);
 
@@ -1335,14 +1755,15 @@ public class ChangeStreamIndexManagerTest {
                   resumeInfoReference::set,
                   IGNORE_METRICS,
                   future,
-                  GenerationIdBuilder.create());
+                  GenerationIdBuilder.create(),
+                  Optional.empty());
 
       CompletableFuture<Void> indexFuture =
           manager.indexBatch(
                   new ChangeStreamBatch(
                       toRawBsonDocuments(events),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -1571,7 +1992,7 @@ public class ChangeStreamIndexManagerTest {
           .schedule(any(), any(), any(), any(), any(), any());
 
       var firstBatch = mock(ChangeStreamBatch.class);
-      when(firstBatch.getCommandOperationTime()).thenReturn(new BsonTimestamp());
+      when(firstBatch.getCommandOperationTime()).thenReturn(Optional.of(new BsonTimestamp()));
       when(firstBatch.getPostBatchResumeToken())
           .thenReturn(ChangeStreamUtils.resumeToken(new BsonTimestamp(3, 0)));
       when(firstBatch.getRawEvents())
@@ -1593,7 +2014,7 @@ public class ChangeStreamIndexManagerTest {
           new ChangeStreamBatch(
               toRawBsonDocuments(secondBatchEvents),
               ChangeStreamUtils.resumeToken(new BsonTimestamp(5, 0)),
-              new BsonTimestamp());
+              Optional.of(new BsonTimestamp()));
 
       // Call index on first batch
       CompletableFuture<Void> indexFuture1 =
@@ -1700,7 +2121,7 @@ public class ChangeStreamIndexManagerTest {
                           Collections.singletonList(
                               ChangeStreamUtils.insertEvent(1, MOCK_INDEX_DEFINITION))),
                       ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                      new BsonTimestamp()),
+                      Optional.of(new BsonTimestamp())),
                   NOOP_DOCUMENT_METRICS_UPDATER,
                   NOOP_TIMER)
               .indexingFuture;
@@ -1731,12 +2152,14 @@ public class ChangeStreamIndexManagerTest {
 
       // create an hanging change-stream for second batch
       ChangeStreamBatch hangingBatch = mock(ChangeStreamBatch.class);
-      when(hangingBatch.getCommandOperationTime()).thenReturn(new BsonTimestamp());
+      when(hangingBatch.getCommandOperationTime()).thenReturn(Optional.of(new BsonTimestamp()));
       when(hangingBatch.getPostBatchResumeToken())
           .thenReturn(ChangeStreamUtils.resumeToken(new BsonTimestamp(3, 0)));
 
-      // allow calls `getRawEvents()` in pre-processing by this thread (total 6 calls), after hang.
-      AtomicInteger blockDecoding = new AtomicInteger(-6);
+      // allow calls `getRawEvents()` in pre-processing by this thread (total 5 calls), after hang.
+      // The event-size metric no longer calls getRawEvents() on this (IO) thread; it is recorded on
+      // the decoding thread instead (CLOUDP-353521).
+      AtomicInteger blockDecoding = new AtomicInteger(-5);
       when(hangingBatch.getRawEvents())
           .thenAnswer(
               invocation -> {
@@ -1767,7 +2190,7 @@ public class ChangeStreamIndexManagerTest {
                   ChangeStreamUtils.toRawBsonDocuments(
                       List.of(ChangeStreamUtils.insertEvent(6, MOCK_INDEX_DEFINITION))),
                   POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()),
+                  Optional.of(new BsonTimestamp())),
               NOOP_DOCUMENT_METRICS_UPDATER,
               NOOP_TIMER);
 
@@ -1827,12 +2250,14 @@ public class ChangeStreamIndexManagerTest {
 
       // create an hanging change-stream for second batch
       ChangeStreamBatch hangingBatch = mock(ChangeStreamBatch.class);
-      when(hangingBatch.getCommandOperationTime()).thenReturn(new BsonTimestamp());
+      when(hangingBatch.getCommandOperationTime()).thenReturn(Optional.of(new BsonTimestamp()));
       when(hangingBatch.getPostBatchResumeToken())
           .thenReturn(ChangeStreamUtils.resumeToken(new BsonTimestamp(3, 0)));
 
-      // allow calls `getRawEvents()` in pre-processing by this thread (total 6 calls), after hang.
-      AtomicInteger blockDecoding = new AtomicInteger(-6);
+      // allow calls `getRawEvents()` in pre-processing by this thread (total 5 calls), after hang.
+      // The event-size metric no longer calls getRawEvents() on this (IO) thread; it is recorded on
+      // the decoding thread instead (CLOUDP-353521).
+      AtomicInteger blockDecoding = new AtomicInteger(-5);
       when(hangingBatch.getRawEvents())
           .thenAnswer(
               invocation -> {
@@ -1863,7 +2288,7 @@ public class ChangeStreamIndexManagerTest {
                   ChangeStreamUtils.toRawBsonDocuments(
                       List.of(ChangeStreamUtils.insertEvent(6, MOCK_INDEX_DEFINITION))),
                   POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()),
+                  Optional.of(new BsonTimestamp())),
               NOOP_DOCUMENT_METRICS_UPDATER,
               NOOP_TIMER);
 
@@ -1930,7 +2355,7 @@ public class ChangeStreamIndexManagerTest {
                   ChangeStreamUtils.toRawBsonDocuments(
                       List.of(ChangeStreamUtils.insertEvent(6, MOCK_INDEX_DEFINITION))),
                   POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()),
+                  Optional.of(new BsonTimestamp())),
               NOOP_DOCUMENT_METRICS_UPDATER,
               NOOP_TIMER);
 
@@ -1940,7 +2365,7 @@ public class ChangeStreamIndexManagerTest {
                   ChangeStreamUtils.toRawBsonDocuments(
                       List.of(ChangeStreamUtils.insertEvent(6, MOCK_INDEX_DEFINITION))),
                   POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()),
+                  Optional.of(new BsonTimestamp())),
               NOOP_DOCUMENT_METRICS_UPDATER,
               NOOP_TIMER);
 
@@ -2037,7 +2462,7 @@ public class ChangeStreamIndexManagerTest {
               new ChangeStreamBatch(
                   toRawBsonDocuments(events),
                   ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()),
+                  Optional.of(new BsonTimestamp())),
               NOOP_DOCUMENT_METRICS_UPDATER,
               NOOP_TIMER);
 
@@ -2085,7 +2510,8 @@ public class ChangeStreamIndexManagerTest {
 
   private static IndexingWorkScheduler scheduler() {
     IndexingWorkSchedulerFactory dispatcher =
-        IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), new SimpleMeterRegistry());
+        IndexingWorkSchedulerFactory.create(
+            2, mock(Supplier.class), new SimpleMeterRegistry(), true);
     return dispatcher.getIndexingWorkScheduler(MOCK_INDEX_DEFINITION);
   }
 }

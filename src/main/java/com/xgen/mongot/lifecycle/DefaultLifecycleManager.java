@@ -15,6 +15,8 @@ import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
+import com.xgen.mongot.monitor.ReplicationStateMonitor;
+import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.ReplicationManager;
 import com.xgen.mongot.replication.ReplicationManagerFactory;
 import com.xgen.mongot.replication.mongodb.autoembedding.AutoEmbeddingMaterializedViewManagerFactory;
@@ -31,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicLong;
 import org.jetbrains.annotations.TestOnly;
 import org.slf4j.LoggerFactory;
 
@@ -52,10 +53,6 @@ public class DefaultLifecycleManager implements LifecycleManager {
   /** A mapping of existing IndexLifecycleManagers. */
   @GuardedBy("this")
   private final Map<GenerationId, IndexLifecycleManager> indexManagers;
-
-  /** If the existing IndexLifecycleManagers have started processing the index lifecycles. */
-  @GuardedBy("this")
-  private boolean initialized;
 
   @GuardedBy("this")
   private boolean shutdown;
@@ -81,6 +78,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
   private final AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMatViewManagerFactory;
   private final ReplicationManagerWrapper replicationManagerWrapper;
   private final Optional<MaterializedViewManager> materializedViewManager;
+  private final Gate replicationGate;
+  private final Gate autoEmbeddingReplicationGate;
   private final InitializedIndexCatalog initializedIndexCatalog;
   private final IndexFactory indexFactory;
   private final Optional<? extends BlobstoreSnapshotterManager> snapshotterManager;
@@ -89,7 +88,6 @@ public class DefaultLifecycleManager implements LifecycleManager {
   private Optional<SyncSourceConfig> syncSourceConfig;
 
   private final IndexLifecycleManager.Metrics metrics;
-  private final AtomicLong lifecycleInitialized;
 
   /**
    * A wrapper over the ReplicationManager that can be used across different instantiations of the
@@ -141,7 +139,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
       MeterRegistry meterRegistry,
       Gate replicationGate,
       LifecycleConfig lifecycleConfig,
-      boolean enableInitAttributionMetrics) {
+      boolean enableInitAttributionMetrics,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
     this(
         replicationManagerFactory,
         syncSourceConfig,
@@ -151,6 +150,62 @@ public class DefaultLifecycleManager implements LifecycleManager {
         autoEmbeddingMaterializedViewManagerFactory,
         meterRegistry,
         replicationGate,
+        ToggleGate.opened(),
+        lifecycleConfig,
+        enableInitAttributionMetrics,
+        threadPoolResourceBindings);
+  }
+
+  public DefaultLifecycleManager(
+      ReplicationManagerFactory replicationManagerFactory,
+      Optional<SyncSourceConfig> syncSourceConfig,
+      InitializedIndexCatalog initializedIndexCatalog,
+      IndexFactory indexFactory,
+      Optional<? extends BlobstoreSnapshotterManager> snapshotterManager,
+      AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMaterializedViewManagerFactory,
+      MeterRegistry meterRegistry,
+      ReplicationStateMonitor replicationStateMonitor,
+      LifecycleConfig lifecycleConfig,
+      boolean enableInitAttributionMetrics,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
+    this(
+        replicationManagerFactory,
+        syncSourceConfig,
+        initializedIndexCatalog,
+        indexFactory,
+        snapshotterManager,
+        autoEmbeddingMaterializedViewManagerFactory,
+        meterRegistry,
+        replicationStateMonitor.getReplicationGate(),
+        replicationStateMonitor.getAutoEmbeddingReplicationGate(),
+        lifecycleConfig,
+        enableInitAttributionMetrics,
+        threadPoolResourceBindings);
+  }
+
+  private DefaultLifecycleManager(
+      ReplicationManagerFactory replicationManagerFactory,
+      Optional<SyncSourceConfig> syncSourceConfig,
+      InitializedIndexCatalog initializedIndexCatalog,
+      IndexFactory indexFactory,
+      Optional<? extends BlobstoreSnapshotterManager> snapshotterManager,
+      AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMaterializedViewManagerFactory,
+      MeterRegistry meterRegistry,
+      Gate replicationGate,
+      Gate autoEmbeddingReplicationGate,
+      LifecycleConfig lifecycleConfig,
+      boolean enableInitAttributionMetrics,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
+    this(
+        replicationManagerFactory,
+        syncSourceConfig,
+        initializedIndexCatalog,
+        indexFactory,
+        snapshotterManager,
+        autoEmbeddingMaterializedViewManagerFactory,
+        meterRegistry,
+        replicationGate,
+        autoEmbeddingReplicationGate,
         Executors.fixedSizeThreadPool(
             "init-lifecycle",
             lifecycleConfig.initializationThreads.orElse(DEFAULT_INITIALIZATION_THREADS),
@@ -158,7 +213,8 @@ public class DefaultLifecycleManager implements LifecycleManager {
         Executors.fixedSizeThreadPool(
             "index-lifecycle", Math.max(1, Runtime.INSTANCE.getNumCpus() / 4), meterRegistry),
         Executors.fixedSizeThreadPool("blobstore-lifecycle", 1, meterRegistry),
-        enableInitAttributionMetrics);
+        enableInitAttributionMetrics,
+        threadPoolResourceBindings);
   }
 
   @VisibleForTesting
@@ -174,13 +230,49 @@ public class DefaultLifecycleManager implements LifecycleManager {
       NamedExecutorService initExecutor,
       NamedExecutorService lifecycleExecutor,
       NamedExecutorService blobstoreExecutor,
-      boolean enableInitAttributionMetrics) {
+      boolean enableInitAttributionMetrics,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
+    this(
+        replicationManagerFactory,
+        syncSourceConfig,
+        initializedIndexCatalog,
+        indexFactory,
+        snapshotterManager,
+        autoEmbeddingMatViewManagerFactory,
+        meterRegistry,
+        replicationGate,
+        ToggleGate.opened(),
+        initExecutor,
+        lifecycleExecutor,
+        blobstoreExecutor,
+        enableInitAttributionMetrics,
+        threadPoolResourceBindings);
+  }
+
+  @VisibleForTesting
+  DefaultLifecycleManager(
+      ReplicationManagerFactory replicationManagerFactory,
+      Optional<SyncSourceConfig> syncSourceConfig,
+      InitializedIndexCatalog initializedIndexCatalog,
+      IndexFactory indexFactory,
+      Optional<? extends BlobstoreSnapshotterManager> snapshotterManager,
+      AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMatViewManagerFactory,
+      MeterRegistry meterRegistry,
+      Gate replicationGate,
+      Gate autoEmbeddingReplicationGate,
+      NamedExecutorService initExecutor,
+      NamedExecutorService lifecycleExecutor,
+      NamedExecutorService blobstoreExecutor,
+      boolean enableInitAttributionMetrics,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
     this.initExecutor = initExecutor;
     this.lifecycleExecutor = lifecycleExecutor;
     this.blobstoreExecutor = blobstoreExecutor;
     this.replicationManagerFactory = replicationManagerFactory;
     this.autoEmbeddingMatViewManagerFactory = autoEmbeddingMatViewManagerFactory;
     this.syncSourceConfig = syncSourceConfig;
+    this.replicationGate = replicationGate;
+    this.autoEmbeddingReplicationGate = autoEmbeddingReplicationGate;
 
     if (replicationGate.isClosed()) {
       LOG.atWarn()
@@ -198,34 +290,11 @@ public class DefaultLifecycleManager implements LifecycleManager {
     this.meterRegistry = meterRegistry;
     MetricsFactory metricsFactory = new MetricsFactory("lifecycle", meterRegistry);
     this.indexManagers = new HashMap<>();
-    this.initialized = false;
     this.shutdown = false;
     this.metrics = IndexLifecycleManager.Metrics.create(metricsFactory);
-    this.lifecycleInitialized =
-        new MetricsFactory("readiness", meterRegistry).numGauge("lifecycleInitialized");
-    this.lifecycleInitialized.set(0);
     if (enableInitAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("init").register(initExecutor, meterRegistry);
+      threadPoolResourceBindings.forSubsystem("init").register(initExecutor, meterRegistry);
     }
-  }
-
-  @Override
-  public synchronized boolean isInitialized() {
-    if (!this.initialized) {
-      this.initialized =
-          this.indexManagers.values().stream()
-                  .allMatch(
-                      indexManager ->
-                          indexManager.getState() != IndexLifecycleManager.State.NOT_STARTED
-                              && indexManager.getState() != IndexLifecycleManager.State.INITIALIZED)
-              // TODO(CLOUDP-361594): Should we include MaterializedViewManager::initialized in
-              // this method for HealthManager/ConfCall?
-              && this.replicationManagerWrapper.currentReplicationManager.isInitialized();
-      if (this.initialized) {
-        this.lifecycleInitialized.set(1);
-      }
-    }
-    return this.initialized;
   }
 
   @Override
@@ -262,10 +331,17 @@ public class DefaultLifecycleManager implements LifecycleManager {
   }
 
   @Override
+  public synchronized boolean contains(GenerationId generationId) {
+    return this.indexManagers.containsKey(generationId);
+  }
+
+  @Override
   public synchronized void restartReplication() {
     this.replicationManagerWrapper.setReplicationEnabled(true);
     this.indexManagers.values().forEach(IndexLifecycleManager::startReplication);
-    this.materializedViewManager.ifPresent(MaterializedViewManager::restartReplication);
+    if (!shouldReplicationBePaused() && !shouldAutoEmbeddingReplicationBePaused()) {
+      this.materializedViewManager.ifPresent(MaterializedViewManager::restartReplication);
+    }
   }
 
   @Override
@@ -313,13 +389,23 @@ public class DefaultLifecycleManager implements LifecycleManager {
   }
 
   @Override
+  public synchronized boolean isAutoEmbeddingReplicationSupported() {
+    return this.materializedViewManager
+        .map(MaterializedViewManager::isReplicationSupported)
+        .orElse(true);
+  }
+
+  @Override
+  public synchronized boolean hasAutoEmbeddingReplication() {
+    return this.materializedViewManager.isPresent();
+  }
+
+  @Override
   public synchronized CompletableFuture<Void> shutdown() {
     // Need to create a separate executor to run the shutdown tasks, otherwise it may end up running
     // on the indexing executor. As one of the shutdown tasks is shutting down that executor, this
     // will hang forever.
     this.shutdown = true;
-    this.initialized = false;
-    this.lifecycleInitialized.set(0);
     this.replicationManagerWrapper.setReplicationEnabled(false);
     var shutdownExecutor =
         Executors.fixedSizeThreadPool("lifecycle-manager-shutdown", 1, this.meterRegistry);
@@ -358,6 +444,34 @@ public class DefaultLifecycleManager implements LifecycleManager {
             this.materializedViewManager
                 .map(MaterializedViewManager::shutdownReplication)
                 .orElse(FutureUtils.COMPLETED_FUTURE)));
+  }
+
+  @Override
+  public synchronized CompletableFuture<Void> shutdownAutoEmbeddingReplication() {
+    return this.materializedViewManager
+        .map(MaterializedViewManager::shutdownReplication)
+        .orElse(FutureUtils.COMPLETED_FUTURE);
+  }
+
+  @Override
+  public synchronized void restartAutoEmbeddingReplication(SyncSourceConfig syncSourceConfig) {
+    if (shouldReplicationBePaused() || shouldAutoEmbeddingReplicationBePaused()) {
+      return;
+    }
+    this.materializedViewManager.ifPresent(
+        matViewManager -> {
+          if (matViewManager.updateSyncSource(syncSourceConfig)) {
+            matViewManager.restartReplication();
+          }
+        });
+  }
+
+  private boolean shouldAutoEmbeddingReplicationBePaused() {
+    return this.autoEmbeddingReplicationGate.isClosed();
+  }
+
+  private boolean shouldReplicationBePaused() {
+    return this.replicationGate.isClosed();
   }
 
   @TestOnly

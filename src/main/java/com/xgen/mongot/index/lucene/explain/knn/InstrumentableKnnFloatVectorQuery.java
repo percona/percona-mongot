@@ -6,13 +6,13 @@ import com.xgen.mongot.index.lucene.query.custom.MongotKnnFloatQuery;
 import java.io.IOException;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.QueryTimeout;
+import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.knn.KnnCollectorManager;
 import org.apache.lucene.util.BitSetIterator;
-import org.apache.lucene.util.Bits;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -43,14 +43,14 @@ public class InstrumentableKnnFloatVectorQuery extends MongotKnnFloatQuery {
   @Override
   protected TopDocs approximateSearch(
       LeafReaderContext context,
-      @Nullable Bits acceptDocs,
+      AcceptDocs acceptDocs,
       int visitedLimit,
       KnnCollectorManager knnCollectorManager)
       throws IOException {
 
     return this.instrumentationHelper.meteredApproximateSearch(
         context,
-        acceptDocs,
+        acceptDocs.bits(),
         () -> super.approximateSearch(context, acceptDocs, visitedLimit, knnCollectorManager));
   }
 
@@ -76,6 +76,13 @@ public class InstrumentableKnnFloatVectorQuery extends MongotKnnFloatQuery {
         perLeafResults, () -> super.mergeLeafResults(perLeafResults));
   }
 
+  /**
+   * Reports the final rescored results to the instrumentation helper so that tracing docs dropped
+   * during rescoring can be marked. Called by {@code BinaryQuantizedVectorRescorer} after two-stage
+   * rescoring completes.
+   *
+   * @param rescoredDocs the final rescored top docs
+   */
   public void examineResultsAfterRescoring(TopDocs rescoredDocs) {
     this.instrumentationHelper.examineResultsAfterRescoring(rescoredDocs);
   }

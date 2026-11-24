@@ -115,6 +115,7 @@ public class MongotKnnQueryMetricsTest {
     // Verify unfiltered approximate counter was incremented
     double unfilteredApproxCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "approximate"))
             .count();
     Assert.assertTrue(
@@ -124,7 +125,8 @@ public class MongotKnnQueryMetricsTest {
     // Verify per-segment histogram was recorded for approximate search
     double unfilteredApproxHistogramCount =
         this.metricsFactory
-            .get("vectorSearchVisitedNodesPerSegment",
+            .get(
+                "vectorSearchVisitedNodesPerSegment",
                 Tags.of("filter", "false", "mode", "approximate"))
             .summary()
             .count();
@@ -135,10 +137,12 @@ public class MongotKnnQueryMetricsTest {
     // Verify filtered counters were not incremented
     double filteredApproxCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "approximate"))
             .count();
     double filteredExactCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "exact"))
             .count();
     Assert.assertEquals(
@@ -167,6 +171,7 @@ public class MongotKnnQueryMetricsTest {
     // Verify filtered approximate counter was incremented
     double filteredApproxCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "approximate"))
             .count();
     Assert.assertTrue(
@@ -176,7 +181,8 @@ public class MongotKnnQueryMetricsTest {
     // Verify per-segment histogram was recorded for approximate search
     double filteredApproxHistogramCount =
         this.metricsFactory
-            .get("vectorSearchVisitedNodesPerSegment",
+            .get(
+                "vectorSearchVisitedNodesPerSegment",
                 Tags.of("filter", "true", "mode", "approximate"))
             .summary()
             .count();
@@ -187,10 +193,12 @@ public class MongotKnnQueryMetricsTest {
     // Verify unfiltered counters were not incremented
     double unfilteredApproxCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "approximate"))
             .count();
     double unfilteredExactCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "exact"))
             .count();
     Assert.assertEquals(
@@ -216,6 +224,7 @@ public class MongotKnnQueryMetricsTest {
 
     double countAfterFirst =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "approximate"))
             .count();
     Assert.assertTrue("Should have visited nodes after first query", countAfterFirst > 0);
@@ -226,6 +235,7 @@ public class MongotKnnQueryMetricsTest {
 
     double countAfterSecond =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "approximate"))
             .count();
     Assert.assertTrue(
@@ -241,6 +251,7 @@ public class MongotKnnQueryMetricsTest {
 
     double visitedCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "approximate"))
             .count();
     Assert.assertTrue("Byte vector query should record visited nodes metric", visitedCount > 0);
@@ -261,6 +272,7 @@ public class MongotKnnQueryMetricsTest {
     // Verify filtered exact counter was incremented (exact search should be triggered)
     double filteredExactCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "exact"))
             .count();
     Assert.assertTrue(
@@ -283,6 +295,7 @@ public class MongotKnnQueryMetricsTest {
     // Verify filtered exact counter was incremented (exact search should be triggered)
     double filteredExactCount =
         this.metricsFactory
+            .getProcessMetricsFactory()
             .counter("vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "exact"))
             .count();
     Assert.assertTrue(
@@ -302,7 +315,8 @@ public class MongotKnnQueryMetricsTest {
     // Verify per-segment histogram count equals number of segments for approximate search
     double histogramCount =
         this.metricsFactory
-            .get("vectorSearchVisitedNodesPerSegment",
+            .get(
+                "vectorSearchVisitedNodesPerSegment",
                 Tags.of("filter", "false", "mode", "approximate"))
             .summary()
             .count();

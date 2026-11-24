@@ -76,7 +76,7 @@ public class FeatureFlagsTest {
         enabledDefaultOverriddenToDisabled() {
       return BsonDeserializationTestSuite.TestSpec.valid(
           "Enabled default overridden to disabled",
-          FeatureFlags.withDefaults().disable(Feature.INITIAL_INDEX_STATUS_UNKNOWN).build());
+          FeatureFlags.withDefaults().disable(Feature.VECTOR_STORED_SOURCE).build());
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<FeatureFlags> allFeaturesEnabled() {
@@ -168,8 +168,8 @@ public class FeatureFlagsTest {
     @Test
     public void builder_disable_disablesFeature() {
       FeatureFlags flags =
-          FeatureFlags.withDefaults().disable(Feature.INITIAL_INDEX_STATUS_UNKNOWN).build();
-      assertFalse(flags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN));
+          FeatureFlags.withDefaults().disable(Feature.VECTOR_STORED_SOURCE).build();
+      assertFalse(flags.isEnabled(Feature.VECTOR_STORED_SOURCE));
     }
 
     @Test
@@ -179,7 +179,7 @@ public class FeatureFlagsTest {
       // Other disabled-by-default features remain disabled
       assertFalse(flags.isEnabled(Feature.FACETING_OVER_TOKEN_FIELDS));
       // Other enabled-by-default features remain enabled
-      assertTrue(flags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN));
+      assertTrue(flags.isEnabled(Feature.VECTOR_STORED_SOURCE));
     }
 
     @Test
@@ -190,11 +190,11 @@ public class FeatureFlagsTest {
 
     @Test
     public void isEnabled_defaultEnabledFeature_returnsTrue() {
-      assertTrue(FeatureFlags.getDefault().isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN));
       assertTrue(
           FeatureFlags.getDefault().isEnabled(Feature.ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE));
       assertTrue(FeatureFlags.getDefault().isEnabled(Feature.VECTOR_STORED_SOURCE));
       assertTrue(FeatureFlags.getDefault().isEnabled(Feature.NESTED_VECTOR));
+      assertTrue(FeatureFlags.getDefault().isEnabled(Feature.SEARCH_AGGREGATION));
     }
 
     @Test
@@ -206,6 +206,7 @@ public class FeatureFlagsTest {
       assertTrue(flags.isEnabled(Feature.INDEX_FEATURE_VERSION_FOUR));
       assertTrue(flags.isEnabled(Feature.SORTED_INDEX));
       assertTrue(flags.isEnabled(Feature.NESTED_VECTOR));
+      assertTrue(flags.isEnabled(Feature.BYTE_BINARY_QUANTIZATION));
     }
 
     @Test
@@ -214,7 +215,6 @@ public class FeatureFlagsTest {
       // Other disabled-by-default features remain disabled
       assertFalse(flags.isEnabled(Feature.STALE_STATE_TRANSITION));
       // Enabled-by-default features remain enabled
-      assertTrue(flags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN));
       assertTrue(flags.isEnabled(Feature.ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE));
       assertTrue(flags.isEnabled(Feature.VECTOR_STORED_SOURCE));
     }
@@ -242,7 +242,34 @@ public class FeatureFlagsTest {
       // Other disabled-by-default features remain disabled
       assertFalse(flags.isEnabled(Feature.OVERLOAD_RETRY_SIGNAL));
       // Enabled-by-default features remain enabled
-      assertTrue(flags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN));
+      assertTrue(flags.isEnabled(Feature.ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE));
+      assertTrue(flags.isEnabled(Feature.VECTOR_STORED_SOURCE));
+      assertTrue(flags.isEnabled(Feature.NESTED_VECTOR));
+    }
+
+    @Test
+    public void enterpriseDefaults_enablesAtlasRolledOutFeatures() {
+      FeatureFlags flags = FeatureFlags.enterpriseDefaults();
+      assertTrue(flags.isEnabled(Feature.FACETING_OVER_TOKEN_FIELDS));
+      assertTrue(flags.isEnabled(Feature.NEW_EMBEDDED_SEARCH_CAPABILITIES));
+      assertTrue(flags.isEnabled(Feature.ACCURATE_NUM_EMBEDDED_ROOT_DOCS_METRIC));
+      assertTrue(flags.isEnabled(Feature.INDEX_FEATURE_VERSION_FOUR));
+      assertTrue(flags.isEnabled(Feature.SORTED_INDEX));
+      assertTrue(flags.isEnabled(Feature.STALE_STATE_TRANSITION));
+      assertTrue(flags.isEnabled(Feature.RETAIN_FAILED_INDEX_DATA_ON_DISK));
+      assertTrue(flags.isEnabled(Feature.REMOVE_ABSENT_INDEXES_BEFORE_INITIALIZATION));
+      assertTrue(flags.isEnabled(Feature.SHUT_DOWN_REPLICATION_WHEN_COLLECTION_NOT_FOUND));
+      assertTrue(flags.isEnabled(Feature.FLOOR_SEGMENT_MB));
+      assertTrue(flags.isEnabled(Feature.TRUNCATE_AUTOCOMPLETE_TOKENS));
+      assertTrue(flags.isEnabled(Feature.FTDC_EXECUTOR_METRICS_TO_PROMETHEUS));
+      assertTrue(flags.isEnabled(Feature.INDEX_SIZE_QUANTIZATION_METRICS));
+      assertTrue(flags.isEnabled(Feature.CACHE_WARMER));
+      assertTrue(flags.isEnabled(Feature.CONCURRENT_INDEX_PARTITION_SEARCH));
+      assertTrue(flags.isEnabled(Feature.CANCEL_MERGE));
+
+      // Other disabled-by-default features remain disabled
+      assertFalse(flags.isEnabled(Feature.OVERLOAD_RETRY_SIGNAL));
+      // Enabled-by-default features remain enabled
       assertTrue(flags.isEnabled(Feature.ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE));
       assertTrue(flags.isEnabled(Feature.VECTOR_STORED_SOURCE));
       assertTrue(flags.isEnabled(Feature.NESTED_VECTOR));
@@ -316,8 +343,8 @@ public class FeatureFlagsTest {
     @Test
     public void initializeProcessInstance_calledTwice_throwsIllegalStateException() {
       FeatureFlags.initializeProcessInstance(this.flags);
-      assertThrows(IllegalStateException.class,
-          () -> FeatureFlags.initializeProcessInstance(this.flags));
+      assertThrows(
+          IllegalStateException.class, () -> FeatureFlags.initializeProcessInstance(this.flags));
     }
 
     @Test
@@ -334,7 +361,5 @@ public class FeatureFlagsTest {
       FeatureFlags.initializeProcessInstance(this.flags);
       assertNotNull(FeatureFlags.getStatic());
     }
-
   }
-
 }

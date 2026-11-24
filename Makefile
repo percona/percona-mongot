@@ -15,7 +15,7 @@ BAZELISK := $(DIR)/scripts/tools/bazelisk/run.sh
 BAZEL = $(BAZELISK)
 RED = \033[0;31m
 NOCOLOR = \033[0m
-COMMUNITY_CONTAINER_VERSION ?= preview
+ONPREM_CONTAINER_VERSION ?= preview
 
 DOCKER_BUILD_OPTS ?=
 
@@ -45,6 +45,12 @@ lint:
 		--test_tag_filters=lint \
 		--test_output=errors \
 		//...
+
+# Auto-fix any format and lint violations
+# Note: cannot call this `make lint.fix` because it will interfere with Claude's `make lint` hook.
+.PHONY: fix
+fix:
+	bash ./bazel/tools/format/fix.sh
 
 .PHONY: sync
 sync:
@@ -124,12 +130,14 @@ tools.precommit.enabled:
     		echo "WARNING: pre-commit is not installed on your system."; \
     		echo "Install it via 'pip install pre-commit' or 'brew install pre-commit'."; \
             echo "****************************************************************"; \
-    	elif [ ! -f .git/hooks/pre-commit ] || ! grep -q "pre-commit" .git/hooks/pre-commit; then \
-    		echo "****************************************************************"; \
-    		echo "WARNING: Local pre-commit hooks are not installed."; \
-    		echo "Run 'pre-commit install' to enable it."; \
-    		echo "****************************************************************"; \
-    	fi
+	elif HOOKS="$$(git rev-parse --git-path hooks)/pre-commit"; then \
+		if [ ! -f "$$HOOKS" ] || ! grep -q "pre-commit" "$$HOOKS"; then \
+			echo "****************************************************************"; \
+			echo "WARNING: Local pre-commit hooks are not installed."; \
+			echo "Run 'pre-commit install' to enable it."; \
+			echo "****************************************************************"; \
+		fi; \
+	fi
 
 # dependency rules
 .PHONY: deps.update
@@ -142,10 +150,8 @@ deps.update:
 deps.outdated:
 	@$(call BAZEL) run @maven//:outdated
 
-.PHONY: deps.pin.community
-deps.pin.community:
-	@$(DIR)/scripts/java/pin-community-maven.sh
-
+# --build_tests_only is required alongside //...: without it Bazel also analyzes non-test targets,
+# including the OCI images, which need registry credentials to fetch.
 .PHONY: test.unit
 test.unit:
 	@echo 'Running unit tests for files affected by this PR'
@@ -161,8 +167,9 @@ test.unit:
 		echo 'Running all unit tests'; \
 		$(BAZEL) test \
 			--test_tag_filters='unit' \
+			--build_tests_only \
 			--test_output=errors \
-			//src/...; \
+			//...; \
 	fi
 
 .PHONY: test.unit.coverage

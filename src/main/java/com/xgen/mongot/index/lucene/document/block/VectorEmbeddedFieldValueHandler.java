@@ -2,6 +2,7 @@ package com.xgen.mongot.index.lucene.document.block;
 
 import com.google.common.collect.ImmutableMap;
 import com.mongodb.client.model.geojson.Geometry;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater.IndexingMetricsUpdater;
 import com.xgen.mongot.index.definition.VectorEmbeddedDocumentsFieldDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
@@ -40,6 +41,7 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
   private final FieldPath path;
   private final byte[] id;
   private final ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings;
+  private final FeatureFlags featureFlags;
 
   private VectorEmbeddedFieldValueHandler(
       Optional<FieldValueHandler> wrappedFieldValueHandler,
@@ -50,7 +52,8 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
       IndexCapabilities indexCapabilities,
       FieldPath path,
       byte[] id,
-      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings) {
+      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings,
+      FeatureFlags featureFlags) {
     this.wrappedFieldValueHandler = wrappedFieldValueHandler;
     this.documentBlock = documentBlock;
     this.fieldDefinition = fieldDefinition;
@@ -60,6 +63,7 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
     this.path = path;
     this.id = id;
     this.autoEmbeddings = autoEmbeddings;
+    this.featureFlags = featureFlags;
   }
 
   static FieldValueHandler create(
@@ -71,17 +75,19 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
       IndexCapabilities indexCapabilities,
       FieldPath path,
       byte[] id,
-      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings) {
+      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings,
+      FeatureFlags featureFlags) {
     return new VectorEmbeddedFieldValueHandler(
-            wrappedValueHandler,
-            documentBlock,
-            fieldDefinition,
-            mapping,
-            indexingMetricsUpdater,
-            indexCapabilities,
-            path,
-            id,
-            autoEmbeddings);
+        wrappedValueHandler,
+        documentBlock,
+        fieldDefinition,
+        mapping,
+        indexingMetricsUpdater,
+        indexCapabilities,
+        path,
+        id,
+        autoEmbeddings,
+        featureFlags);
   }
 
   /**
@@ -100,7 +106,8 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
       IndexCapabilities indexCapabilities,
       FieldPath path,
       byte[] id,
-      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings) {
+      ImmutableMap<FieldPath, ImmutableMap<String, Vector>> autoEmbeddings,
+      FeatureFlags featureFlags) {
     return new VectorEmbeddedFieldValueHandler(
         wrappedValueHandler,
         documentBlock,
@@ -110,7 +117,8 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
         indexCapabilities,
         path,
         id,
-        autoEmbeddings);
+        autoEmbeddings,
+        featureFlags);
   }
 
   @Override
@@ -187,16 +195,18 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
 
   @Override
   public Optional<FieldValueHandler> arrayFieldValueHandler() {
-    return Optional.of(VectorEmbeddedFieldValueHandler.create(
-        this.wrappedFieldValueHandler.flatMap(FieldValueHandler::arrayFieldValueHandler),
-        this.documentBlock,
-        this.fieldDefinition,
-        this.mapping,
-        this.indexingMetricsUpdater,
-        this.indexCapabilities,
-        this.path,
-        this.id,
-        this.autoEmbeddings));
+    return Optional.of(
+        VectorEmbeddedFieldValueHandler.create(
+            this.wrappedFieldValueHandler.flatMap(FieldValueHandler::arrayFieldValueHandler),
+            this.documentBlock,
+            this.fieldDefinition,
+            this.mapping,
+            this.indexingMetricsUpdater,
+            this.indexCapabilities,
+            this.path,
+            this.id,
+            this.autoEmbeddings,
+            this.featureFlags));
   }
 
   /**
@@ -206,8 +216,8 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
    * VectorEmbeddedDocumentsFieldDefinition), create a new {@link VectorEmbeddedDocumentBuilder} to
    * build the new embedded document, and return it along with the wrapped sub document handler.
    *
-   * <p>If this handler is for an intermediate ancestor path of the {@code nestedRoot} (i.e.,
-   * {@code fieldDefinition} is null), the sub-document handler is wrapped in a {@link
+   * <p>If this handler is for an intermediate ancestor path of the {@code nestedRoot} (i.e., {@code
+   * fieldDefinition} is null), the sub-document handler is wrapped in a {@link
    * VectorEmbeddedDocumentHandler} so that traversal continues with embedded-root awareness.
    */
   @Override
@@ -226,7 +236,8 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
               this.path,
               this.indexingMetricsUpdater,
               this.indexCapabilities,
-              this.autoEmbeddings);
+              this.autoEmbeddings,
+              this.featureFlags);
 
       // If there's also a wrapped handler, we need to handle both
       // For now, return the embedded builder (similar to search index pattern)
@@ -264,10 +275,10 @@ class VectorEmbeddedFieldValueHandler implements FieldValueHandler {
                   this.documentBlock,
                   this.path,
                   this.id,
-                  this.autoEmbeddings));
+                  this.autoEmbeddings,
+                  this.featureFlags));
     }
 
     return wrappedSubDocumentHandler;
   }
 }
-

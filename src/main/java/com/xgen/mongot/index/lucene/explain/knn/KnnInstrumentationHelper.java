@@ -26,6 +26,7 @@ import org.apache.lucene.search.AbstractKnnCollector;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TopKnnCollector;
+import org.apache.lucene.search.knn.KnnSearchStrategy;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
@@ -205,6 +206,14 @@ public class KnnInstrumentationHelper {
     return competitiveTracingDocs;
   }
 
+  /**
+   * Marks any traced candidates that are absent from the rescored result set with a {@link
+   * VectorSearchTracingSpec.DropReason#RESCORING} drop reason. Called after two-stage rescoring
+   * completes so that explain output can distinguish docs dropped during HNSW traversal from docs
+   * dropped during rescoring.
+   *
+   * @param rescoredDocs the final rescored top docs
+   */
   public void examineResultsAfterRescoring(TopDocs rescoredDocs) {
     Set<Integer> luceneDocIdsAfterRescoring =
         Arrays.stream(rescoredDocs.scoreDocs).map((doc) -> doc.doc).collect(Collectors.toSet());
@@ -234,19 +243,22 @@ public class KnnInstrumentationHelper {
   }
 
   @SuppressWarnings("checkstyle:MissingJavadocMethod")
-  public AbstractKnnCollector getKnnCollector(LeafReaderContext context, int k, int visitedLimit)
+  public AbstractKnnCollector getKnnCollector(
+      LeafReaderContext context, int k, int visitedLimit, KnnSearchStrategy searchStrategy)
       throws IOException {
 
-    AbstractKnnCollector knnCollector = createKnnCollector(context, k, visitedLimit);
+    AbstractKnnCollector knnCollector =
+        createKnnCollector(context, k, visitedLimit, searchStrategy);
     this.tracingExplainer.getSegmentStats(context.id()).replaceCollectorAndMergeStats(knnCollector);
     return knnCollector;
   }
 
   private AbstractKnnCollector createKnnCollector(
-      LeafReaderContext context, int k, int visitedLimit) throws IOException {
+      LeafReaderContext context, int k, int visitedLimit, KnnSearchStrategy searchStrategy)
+      throws IOException {
     List<TracingInformation> tracingDocsInSegment = tracingInfosForSegment(context);
     if (tracingDocsInSegment.isEmpty()) {
-      return new TopKnnCollector(k, visitedLimit);
+      return new TopKnnCollector(k, visitedLimit, searchStrategy);
     }
 
     Map<Integer, TracingInformation> luceneIdToTracingInfo =
@@ -267,10 +279,10 @@ public class KnnInstrumentationHelper {
     }
 
     if (luceneIdToTracingInfo.isEmpty()) {
-      return new TopKnnCollector(k, visitedLimit);
+      return new TopKnnCollector(k, visitedLimit, searchStrategy);
     }
 
-    return new InstrumentedTopKnnCollector(context.docBase, this, k, visitedLimit);
+    return new InstrumentedTopKnnCollector(context.docBase, this, k, visitedLimit, searchStrategy);
   }
 
   public void examineCollect(int docId, float score) {

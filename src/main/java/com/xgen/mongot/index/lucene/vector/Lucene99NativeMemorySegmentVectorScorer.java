@@ -1,6 +1,9 @@
 package com.xgen.mongot.index.lucene.vector;
 
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
+import com.xgen.mongot.util.GlobalMetricFactory;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -15,6 +18,10 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.MemorySegmentAccessInput;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.UpdateableRandomVectorScorer;
+import org.apache.lucene.util.hnsw.UpdateableRandomVectorScorer.AbstractUpdateableRandomVectorScorer;
+import org.apache.lucene.util.quantization.QuantizedByteVectorValues;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * A {@link FlatVectorsScorer} that accelerates byte vector comparisons using native SIMD routines
@@ -22,6 +29,11 @@ import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
  * from the underlying {@link MemorySegmentAccessInput}, avoiding any copying on the hot path when
  * the vector fits within a single mapped segment. Falls back to the delegate scorer for float
  * vectors or when the {@link IndexInput} is not memory-segment backed.
+ *
+ * <p>The native path also requires {@link Similarity#I8_ACCELERATION} and the default-on {@code
+ * NATIVE_BYTE_VECTOR_SCORING} dynamic feature flag (read from the process-global {@link
+ * DynamicFeatureFlagRegistry#getStatic()}); disabling the flag routes all byte scoring to the
+ * delegate.
  */
 public class Lucene99NativeMemorySegmentVectorScorer implements FlatVectorsScorer {
   private final FlatVectorsScorer delegate;
@@ -30,21 +42,51 @@ public class Lucene99NativeMemorySegmentVectorScorer implements FlatVectorsScore
     this.delegate = delegate;
   }
 
+  private static boolean nativeEnabled() {
+    if (!Similarity.I8_ACCELERATION) {
+      return false;
+    }
+    try {
+      return DynamicFeatureFlagRegistry.getStatic()
+          .evaluateClusterInvariant(DynamicFeatureFlags.NATIVE_BYTE_VECTOR_SCORING);
+    } catch (IllegalStateException e) {
+      // The process-global registry is installed by the bootstrapper before any query runs, so this
+      // is unreachable in a normal mongot process. Non-bootstrap contexts that drive the codec
+      // directly (e.g. standalone force-merge tooling) keep the flag's default-on behavior.
+      return DynamicFeatureFlags.NATIVE_BYTE_VECTOR_SCORING.getFallback();
+    }
+  }
+
   @Override
   public RandomVectorScorerSupplier getRandomVectorScorerSupplier(
       VectorSimilarityFunction similarityFunction, KnnVectorValues vectorValues)
       throws IOException {
     if (vectorValues instanceof ByteVectorValues byteValues
-        && byteValues instanceof HasIndexSlice hasSlice
-        && Similarity.I8_ACCELERATION) {
-      IndexInput slice = hasSlice.getSlice();
-      if (slice != null) {
-        IndexInput unwrapped = FilterIndexInput.unwrapOnlyTest(slice);
-        if (unwrapped instanceof MemorySegmentAccessInput msInput) {
-          checkInvariants(byteValues.size(), byteValues.getVectorByteLength(), unwrapped);
-          return new NativeByteVectorScorerSupplier(similarityFunction, msInput, byteValues);
+        // Q7 values subtype ByteVectorValues but use a different stride/formula; they are
+        // handled by NativeScalarQuantizedVectorsScorer, never here.
+        && !(byteValues instanceof QuantizedByteVectorValues)
+        && nativeEnabled()) {
+      if (byteValues instanceof HasIndexSlice hasSlice) {
+        IndexInput slice = hasSlice.getSlice();
+        if (slice != null) {
+          IndexInput unwrapped = FilterIndexInput.unwrapOnlyTest(slice);
+          if (unwrapped instanceof MemorySegmentAccessInput msInput) {
+            checkInvariants(byteValues.size(), byteValues.getVectorByteLength(), unwrapped);
+            GlobalMetricFactory.incrementNativeByteVectorScoringEngaged();
+            return new NativeByteVectorScorerSupplier(similarityFunction, msInput, byteValues);
+          }
+          // The values expose an index slice but it is not memory-segment-backed, so we cannot
+          // score them zero-copy. Keep Lucene's default scorer rather than broadening native
+          // scoring to every non-mmap byte value.
+          return this.delegate.getRandomVectorScorerSupplier(similarityFunction, vectorValues);
         }
       }
+      // ByteVectorValues with no usable slice (for example HNSW graph build's
+      // ByteVectorValues.fromBytes(...)) carry no mmap fast path. Score them natively too, copying
+      // each vector into reused native segments, so graph build does not fall back to Lucene's
+      // int8 -> int widening PanamaVectorUtilSupport.dotProductBody (a dominant CPU cost).
+      GlobalMetricFactory.incrementNativeByteVectorScoringEngaged();
+      return new InMemoryByteVectorScorerSupplier(similarityFunction, byteValues);
     }
     return this.delegate.getRandomVectorScorerSupplier(similarityFunction, vectorValues);
   }
@@ -69,12 +111,17 @@ public class Lucene99NativeMemorySegmentVectorScorer implements FlatVectorsScore
     }
     if (vectorValues instanceof ByteVectorValues byteValues
         && byteValues instanceof HasIndexSlice hasSlice
-        && Similarity.I8_ACCELERATION) {
+        // Q7 values subtype ByteVectorValues but use a different stride/formula; they are
+        // handled by NativeScalarQuantizedVectorsScorer, never here.
+        && !(byteValues instanceof QuantizedByteVectorValues)
+        && nativeEnabled()) {
       IndexInput slice = hasSlice.getSlice();
       if (slice != null) {
         IndexInput unwrapped = FilterIndexInput.unwrapOnlyTest(slice);
         if (unwrapped instanceof MemorySegmentAccessInput msInput) {
           checkInvariants(byteValues.size(), byteValues.getVectorByteLength(), unwrapped);
+          GlobalMetricFactory.incrementNativeByteVectorScoringEngaged();
+          GlobalMetricFactory.markNativeByteVectorScoringQueryActive();
           return new NativeByteQueryScorer(similarityFunction, msInput, byteValues, target);
         }
       }
@@ -134,9 +181,20 @@ public class Lucene99NativeMemorySegmentVectorScorer implements FlatVectorsScore
     }
 
     @Override
-    public RandomVectorScorer scorer(int ord) throws IOException {
-      MemorySegment ordSeg = getSegment(this.input, ord, this.vectorByteLength);
-      return new RandomVectorScorer.AbstractRandomVectorScorer(this.values) {
+    public UpdateableRandomVectorScorer scorer() throws IOException {
+      return new AbstractUpdateableRandomVectorScorer(this.values) {
+        @Nullable private MemorySegment ordSeg;
+
+        @Override
+        public void setScoringOrdinal(int node) throws IOException {
+          this.ordSeg =
+              getSegment(
+                  NativeByteVectorScorerSupplier.this.input,
+                  node,
+                  NativeByteVectorScorerSupplier.this.vectorByteLength);
+        }
+
+        @SuppressWarnings("NullAway")
         @Override
         public float score(int node) throws IOException {
           MemorySegment nodeSeg =
@@ -146,7 +204,7 @@ public class Lucene99NativeMemorySegmentVectorScorer implements FlatVectorsScore
                   NativeByteVectorScorerSupplier.this.vectorByteLength);
           return nativeScore(
               NativeByteVectorScorerSupplier.this.similarityFunction,
-              ordSeg,
+              this.ordSeg,
               nodeSeg,
               NativeByteVectorScorerSupplier.this.vectorByteLength);
         }
@@ -163,6 +221,82 @@ public class Lucene99NativeMemorySegmentVectorScorer implements FlatVectorsScore
     public String toString() {
       return "NativeByteVectorScorerSupplier(similarityFunction=" + this.similarityFunction + ")";
     }
+  }
+
+  /**
+   * A {@link RandomVectorScorerSupplier} for in-memory {@link ByteVectorValues} (no {@link
+   * HasIndexSlice}), such as the list-backed values used while building an HNSW graph. Each vector
+   * is copied into a reused native {@link MemorySegment} (Java byte[] cannot cross the FFM
+   * boundary) and scored via {@link #nativeScore}, which dispatches to the accelerated {@link
+   * Similarity} kernels -- avoiding Lucene's int8 -> int widening dot product on the graph build
+   * hot path. The scratch segments are confined to a single scorer, so construction is not
+   * thread-safe but each scorer is single-threaded.
+   */
+  private static final class InMemoryByteVectorScorerSupplier
+      implements RandomVectorScorerSupplier {
+    private final VectorSimilarityFunction similarityFunction;
+    private final ByteVectorValues values;
+    private final int vectorByteLength;
+
+    InMemoryByteVectorScorerSupplier(
+        VectorSimilarityFunction similarityFunction, ByteVectorValues values) {
+      this.similarityFunction = similarityFunction;
+      this.values = values;
+      this.vectorByteLength = values.getVectorByteLength();
+    }
+
+    @Override
+    public UpdateableRandomVectorScorer scorer() throws IOException {
+      return new AbstractUpdateableRandomVectorScorer(this.values) {
+        private final Arena arena = Arena.ofAuto();
+        private final MemorySegment ordSeg =
+            this.arena.allocate(InMemoryByteVectorScorerSupplier.this.vectorByteLength);
+        private final MemorySegment nodeSeg =
+            this.arena.allocate(InMemoryByteVectorScorerSupplier.this.vectorByteLength);
+
+        @Override
+        public void setScoringOrdinal(int node) throws IOException {
+          copyInto(this.ordSeg, InMemoryByteVectorScorerSupplier.this.values.vectorValue(node));
+        }
+
+        @SuppressWarnings("NullAway")
+        @Override
+        public float score(int node) throws IOException {
+          copyInto(this.nodeSeg, InMemoryByteVectorScorerSupplier.this.values.vectorValue(node));
+          return nativeScore(
+              InMemoryByteVectorScorerSupplier.this.similarityFunction,
+              this.ordSeg,
+              this.nodeSeg,
+              InMemoryByteVectorScorerSupplier.this.vectorByteLength);
+        }
+      };
+    }
+
+    @Override
+    public RandomVectorScorerSupplier copy() throws IOException {
+      return new InMemoryByteVectorScorerSupplier(this.similarityFunction, this.values.copy());
+    }
+
+    @Override
+    public String toString() {
+      return "InMemoryByteVectorScorerSupplier(similarityFunction=" + this.similarityFunction + ")";
+    }
+  }
+
+  /**
+   * Copies {@code src} into the pre-allocated native segment {@code dst}, which is sized to {@code
+   * vectorByteLength}. A shorter {@code src} is a silent contract violation: the trailing bytes of
+   * the reused segment would retain stale values and be scored.
+   */
+  private static void copyInto(MemorySegment dst, byte[] src) {
+    if (src.length != dst.byteSize()) {
+      throw new IllegalArgumentException(
+          "vector byte length "
+              + src.length
+              + " does not match native segment size "
+              + dst.byteSize());
+    }
+    MemorySegment.copy(src, 0, dst, ValueLayout.JAVA_BYTE, 0, src.length);
   }
 
   private static final class NativeByteQueryScorer

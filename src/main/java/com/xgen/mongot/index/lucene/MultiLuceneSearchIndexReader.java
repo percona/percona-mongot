@@ -10,12 +10,12 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.BatchProducer;
 import com.xgen.mongot.index.CountMergingBatchProducer;
 import com.xgen.mongot.index.CountMetaBatchProducer;
-import com.xgen.mongot.index.IndexReader;
 import com.xgen.mongot.index.MetaResults;
 import com.xgen.mongot.index.MeteredBatchProducer;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.SearchIndexReader;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
+import com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache;
 import com.xgen.mongot.index.query.CollectorQuery;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.OperatorQuery;
@@ -25,8 +25,9 @@ import com.xgen.mongot.index.query.SearchQuery;
 import com.xgen.mongot.index.query.VectorSearchQuery;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Check;
-import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import java.io.IOException;
@@ -139,14 +140,17 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     // intermediateQuery() to get _all_ instead of top string facet buckets.
     SearchProducerAndMetaProducer result =
         intermediateQuery(query, queryCursorOptions, batchSizeStrategy, queryOptimizationFlags);
-    if (!(result.metaBatchProducer instanceof FacetMergingBatchProducer)) {
-      throw new IllegalStateException(
-          "metaProducer from intermediateOperatorQuery() must be a "
-              + "LuceneFacetCollectorMetaBatchProducer.");
-    }
     MetaResults metaResults =
-        ((FacetMergingBatchProducer) result.metaBatchProducer)
-            .getMetaResultsAndClose(query.count().type());
+        switch (result.metaBatchProducer) {
+          case FacetMergingBatchProducer facetMergingBatchProducer ->
+              facetMergingBatchProducer.getMetaResultsAndClose(query.count().type());
+          case AggregationIntermediateBatchProducer aggregationBatchProducer ->
+              aggregationBatchProducer.getMetaResultsAndClose(query.count().type());
+          default ->
+              throw new IllegalStateException(
+                  "metaProducer from intermediateQuery() must be a FacetMergingBatchProducer or"
+                      + " an AggregationIntermediateBatchProducer.");
+        };
     return new SearchProducerAndMetaResults(result.searchBatchProducer, metaResults);
   }
 
@@ -165,6 +169,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
     List<CountMetaBatchProducer> countBatchProducers =
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
+    List<AggregationIntermediateBatchProducer> aggregationBatchProducers =
+        java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
 
     executeOnAllPartitions(
         query,
@@ -178,7 +184,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
                 searchBatchProducers,
                 extraBatchProducersToClose,
                 facetBatchProducers,
-                countBatchProducers));
+                countBatchProducers,
+                aggregationBatchProducers));
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -190,11 +197,18 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     BatchProducer mergedMetaProducer;
     if (!facetBatchProducers.isEmpty()) {
       mergedMetaProducer = FacetMergingBatchProducer.create(facetBatchProducers);
+    } else if (!aggregationBatchProducers.isEmpty()) {
+      // Sequential fold after the concurrent per-partition fan-out above has joined: the merge
+      // (like AggregationResultBuilder) is not thread-safe, so partitions must not fold directly.
+      mergedMetaProducer =
+          AggregationIntermediateBatchProducer.merge(
+              aggregationBatchProducers, this.readers.get(0).getSearchAggregationMetricsReporter());
     } else if (!countBatchProducers.isEmpty()) {
       mergedMetaProducer = new CountMergingBatchProducer(countBatchProducers);
     } else {
       return Check.unreachable(
-          "Either facetBatchProducers or countBatchProducers must be non-empty");
+          "Either facetBatchProducers, aggregationBatchProducers or countBatchProducers must be"
+              + " non-empty");
     }
     return new SearchProducerAndMetaProducer(searchBatchProducer, mergedMetaProducer);
   }
@@ -244,14 +258,6 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     return this.readers.size();
   }
 
-  @Override
-  public long getRequiredMemoryForVectorData() throws ReaderClosedException {
-    return CheckedStream.from(this.readers)
-        .mapAndCollectChecked(IndexReader::getRequiredMemoryForVectorData)
-        .stream()
-        .reduce(0L, Long::sum);
-  }
-
   /**
    * Returns the maximum cardinality across all cached stringFacet fields across all underlying
    * index partitions.
@@ -263,6 +269,17 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         .mapToInt(LuceneSearchIndexReader::getMaxStringFacetCardinality)
         .max()
         .orElse(0);
+  }
+
+  /**
+   * Summed across partitions: each partition reader holds its own token-facets cache and is
+   * acquired once.
+   */
+  @Override
+  public TokenFacetsStateCache.Snapshot getTokenFacetsStateCacheSnapshot() {
+    return this.readers.stream()
+        .map(LuceneSearchIndexReader::getTokenFacetsStateCacheSnapshot)
+        .reduce(TokenFacetsStateCache.Snapshot.EMPTY, TokenFacetsStateCache.Snapshot::plus);
   }
 
   /**
@@ -417,7 +434,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       List<LuceneSearchBatchProducer> searchBatchProducers,
       List<BatchProducer> extraBatchProducersToClose,
       List<LuceneFacetCollectorMetaBatchProducer> facetBatchProducers,
-      List<CountMetaBatchProducer> countBatchProducers)
+      List<CountMetaBatchProducer> countBatchProducers,
+      List<AggregationIntermediateBatchProducer> aggregationBatchProducers)
       throws IOException, InvalidQueryException, InterruptedException {
     try (var indexPartitionResourceManager = Explain.maybeEnterIndexPartitionQueryContext(i)) {
       var reader = this.readers.get(i);
@@ -433,6 +451,9 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       } else if (result.metaBatchProducer
           instanceof CountMetaBatchProducer countMetaBatchProducer) {
         countBatchProducers.add(countMetaBatchProducer);
+      } else if (result.metaBatchProducer
+          instanceof AggregationIntermediateBatchProducer aggregationBatchProducer) {
+        aggregationBatchProducers.add(aggregationBatchProducer);
       } else {
         throw new IllegalStateException(
             String.format(
@@ -448,6 +469,10 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       case IOException ioException -> throw ioException;
       case InvalidQueryException invalidQueryException -> throw invalidQueryException;
       case InterruptedException interruptedException -> throw interruptedException;
+      // Command handlers distinguish analyzer limits and cancellation from internal failures.
+      case RegexLimitExceededException regexLimitExceededException ->
+          throw regexLimitExceededException;
+      case RegexInterruptedException regexInterruptedException -> throw regexInterruptedException;
       default -> throw new RuntimeException(e);
     }
   }

@@ -7,6 +7,7 @@ import com.xgen.mongot.config.util.HysteresisConfig;
 import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.config.LuceneConfig.VectorMergePolicyConfig;
 import com.xgen.mongot.util.Bytes;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.testing.util.MockRuntimeBuilder;
 import java.nio.file.Path;
@@ -32,7 +33,9 @@ public class LuceneConfigMapperTest {
 
   @Test
   public void toLuceneConfig_appliesCommunityDefaultsWhenUnset() throws Exception {
-    CommunityConfig config = CommunityConfig.readFromFile(DEFAULT_CONFIG).config();
+    CommunityConfig config =
+        CommunityConfig.readFromFile(DEFAULT_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
 
     LuceneConfig lc =
         LuceneConfigMapper.toLuceneConfig(
@@ -42,7 +45,7 @@ public class LuceneConfigMapperTest {
     assertEquals(Optional.empty(), lc.fieldLimit());
     assertEquals(Optional.of(LuceneConfig.MAX_DOCS_LIMIT), lc.docsLimit());
     assertEquals(NUM_CPUS, lc.numMaxMergeThreads());
-    assertEquals(Optional.of(64.0), lc.floorSegmentMB());
+    assertEquals(Optional.of(64.0), lc.vectorFloorSegmentMB());
     assertTrue(lc.enableConcurrentSearch());
     assertEquals(
         Optional.of(new HysteresisConfig(0.9, 0.9)), lc.mergePolicyDiskUtilizationConfig());
@@ -54,10 +57,11 @@ public class LuceneConfigMapperTest {
 
   @Test
   public void toLuceneConfig_honorsConfiguredValues() throws Exception {
-    CommunityConfig config = CommunityConfig.readFromFile(TUNING_CONFIG).config();
+    CommunityConfig config =
+        CommunityConfig.readFromFile(TUNING_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
 
-    LuceneConfig lc =
-        LuceneConfigMapper.toLuceneConfig(config, RUNTIME, Optional.empty());
+    LuceneConfig lc = LuceneConfigMapper.toLuceneConfig(config, RUNTIME, Optional.empty());
 
     assertEquals(Duration.ofMillis(2000), lc.refreshInterval());
     assertEquals(6, lc.numMaxMergeThreads());
@@ -72,7 +76,7 @@ public class LuceneConfigMapperTest {
     assertEquals((int) Math.ceil(0.8 * 4096), vmp.globalHeapBudgetMb());
 
     assertEquals(Optional.of(LuceneConfig.MAX_DOCS_LIMIT), lc.docsLimit());
-    assertEquals(Optional.of(128.0), lc.floorSegmentMB());
+    assertEquals(Optional.of(128.0), lc.vectorFloorSegmentMB());
     assertTrue(lc.enableConcurrentSearch());
     assertEquals(Optional.empty(), lc.mergePolicyDiskUtilizationConfig());
   }

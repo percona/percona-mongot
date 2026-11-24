@@ -1,7 +1,10 @@
 package com.xgen.mongot.server.executors;
 
 import com.google.common.collect.HashBasedTable;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.server.util.NettyUtil;
 import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.Crash;
@@ -9,6 +12,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.netty.channel.EventLoopGroup;
 import java.io.Closeable;
 import java.util.Collection;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,20 +36,41 @@ public class ExecutorManager implements Closeable {
       eventLoopGroups;
 
   public ExecutorManager(MeterRegistry meterRegistry) {
-    this(meterRegistry, RegularBlockingRequestSettings.defaults(), FeatureFlags.getDefault());
+    this(
+        meterRegistry,
+        RegularBlockingRequestSettings.defaults(),
+        FeatureFlags.getDefault(),
+        DynamicFeatureFlagRegistry.empty(),
+        Optional.empty(),
+        FeatureFlags.getDefault().isEnabled(Feature.OVERLOAD_RETRY_SIGNAL));
   }
 
   public ExecutorManager(
       MeterRegistry meterRegistry, RegularBlockingRequestSettings regularBlockingRequestSettings) {
-    this(meterRegistry, regularBlockingRequestSettings, FeatureFlags.getDefault());
+    this(
+        meterRegistry,
+        regularBlockingRequestSettings,
+        FeatureFlags.getDefault(),
+        DynamicFeatureFlagRegistry.empty(),
+        Optional.empty(),
+        FeatureFlags.getDefault().isEnabled(Feature.OVERLOAD_RETRY_SIGNAL));
   }
 
   public ExecutorManager(
       MeterRegistry meterRegistry,
       RegularBlockingRequestSettings regularBlockingRequestSettings,
-      FeatureFlags featureFlags) {
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      Optional<ThreadPoolResourceMetrics.Bindings> threadPoolResourceBindings,
+      boolean shouldRetryViaEnvoy) {
     this.commandExecutor =
-        new BulkheadCommandExecutor(meterRegistry, regularBlockingRequestSettings, featureFlags);
+        new BulkheadCommandExecutor(
+            meterRegistry,
+            regularBlockingRequestSettings,
+            featureFlags,
+            dynamicFeatureFlagRegistry,
+            threadPoolResourceBindings,
+            shouldRetryViaEnvoy);
     this.eventLoopGroups = HashBasedTable.create();
   }
 
@@ -70,10 +95,14 @@ public class ExecutorManager implements Closeable {
 
   void shutdown() throws InterruptedException {
     this.commandExecutor.close();
-    shutdownEventLoopGroupsInParallel(
-        this.eventLoopGroups.column(EventLoopGroupType.WORKER).values());
+    // BOSS groups must go down first: shutting down a boss group closes its listen channels and
+    // stops accepting. If the workers die first, the still-accepting boss accepts connections it
+    // cannot register; those are force-closed after a successful TCP handshake instead of being
+    // refused (CLOUDP-434454 / HELP-98178).
     shutdownEventLoopGroupsInParallel(
         this.eventLoopGroups.column(EventLoopGroupType.BOSS).values());
+    shutdownEventLoopGroupsInParallel(
+        this.eventLoopGroups.column(EventLoopGroupType.WORKER).values());
   }
 
   private static void shutdownEventLoopGroupsInParallel(Collection<EventLoopGroup> eventLoopGroups)

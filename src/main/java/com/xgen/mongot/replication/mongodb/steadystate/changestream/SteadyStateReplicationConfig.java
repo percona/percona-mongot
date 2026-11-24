@@ -1,6 +1,9 @@
 package com.xgen.mongot.replication.mongodb.steadystate.changestream;
 
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
+import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
+import com.xgen.mongot.replication.mongodb.common.SteadyStateSchedulingMethod;
 import com.xgen.mongot.util.Check;
 import java.util.List;
 import java.util.Optional;
@@ -16,7 +19,16 @@ public class SteadyStateReplicationConfig {
   private final List<String> excludedChangestreamFields;
   private final boolean matchCollectionUuidForUpdateLookup;
   private final boolean enableSplitLargeChangeStreamEvents;
+  private final Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig;
+  private final int changeStreamInactivityThresholdSec;
   private final CommonReplicationConfig.Type replicationType;
+  private final SteadyStateSchedulingMethod steadyStateSchedulingMethod;
+  private final int steadyStatePriorityRatio;
+  private final int steadyStatePriorityOptimeThresholdSeconds;
+  private final int changeStreamKeepAliveIntervalSec;
+  private final boolean retryThrottledGetMoreOnSameCursor;
+  private final boolean enableParallelChangeStreamReaders;
+  private final int numParallelChangeStreamReaders;
 
   private SteadyStateReplicationConfig(
       int numConcurrentChangeStreams,
@@ -28,7 +40,16 @@ public class SteadyStateReplicationConfig {
       List<String> excludedChangestreamFields,
       boolean matchCollectionUuidForUpdateLookup,
       boolean enableSplitLargeChangeStreamEvents,
-      CommonReplicationConfig.Type replicationType) {
+      Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig,
+      int changeStreamInactivityThresholdSec,
+      CommonReplicationConfig.Type replicationType,
+      SteadyStateSchedulingMethod steadyStateSchedulingMethod,
+      int steadyStatePriorityRatio,
+      int steadyStatePriorityOptimeThresholdSeconds,
+      int changeStreamKeepAliveIntervalSec,
+      boolean retryThrottledGetMoreOnSameCursor,
+      boolean enableParallelChangeStreamReaders,
+      int numParallelChangeStreamReaders) {
     this.numConcurrentChangeStreams = numConcurrentChangeStreams;
     this.changeStreamQueryMaxTimeMs = changeStreamQueryMaxTimeMs;
     this.changeStreamCursorMaxTimeSec = changeStreamCursorMaxTimeSec;
@@ -38,7 +59,16 @@ public class SteadyStateReplicationConfig {
     this.excludedChangestreamFields = excludedChangestreamFields;
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
     this.enableSplitLargeChangeStreamEvents = enableSplitLargeChangeStreamEvents;
+    this.autoEmbeddingMaterializedViewConfig = autoEmbeddingMaterializedViewConfig;
+    this.changeStreamInactivityThresholdSec = changeStreamInactivityThresholdSec;
     this.replicationType = replicationType;
+    this.steadyStateSchedulingMethod = steadyStateSchedulingMethod;
+    this.steadyStatePriorityRatio = steadyStatePriorityRatio;
+    this.steadyStatePriorityOptimeThresholdSeconds = steadyStatePriorityOptimeThresholdSeconds;
+    this.changeStreamKeepAliveIntervalSec = changeStreamKeepAliveIntervalSec;
+    this.retryThrottledGetMoreOnSameCursor = retryThrottledGetMoreOnSameCursor;
+    this.enableParallelChangeStreamReaders = enableParallelChangeStreamReaders;
+    this.numParallelChangeStreamReaders = numParallelChangeStreamReaders;
   }
 
   public static SteadyStateReplicationConfig.Builder builder() {
@@ -81,11 +111,48 @@ public class SteadyStateReplicationConfig {
     return this.enableSplitLargeChangeStreamEvents;
   }
 
+  public Optional<AutoEmbeddingMaterializedViewConfig> getAutoEmbeddingMaterializedViewConfig() {
+    return this.autoEmbeddingMaterializedViewConfig;
+  }
+
+  public int getChangeStreamInactivityThresholdSec() {
+    return this.changeStreamInactivityThresholdSec;
+  }
+
+  public int getChangeStreamKeepAliveIntervalSec() {
+    return this.changeStreamKeepAliveIntervalSec;
+  }
+
   public CommonReplicationConfig.Type getReplicationType() {
     return this.replicationType;
   }
 
+  public SteadyStateSchedulingMethod getSteadyStateSchedulingMethod() {
+    return this.steadyStateSchedulingMethod;
+  }
+
+  public int getSteadyStatePriorityRatio() {
+    return this.steadyStatePriorityRatio;
+  }
+
+  public int getSteadyStatePriorityOptimeThresholdSeconds() {
+    return this.steadyStatePriorityOptimeThresholdSeconds;
+  }
+
+  public boolean getRetryThrottledGetMoreOnSameCursor() {
+    return this.retryThrottledGetMoreOnSameCursor;
+  }
+
+  public boolean getEnableParallelChangeStreamReaders() {
+    return this.enableParallelChangeStreamReaders;
+  }
+
+  public int getNumParallelChangeStreamReaders() {
+    return this.numParallelChangeStreamReaders;
+  }
+
   public static class Builder {
+    private boolean retryThrottledGetMoreOnSameCursor = false;
     private Optional<Integer> numConcurrentChangeStreams;
     private Optional<Integer> changeStreamQueryMaxTimeMs;
     private Optional<Integer> changeStreamCursorMaxTimeSec;
@@ -95,8 +162,17 @@ public class SteadyStateReplicationConfig {
     private List<String> excludedChangestreamFields;
     private boolean matchCollectionUuidForUpdateLookup;
     private boolean enableSplitLargeChangeStreamEvents;
+    private Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig;
+    private int changeStreamInactivityThresholdSec;
     private CommonReplicationConfig.Type replicationType;
+    private SteadyStateSchedulingMethod steadyStateSchedulingMethod;
+    private int steadyStatePriorityRatio;
+    private int steadyStatePriorityOptimeThresholdSeconds;
+    private int changeStreamKeepAliveIntervalSec;
+    private boolean enableParallelChangeStreamReaders;
+    private int numParallelChangeStreamReaders;
 
+    /** Creates a builder with the default value for every field not explicitly set. */
     public Builder() {
       this.numConcurrentChangeStreams = Optional.empty();
       this.changeStreamQueryMaxTimeMs = Optional.empty();
@@ -107,7 +183,20 @@ public class SteadyStateReplicationConfig {
       this.excludedChangestreamFields = List.of();
       this.matchCollectionUuidForUpdateLookup = false;
       this.enableSplitLargeChangeStreamEvents = false;
+      this.autoEmbeddingMaterializedViewConfig = Optional.empty();
+      this.changeStreamInactivityThresholdSec =
+          MongoDbReplicationConfig.DEFAULT_CHANGE_STREAM_INACTIVITY_THRESHOLD_SEC;
       this.replicationType = CommonReplicationConfig.Type.DEFAULT;
+      this.steadyStateSchedulingMethod =
+          MongoDbReplicationConfig.DEFAULT_STEADY_STATE_SCHEDULING_METHOD;
+      this.steadyStatePriorityRatio = MongoDbReplicationConfig.DEFAULT_STEADY_STATE_PRIORITY_RATIO;
+      this.steadyStatePriorityOptimeThresholdSeconds =
+          MongoDbReplicationConfig.DEFAULT_STEADY_STATE_PRIORITY_OPTIME_THRESHOLD_SECONDS;
+      this.changeStreamKeepAliveIntervalSec =
+          MongoDbReplicationConfig.DEFAULT_CHANGE_STREAM_KEEP_ALIVE_INTERVAL_SEC;
+      this.enableParallelChangeStreamReaders = false;
+      this.numParallelChangeStreamReaders =
+          MongoDbReplicationConfig.DEFAULT_NUM_PARALLEL_CHANGE_STREAM_READERS;
     }
 
     public Builder setNumConcurrentChangeStreams(int value) {
@@ -156,12 +245,65 @@ public class SteadyStateReplicationConfig {
       return this;
     }
 
+    public Builder setAutoEmbeddingMaterializedViewConfig(
+        AutoEmbeddingMaterializedViewConfig autoEmbeddingMaterializedViewConfig) {
+      this.autoEmbeddingMaterializedViewConfig = Optional.of(autoEmbeddingMaterializedViewConfig);
+      return this;
+    }
+
+    public Builder setChangeStreamInactivityThresholdSec(int value) {
+      this.changeStreamInactivityThresholdSec = value;
+      return this;
+    }
+
+    public Builder setChangeStreamKeepAliveIntervalSec(int value) {
+      this.changeStreamKeepAliveIntervalSec = value;
+      return this;
+    }
+
     public Builder setReplicationType(CommonReplicationConfig.Type replicationType) {
       this.replicationType = replicationType;
       return this;
     }
 
+    public Builder setSteadyStateSchedulingMethod(
+        SteadyStateSchedulingMethod steadyStateSchedulingMethod) {
+      this.steadyStateSchedulingMethod = steadyStateSchedulingMethod;
+      return this;
+    }
+
+    public Builder setSteadyStatePriorityRatio(int steadyStatePriorityRatio) {
+      this.steadyStatePriorityRatio = steadyStatePriorityRatio;
+      return this;
+    }
+
+    public Builder setSteadyStatePriorityOptimeThresholdSeconds(
+        int steadyStatePriorityOptimeThresholdSeconds) {
+      this.steadyStatePriorityOptimeThresholdSeconds = steadyStatePriorityOptimeThresholdSeconds;
+      return this;
+    }
+
+    public Builder setRetryThrottledGetMoreOnSameCursor(boolean retryThrottledGetMoreOnSameCursor) {
+      this.retryThrottledGetMoreOnSameCursor = retryThrottledGetMoreOnSameCursor;
+      return this;
+    }
+
+    public Builder setEnableParallelChangeStreamReaders(boolean enableParallelChangeStreamReaders) {
+      this.enableParallelChangeStreamReaders = enableParallelChangeStreamReaders;
+      return this;
+    }
+
+    public Builder setNumParallelChangeStreamReaders(int numParallelChangeStreamReaders) {
+      this.numParallelChangeStreamReaders = numParallelChangeStreamReaders;
+      return this;
+    }
+
     public SteadyStateReplicationConfig build() {
+      Check.argIsPositive(
+          this.changeStreamInactivityThresholdSec, "changeStreamInactivityThresholdSec");
+      Check.argIsPositive(
+          this.changeStreamKeepAliveIntervalSec, "changeStreamKeepAliveIntervalSec");
+      Check.argIsPositive(this.numParallelChangeStreamReaders, "numParallelChangeStreamReaders");
       return new SteadyStateReplicationConfig(
           Check.isPresent(this.numConcurrentChangeStreams, "numConcurrentChangeStreams"),
           Check.isPresent(this.changeStreamQueryMaxTimeMs, "changeStreamQueryMaxTimeMs"),
@@ -172,7 +314,16 @@ public class SteadyStateReplicationConfig {
           this.excludedChangestreamFields,
           this.matchCollectionUuidForUpdateLookup,
           this.enableSplitLargeChangeStreamEvents,
-          this.replicationType);
+          this.autoEmbeddingMaterializedViewConfig,
+          this.changeStreamInactivityThresholdSec,
+          this.replicationType,
+          this.steadyStateSchedulingMethod,
+          this.steadyStatePriorityRatio,
+          this.steadyStatePriorityOptimeThresholdSeconds,
+          this.changeStreamKeepAliveIntervalSec,
+          this.retryThrottledGetMoreOnSameCursor,
+          this.enableParallelChangeStreamReaders,
+          this.numParallelChangeStreamReaders);
     }
   }
 }

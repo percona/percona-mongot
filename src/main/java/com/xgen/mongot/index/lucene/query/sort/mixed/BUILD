@@ -27,6 +27,7 @@ java_library(
     ],
     deps = [
         "//src/main/java/com/xgen/mongot/index/lucene/field",
+        "//src/main/java/com/xgen/mongot/index/lucene/query/sort/comparator",
         "//src/main/java/com/xgen/mongot/index/lucene/util",
         "//src/main/java/com/xgen/mongot/index/query/sort",
         "//src/main/java/com/xgen/mongot/util",

@@ -7,11 +7,16 @@ java_library(
         "DynamicFeatureFlagJournal.java",
         "DynamicFeatureFlagJournalWriter.java",
         "JournalEditor.java",
+        "JournalEntry.java",
+        "JournalEntryIdentity.java",
         "JournalWriter.java",
+        "QuarantinePolicy.java",
     ],
     visibility = ["//visibility:public"],
     exports = [
+        "//src/main/java/com/xgen/mongot/config/util",
         "//src/main/java/com/xgen/mongot/index/definition",
+        "//src/main/java/com/xgen/mongot/index/version",
         "@maven//:org_mongodb_bson",
     ],
     deps = [
@@ -25,5 +30,6 @@ java_library(
         "@maven//:com_google_guava_guava",
         "@maven//:org_jetbrains_annotations",
         "@maven//:org_mongodb_bson",
+        "@maven//:org_slf4j_slf4j_api",
     ],
 )

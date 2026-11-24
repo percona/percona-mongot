@@ -1,5 +1,6 @@
 package com.xgen.mongot.replication.mongodb.initialsync;
 
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexMetricsUpdater.ReplicationMetricsUpdater.InitialSyncMetrics;
@@ -8,6 +9,7 @@ import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.monitor.Gate;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
@@ -34,8 +36,12 @@ public class InitialSyncContext {
   private final Optional<BsonTimestamp> changeStreamBufferEndOperationTime;
   private final Optional<Integer> embeddingGetMoreBatchSize;
   private final boolean useNaturalOrderScan;
+  private final boolean enableParallelNaturalOrderScan;
+  private final int parallelPartitionCount;
   private final boolean removeMatchCollectionUuid;
   private final Gate initialSyncGate;
+  private final Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig;
+  private final FeatureFlags featureFlags;
 
   private InitialSyncContext(
       IndexDefinitionGeneration indexDefinitionGeneration,
@@ -47,7 +53,11 @@ public class InitialSyncContext {
       Optional<Integer> embeddingGetMoreBatchSize,
       boolean removeMatchCollectionUuid,
       boolean useNaturalOrderScan,
-      Gate initialSyncGate) {
+      boolean enableParallelNaturalOrderScan,
+      int parallelPartitionCount,
+      Gate initialSyncGate,
+      Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig,
+      FeatureFlags featureFlags) {
 
     this.indexDefinitionGeneration = indexDefinitionGeneration;
     this.indexingWorkScheduler = indexingWorkScheduler;
@@ -60,8 +70,12 @@ public class InitialSyncContext {
             ? embeddingGetMoreBatchSize
             : Optional.empty();
     this.useNaturalOrderScan = useNaturalOrderScan;
+    this.enableParallelNaturalOrderScan = enableParallelNaturalOrderScan;
+    this.parallelPartitionCount = parallelPartitionCount;
     this.removeMatchCollectionUuid = removeMatchCollectionUuid;
     this.initialSyncGate = initialSyncGate;
+    this.autoEmbeddingMaterializedViewConfig = autoEmbeddingMaterializedViewConfig;
+    this.featureFlags = featureFlags;
   }
 
   static InitialSyncContext create(
@@ -72,7 +86,37 @@ public class InitialSyncContext {
       Optional<Integer> embeddingGetMoreBatchSize,
       boolean removeMatchCollectionUuid,
       boolean useNaturalOrderScan,
+      boolean enableParallelNaturalOrderScan,
+      int parallelPartitionCount,
       Gate initialSyncGate) {
+    return create(
+        indexDefinitionGeneration,
+        indexingWorkScheduler,
+        indexer,
+        indexMetricsUpdater,
+        embeddingGetMoreBatchSize,
+        removeMatchCollectionUuid,
+        useNaturalOrderScan,
+        enableParallelNaturalOrderScan,
+        parallelPartitionCount,
+        initialSyncGate,
+        Optional.empty(),
+        FeatureFlags.getDefault());
+  }
+
+  static InitialSyncContext create(
+      IndexDefinitionGeneration indexDefinitionGeneration,
+      IndexingWorkScheduler indexingWorkScheduler,
+      DocumentIndexer indexer,
+      IndexMetricsUpdater indexMetricsUpdater,
+      Optional<Integer> embeddingGetMoreBatchSize,
+      boolean removeMatchCollectionUuid,
+      boolean useNaturalOrderScan,
+      boolean enableParallelNaturalOrderScan,
+      int parallelPartitionCount,
+      Gate initialSyncGate,
+      Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig,
+      FeatureFlags featureFlags) {
 
     return new InitialSyncContext(
         indexDefinitionGeneration,
@@ -84,7 +128,15 @@ public class InitialSyncContext {
         embeddingGetMoreBatchSize,
         removeMatchCollectionUuid,
         useNaturalOrderScan,
-        initialSyncGate);
+        enableParallelNaturalOrderScan,
+        parallelPartitionCount,
+        initialSyncGate,
+        autoEmbeddingMaterializedViewConfig,
+        featureFlags);
+  }
+
+  public FeatureFlags getFeatureFlags() {
+    return this.featureFlags;
   }
 
   public GenerationId getGenerationId() {
@@ -100,7 +152,7 @@ public class InitialSyncContext {
   }
 
   public IndexFormatVersion getIndexFormatVersion() {
-    return this.indexDefinitionGeneration.generation().indexFormatVersion;
+    return this.indexDefinitionGeneration.generation().capabilitiesFormatVersion();
   }
 
   public InitialSyncMetrics getInitialSyncMetricsUpdater() {
@@ -109,6 +161,10 @@ public class InitialSyncContext {
 
   public IndexMetricsUpdater getIndexMetricsUpdater() {
     return this.indexMetricsUpdater;
+  }
+
+  public Optional<AutoEmbeddingMaterializedViewConfig> getAutoEmbeddingMaterializedViewConfig() {
+    return this.autoEmbeddingMaterializedViewConfig;
   }
 
   /**
@@ -154,6 +210,19 @@ public class InitialSyncContext {
   }
 
   /**
+   * Returns true if the natural-order collection scan may be split into disjoint {@code $recordId}
+   * partitions scanned in parallel. Only meaningful alongside {@link #useNaturalOrderScan()}.
+   */
+  public boolean isParallelNaturalOrderScanEnabled() {
+    return this.enableParallelNaturalOrderScan;
+  }
+
+  /** Returns the number of partitions to use when parallel natural-order scan is enabled. */
+  public int getParallelPartitionCount() {
+    return this.parallelPartitionCount;
+  }
+
+  /**
    * Schedules a batch of document events to be indexed. Shortcut for {@link
    * IndexingWorkScheduler#schedule}.
    *
@@ -167,6 +236,13 @@ public class InitialSyncContext {
       List<DocumentEvent> batch,
       SchedulerQueue.Priority priority,
       IndexCommitUserData commitUserData) {
+    return schedule(batch, priority, Optional.of(commitUserData));
+  }
+
+  private CompletableFuture<Void> schedule(
+      List<DocumentEvent> batch,
+      SchedulerQueue.Priority priority,
+      Optional<IndexCommitUserData> commitUserData) {
 
     if (this.initialSyncGate.isClosed()) {
       return CompletableFuture.failedFuture(
@@ -179,8 +255,18 @@ public class InitialSyncContext {
         this.indexer,
         getGenerationId(),
         Optional.empty(),
-        Optional.of(commitUserData),
+        commitUserData,
         this.indexMetricsUpdater.getIndexingMetricsUpdater());
+  }
+
+  /**
+   * Schedules a batch to be indexed without staging commit data with it, for the parallel
+   * collection scan: one supplier assembles every partition's position, whereas a per-batch blob
+   * would let whichever partition committed last overwrite the others.
+   */
+  public CompletableFuture<Void> scheduleWithoutCommitUserData(
+      List<DocumentEvent> batch, SchedulerQueue.Priority priority) {
+    return schedule(batch, priority, Optional.empty());
   }
 
   /**
@@ -230,6 +316,10 @@ public class InitialSyncContext {
         this.embeddingGetMoreBatchSize,
         this.removeMatchCollectionUuid,
         this.useNaturalOrderScan,
-        this.initialSyncGate);
+        this.enableParallelNaturalOrderScan,
+        this.parallelPartitionCount,
+        this.initialSyncGate,
+        this.autoEmbeddingMaterializedViewConfig,
+        this.featureFlags);
   }
 }

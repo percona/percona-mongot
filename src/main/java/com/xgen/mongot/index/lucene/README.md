@@ -58,7 +58,7 @@ Conceptually, highlighting requires two separate inputs:
 
 2. A `TokenStream` derived from that text. There are two ways to derive this `TokenStream`:
 
-    a. Re-analyze the text in memory using the [analyzer](#lucene-analyzer) that is [passed into](https://github.com/mongodb/mongot/blob/c1745aeb5220a0d66c0b3ee4ca332bc71c95c20c/src/main/java/com/xgen/mongot/index/lucene/LuceneUnifiedHighlighter.java#L24)
+    a. Re-analyze the text in memory using the [analyzer](#lucene-analyzer) that is [passed into](https://github.com/10gen/mongot-public-preview/blob/c1745aeb5220a0d66c0b3ee4ca332bc71c95c20c/src/main/java/com/xgen/mongot/index/lucene/LuceneUnifiedHighlighter.java#L24)
      `UnifiedHighlighter`. This is done for multi-term queries, like fuzzy, wildcard, etc.
     
     b. Faster option: Use the term vectors for the field if term vectors were created during indexing time. If the term vectors are being used,

@@ -1,0 +1,246 @@
+package com.xgen.mongot.replication.mongodb.steadystate.changestream;
+
+import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamBatch;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamPartition;
+import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
+import com.xgen.mongot.util.concurrent.Executors;
+import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.commons.codec.DecoderException;
+import org.bson.BsonTimestamp;
+import org.bson.types.ObjectId;
+import org.jetbrains.annotations.TestOnly;
+import org.jetbrains.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Base class for priority strategies that classify indexes by comparing lag across the whole active
+ * population. Maintains a per-index lag registry and periodically recomputes the preferred set from
+ * it; subclasses only implement {@link #computePreferredSet}.
+ */
+abstract class RecomputingLagPriorityStrategy implements ChangeStreamPriorityStrategy {
+
+  private static final Logger LOG = LoggerFactory.getLogger(RecomputingLagPriorityStrategy.class);
+
+  /**
+   * Latest lag per partition for each index. A partition that has not reported yet has no entry, so
+   * an index with no reports has zero lag. Unpartitioned batches report as partition 0.
+   */
+  private final ConcurrentHashMap<ObjectId, ConcurrentHashMap<Integer, Integer>>
+      lagSecondsByIndexAndPartition = new ConcurrentHashMap<>();
+
+  /** How many live index generations share each key of {@link #lagSecondsByIndexAndPartition}. */
+  private final ConcurrentHashMap<ObjectId, Integer> activeGenerationsByIndex =
+      new ConcurrentHashMap<>();
+
+  private final AtomicReference<Set<ObjectId>> currentPreferredIndexIds =
+      new AtomicReference<>(Set.of());
+  private final NamedScheduledExecutorService scheduler;
+  private final int healthyLagFloorSeconds;
+  private final MetricsFactory metrics;
+  private final AtomicLong preferredSetSize;
+  private final Counter promotedCount;
+  private final Counter demotedCount;
+  private final AtomicLong lastSuccessfulRecomputeEpochSeconds;
+
+  /**
+   * Constructs the strategy and starts its background recompute loop.
+   *
+   * @param executorName names the single-threaded executor that runs the recompute loop.
+   * @param healthyLagFloorSeconds minimum lag (seconds) for an index to be eligible for the
+   *     preferred set. Must also be applied per candidate in {@link #computePreferredSet} — not
+   *     just here — or healthy indexes get padded in just to fill a quota.
+   */
+  RecomputingLagPriorityStrategy(
+      String executorName,
+      int recomputeIntervalSeconds,
+      int healthyLagFloorSeconds,
+      MeterRegistry meterRegistry) {
+    if (recomputeIntervalSeconds <= 0) {
+      throw new IllegalArgumentException(
+          "recomputeIntervalSeconds must be positive, got: " + recomputeIntervalSeconds);
+    }
+    if (healthyLagFloorSeconds < 0) {
+      throw new IllegalArgumentException(
+          "healthyLagFloorSeconds must be non-negative, got: " + healthyLagFloorSeconds);
+    }
+    this.healthyLagFloorSeconds = healthyLagFloorSeconds;
+    this.metrics =
+        new MetricsFactory(
+            "replication.steadyState.priorityStrategy",
+            meterRegistry,
+            Tags.of("strategy", executorName));
+    this.preferredSetSize = this.metrics.numGauge("preferredSetSize");
+    this.promotedCount = this.metrics.counter("promotedCount");
+    this.demotedCount = this.metrics.counter("demotedCount");
+    this.lastSuccessfulRecomputeEpochSeconds =
+        this.metrics.numGauge("lastSuccessfulRecomputeEpochSeconds");
+    this.lastSuccessfulRecomputeEpochSeconds.set(System.currentTimeMillis() / 1000);
+    this.scheduler = Executors.singleThreadScheduledExecutor(executorName, meterRegistry);
+    this.scheduler.scheduleAtFixedRate(
+        this::recomputeSafely,
+        recomputeIntervalSeconds,
+        recomputeIntervalSeconds,
+        TimeUnit.SECONDS);
+  }
+
+  /**
+   * Decides the current preferred set from a snapshot of every active index's latest known lag.
+   * {@code lagSecondsSnapshot.size()} is the total population, used as the denominator for
+   * K/threshold targets — but each selected candidate must individually clear {@code
+   * healthyLagFloorSeconds}, or healthy indexes get padded in to fill the target count/value.
+   *
+   * @param previousPreferredSet the previous cycle's result, for subclasses implementing hysteresis
+   */
+  abstract Set<ObjectId> computePreferredSet(
+      Map<ObjectId, Integer> lagSecondsSnapshot,
+      Set<ObjectId> previousPreferredSet,
+      int healthyLagFloorSeconds);
+
+  @Override
+  public final void addIndex(ObjectId indexId) {
+    this.activeGenerationsByIndex.merge(indexId, 1, Integer::sum);
+    this.lagSecondsByIndexAndPartition.putIfAbsent(indexId, new ConcurrentHashMap<>());
+  }
+
+  @Override
+  public final boolean isHighPriority(ObjectId indexId, ChangeStreamBatch batch) {
+    // Replace rather than put, because a batch can finish after its index was removed: the
+    // dispatcher checks for shutdown before fetching a batch, not before reporting one, so a
+    // getMore that was in flight when the index stopped still lands here.
+    int partitionId = batch.getPartition().map(ChangeStreamPartition::partitionId).orElse(0);
+    int lagSeconds = computeLagSeconds(batch);
+    this.lagSecondsByIndexAndPartition.computeIfPresent(
+        indexId,
+        (id, lagByPartition) -> {
+          lagByPartition.put(partitionId, lagSeconds);
+          return lagByPartition;
+        });
+    return this.currentPreferredIndexIds.get().contains(indexId);
+  }
+
+  @Override
+  public final void removeIndex(ObjectId indexId) {
+    // Drop the lag entry only once the last generation sharing it is gone.
+    Integer remainingGenerations =
+        this.activeGenerationsByIndex.computeIfPresent(
+            indexId, (id, count) -> count == 1 ? null : count - 1);
+    if (remainingGenerations == null) {
+      this.lagSecondsByIndexAndPartition.remove(indexId);
+    }
+  }
+
+  private void recomputeSafely() {
+    try {
+      recompute();
+    } catch (RuntimeException e) {
+      LOG.warn("Failed to recompute preferred set for {}", getClass().getSimpleName(), e);
+    }
+  }
+
+  /**
+   * Synchronously runs one recompute cycle, bypassing the scheduled-interval wait. Tests use this
+   * instead of sleeping past {@code recomputeIntervalSeconds} to observe classification changes
+   * deterministically.
+   */
+  @TestOnly
+  @VisibleForTesting
+  void recomputeNowForTesting() {
+    recompute();
+  }
+
+  private void recompute() {
+    Map<ObjectId, Integer> snapshot = snapshotWorstPartitionLag();
+    if (snapshot.isEmpty()) {
+      setPreferredIndexIds(Set.of());
+      markRecomputeSucceeded();
+      return;
+    }
+    int worstLagSeconds = Collections.max(snapshot.values());
+    if (worstLagSeconds < this.healthyLagFloorSeconds) {
+      setPreferredIndexIds(Set.of());
+      markRecomputeSucceeded();
+      return;
+    }
+    Set<ObjectId> previous = this.currentPreferredIndexIds.get();
+    setPreferredIndexIds(
+        Set.copyOf(computePreferredSet(snapshot, previous, this.healthyLagFloorSeconds)));
+    markRecomputeSucceeded();
+  }
+
+  /**
+   * Each index's lag is its slowest partition's, since that partition holds back what the index can
+   * serve. Partitions that have not reported yet are left out rather than counted as worst-case, so
+   * a newly started index does not outrank indexes that are actually behind.
+   */
+  private Map<ObjectId, Integer> snapshotWorstPartitionLag() {
+    Map<ObjectId, Integer> snapshot = new HashMap<>();
+    this.lagSecondsByIndexAndPartition.forEach(
+        (indexId, lagByPartition) -> {
+          int worst = lagByPartition.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+          snapshot.put(indexId, worst);
+        });
+    return Map.copyOf(snapshot);
+  }
+
+  /**
+   * Marks a recompute cycle as having genuinely completed, as opposed to {@link #recomputeSafely}
+   * catching an exception thrown from this method.
+   */
+  private void markRecomputeSucceeded() {
+    this.lastSuccessfulRecomputeEpochSeconds.set(System.currentTimeMillis() / 1000);
+  }
+
+  private void setPreferredIndexIds(Set<ObjectId> updated) {
+    Set<ObjectId> previous = this.currentPreferredIndexIds.getAndSet(updated);
+    Set<ObjectId> promoted = new HashSet<>(updated);
+    promoted.removeAll(previous);
+    Set<ObjectId> demoted = new HashSet<>(previous);
+    demoted.removeAll(updated);
+    this.promotedCount.increment(promoted.size());
+    this.demotedCount.increment(demoted.size());
+    this.preferredSetSize.set(updated.size());
+  }
+
+  /**
+   * A resume token this cannot read yields {@link Integer#MAX_VALUE} so the index ranks worst,
+   * rather than the per-batch "default to high priority" {@link OptimeLagPriorityStrategy} uses —
+   * there's no single-call equivalent in a cross-index registry.
+   */
+  private static int computeLagSeconds(ChangeStreamBatch batch) {
+    BsonTimestamp resumeTokenTime;
+    try {
+      resumeTokenTime = ResumeTokenUtils.opTimeFromResumeToken(batch.getPostBatchResumeToken());
+    } catch (DecoderException | RuntimeException e) {
+      LOG.warn("Failed to read resume token for lag computation; treating as worst-case lag", e);
+      return Integer.MAX_VALUE;
+    }
+    // commandOperationTime is Optional: absent (no gossiped $clusterTime yet) means no lag
+    // information, so treat as worst-case lag, matching the resume-token failure path above.
+    return batch
+        .getCommandOperationTime()
+        .map(
+            commandOperationTime ->
+                Math.max(0, commandOperationTime.getTime() - resumeTokenTime.getTime()))
+        .orElse(Integer.MAX_VALUE);
+  }
+
+  @Override
+  public void shutdown() {
+    this.scheduler.shutdown();
+    this.metrics.close();
+  }
+}

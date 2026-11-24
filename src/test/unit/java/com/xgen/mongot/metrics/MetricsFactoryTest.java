@@ -2,6 +2,7 @@ package com.xgen.mongot.metrics;
 
 import com.google.common.base.CaseFormat;
 import com.xgen.mongot.util.Enums;
+import com.xgen.testing.mongot.metrics.FilteredCompositeRegistry;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
@@ -11,6 +12,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import io.micrometer.core.instrument.search.MeterNotFoundException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
@@ -173,8 +175,7 @@ public class MetricsFactoryTest {
     MeterRegistry meterRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
     MetricsFactory metricsFactory = new MetricsFactory("testMetricsFactory", meterRegistry);
 
-    DistributionSummary metricsFactoryHistogram =
-        metricsFactory.histogram("histogram", 1, 50, 100);
+    DistributionSummary metricsFactoryHistogram = metricsFactory.histogram("histogram", 1, 50, 100);
 
     for (int i = 0; i < 100; i++) {
       metricsFactoryHistogram.record(i);
@@ -201,8 +202,7 @@ public class MetricsFactoryTest {
     Assert.assertThrows(
         IllegalArgumentException.class, () -> metricsFactory.histogram("histogram"));
     Assert.assertThrows(
-        IllegalArgumentException.class,
-        () -> metricsFactory.histogram("histogram", Tags.empty()));
+        IllegalArgumentException.class, () -> metricsFactory.histogram("histogram", Tags.empty()));
   }
 
   @Test
@@ -325,6 +325,26 @@ public class MetricsFactoryTest {
   }
 
   @Test
+  public void testSiblingMetricsFactory() {
+    MeterRegistry meterRegistry = new SimpleMeterRegistry();
+    Tags parentTags = Tags.of(Tag.of("ClassID", "2"));
+    MetricsFactory metricsFactory =
+        new MetricsFactory("testMetricsFactory", meterRegistry, parentTags);
+
+    Tags siblingTags = Tags.of(Tag.of("phase", "index"));
+    MetricsFactory siblingMetricsFactory =
+        metricsFactory.siblingMetricsFactory("sibling", siblingTags);
+    Counter counter = siblingMetricsFactory.counter("counter");
+
+    // Independent namespace: not prefixed with the parent's namespace.
+    Assert.assertEquals("sibling.counter", counter.getId().getName());
+    // Sibling tags are applied; the parent's factory tags are not inherited.
+    Assert.assertEquals(siblingTags, counter.getId().getTagsAsIterable());
+    // The parent's registry is shared, so the same meter is returned.
+    Assert.assertSame(counter, meterRegistry.counter("sibling.counter", siblingTags));
+  }
+
+  @Test
   public void testGet() {
     MeterRegistry meterRegistry = new SimpleMeterRegistry();
     Tags tags = Tags.of(Tag.of("ClassID", "2"));
@@ -380,7 +400,7 @@ public class MetricsFactoryTest {
     metricsFactory.numGauge("numGauge");
     metricsFactory.objectValueGauge("objectValueGauge", new ArrayList<>(), ArrayList::size);
     metricsFactory.collectionSizeGauge("collectionGauge", new ArrayList<>());
-    metricsFactory.timer("timer");
+    metricsFactory.timerSec("timer");
     metricsFactory.summary("histogram", new double[0]);
 
     Assert.assertEquals(6, metricsFactory.getAllRegisteredMeters().size());
@@ -409,5 +429,178 @@ public class MetricsFactoryTest {
     Assert.assertThrows(
         MeterNotFoundException.class, () -> metricsFactory1.get("counter").counter());
     Assert.assertEquals(1, meterRegistry.getMeters().size());
+  }
+
+  @Test
+  public void testIdentitySafeCloseKeepsSuccessorGauge() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    Tags shared = Tags.of("generationId logString", "matview-abc-u0");
+    MetricsFactory a0 = new MetricsFactory("ns", registry, shared, /* identitySafeClose= */ true);
+    MetricsFactory a1 = new MetricsFactory("ns", registry, shared, /* identitySafeClose= */ true);
+
+    a0.objectValueGauge("leaderStatus", new AtomicLong(), Number::doubleValue);
+    a0.objectValueGauge("a0Only", new AtomicLong(), Number::doubleValue);
+    // a1 registering the same id evicts a0's gauge from the registry and installs its own.
+    AtomicLong a1State = a1.objectValueGauge("leaderStatus", new AtomicLong(), Number::doubleValue);
+    a1State.set(1);
+
+    a0.close();
+
+    // Successor's shared-id gauge survives; a0's uniquely-owned gauge is removed; tracking cleared.
+    List<Meter> meters = registry.getMeters();
+    Assert.assertEquals(1, meters.size());
+    Assert.assertEquals(1.0, ((Gauge) meters.get(0)).value(), 0.0);
+    Assert.assertNull(registry.find("ns.a0Only").gauge());
+    Assert.assertTrue(a0.getAllRegisteredMeters().isEmpty());
+
+    // No successor now, so close() still removes a1's own gauge.
+    a1.close();
+    Assert.assertTrue(registry.getMeters().isEmpty());
+  }
+
+  // ensureObjectValueGaugeRegistered is a no-op when the gauge is present, and re-registers the
+  // SAME state object when it has been evicted.
+  @Test
+  public void testEnsureObjectValueGaugeRegistered() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory factory = new MetricsFactory("ns", registry);
+
+    AtomicLong state =
+        factory.objectValueGauge("leaderStatus", new AtomicLong(), Number::doubleValue);
+    state.set(1);
+
+    // Present -> no-op.
+    Assert.assertFalse(
+        factory.ensureObjectValueGaugeRegistered(
+            "leaderStatus", state, Number::doubleValue, Tags.empty()));
+    Assert.assertEquals(1, registry.getMeters().size());
+
+    // Evict, then ensure re-registers against the existing state object.
+    registry.remove(registry.getMeters().get(0));
+    Assert.assertTrue(registry.getMeters().isEmpty());
+    Assert.assertTrue(
+        factory.ensureObjectValueGaugeRegistered(
+            "leaderStatus", state, Number::doubleValue, Tags.empty()));
+
+    List<Meter> meters = registry.getMeters();
+    Assert.assertEquals(1, meters.size());
+    Assert.assertEquals(1.0, ((Gauge) meters.get(0)).value(), 0.0);
+  }
+
+  @Test
+  public void removeMeters_matchingNameAndTags_removesOnlyThatSeries() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory factory = new MetricsFactory("ns", registry);
+    factory.counter("indexStatusCode", Tags.of("indexId", "a")).increment();
+    factory.counter("indexStatusCode", Tags.of("indexId", "b")).increment();
+    factory.counter("otherMetric", Tags.of("indexId", "a")).increment();
+
+    factory.removeMeters("indexStatusCode", Tags.of("indexId", "a"));
+
+    List<String> remaining =
+        registry.getMeters().stream()
+            .map(meter -> meter.getId().getName() + meter.getId().getTags())
+            .sorted()
+            .toList();
+    Assert.assertEquals(
+        List.of("ns.indexStatusCode[tag(indexId=b)]", "ns.otherMetric[tag(indexId=a)]"), remaining);
+  }
+
+  @Test
+  public void removeMeters_noMatchingSeries_leavesRegistryUnchanged() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory factory = new MetricsFactory("ns", registry);
+    factory.counter("indexStatusCode", Tags.of("indexId", "a")).increment();
+
+    factory.removeMeters("indexStatusCode", Tags.of("indexId", "absent"));
+
+    Assert.assertEquals(1, registry.getMeters().size());
+  }
+
+  @Test
+  public void removeMeters_factoryHasItsOwnTags_matchesAgainstTheCombinedTags() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory factory = new MetricsFactory("ns", registry, Tags.of("scope", "replication"));
+    factory.counter("indexStatusCode", Tags.of("indexId", "a")).increment();
+
+    // The caller passes only the meter tags; the factory's own tags are added for it.
+    factory.removeMeters("indexStatusCode", Tags.of("indexId", "a"));
+
+    Assert.assertTrue(registry.getMeters().isEmpty());
+  }
+
+  @Test
+  public void removeMeters_afterRemoval_factoryStaysUsable() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory factory = new MetricsFactory("ns", registry);
+    factory.counter("indexStatusCode", Tags.of("indexId", "a")).increment();
+
+    factory.removeMeters("indexStatusCode", Tags.of("indexId", "a"));
+    factory.counter("indexStatusCode", Tags.of("indexId", "a")).increment();
+
+    Assert.assertEquals(1, registry.getMeters().size());
+  }
+
+  /** Registry-level common tags must not stop a series from being removed. */
+  @Test
+  public void removeMeters_registryCommonTags_stillRemovesTheSeries() {
+    MeterRegistry registry = new SimpleMeterRegistry();
+    registry.config().commonTags("env", "prod");
+    MetricsFactory factory = new MetricsFactory("ns", registry);
+    factory.counter("indexStatusCode", Tags.of("indexId", "a")).increment();
+
+    factory.removeMeters("indexStatusCode", Tags.of("indexId", "a"));
+
+    Assert.assertTrue(registry.getMeters().isEmpty());
+  }
+
+  @Test
+  public void counter_compositeWithDeniedChildren_readsRecordedValue() {
+    var registries = FilteredCompositeRegistry.create();
+    var metricsFactory =
+        new MetricsFactory(
+            "test", registries.meterRegistry(), Tags.empty(), false, registries.ftdcRegistry());
+    Counter counter = metricsFactory.counter("counter");
+
+    counter.increment(5);
+
+    Assert.assertEquals(5, counter.count(), 0.0);
+  }
+
+  @Test
+  public void timer_compositeWithDeniedChildren_readsRecordedValue() {
+    var registries = FilteredCompositeRegistry.create();
+    var metricsFactory =
+        new MetricsFactory(
+            "test", registries.meterRegistry(), Tags.empty(), false, registries.ftdcRegistry());
+    Timer timer = metricsFactory.timer("timer", TimeUnit.MILLISECONDS);
+
+    timer.record(3, TimeUnit.MILLISECONDS);
+
+    Assert.assertEquals(1, timer.count());
+    Assert.assertEquals(3, timer.totalTime(TimeUnit.MILLISECONDS), 0.0);
+  }
+
+  @Test
+  public void counter_compositeWithDeniedChildren_recordsOnceToReadRegistry() {
+    var registries = FilteredCompositeRegistry.create();
+    var metricsFactory =
+        new MetricsFactory(
+            "test", registries.meterRegistry(), Tags.empty(), false, registries.ftdcRegistry());
+
+    metricsFactory.counter("counter").increment(5);
+
+    Assert.assertEquals(5, registries.ftdcRegistry().get("test.counter").counter().count(), 0.0);
+  }
+
+  @Test
+  public void counter_readRegistryNotAChild_returnsRegisteredCounter() {
+    var composite = new CompositeMeterRegistry();
+    var metricsFactory =
+        new MetricsFactory("test", composite, Tags.empty(), false, new SimpleMeterRegistry());
+
+    Counter counter = metricsFactory.counter("counter");
+
+    Assert.assertSame(composite.get("test.counter").counter(), counter);
   }
 }

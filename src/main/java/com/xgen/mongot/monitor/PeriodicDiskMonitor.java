@@ -32,11 +32,14 @@ public class PeriodicDiskMonitor implements DiskMonitor {
   // being opened means disk write activity is being allowed.
   @GuardedBy("this")
   private final Set<Gate> gates;
+
   // anyGateWasOpened is set to true if any gate was ever open. It remains true even if all gates
   // are currently closed.
   @GuardedBy("this")
   private boolean anyGateWasOpened;
+
   private final double crashThreshold;
+
   @GuardedBy("this")
   private double diskUtilization;
 
@@ -85,6 +88,7 @@ public class PeriodicDiskMonitor implements DiskMonitor {
         computeDiskUtilization(fileStore));
   }
 
+  @Override
   @VisibleForTesting
   public void start(Duration diskMonitorDuration) {
     LOG.atInfo()
@@ -97,6 +101,7 @@ public class PeriodicDiskMonitor implements DiskMonitor {
         TimeUnit.MILLISECONDS);
   }
 
+  @Override
   public void stop() {
     LOG.info("Stopping periodic disk monitoring.");
     Executors.shutdownOrFail(this.executorService);
@@ -126,6 +131,7 @@ public class PeriodicDiskMonitor implements DiskMonitor {
             "disk utilization has reached critical threshold, crashing to abort"
                 + "pending merges and writes")
         .withCrashCategory(Crash.CrashCategory.DISK_FULL)
+        .withThreadDump()
         .now();
   }
 

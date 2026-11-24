@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -14,7 +15,9 @@ import static org.mockito.Mockito.when;
 import com.google.common.util.concurrent.RateLimiter;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoNamespace;
+import com.mongodb.WriteConcern;
 import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
@@ -91,8 +94,11 @@ public class MaterializedViewWriterTest {
     this.mockCollection = mock(MongoCollection.class);
 
     this.mockLeaseManager = mock(LeaseManager.class);
-    when(this.mockLeaseManager.getLeaseVersion(GENERATION_ID)).thenReturn(1L);
+    when(this.mockLeaseManager.getOwnedTenure(GENERATION_ID))
+        .thenReturn(new LeaseManager.OwnedTenure(1L, 1L));
     when(this.mockDatabase.getCollection(MV_NAMESPACE.getCollectionName(), RawBsonDocument.class))
+        .thenReturn(this.mockCollection);
+    when(this.mockCollection.withWriteConcern(any(WriteConcern.class)))
         .thenReturn(this.mockCollection);
     when(this.mockMongoClient.getDatabase(MV_DATABASE_NAME)).thenReturn(this.mockDatabase);
   }
@@ -137,6 +143,53 @@ public class MaterializedViewWriterTest {
     verify(this.mockCollection)
         .bulkWrite(
             argThat(list -> list.size() == 3), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+    verify(this.mockLeaseManager).updateCommitInfo(GENERATION_ID, EncodedUserData.EMPTY, true);
+  }
+
+  @Test
+  public void testCommitUsesMajorityWriteConcernForMaterializedViewWrites()
+      throws IOException, FieldExceededLimitsException {
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+    ObjectId indexId = new ObjectId();
+    RawBsonDocument document =
+        BsonUtils.documentToRaw(
+            new BsonDocument(indexId.toString(), new BsonDocument("_id", new BsonInt32(1))));
+    matViewWriter.updateIndex(
+        DocumentEvent.createInsert(
+            DocumentMetadata.fromMetadataNamespace(Optional.of(document), indexId), document));
+
+    matViewWriter.commit(EncodedUserData.EMPTY);
+
+    verify(this.mockCollection).withWriteConcern(WriteConcern.MAJORITY);
+  }
+
+  @Test
+  public void testEmptyCommitRecordsNoMaterializedViewWrite() throws IOException {
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    matViewWriter.commit(EncodedUserData.EMPTY);
+
+    verify(this.mockCollection, never())
+        .bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+    verify(this.mockLeaseManager).updateCommitInfo(GENERATION_ID, EncodedUserData.EMPTY, false);
   }
 
   @Test
@@ -371,6 +424,87 @@ public class MaterializedViewWriterTest {
   }
 
   @Test
+  public void testFilterOnlyUpdateNoOpIsCountedAsUnmatchedFilterUpdate()
+      throws IOException, FieldExceededLimitsException {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("noOpTest", registry);
+
+    // A filter-only $set (UpdateOneModel, upsert=false) that matches no MV document — e.g. the doc
+    // has not been ingested by initial sync yet. matchedCount=0 and no upserts, so the single
+    // expected write effect did not land: a silent dropped write.
+    BulkWriteResult noOpResult = mock(BulkWriteResult.class);
+    when(noOpResult.wasAcknowledged()).thenReturn(true);
+    when(noOpResult.getMatchedCount()).thenReturn(0);
+    when(noOpResult.getUpserts()).thenReturn(List.of());
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenReturn(noOpResult);
+
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            metricsFactory,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    matViewWriter.updateIndex(filterOnlyUpdateEvent());
+    matViewWriter.commit(EncodedUserData.EMPTY);
+
+    Assert.assertEquals(1.0, metricsFactory.get("mvUnmatchedFilterUpdates").counter().count(), 0.0);
+  }
+
+  @Test
+  public void testFilterOnlyUpdateThatMatchesIsNotCounted()
+      throws IOException, FieldExceededLimitsException {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("matchedTest", registry);
+
+    // The same filter-only $set, but it matches its target document (matchedCount=1): the write
+    // landed, so nothing is counted as dropped.
+    BulkWriteResult matchedResult = mock(BulkWriteResult.class);
+    when(matchedResult.wasAcknowledged()).thenReturn(true);
+    when(matchedResult.getMatchedCount()).thenReturn(1);
+    when(matchedResult.getUpserts()).thenReturn(List.of());
+    when(this.mockCollection.bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS)))
+        .thenReturn(matchedResult);
+
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            metricsFactory,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    matViewWriter.updateIndex(filterOnlyUpdateEvent());
+    matViewWriter.commit(EncodedUserData.EMPTY);
+
+    Assert.assertEquals(0.0, metricsFactory.get("mvUnmatchedFilterUpdates").counter().count(), 0.0);
+  }
+
+  /**
+   * A filter-only (partial-embed) update event, written as an {@code UpdateOneModel} upsert=false.
+   */
+  private static DocumentEvent filterOnlyUpdateEvent() {
+    ObjectId indexId = new ObjectId();
+    RawBsonDocument document =
+        BsonUtils.documentToRaw(
+            new BsonDocument(indexId.toString(), new BsonDocument("_id", new BsonInt32(1)))
+                .append("filterField", new BsonString("value")));
+    return DocumentEvent.createPartialUpdate(
+        DocumentMetadata.fromMetadataNamespace(Optional.of(document), indexId),
+        document,
+        new BsonDocument("filterField", new BsonString("newValue")),
+        com.google.common.collect.ImmutableMap.of());
+  }
+
+  @Test
   public void testRegularUpdateUsesReplaceOneModel()
       throws IOException, FieldExceededLimitsException {
     var matViewWriter =
@@ -407,6 +541,53 @@ public class MaterializedViewWriterTest {
                   }
                   // Check that it's a ReplaceOneModel, not UpdateOneModel
                   return list.get(0) instanceof com.mongodb.client.model.ReplaceOneModel;
+                }),
+            same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+  }
+
+  @Test
+  public void testRegularUpdateReplacementOmitsObsoleteVectorAndHashFields()
+      throws IOException, FieldExceededLimitsException {
+    var matViewWriter =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    ObjectId indexId = new ObjectId();
+    RawBsonDocument document =
+        BsonUtils.documentToRaw(
+            new BsonDocument(indexId.toString(), new BsonDocument("_id", new BsonInt32(1)))
+                .append("category", new BsonString("books")));
+    DocumentEvent regularUpdateEvent =
+        DocumentEvent.createUpdate(
+            DocumentMetadata.fromMetadataNamespace(Optional.of(document), indexId), document);
+
+    matViewWriter.updateIndex(regularUpdateEvent);
+    matViewWriter.commit(EncodedUserData.EMPTY);
+
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(
+                list -> {
+                  if (list.size() != 1 || !(list.get(0) instanceof ReplaceOneModel<?> model)) {
+                    return false;
+                  }
+                  BsonDocument replacement =
+                      ((RawBsonDocument) model.getReplacement()).toBsonDocument();
+                  if (!replacement.containsKey("_autoEmbed")) {
+                    return false;
+                  }
+                  BsonDocument autoEmbed = replacement.getDocument("_autoEmbed");
+                  return autoEmbed.size() == 1
+                      && !autoEmbed.containsKey("items")
+                      && !autoEmbed.containsKey("_hash")
+                      && autoEmbed.getInt64("_leaseVersion").getValue() == 1L;
                 }),
             same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
   }
@@ -715,7 +896,12 @@ public class MaterializedViewWriterTest {
   @Test
   public void testCommit_negativeLeaseVersion_throwsNonTransientException()
       throws IOException, FieldExceededLimitsException {
-    when(this.mockLeaseManager.getLeaseVersion(GENERATION_ID)).thenReturn(-1L);
+    // Also the not-owner case: the lease manager returns this same sentinel when the cached lease
+    // belongs to another host, so no stolen-token write can reach the collection.
+    when(this.mockLeaseManager.getOwnedTenure(GENERATION_ID))
+        .thenReturn(
+            new LeaseManager.OwnedTenure(
+                LeaseManager.INVALID_LEASE_VERSION, LeaseManager.INVALID_LEASE_VERSION));
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,
@@ -729,6 +915,64 @@ public class MaterializedViewWriterTest {
 
     Assert.assertThrows(
         MaterializedViewNonTransientException.class, () -> updateAndCommit(1, matViewWriter));
+
+    verify(this.mockCollection, times(0))
+        .bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+  }
+
+  @Test
+  public void testCommit_withExplicitToken_usesTokenAfterCheckpointAdvance()
+      throws IOException, FieldExceededLimitsException {
+    var writer =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    writer.updateIndex(createDocumentEvent(new ObjectId(), 1));
+    writer.commit(EncodedUserData.EMPTY, 7L);
+
+    verify(this.mockCollection)
+        .bulkWrite(
+            argThat(
+                writes -> {
+                  ReplaceOneModel<RawBsonDocument> write =
+                      (ReplaceOneModel<RawBsonDocument>) writes.get(0);
+                  return write
+                          .getReplacement()
+                          .toBsonDocument()
+                          .getDocument("_autoEmbed")
+                          .getInt64("_leaseVersion")
+                          .getValue()
+                      == 7L;
+                }),
+            same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
+  }
+
+  @Test
+  public void testDiscardBufferedWrites_dropsQueuedOpsFromSubsequentCommit()
+      throws IOException, FieldExceededLimitsException {
+    var writer =
+        new MaterializedViewWriter(
+            this.autoEmbeddingMongoClient,
+            MV_DATABASE_NAME,
+            MV_COLLECTION_NAME,
+            GENERATION_ID,
+            this.mockLeaseManager,
+            METRICS_FACTORY,
+            COLLECTION_UUID,
+            Optional.empty());
+
+    // Simulates a tenure buffering a write, then ending before it commits: the discarded write
+    // must not be flushed and fenced with a later tenure's lease version.
+    writer.updateIndex(createDocumentEvent(new ObjectId(), 1));
+    writer.discardBufferedWrites();
+    writer.commit(EncodedUserData.EMPTY, 8L);
 
     verify(this.mockCollection, times(0))
         .bulkWrite(any(), same(MaterializedViewWriter.MV_BULK_WRITE_OPTIONS));
@@ -967,7 +1211,8 @@ public class MaterializedViewWriterTest {
 
   @Test
   public void testCommitWithInvalidLeaseThrowsNonTransientWithInvalidLeaseReason() {
-    when(this.mockLeaseManager.getLeaseVersion(GENERATION_ID)).thenReturn(0L);
+    when(this.mockLeaseManager.getOwnedTenure(GENERATION_ID))
+        .thenReturn(new LeaseManager.OwnedTenure(0L, 0L));
     var matViewWriter =
         new MaterializedViewWriter(
             this.autoEmbeddingMongoClient,

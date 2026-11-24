@@ -6,6 +6,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexUnavailableException;
+import com.xgen.mongot.index.InitialSyncIndexUnavailableException;
 import com.xgen.mongot.index.SearchIndex;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.analyzer.definition.AnalyzerDefinition;
@@ -57,6 +58,7 @@ public class LuceneSearchIndex implements SearchIndex {
     boolean enableTextOperatorNewSynonymsSyntax;
     boolean enableFacetingOverTokenFields;
     Optional<Integer> tokenFacetingCardinalityLimit;
+    Optional<Integer> aggregationMaxBuckets;
     IndexFormatVersion indexFormatVersion;
     PerIndexMetricsFactory metricsFactory;
     Optional<NamedExecutorService> concurrentSearchExecutor;
@@ -77,6 +79,7 @@ public class LuceneSearchIndex implements SearchIndex {
         boolean enableTextOperatorNewSynonymsSyntax,
         boolean enableFacetingOverTokenFields,
         Optional<Integer> tokenFacetingCardinalityLimit,
+        Optional<Integer> aggregationMaxBuckets,
         IndexFormatVersion indexFormatVersion,
         PerIndexMetricsFactory metricsFactory,
         Optional<NamedExecutorService> concurrentSearchExecutor,
@@ -94,6 +97,7 @@ public class LuceneSearchIndex implements SearchIndex {
       this.enableTextOperatorNewSynonymsSyntax = enableTextOperatorNewSynonymsSyntax;
       this.enableFacetingOverTokenFields = enableFacetingOverTokenFields;
       this.tokenFacetingCardinalityLimit = tokenFacetingCardinalityLimit;
+      this.aggregationMaxBuckets = aggregationMaxBuckets;
       this.indexFormatVersion = indexFormatVersion;
       this.metricsFactory = metricsFactory;
       this.concurrentSearchExecutor = concurrentSearchExecutor;
@@ -126,6 +130,7 @@ public class LuceneSearchIndex implements SearchIndex {
       boolean enableTextOperatorNewSynonymsSyntax,
       boolean enableFacetingOverTokenFields,
       Optional<Integer> tokenFacetingCardinalityLimit,
+      Optional<Integer> aggregationMaxBuckets,
       SearchIndexDefinition indexDefinition,
       IndexFormatVersion indexFormatVersion,
       AnalyzerRegistry analyzerRegistry,
@@ -159,6 +164,7 @@ public class LuceneSearchIndex implements SearchIndex {
                 enableTextOperatorNewSynonymsSyntax,
                 enableFacetingOverTokenFields,
                 tokenFacetingCardinalityLimit,
+                aggregationMaxBuckets,
                 indexFormatVersion,
                 metricsFactory,
                 concurrentSearchExecutor,
@@ -200,6 +206,7 @@ public class LuceneSearchIndex implements SearchIndex {
         config.enableTextOperatorNewSynonymsSyntax(),
         featureFlags.isEnabled(Feature.FACETING_OVER_TOKEN_FIELDS),
         config.tokenFacetingCardinalityLimit(),
+        config.aggregationMaxBuckets(),
         indexDefinition,
         indexFormatVersion,
         analyzerRegistry,
@@ -215,9 +222,7 @@ public class LuceneSearchIndex implements SearchIndex {
         concurrentSearchExecutor,
         concurrentVectorRescoringExecutor,
         metricRefreshExecutor,
-        featureFlags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN)
-            ? IndexStatus.unknown()
-            : IndexStatus.notStarted());
+        IndexStatus.unknown());
   }
 
   private static void checkOverriddenAnalyzersSatisfied(
@@ -286,7 +291,11 @@ public class LuceneSearchIndex implements SearchIndex {
   public void throwIfUnavailableForQuerying() throws IndexUnavailableException {
     IndexStatus.StatusCode statusCode = this.getStatus().getStatusCode();
     switch (statusCode) {
-      case UNKNOWN, NOT_STARTED, INITIAL_SYNC, FAILED ->
+      case INITIAL_SYNC ->
+          throw new InitialSyncIndexUnavailableException(
+              String.format(
+                  "cannot query search index %s while in state %s", this.definition, statusCode));
+      case UNKNOWN, NOT_STARTED, FAILED ->
           throw new IndexUnavailableException(
               String.format(
                   "cannot query search index %s while in state %s", this.definition, statusCode));

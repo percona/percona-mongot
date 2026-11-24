@@ -9,6 +9,7 @@ java_test_suite(
         "LockGuardTest.java",
         "MeteredCallerRunsPolicyTest.java",
         "OneShotSingleThreadExecutorTest.java",
+        "PrioritizedTaskTest.java",
         "RecurringTimerTest.java",
     ],
     tags = ["unit"],

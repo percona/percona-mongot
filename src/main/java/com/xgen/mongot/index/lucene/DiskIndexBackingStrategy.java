@@ -1,6 +1,5 @@
 package com.xgen.mongot.index.lucene;
 
-import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import com.google.errorprone.annotations.Var;
@@ -18,7 +17,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Supplier;
 import org.apache.lucene.search.ReferenceManager;
@@ -26,16 +31,21 @@ import org.jetbrains.annotations.Nullable;
 
 public class DiskIndexBackingStrategy implements IndexBackingStrategy {
 
-  /** Value class for per-partition and cumulative disk metrics. */
+  private static final Duration DISK_STATS_CACHE_EXPIRATION = Duration.ofMinutes(3);
+
   private record PartitionStats(long[] partitionSizesBytes, DiskStats totalStats) {
     public static final PartitionStats EMPTY = new PartitionStats(new long[0], DiskStats.EMPTY);
   }
 
-  /**
-   * Caches latest disk and partition stats with expiration to amortize cost over multiple calls.
-   * Cache is invalidated on close.
-   */
-  private volatile Supplier<PartitionStats> partitionStatsSupplier;
+  private record CachedPartitionStats(PartitionStats stats, Instant sampledAt) {
+    static CachedPartitionStats of(PartitionStats stats) {
+      return new CachedPartitionStats(stats, Instant.now());
+    }
+
+    boolean isFresh(Instant now) {
+      return Duration.between(this.sampledAt, now).compareTo(DISK_STATS_CACHE_EXPIRATION) < 0;
+    }
+  }
 
   private final int numPartitions;
   private final Path directoryPath;
@@ -44,6 +54,9 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
   private final Duration refreshInterval;
   private final AtomicDirectoryRemover directoryRemover;
   private final Path metadataDirectoryPath;
+
+  @GuardedBy("this")
+  private Optional<CachedPartitionStats> cachedPartitionStats;
 
   @GuardedBy("this")
   private boolean released;
@@ -63,8 +76,7 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
     this.directoryRemover = directoryRemover;
     this.metadataDirectoryPath = metadataDirectoryPath;
     this.numPartitions = numPartitions;
-    this.partitionStatsSupplier =
-        Suppliers.memoizeWithExpiration(this::computeDiskStats, Duration.ofMinutes(3));
+    this.cachedPartitionStats = Optional.empty();
   }
 
   @Override
@@ -84,17 +96,29 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
     this.released = true;
     this.directoryRemover.deleteDirectory(this.directoryPath);
     this.directoryRemover.deleteDirectory(this.metadataDirectoryPath);
-    this.partitionStatsSupplier = () -> PartitionStats.EMPTY;
+    this.cachedPartitionStats = Optional.of(CachedPartitionStats.of(PartitionStats.EMPTY));
   }
 
   @Override
   public DiskStats getDiskStats() {
-    return this.partitionStatsSupplier.get().totalStats();
+    return currentPartitionStats().totalStats();
+  }
+
+  @Override
+  public DiskStats refreshDiskStats() throws IOException {
+    PartitionStats stats = scanDiskStatsOrThrow();
+    synchronized (this) {
+      if (this.released) {
+        throw new IOException("index directory has been released");
+      }
+      this.cachedPartitionStats = Optional.of(CachedPartitionStats.of(stats));
+    }
+    return stats.totalStats();
   }
 
   @Override
   public long getIndexSizeForIndexPartition(int indexPartitionId) {
-    long[] partitionSizes = this.partitionStatsSupplier.get().partitionSizesBytes();
+    long[] partitionSizes = currentPartitionStats().partitionSizesBytes();
     return 0 <= indexPartitionId && indexPartitionId < partitionSizes.length
         ? partitionSizes[indexPartitionId]
         : 0L;
@@ -105,18 +129,33 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
     this.directoryRemover.deleteFilesInDirectory(this.metadataDirectoryPath);
   }
 
-  private synchronized PartitionStats computeDiskStats() {
-    if (this.released) {
-      return PartitionStats.EMPTY;
+  private synchronized PartitionStats currentPartitionStats() {
+    Instant now = Instant.now();
+    Optional<CachedPartitionStats> freshCachedStats =
+        this.cachedPartitionStats.filter(sample -> sample.isFresh(now));
+    if (freshCachedStats.isPresent()) {
+      return freshCachedStats.get().stats();
     }
+    CachedPartitionStats sample = CachedPartitionStats.of(scanDiskStatsBestEffort());
+    this.cachedPartitionStats = Optional.of(sample);
+    return sample.stats();
+  }
 
+  private PartitionStats scanDiskStatsOrThrow() throws IOException {
+    synchronized (this) {
+      if (this.released) {
+        throw new IOException("index directory has been released");
+      }
+    }
     var visitor = new DiskStatsVisitor(this.directoryPath, this.numPartitions);
+    Files.walkFileTree(this.directoryPath, visitor);
+    return visitor.getPartitionStats();
+  }
+
+  private PartitionStats scanDiskStatsBestEffort() {
     try {
-      Files.walkFileTree(this.directoryPath, visitor);
-      return visitor.getPartitionStats();
+      return scanDiskStatsOrThrow();
     } catch (IOException e) {
-      // Report 0 in this case. walkFileTree() should handle errors during listing and forward
-      // them to the visitor, which will just tell it to continue.
       return PartitionStats.EMPTY;
     }
   }
@@ -134,11 +173,16 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
     private long totalSizeBytes = 0L;
     private long largestFileByteSize = 0L;
     private long numFiles = 0;
+    private long graphAndQuantizedBytes = 0L;
+    private long cfsBytes = 0L;
+    // A quantized field writes both a .veq and a sibling .vec under the same prefix, but only the
+    // .veq is heap-resident, so a .vec counts only when no same-prefix .veq exists.
+    private final Map<String, Long> rawVecBytesByPrefix = new HashMap<>();
+    private final Set<String> quantizedFieldPrefixes = new HashSet<>();
 
     private final Path indexRoot;
 
-    @Var
-    private OptionalInt currentPartition = OptionalInt.empty();
+    @Var private OptionalInt currentPartition = OptionalInt.empty();
 
     DiskStatsVisitor(Path indexRoot, int numPartitions) {
       this.indexRoot = indexRoot;
@@ -146,8 +190,25 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
     }
 
     public PartitionStats getPartitionStats() {
+      @Var long vectorDataBytes = this.graphAndQuantizedBytes;
+      for (Map.Entry<String, Long> entry : this.rawVecBytesByPrefix.entrySet()) {
+        if (!this.quantizedFieldPrefixes.contains(entry.getKey())) {
+          vectorDataBytes += entry.getValue();
+        }
+      }
+
+      // Estimate vector bytes inside .cfs compound files by assuming they contain the same
+      // proportion of vector data as the non-.cfs files we could inspect directly. When there are
+      // no non-.cfs files (e.g. an all-compound index) there is no basis to extrapolate, so .cfs
+      // contributes nothing. vectorDataBytes only counts non-.cfs files, so it is 0 whenever
+      // nonCfsTotal is 0.
+      long nonCfsTotal = this.totalSizeBytes - this.cfsBytes;
+      long estimatedCfsRequired =
+          nonCfsTotal > 0 ? (long) (this.cfsBytes * ((double) vectorDataBytes / nonCfsTotal)) : 0L;
+      long totalRequiredMemory = vectorDataBytes + estimatedCfsRequired;
       DiskStats totalStats =
-          new DiskStats(this.totalSizeBytes, this.largestFileByteSize, this.numFiles);
+          new DiskStats(
+              this.totalSizeBytes, this.largestFileByteSize, this.numFiles, totalRequiredMemory);
       return new PartitionStats(this.partitionSizeBytes, totalStats);
     }
 
@@ -158,7 +219,31 @@ public class DiskIndexBackingStrategy implements IndexBackingStrategy {
       this.largestFileByteSize = Math.max(this.largestFileByteSize, size);
       this.totalSizeBytes += size;
       this.currentPartition.ifPresent(slot -> this.partitionSizeBytes[slot] += size);
+      String fileName = file.getFileName().toString();
+      if (fileName.endsWith(".vex")) {
+        // .vex = HNSW graph
+        this.graphAndQuantizedBytes += size;
+      } else if (fileName.endsWith(".veq")) {
+        // .veq = quantized vectors
+        this.graphAndQuantizedBytes += size;
+        this.quantizedFieldPrefixes.add(stripVectorExtension(file));
+      } else if (fileName.endsWith(".vec")) {
+        // .vec = raw float vectors
+        this.rawVecBytesByPrefix.merge(stripVectorExtension(file), size, Long::sum);
+      } else if (fileName.endsWith(".cfs")) {
+        this.cfsBytes += size;
+      }
       return FileVisitResult.CONTINUE;
+    }
+
+    /**
+     * Returns the full file path with its trailing vector extension removed, used to pair a field's
+     * .veq and .vec siblings. The full path is used so identically-named files in different
+     * partition subdirectories do not collide. Only called for .veq/.vec
+     */
+    private static String stripVectorExtension(Path file) {
+      String path = file.toString();
+      return path.substring(0, path.length() - ".vec".length());
     }
 
     @Override

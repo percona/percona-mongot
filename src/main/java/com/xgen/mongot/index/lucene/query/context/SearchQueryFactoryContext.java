@@ -20,8 +20,10 @@ import com.xgen.mongot.index.definition.SortableNumberBetaV1FieldDefinition;
 import com.xgen.mongot.index.definition.SortableStringBetaV1FieldDefinition;
 import com.xgen.mongot.index.definition.TokenFieldDefinition;
 import com.xgen.mongot.index.definition.UuidFieldDefinition;
+import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.query.util.SafeQueryBuilder;
@@ -30,6 +32,7 @@ import com.xgen.mongot.index.path.string.StringMultiFieldPath;
 import com.xgen.mongot.index.path.string.StringPath;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.SearchQueryTimeMappingChecks;
+import com.xgen.mongot.index.query.sort.Sort;
 import com.xgen.mongot.index.synonym.SynonymMapping;
 import com.xgen.mongot.index.synonym.SynonymMappingException;
 import com.xgen.mongot.index.synonym.SynonymRegistry;
@@ -206,6 +209,18 @@ public class SearchQueryFactoryContext implements QueryFactoryContext {
     return fieldDefinition.get().vectorFieldSpecification().get().quantization();
   }
 
+  @Override
+  public Optional<VectorAutoEmbedQuantization> getAutoEmbedQuantization(FieldPath fieldPath) {
+    Optional<VectorFieldSpecification> specification =
+        this.fieldDefinitionResolver
+            .getFieldDefinition(fieldPath, Optional.empty())
+            .flatMap(FieldDefinition::vectorFieldSpecification);
+    return specification.isPresent()
+            && specification.get() instanceof VectorAutoEmbedFieldSpecification autoEmbed
+        ? Optional.of(autoEmbed.autoEmbedQuantization())
+        : Optional.empty();
+  }
+
   /**
    * Gets all the Lucene field names associated with a given path, including those corresponding to
    * any multi analyzers.
@@ -282,6 +297,11 @@ public class SearchQueryFactoryContext implements QueryFactoryContext {
 
   public IndexCapabilities getIndexCapabilities() {
     return this.fieldDefinitionResolver.getIndexCapabilities();
+  }
+
+  @Override
+  public Optional<Sort> getIndexSort() {
+    return this.fieldDefinitionResolver.indexDefinition.getSort();
   }
 
   @Override

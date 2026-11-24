@@ -199,6 +199,55 @@ public class EmbeddedDocumentsFieldDefinitionTest {
     }
 
     @Test
+    public void testAutoEmbedType() {
+      FieldDefinition fields =
+          FieldDefinitionBuilder.builder()
+              .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+              .build();
+
+      try {
+        EmbeddedDocumentsFieldDefinition.create(
+            new DynamicDefinition.Boolean(false), Map.of("content", fields), Optional.empty());
+        Assert.fail("should throw");
+      } catch (IllegalEmbeddedFieldException e) {
+        Assert.assertEquals(
+            "cannot define fields of type autoEmbed inside an embeddedDocuments field",
+            e.getMessage());
+        return;
+      }
+
+      Assert.fail("unreachable");
+    }
+
+    @Test
+    public void testAutoEmbedTypeNestedUnderDocument() {
+      FieldDefinition autoEmbedField =
+          FieldDefinitionBuilder.builder()
+              .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+              .build();
+      FieldDefinition documentField =
+          FieldDefinitionBuilder.builder()
+              .document(
+                  DocumentFieldDefinitionBuilder.builder().field("content", autoEmbedField).build())
+              .build();
+
+      try {
+        EmbeddedDocumentsFieldDefinition.create(
+            new DynamicDefinition.Boolean(false),
+            Map.of("document", documentField),
+            Optional.empty());
+        Assert.fail("should throw");
+      } catch (IllegalEmbeddedFieldException e) {
+        Assert.assertEquals(
+            "cannot define fields of type autoEmbed inside an embeddedDocuments field",
+            e.getMessage());
+        return;
+      }
+
+      Assert.fail("unreachable");
+    }
+
+    @Test
     public void testEquals() {
       TestUtils.assertEqualityGroups(
           () -> EmbeddedDocumentsFieldDefinitionBuilder.builder().dynamic(false).build(),
