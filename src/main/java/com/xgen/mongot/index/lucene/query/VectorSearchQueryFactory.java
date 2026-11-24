@@ -20,13 +20,14 @@ import com.xgen.mongot.index.lucene.query.custom.MongotKnnFloatQuery;
 import com.xgen.mongot.index.lucene.query.util.MetaIdRetriever;
 import com.xgen.mongot.index.lucene.query.util.WrappedToParentBlockJoinQuery;
 import com.xgen.mongot.index.lucene.util.LuceneDocumentIdEncoder;
+import com.xgen.mongot.index.lucene.util.VectorSearchUtil;
 import com.xgen.mongot.index.query.AutoEmbedQueryVectorReconciler;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.operators.ApproximateVectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.ExactVectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorEmbeddedOptions;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
-import com.xgen.mongot.util.Check;
+import com.xgen.mongot.index.version.IndexCapabilities;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.BitVector;
 import com.xgen.mongot.util.bson.ByteVector;
@@ -59,6 +60,7 @@ import org.bson.BsonValue;
 class VectorSearchQueryFactory {
 
   private final QueryFactoryContext factoryContext;
+  private final IndexCapabilities indexCapabilities;
   private final VectorSearchFilterQueryFactory vectorSearchFilterQueryFactory;
 
   // Not read yet -- threaded in ahead of the dynamic feature flag gate for exact-search off-heap
@@ -73,13 +75,22 @@ class VectorSearchQueryFactory {
     this.factoryContext = factoryContext;
     this.vectorSearchFilterQueryFactory = vectorSearchFilterQueryFactory;
     this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+    this.indexCapabilities = factoryContext.getIndexCapabilities();
   }
 
   Query fromQuery(VectorSearchCriteria criteria, SingleQueryContext queryContext)
       throws InvalidQueryException, IOException {
 
     FieldPath path = criteria.path();
-    @Var Vector queryVector = Check.isPresent(criteria.queryVector(), "queryVector");
+    Optional<Vector> queryVectorOptional = criteria.queryVector();
+    if (queryVectorOptional.isEmpty()) {
+      throw new InvalidQueryException(
+          String.format(
+              "Path '%s' is not an auto-embed field; 'query' cannot be used as the vector input."
+                  + " Supply 'queryVector' for this field.",
+              path));
+    }
+    @Var Vector queryVector = queryVectorOptional.get();
 
     // Check if this is an embedded vector field
     Optional<FieldPath> embeddedRoot = determineEmbeddedRoot(path, queryContext);
@@ -159,6 +170,11 @@ class VectorSearchQueryFactory {
     }
 
     String fieldName = getLuceneFieldName(path, embeddedRoot, queryVector.getVectorType());
+    // The query vector is shared by concurrent partition tasks, so normalize a copy.
+    VectorSearchUtil.NormalizedVector normalized =
+        VectorSearchUtil.normalizeIfNeeded(
+            queryVector, indexedVectorSimilarity, this.indexCapabilities);
+    queryVector = normalized.vector();
 
     Query childQuery;
     switch (criteria) {
@@ -179,9 +195,15 @@ class VectorSearchQueryFactory {
         // consistent with how embeddedDocuments works in search indexes. Users can increase
         // numCandidates to improve recall when documents have many embedded vectors.
         //
-        // In auto mode (user omitted numCandidates) this resolves to clamp(8 * limit, 100, 10000);
-        // otherwise it is the user-supplied value. See ApproximateVectorSearchCriteria.
-        int numCandidates = approximateCriteria.resolveNumCandidates();
+        // In auto mode (user omitted numCandidates) this resolves to clamp(ratio * limit, 100,
+        // 10000); otherwise it is the user-supplied value. Binary-quantized searches traverse the
+        // HNSW graph over binary codes and lose recall at the default ratio, so auto mode uses a
+        // larger ratio for them. See ApproximateVectorSearchCriteria.
+        int numCandidates =
+            approximateCriteria.resolveNumCandidates(
+                ApproximateVectorSearchCriteria.isBinaryQuantizedSearch(
+                    this.factoryContext.getFieldDefinitionResolver().resolveQuantization(path),
+                    queryVector));
         int limit = approximateCriteria.limit();
         ApproximateVectorQueryCreator queryCreator =
             ApproximateVectorQueryCreator.get(
@@ -226,12 +248,14 @@ class VectorSearchQueryFactory {
         break;
 
       case ExactVectorSearchCriteria unused:
+        // TODO(CLOUDP-316055): Should use the VectorScorer associated with the FieldInfo to do
+        // off-heap scoring rather than computing the similarity function again.
         Query vectorFieldExistsQuery = new FieldExistsQuery(fieldName);
         childQuery =
             new com.xgen.mongot.index.lucene.query.custom.ExactVectorSearchQuery(
                 fieldName,
                 queryVector,
-                indexedVectorSimilarity.getLuceneSimilarityFunction(),
+                normalized.similarity().getLuceneSimilarityFunction(),
                 luceneFilter.isPresent()
                     ? new BooleanQuery.Builder()
                         .add(vectorFieldExistsQuery, BooleanClause.Occur.FILTER)

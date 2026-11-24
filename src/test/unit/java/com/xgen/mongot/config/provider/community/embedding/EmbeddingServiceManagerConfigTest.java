@@ -108,6 +108,28 @@ public class EmbeddingServiceManagerConfigTest {
   }
 
   @Test
+  public void loadEmbeddingServiceConfig_voyage4_loadsSupportedDimensions() {
+    EmbeddingServiceManagerConfig.VoyageCredentials credentials =
+        new EmbeddingServiceManagerConfig.VoyageCredentials(
+            new VoyageEmbeddingCredentials("test-query-key"),
+            new VoyageEmbeddingCredentials("test-indexing-key"));
+
+    EmbeddingServiceManagerConfig config =
+        EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(Optional.of(credentials))
+            .orElseThrow();
+
+    EmbeddingServiceConfig voyage4 =
+        config.configs().stream()
+            .filter(serviceConfig -> serviceConfig.modelName.equals("voyage-4"))
+            .findFirst()
+            .orElseThrow();
+    assertEquals(
+        Optional.of(List.of(256, 512, 1024, 2048)),
+        ((EmbeddingServiceConfig.VoyageModelConfig) voyage4.embeddingConfig.modelConfigBase)
+            .supportedDimensions);
+  }
+
+  @Test
   public void loadEmbeddingServiceConfig_noCredentials_dropsVoyageKeepsOpenAiCompat() {
     Optional<EmbeddingServiceManagerConfig> result =
         EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(Optional.empty());

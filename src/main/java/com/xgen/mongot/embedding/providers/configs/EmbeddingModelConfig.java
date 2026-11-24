@@ -6,12 +6,14 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.Embedd
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ErrorHandlingConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.InferenceScope;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.TenantWorkloadCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageEmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.WorkloadParams;
+import com.xgen.mongot.util.Check;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -52,7 +54,8 @@ public record EmbeddingModelConfig(
             rps,
             config.getQueryParams().flatMap(params -> params.tenantCredentials),
             config.tenantCredentials,
-            config.isDedicatedCluster),
+            config.isDedicatedCluster,
+            config.inferenceScope),
         consolidateWorkloadParams(
             config.getChangeStreamParams(),
             config.getModelConfigBase(),
@@ -62,7 +65,8 @@ public record EmbeddingModelConfig(
             rps,
             config.getChangeStreamParams().flatMap(params -> params.tenantCredentials),
             config.tenantCredentials,
-            config.isDedicatedCluster),
+            config.isDedicatedCluster,
+            config.inferenceScope),
         consolidateWorkloadParams(
             config.getCollectionScanParams(),
             config.getModelConfigBase(),
@@ -72,7 +76,8 @@ public record EmbeddingModelConfig(
             rps,
             config.getCollectionScanParams().flatMap(params -> params.tenantCredentials),
             config.tenantCredentials,
-            config.isDedicatedCluster));
+            config.isDedicatedCluster,
+            config.inferenceScope));
   }
 
   private static final ModelConfig DEFAULT_CONFIG =
@@ -100,7 +105,8 @@ public record EmbeddingModelConfig(
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
-              true),
+              true,
+              InferenceScope.UNKNOWN),
           new ConsolidatedWorkloadParams(
               DEFAULT_CONFIG,
               DEFAULT_ERROR_CONFIG,
@@ -109,7 +115,8 @@ public record EmbeddingModelConfig(
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
-              true),
+              true,
+              InferenceScope.UNKNOWN),
           new ConsolidatedWorkloadParams(
               DEFAULT_CONFIG,
               DEFAULT_ERROR_CONFIG,
@@ -118,7 +125,8 @@ public record EmbeddingModelConfig(
               Optional.empty(),
               Optional.empty(),
               Optional.empty(),
-              true));
+              true,
+              InferenceScope.UNKNOWN));
 
   /**
    * This method validates and consolidates all base provider configs with model level overrides and
@@ -133,6 +141,7 @@ public record EmbeddingModelConfig(
    * @param tenantCredentials Default/dedicated cluster credentials
    * @param perTenantCredentials Per-tenant credentials map
    * @param isDedicatedCluster Whether this is a dedicated cluster
+   * @param inferenceScope Cloud and geography of the provider endpoint
    */
   private static ConsolidatedWorkloadParams consolidateWorkloadParams(
       Optional<WorkloadParams> overrideWorkloadParams,
@@ -143,7 +152,8 @@ public record EmbeddingModelConfig(
       Optional<Integer> rpsPerProvider,
       Optional<EmbeddingCredentials> tenantCredentials,
       Optional<Map<String, TenantWorkloadCredentials>> perTenantCredentials,
-      boolean isDedicatedCluster) {
+      boolean isDedicatedCluster,
+      InferenceScope inferenceScope) {
     @Var ModelConfig consolidatedModelConfig = baseModelConfig;
     @Var ErrorHandlingConfig consolidatedErrorHandlingConfig = baseErrorHandlingConfig;
     @Var EmbeddingCredentials consolidatedCredentials = baseCredentials;
@@ -214,7 +224,8 @@ public record EmbeddingModelConfig(
         rpsPerProvider,
         tenantCredentials,
         perTenantCredentials,
-        isDedicatedCluster);
+        isDedicatedCluster,
+        inferenceScope);
   }
 
   private static ModelConfig consolidateVoyageModelConfig(
@@ -240,7 +251,10 @@ public record EmbeddingModelConfig(
             : baseModelConfig.quantization,
         overrideModelConfig.similarityByQuantization.isPresent()
             ? overrideModelConfig.similarityByQuantization
-            : baseModelConfig.similarityByQuantization);
+            : baseModelConfig.similarityByQuantization,
+        overrideModelConfig.supportedDimensions.isPresent()
+            ? overrideModelConfig.supportedDimensions
+            : baseModelConfig.supportedDimensions);
   }
 
   private static ModelConfig consolidateOpenAiModelConfig(
@@ -319,7 +333,12 @@ public record EmbeddingModelConfig(
       // default/dedicated clustercredentials
       Optional<EmbeddingCredentials> tenantCredentials,
       Optional<Map<String, TenantWorkloadCredentials>> perTenantCredentials,
-      boolean isDedicatedCluster) {
+      boolean isDedicatedCluster,
+      InferenceScope inferenceScope) {
+
+    public ConsolidatedWorkloadParams {
+      Check.argNotNull(inferenceScope, "inferenceScope");
+    }
 
     @Override
     public boolean equals(Object o) {
@@ -338,7 +357,8 @@ public record EmbeddingModelConfig(
               this.tenantCredentials.orElse(null), other.tenantCredentials.orElse(null))
           && Objects.equals(
               this.perTenantCredentials.orElse(null), other.perTenantCredentials.orElse(null))
-          && this.isDedicatedCluster == other.isDedicatedCluster;
+          && this.isDedicatedCluster == other.isDedicatedCluster
+          && Objects.equals(this.inferenceScope, other.inferenceScope);
     }
 
     @Override
@@ -350,7 +370,8 @@ public record EmbeddingModelConfig(
           this.providerEndpoint.orElse(null),
           this.tenantCredentials.orElse(null),
           this.perTenantCredentials.orElse(null),
-          this.isDedicatedCluster);
+          this.isDedicatedCluster,
+          this.inferenceScope);
     }
   }
 

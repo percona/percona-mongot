@@ -106,6 +106,22 @@ class CheckDriftTest(unittest.TestCase):
         task = _task(_DEFAULT_NAME, ExecutionMode="manual", Activity="A")
         self.assertFalse(self._check([task], []))
 
+    def test_non_prod_rollout_barrier_descriptive_drift_fails(self):
+        task = _task(
+            "NON_PROD_ENV_PVM_ROLLOUT",
+            ExecutionMode="automated",
+            Type="simple_gate",
+            Notes="All three environment responses are verified.",
+            Description="Require verified non-production PVM updates.",
+        )
+        self.assertTrue(self._check([task], [dict(task)]))
+        for field in ("Notes", "Description"):
+            with self.subTest(field=field):
+                changed = dict(task)
+                changed[field] = "DRIFTED"
+                self.assertFalse(self._check([task], [changed]))
+                self.assertFalse(self._check([changed], [task]))
+
     # --- exempt task: allowed to diverge entirely ----------------------------
 
     def test_exempt_task_drift_is_allowed(self):
@@ -122,6 +138,34 @@ class CheckDriftTest(unittest.TestCase):
         self.assertTrue(self._check([task], []))
 
     # --- partial-sync task ---------------------------------------------------
+
+    def test_tag_notification_workflow_specific_notes_pass(self):
+        non_patch = _task(
+            "NOTIFY_RELEASE_TAG_CREATED",
+            ExecutionMode="automated",
+            Type="slack",
+            Notes="Starts after `Create Git Tag` completes.",
+        )
+        patch = dict(non_patch, Notes="Starts after `Create Git Tag (Patch)` completes.")
+        self.assertTrue(self._check([non_patch], [patch]))
+        self.assertTrue(self._check([patch], [non_patch]))
+
+    def test_tag_notification_other_fields_stay_in_sync(self):
+        task = _task(
+            "NOTIFY_RELEASE_TAG_CREATED",
+            Activity="notification",
+            DisplayName="Notify Release Tag Created",
+            Description="Notify the release channel after tagging",
+            ExecutionMode="automated",
+            Type="slack",
+            Data={"Slack": {"ActionType": "send-message"}},
+        )
+        for field in ("Activity", "DisplayName", "Description", "ExecutionMode", "Type", "Data"):
+            with self.subTest(field=field):
+                changed = dict(task)
+                changed[field] = "DRIFTED"
+                self.assertFalse(self._check([task], [changed]))
+                self.assertFalse(self._check([changed], [task]))
 
     def test_partial_sync_descriptive_drift_passes(self):
         # Notes AND Description may differ; the guarded fields match -> allowed.

@@ -63,6 +63,7 @@ import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionGenerationB
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -108,6 +109,42 @@ public class InitialSyncQueueTest {
   private static final String DEFAULT_MONGO_HOST_NAME = "defaultHost";
 
   @Test
+  public void create_recreatedQueue_retainsSharedPauseState() throws Exception {
+    var state = new InitialSyncPauseState();
+    var indexId = new ObjectId();
+    var first = createQueueWithPauseState(state);
+    first.shutdown().get(5, TimeUnit.SECONDS);
+
+    state.updatePausedIndexIds(List.of(indexId));
+    var second = createQueueWithPauseState(state);
+    try {
+      assertThat(second.initialSyncPauseState).isSameInstanceAs(state);
+      assertThat(second.initialSyncPauseState.isPaused(indexId)).isTrue();
+
+      state.updatePausedIndexIds(List.of());
+
+      assertThat(second.initialSyncPauseState.isPaused(indexId)).isFalse();
+    } finally {
+      second.shutdown().get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  private static InitialSyncQueue createQueueWithPauseState(InitialSyncPauseState state) {
+    return InitialSyncQueue.create(
+        new SimpleMeterRegistry(),
+        Map.of(),
+        DEFAULT_MONGO_HOST_NAME,
+        mock(IndexingWorkSchedulerFactory.class),
+        MongoDbReplicationConfig.getDefault(),
+        new InitialSyncConfig(),
+        Path.of("unused"),
+        ToggleGate.opened(),
+        FeatureFlags.getDefault(),
+        Optional.empty(),
+        state);
+  }
+
+  @Test
   public void queuedSyncsGaugesCoverEveryIndexTypeTag() throws Exception {
     // The gauge maps are looked up unchecked via getIndexTypeTag, so a missing tag NPEs the
     // first initial sync of that index type (search auto-embedding was missing).
@@ -145,7 +182,7 @@ public class InitialSyncQueueTest {
    * Guards the config plumbing from InitialSyncConfig through InitialSyncQueue onto the
    * InitialSyncContext handed to the InitialSyncManager. Every other boolean is false so a flag
    * wired from the wrong source cannot accidentally satisfy the assertion, and the partition count
-   * differs from the default of 4.
+   * and max concurrent batches differ from their defaults of 4 and 1.
    */
   @Test
   public void testParallelNaturalOrderScanConfigReachesContext() throws Exception {
@@ -161,7 +198,8 @@ public class InitialSyncQueueTest {
             Optional.of(false),
             Optional.of(false),
             Optional.of(true),
-            Optional.of(7));
+            Optional.of(7),
+            Optional.of(3));
 
     Mocks mocks =
         Mocks.create(
@@ -185,6 +223,7 @@ public class InitialSyncQueueTest {
     InitialSyncContext context = mocks.mockInitialSyncManagerFactory.getContext();
     Assert.assertTrue(context.isParallelNaturalOrderScanEnabled());
     Assert.assertEquals(7, context.getParallelPartitionCount());
+    Assert.assertEquals(3, context.getParallelScanMaxConcurrentBatches());
 
     mocks.mockInitialSyncManagerFactory.completeSync(MOCK_INDEX_GENERATION_ID);
     future.get(5, TimeUnit.SECONDS);
@@ -1383,6 +1422,136 @@ public class InitialSyncQueueTest {
   }
 
   @Test
+  public void enqueue_livePause_blocksUntilCleared() throws Exception {
+    Mocks mocks = Mocks.create(Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO));
+    var state = mocks.initialSyncQueue.initialSyncPauseState;
+    state.updatePausedIndexIds(List.of(MOCK_INDEX_GENERATION_ID.indexId));
+
+    var error =
+        assertThrows(
+            InitialSyncException.class,
+            () ->
+                mocks.initialSyncQueue.enqueue(
+                    DOCUMENT_INDEXER,
+                    MOCK_INDEX_DEFINITION_GENERATION,
+                    () -> {},
+                    IGNORE_METRICS,
+                    false,
+                    false));
+    assertThat(error.getType()).isEqualTo(InitialSyncException.Type.RESUMABLE_TRANSIENT);
+    var resumeError =
+        assertThrows(
+            InitialSyncException.class,
+            () ->
+                mocks.initialSyncQueue.enqueueResume(
+                    DOCUMENT_INDEXER,
+                    MOCK_INDEX_DEFINITION_GENERATION,
+                    () -> {},
+                    INITIAL_SYNC_RESUME_INFO,
+                    IGNORE_METRICS,
+                    false,
+                    false));
+    assertThat(resumeError.getType()).isEqualTo(InitialSyncException.Type.RESUMABLE_TRANSIENT);
+    assertThat(mocks.queued).isEmpty();
+
+    state.updatePausedIndexIds(List.of());
+    var started = new CountDownLatch(1);
+    var future =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER,
+            MOCK_INDEX_DEFINITION_GENERATION,
+            started::countDown,
+            IGNORE_METRICS,
+            false,
+            false);
+    assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+    state.updatePausedIndexIds(List.of(MOCK_INDEX_GENERATION_ID.indexId));
+    mocks.mockInitialSyncManagerFactory.completeSync(MOCK_INDEX_GENERATION_ID);
+    assertCompletesInitialSyncSuccess(future);
+  }
+
+  @Test(timeout = 10000)
+  public void dispatch_livePause_releasesPermits() throws Exception {
+    var index = mockDefinitionGeneration(mockAutoEmbeddingVectorDefinition(new ObjectId()));
+    var other = uniqueMockGenerationDefinition();
+    var another = uniqueMockGenerationDefinition();
+    var queue = ControlledBlockingQueue.<GenerationId>paused();
+    Mocks mocks =
+        Mocks.create(
+            Map.of(
+                index.getGenerationId(),
+                () -> RESUME_INFO,
+                other.getGenerationId(),
+                () -> RESUME_INFO,
+                another.getGenerationId(),
+                () -> RESUME_INFO),
+            queue,
+            Optional.of(2),
+            Optional.of(1));
+    var state = mocks.initialSyncQueue.initialSyncPauseState;
+    var future =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER, index, () -> {}, IGNORE_METRICS, false, false);
+    queue.waitForItemsDequeued(1);
+    state.updatePausedIndexIds(List.of(index.getIndexId()));
+    queue.resume();
+    assertCompletesInitialSyncException(future, InitialSyncException.Type.RESUMABLE_TRANSIENT);
+    assertNumberOfEmbeddingPermits(mocks, 1);
+    assertThat(mocks.queued).isEmpty();
+    assertThat(mocks.inProgress).isEmpty();
+    verify(mocks.mockInitialSyncManagerFactory.getManager(index.getGenerationId()), times(0))
+        .sync();
+
+    var started = new CountDownLatch(2);
+    var otherFuture =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER, other, started::countDown, IGNORE_METRICS, false, false);
+    var anotherFuture =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER, another, started::countDown, IGNORE_METRICS, false, false);
+    assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+    mocks.mockInitialSyncManagerFactory.completeSync(other.getGenerationId());
+    mocks.mockInitialSyncManagerFactory.completeSync(another.getGenerationId());
+    assertCompletesInitialSyncSuccess(otherFuture);
+    assertCompletesInitialSyncSuccess(anotherFuture);
+
+    state.updatePausedIndexIds(List.of());
+    var retry =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER, index, () -> {}, IGNORE_METRICS, false, false);
+    mocks.mockInitialSyncManagerFactory.completeSync(index.getGenerationId());
+    assertCompletesInitialSyncSuccess(retry);
+    assertNumberOfEmbeddingPermits(mocks, 1);
+  }
+
+  @Test(timeout = 10000)
+  public void dispatch_cancelledAndPaused_preservesCancellation() throws Exception {
+    var queue = ControlledBlockingQueue.<GenerationId>paused();
+    Mocks mocks = Mocks.create(Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO), queue);
+    var future =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER,
+            MOCK_INDEX_DEFINITION_GENERATION,
+            () -> {},
+            IGNORE_METRICS,
+            false,
+            false);
+    queue.waitForItemsDequeued(1);
+
+    mocks.initialSyncQueue.cancel(MOCK_INDEX_GENERATION_ID).get(5, TimeUnit.SECONDS);
+    mocks.initialSyncQueue.initialSyncPauseState.updatePausedIndexIds(
+        List.of(MOCK_INDEX_GENERATION_ID.indexId));
+    queue.resume();
+
+    assertCompletesInitialSyncException(future, InitialSyncException.Type.SHUT_DOWN);
+    Condition.await().atMost(Duration.ofSeconds(5)).until(() -> mocks.cancelled.isEmpty());
+    assertThat(mocks.queued).isEmpty();
+    assertThat(mocks.inProgress).isEmpty();
+    verify(mocks.mockInitialSyncManagerFactory.getManager(MOCK_INDEX_GENERATION_ID), times(0))
+        .sync();
+  }
+
+  @Test
   public void testEnqueueInitialSyncsPaused() throws Exception {
     var initialSyncGate = ToggleGate.closed();
 
@@ -1639,7 +1808,8 @@ public class InitialSyncQueueTest {
               mockInitialSyncManagerFactory,
               rootPath,
               initialSyncGate,
-              FeatureFlags.getDefault());
+              FeatureFlags.getDefault(),
+              new InitialSyncPauseState());
     }
 
     static Mocks create(

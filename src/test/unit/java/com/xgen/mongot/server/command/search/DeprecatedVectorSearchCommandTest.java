@@ -10,6 +10,7 @@ import static com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionG
 import static com.xgen.testing.mongot.mock.index.IndexGeneration.mockVectorIndexGeneration;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -45,6 +46,9 @@ import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.MetaResults;
 import com.xgen.mongot.index.QuarantinedIndexException;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
+import com.xgen.mongot.index.definition.SearchIndexCapabilities;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.lucene.explain.information.LuceneQuerySpecification;
 import com.xgen.mongot.index.lucene.explain.information.MetadataExplainInformation;
@@ -63,11 +67,15 @@ import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
+import com.xgen.mongot.server.command.search.definition.request.VectorSearchCommandDefinition;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.MongoDbServerInfo;
 import com.xgen.mongot.util.mongodb.MongoDbVersion;
+import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.EmbeddingModelCatalogTestUtils;
+import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.lucene.explain.information.DefaultQueryBuilder;
@@ -84,6 +92,7 @@ import com.xgen.testing.mongot.server.command.search.definition.request.ExplainD
 import com.xgen.testing.mongot.server.command.search.definition.request.VectorSearchCommandDefinitionBuilder;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -160,6 +169,52 @@ public class DeprecatedVectorSearchCommandTest {
   @DataPoints
   public static final List<MongoDbVersion> mdbVersions =
       List.of(new MongoDbVersion(8, 1, 0), new MongoDbVersion(7, 0, 0));
+
+  @Test
+  public void testDelegationForwardsRouterMaterializedMark() throws Exception {
+    // The registered vectorSearch command is the deprecated one; the mark must survive its
+    // delegation to VectorSearchCommand or the expectedModel check never runs on real traffic.
+    VectorSearchCommand.Factory factory = mock(VectorSearchCommand.Factory.class);
+    VectorSearchCommand inner = mock(VectorSearchCommand.class);
+    when(factory.create(any(VectorSearchCommandDefinition.class))).thenReturn(inner);
+    when(inner.run()).thenReturn(new BsonDocument());
+    when(inner.getCreatedCursorIds()).thenReturn(Collections.emptyList());
+    IndexCatalog indexCatalog = mock(IndexCatalog.class);
+    doReturn(Optional.of(mockVectorIndexGeneration()))
+        .when(indexCatalog)
+        .getIndex(any(), any(), any(), any());
+
+    DeprecatedVectorSearchCommand command =
+        new DeprecatedVectorSearchCommand(
+            getCursorManager(),
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .build())
+                        .build())
+                .build(),
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
+            indexCatalog,
+            getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            factory,
+            BOOTSTRAPPER_METADATA);
+
+    command.handleRouterMaterialized(true);
+    command.run();
+
+    verify(inner).handleRouterMaterialized(true);
+  }
 
   @Test
   public void testValidIndex() throws Exception {
@@ -665,6 +720,113 @@ public class DeprecatedVectorSearchCommandTest {
     BsonDocument expected = mockInitialMongotCursorBatchForVectorSearch().toBson();
     Assert.assertEquals(expected, result);
     Assert.assertEquals(List.of(MOCK_SEARCH_CURSOR_ID), command.getCreatedCursorIds());
+  }
+
+  @Test
+  public void run_autoEmbedSourcePathInSearchIndex_returnsUserErrorWithoutQuerying()
+      throws Exception {
+    MongotCursorManager cursorManager = getCursorManager();
+
+    BsonDocument result =
+        runAgainstAutoEmbedSearchIndex(cursorManager, FieldPath.parse("description"), getFilter());
+
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Truth.assertThat(result.getString("errmsg").getValue())
+        .isEqualTo(
+            "$vectorSearch cannot query type:autoEmbed fields in search index 'default'. Use the"
+                + " vectorSearch operator in $search instead.");
+    verify(cursorManager, never())
+        .newCursor(any(), any(), any(), any(), any(Query.class), any(), any(), any());
+  }
+
+  @Test
+  public void run_filterOnAutoEmbedPathInSearchIndex_returnsUserErrorWithoutQuerying()
+      throws Exception {
+    MongotCursorManager cursorManager = getCursorManager();
+    VectorSearchFilter filter =
+        new VectorSearchFilter.ClauseFilter(
+            ClauseBuilder.simpleClause()
+                .path(FieldPath.parse("description"))
+                .addOperator(MqlFilterOperatorBuilder.exists().value(true).build())
+                .build());
+
+    BsonDocument result =
+        runAgainstAutoEmbedSearchIndex(cursorManager, FieldPath.parse("embedding"), filter);
+
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Truth.assertThat(result.getString("errmsg").getValue())
+        .contains("Path 'description' is a type:autoEmbed field");
+    verify(cursorManager, never())
+        .newCursor(any(), any(), any(), any(), any(Query.class), any(), any(), any());
+  }
+
+  @Test
+  public void run_otherVectorPathInAutoEmbedSearchIndex_queriesIndex() throws Exception {
+    MongotCursorManager cursorManager = getCursorManager();
+
+    BsonDocument result =
+        runAgainstAutoEmbedSearchIndex(cursorManager, FieldPath.parse("embedding"), getFilter());
+
+    Assert.assertEquals(mockInitialMongotCursorBatchForVectorSearch().toBson(), result);
+  }
+
+  /**
+   * Runs a $vectorSearch stage against a search index whose catalog definition maps {@code
+   * description} as autoEmbed, as an index with a knnVector field next to it would.
+   */
+  private static BsonDocument runAgainstAutoEmbedSearchIndex(
+      MongotCursorManager cursorManager, FieldPath path, VectorSearchFilter filter)
+      throws Exception {
+    EmbeddingModelCatalogTestUtils.registerAutoEmbedModel("voyage-3-large");
+    SearchIndexDefinition autoEmbedDefinition =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .field(
+                        "description",
+                        FieldDefinitionBuilder.builder()
+                            .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                            .build())
+                    .build())
+            .indexFeatureVersion(SearchIndexCapabilities.CURRENT_FEATURE_VERSION)
+            .build();
+    IndexGeneration indexGeneration = mock(IndexGeneration.class);
+    when(indexGeneration.getDefinition()).thenReturn(autoEmbedDefinition);
+    var catalog = mock(IndexCatalog.class);
+    when(catalog.getIndex(any(), any(), any(), any())).thenReturn(Optional.of(indexGeneration));
+    var initializedIndex = mock(InitializedSearchIndex.class, Mockito.RETURNS_DEEP_STUBS);
+    when(initializedIndex.getType()).thenReturn(IndexDefinitionGeneration.Type.SEARCH);
+    when(initializedIndex.getDefinition()).thenReturn(autoEmbedDefinition);
+    var initializedIndexCatalog = mock(InitializedIndexCatalog.class);
+    when(initializedIndexCatalog.getIndex(any())).thenReturn(Optional.of(initializedIndex));
+    DeprecatedVectorSearchCommand command =
+        new DeprecatedVectorSearchCommand(
+            cursorManager,
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(path)
+                                .filter(filter)
+                                .build())
+                        .build())
+                .build(),
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
+            catalog,
+            initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            mock(VectorSearchCommand.Factory.class),
+            BOOTSTRAPPER_METADATA);
+    return command.run();
   }
 
   @Test
