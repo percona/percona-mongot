@@ -22,19 +22,11 @@ java_binary(
 # Per-language configuration for all format and lint checks provided by aspect_rules_lint
 # Use `bazel run //bazel/tools/format` to fix formatting in all files of the current subtree.
 # Use `bazel run //bazel/tools/format/format.check` to only validate formatting in the current subtree.
+# Percona: no Rust formatter -- the published sources have no Rust code and no @rules_rust.
 format_multirun(
     name = "format",
     java = ":java-format",
     python = "@aspect_rules_lint//lint:ruff_bin",
-    rust = "@rules_rust//tools/upstream_wrapper:rustfmt",
-    rust_check_args = [
-        "--edition",
-        "2024",
-    ],
-    rust_fix_args = [
-        "--edition",
-        "2024",
-    ],
     starlark = "@buildifier_prebuilt//:buildifier",
 )
 
