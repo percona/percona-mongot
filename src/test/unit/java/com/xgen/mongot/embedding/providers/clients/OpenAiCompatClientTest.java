@@ -10,7 +10,6 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
-import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.VectorOrError;
 import com.xgen.mongot.embedding.exceptions.EmbeddingProviderNonTransientException;
@@ -20,6 +19,7 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.FloatVector;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;

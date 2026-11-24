@@ -5,7 +5,9 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.Embedd
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ErrorHandlingConfig;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.HuggingFaceModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ModelConfig;
+import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.OpenAiModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.TenantWorkloadCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageEmbeddingCredentials;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.VoyageModelConfig;
@@ -159,14 +161,22 @@ public record EmbeddingModelConfig(
                   + " vs "
                   + baseModelConfig.getModelProvider());
         }
-        if (baseModelConfig.getModelProvider() == EmbeddingProvider.VOYAGE) {
-          consolidatedModelConfig =
-              consolidateVoyageModelConfig(
-                  (VoyageModelConfig) baseModelConfig, (VoyageModelConfig) overrideModelConfig);
-        } else {
-          throw new IllegalArgumentException(
-              "Unsupported model provider: " + baseModelConfig.getModelProvider());
-        }
+        consolidatedModelConfig =
+            switch (baseModelConfig.getModelProvider()) {
+              case VOYAGE ->
+                  consolidateVoyageModelConfig(
+                      (VoyageModelConfig) baseModelConfig, (VoyageModelConfig) overrideModelConfig);
+              case OPENAI_COMPATIBLE ->
+                  consolidateOpenAiModelConfig(
+                      (OpenAiModelConfig) baseModelConfig, (OpenAiModelConfig) overrideModelConfig);
+              case HUGGINGFACE_INFERENCE ->
+                  consolidateHuggingFaceModelConfig(
+                      (HuggingFaceModelConfig) baseModelConfig,
+                      (HuggingFaceModelConfig) overrideModelConfig);
+              case AWS_BEDROCK, COHERE ->
+                  throw new IllegalArgumentException(
+                      "Unsupported model provider: " + baseModelConfig.getModelProvider());
+            };
       }
 
       // Override error handling config if provided
@@ -187,11 +197,12 @@ public record EmbeddingModelConfig(
                   + " vs "
                   + baseCredentials.getCredentialProvider());
         }
-        if (baseCredentials.getCredentialProvider() == EmbeddingProvider.VOYAGE) {
-          consolidatedCredentials = overrideCredentials;
-        } else {
-          throw new IllegalArgumentException(
-              "Unsupported credential provider: " + baseCredentials.getCredentialProvider());
+        switch (baseCredentials.getCredentialProvider()) {
+          case VOYAGE, OPENAI_COMPATIBLE, HUGGINGFACE_INFERENCE ->
+              consolidatedCredentials = overrideCredentials;
+          case AWS_BEDROCK, COHERE ->
+              throw new IllegalArgumentException(
+                  "Unsupported credential provider: " + baseCredentials.getCredentialProvider());
         }
       }
     }
@@ -230,6 +241,46 @@ public record EmbeddingModelConfig(
         overrideModelConfig.similarityByQuantization.isPresent()
             ? overrideModelConfig.similarityByQuantization
             : baseModelConfig.similarityByQuantization);
+  }
+
+  private static ModelConfig consolidateOpenAiModelConfig(
+      OpenAiModelConfig baseModelConfig, OpenAiModelConfig overrideModelConfig) {
+    return new OpenAiModelConfig(
+        overrideModelConfig.outputDimensions.isPresent()
+            ? overrideModelConfig.outputDimensions
+            : baseModelConfig.outputDimensions,
+        overrideModelConfig.batchSize.isPresent()
+            ? overrideModelConfig.batchSize
+            : baseModelConfig.batchSize,
+        overrideModelConfig.batchTokenLimit.isPresent()
+            ? overrideModelConfig.batchTokenLimit
+            : baseModelConfig.batchTokenLimit,
+        overrideModelConfig.quantization.isPresent()
+            ? overrideModelConfig.quantization
+            : baseModelConfig.quantization,
+        overrideModelConfig.forwardDimensions.isPresent()
+            ? overrideModelConfig.forwardDimensions
+            : baseModelConfig.forwardDimensions,
+        overrideModelConfig.queryPrefix.isPresent()
+            ? overrideModelConfig.queryPrefix
+            : baseModelConfig.queryPrefix,
+        overrideModelConfig.documentPrefix.isPresent()
+            ? overrideModelConfig.documentPrefix
+            : baseModelConfig.documentPrefix);
+  }
+
+  private static ModelConfig consolidateHuggingFaceModelConfig(
+      HuggingFaceModelConfig baseModelConfig, HuggingFaceModelConfig overrideModelConfig) {
+    return new HuggingFaceModelConfig(
+        overrideModelConfig.modelId.or(() -> baseModelConfig.modelId),
+        overrideModelConfig.outputDimensions.or(() -> baseModelConfig.outputDimensions),
+        overrideModelConfig.batchSize.or(() -> baseModelConfig.batchSize),
+        overrideModelConfig.batchTokenLimit.or(() -> baseModelConfig.batchTokenLimit),
+        overrideModelConfig.quantization.or(() -> baseModelConfig.quantization),
+        overrideModelConfig.normalize.or(() -> baseModelConfig.normalize),
+        overrideModelConfig.truncate.or(() -> baseModelConfig.truncate),
+        overrideModelConfig.queryPrefix.or(() -> baseModelConfig.queryPrefix),
+        overrideModelConfig.documentPrefix.or(() -> baseModelConfig.documentPrefix));
   }
 
   @Override

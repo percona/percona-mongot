@@ -7,6 +7,8 @@ java_library(
         "EmbeddingModelCatalog.java",
         "EmbeddingModelConfig.java",
         "EmbeddingServiceConfig.java",
+        "HuggingFaceApiSchema.java",
+        "OpenAiApiSchema.java",
         "VoyageApiSchema.java",
     ],
     visibility = ["//:__subpackages__"],

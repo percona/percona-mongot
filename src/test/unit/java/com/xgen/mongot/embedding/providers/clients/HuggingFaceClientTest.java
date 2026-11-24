@@ -13,7 +13,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.MongotMetadata;
 import com.xgen.mongot.embedding.VectorOrError;
@@ -27,6 +26,7 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.Huggin
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.FloatVector;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;

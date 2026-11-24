@@ -789,28 +789,35 @@ public class OnPremMongotBootstrapper {
       MeterRegistry meterRegistry,
       SearchCommandsRegister.BootstrapperMetadata bootstrapperMetadata) {
 
-    // Load credentials from files if configured
+    // auto-embedding turns on when the config has an `embedding` section — no Voyage keys needed
+    // anymore (OPENAI_COMPATIBLE works keyless). Voyage models still need query/indexing keys or
+    // they're dropped.
+    if (config.embeddingConfig().isEmpty()) {
+      LOG.info(
+          "Auto-embedding functionality is disabled. To enable, add an `embedding` section to "
+              + "your community config (Voyage models additionally require queryKeyFile and "
+              + "indexingKeyFile).");
+      return emptyEmbeddingServiceManager(meterRegistry, mongotConfigs);
+    }
+
+    // Load Voyage credentials from files if configured (optional for keyless providers).
     Optional<EmbeddingServiceManagerConfig.VoyageCredentials> credentials =
         loadVoyageCredentials(config.embeddingConfig());
 
-    // Load internal embedding configuration
+    // catalog source order: on-disk override (embedding.modelConfigFile) -> file shipped next
+    // to the JAR -> bundled-in-JAR resource
+    Optional<Path> modelConfigFile =
+        config.embeddingConfig().flatMap(EmbeddingConfig::modelConfigFile);
     Optional<EmbeddingServiceManagerConfig> embeddingConfigOpt =
-        EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(credentials);
+        EmbeddingServiceManagerConfig.loadEmbeddingServiceConfig(credentials, modelConfigFile);
 
-    if (embeddingConfigOpt.isEmpty()) {
+    if (embeddingConfigOpt.isEmpty() || embeddingConfigOpt.get().configs().isEmpty()) {
       LOG.info(
-          "Auto-embedding functionality is disabled. To enable, configure queryKeyFile and "
-              + "indexingKeyFile in the embedding section of your community config.");
-      // Return no-op supplier - embedding service manager with empty configs
-      return Suppliers.memoize(
-          () ->
-              new EmbeddingServiceManager(
-                  List.of(),
-                  new EmbeddingClientFactory(meterRegistry, DeploymentEnvironment.COMMUNITY),
-                  Executors.fixedSizeThreadScheduledExecutor(
-                      "embedding-providers", 1, meterRegistry),
-                  meterRegistry,
-                  mongotConfigs.autoEmbeddingMaterializedViewConfig.congestionControl));
+          "Auto-embedding is enabled but no usable embedding models are configured; the "
+              + "subsystem will be inactive. Configure Voyage credentials, a reachable "
+              + "OPENAI_COMPATIBLE endpoint, or a HUGGINGFACE_INFERENCE apiToken to activate "
+              + "models.");
+      return emptyEmbeddingServiceManager(meterRegistry, mongotConfigs);
     }
 
     // Get user's endpoint override from config
@@ -846,6 +853,19 @@ public class OnPremMongotBootstrapper {
                 mongotConfigs.autoEmbeddingMaterializedViewConfig.embeddingProviderRpsLimit));
   }
 
+  /** No-op supplier used when auto-embedding is disabled or has no usable models. */
+  private static Supplier<EmbeddingServiceManager> emptyEmbeddingServiceManager(
+      MeterRegistry meterRegistry, MongotConfigs mongotConfigs) {
+    return Suppliers.memoize(
+        () ->
+            new EmbeddingServiceManager(
+                List.of(),
+                new EmbeddingClientFactory(meterRegistry, DeploymentEnvironment.COMMUNITY),
+                Executors.fixedSizeThreadScheduledExecutor("embedding-providers", 1, meterRegistry),
+                meterRegistry,
+                mongotConfigs.autoEmbeddingMaterializedViewConfig.congestionControl));
+  }
+
   /** Loads Voyage API credential secrets from files specified in embedding config. */
   private static Optional<EmbeddingServiceManagerConfig.VoyageCredentials> loadVoyageCredentials(
       Optional<EmbeddingConfig> embeddingConfig) {
@@ -856,9 +876,10 @@ public class OnPremMongotBootstrapper {
     EmbeddingConfig config = embeddingConfig.get();
     if (config.queryKeyFile().isEmpty() || config.indexingKeyFile().isEmpty()) {
       LOG.warn(
-          "Voyage API credential files not configured. Auto-embedding functionality "
-              + "will be disabled. To enable auto-embedding indexes, specify both queryKeyFile "
-              + "and indexingKeyFile in the embedding configuration.");
+          "Voyage API credential files not configured: Voyage models will be unavailable. Keyless"
+              + " OPENAI_COMPATIBLE models (Ollama/vLLM/TEI) remain active. To enable Voyage"
+              + " models, specify both queryKeyFile and indexingKeyFile in the embedding "
+              + "configuration.");
       return Optional.empty();
     }
 
@@ -876,36 +897,53 @@ public class OnPremMongotBootstrapper {
               new VoyageEmbeddingCredentials(queryKey),
               new VoyageEmbeddingCredentials(indexingKey)));
     } catch (IOException | IllegalArgumentException e) {
-      LOG.warn("Failed to read Voyage API credential files. Auto-embedding disabled.", e);
+      LOG.warn(
+          "Failed to read Voyage API credential files: Voyage models will be unavailable "
+              + "(keyless OPENAI_COMPATIBLE models remain active).",
+          e);
       return Optional.empty();
     }
   }
 
-  /** Applies provider endpoint override to all embedding service configs. */
+  /**
+   * Apply the global {@code embedding.providerEndpoint} override to Voyage models only.
+   *
+   * <p>It's an upstream single-provider knob, so we keep it for Voyage. OPENAI_COMPATIBLE models
+   * each have their own URL in the catalog and must not be collapsed onto one global value, so
+   * they're returned unchanged.
+   */
   static List<EmbeddingServiceConfig> applyEndpointOverride(
       List<EmbeddingServiceConfig> configs, String endpoint) {
-    LOG.info("Overriding embedding provider endpoint with user-provided value: {}", endpoint);
+    LOG.info(
+        "Overriding Voyage embedding provider endpoint with user-provided value: {} "
+            + "(OPENAI_COMPATIBLE models keep their per-model catalog endpoints)",
+        endpoint);
     return configs.stream()
         .map(
-            serviceConfig ->
-                new EmbeddingServiceConfig(
-                    serviceConfig.embeddingProvider,
-                    serviceConfig.modelName,
-                    serviceConfig.rpsPerProvider,
-                    new EmbeddingServiceConfig.EmbeddingConfig(
-                        serviceConfig.embeddingConfig.region,
-                        serviceConfig.embeddingConfig.getModelConfigBase(),
-                        serviceConfig.embeddingConfig.getErrorHandlingConfigBase(),
-                        serviceConfig.embeddingConfig.getCredentialsBase(),
-                        serviceConfig.embeddingConfig.getQueryParams(),
-                        serviceConfig.embeddingConfig.getCollectionScanParams(),
-                        serviceConfig.embeddingConfig.getChangeStreamParams(),
-                        serviceConfig.embeddingConfig.getTenantCredentials(),
-                        serviceConfig.embeddingConfig.isDedicatedCluster,
-                        Optional.of(endpoint),
-                        serviceConfig.embeddingConfig.useFlexTier,
-                        serviceConfig.embeddingConfig.rpsPerProvider),
-                    serviceConfig.compatibleModels))
+            serviceConfig -> {
+              if (serviceConfig.embeddingProvider
+                  != EmbeddingServiceConfig.EmbeddingProvider.VOYAGE) {
+                return serviceConfig;
+              }
+              return new EmbeddingServiceConfig(
+                  serviceConfig.embeddingProvider,
+                  serviceConfig.modelName,
+                  serviceConfig.rpsPerProvider,
+                  new EmbeddingServiceConfig.EmbeddingConfig(
+                      serviceConfig.embeddingConfig.region,
+                      serviceConfig.embeddingConfig.getModelConfigBase(),
+                      serviceConfig.embeddingConfig.getErrorHandlingConfigBase(),
+                      serviceConfig.embeddingConfig.getCredentialsBase(),
+                      serviceConfig.embeddingConfig.getQueryParams(),
+                      serviceConfig.embeddingConfig.getCollectionScanParams(),
+                      serviceConfig.embeddingConfig.getChangeStreamParams(),
+                      serviceConfig.embeddingConfig.getTenantCredentials(),
+                      serviceConfig.embeddingConfig.isDedicatedCluster,
+                      Optional.of(endpoint),
+                      serviceConfig.embeddingConfig.useFlexTier,
+                      serviceConfig.embeddingConfig.rpsPerProvider),
+                  serviceConfig.compatibleModels);
+            })
         .toList();
   }
 
