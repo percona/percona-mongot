@@ -85,6 +85,11 @@ public record EmbeddingConfig(
     public Optional<Path> indexingKeyFile = Optional.empty();
 
     @CommandLine.Option(
+        names = "--embeddingModelConfigFile",
+        description = "Path to a YAML file that overrides the embedding model catalog")
+    public Optional<Path> modelConfigFile = Optional.empty();
+
+    @CommandLine.Option(
         names = "--isAutoEmbeddingViewWriter",
         description = "Configures this instance as the auto-embedding view writer (leader)")
     public Optional<Boolean> isAutoEmbeddingViewWriter = Optional.empty();
@@ -93,6 +98,7 @@ public record EmbeddingConfig(
       addStringLeafValue(Fields.PROVIDER_ENDPOINT, () -> this.providerEndpoint);
       addPathLeafValue(Fields.QUERY_KEY_FILE, () -> this.queryKeyFile);
       addPathLeafValue(Fields.INDEXING_KEY_FILE, () -> this.indexingKeyFile);
+      addPathLeafValue(Fields.MODEL_CONFIG_FILE, () -> this.modelConfigFile);
       addBooleanLeafValue(
           Fields.IS_AUTO_EMBEDDING_VIEW_WRITER, () -> this.isAutoEmbeddingViewWriter);
     }
