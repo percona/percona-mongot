@@ -14,13 +14,16 @@ import org.bson.BsonDocument;
 import picocli.CommandLine;
 
 /**
- * Basic embedding configuration for community edition.
- * Supports:
- * - Overriding the provider endpoint URL
- * - Specifying file paths for Voyage API credentials
- * - Overriding the embedding model catalog with an on-disk file
- * - Configuring whether this instance is the auto-embedding view writer (leader).
- * The advanced embedding configs are defined in {@code CommunityAutoEmbeddingConfig}
+ * Basic embedding configuration for community edition. Supports:
+ *
+ * <ul>
+ *   <li>Overriding the provider endpoint URL
+ *   <li>Specifying file paths for Voyage API credentials
+ *   <li>Overriding the embedding model catalog with an on-disk file
+ *   <li>Configuring whether this instance is the auto-embedding view writer (leader)
+ * </ul>
+ *
+ * <p>The advanced embedding configs are defined in {@code CommunityAutoEmbeddingConfig}.
  */
 public record EmbeddingConfig(
     Optional<String> providerEndpoint,
