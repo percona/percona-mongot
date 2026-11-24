@@ -10,6 +10,24 @@ exports_files(
     visibility = ["//deploy:__subpackages__"],
 )
 
+exports_files(
+    ["launcher_jvm_flags_test.sh"],
+    visibility = ["//deploy:__subpackages__"],
+)
+
+sh_test(
+    name = "community_jvm_flags_test",
+    size = "small",
+    srcs = ["launcher_jvm_flags_test.sh"],
+    args = [
+        "$(location community-resources/mongot)",
+        "bin/jdk",
+        "com.xgen.mongot.community.MongotCommunity",
+    ],
+    data = ["community-resources/mongot"],
+    tags = ["unit"],
+)
+
 # The two anchoring roots distrusted by CLOUDP-466523. Matches the scope
 # of the SRE host remediation (chef nds-common::ca-trust blocklists exactly these two).
 DISTRUSTED_ROOT_CNS = [

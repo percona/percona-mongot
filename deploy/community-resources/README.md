@@ -15,6 +15,12 @@ MongoDB versions 8.2 and above support search index management directly through 
 supported driver. For more information,
 see the [Atlas Search Index documentation](https://mdb.link/atlas-search-index).
 
+## Security
+
+If you start `mongot` with your own `java` command instead of the bundled
+launcher, add `-XX:-UseBASE64Intrinsics` to your JVM arguments to avoid
+CVE-2026-114938.
+
 ## License
 
 MongoDB Search Community Edition is subject to the License Agreement contained herein. Please see
