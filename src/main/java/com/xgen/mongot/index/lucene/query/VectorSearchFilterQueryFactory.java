@@ -9,6 +9,7 @@ import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.operators.VectorSearchFilter;
 import com.xgen.mongot.index.query.operators.mql.AndClause;
 import com.xgen.mongot.index.query.operators.mql.Clause;
+import com.xgen.mongot.index.query.operators.mql.ClosedRangeBoundComparisonOperator;
 import com.xgen.mongot.index.query.operators.mql.ComparisonOperator;
 import com.xgen.mongot.index.query.operators.mql.CompoundClause;
 import com.xgen.mongot.index.query.operators.mql.EqOperator;
@@ -22,6 +23,8 @@ import com.xgen.mongot.index.query.operators.mql.NotOperator;
 import com.xgen.mongot.index.query.operators.mql.OpenRangeBoundComparisonOperator;
 import com.xgen.mongot.index.query.operators.mql.OrClause;
 import com.xgen.mongot.index.query.operators.mql.SimpleClause;
+import com.xgen.mongot.index.query.optimizer.QueryOptimizer;
+import com.xgen.mongot.index.query.optimizer.rules.DefaultRuleRegistry;
 import com.xgen.mongot.util.FieldPath;
 import java.io.IOException;
 import java.util.List;
@@ -38,6 +41,7 @@ public class VectorSearchFilterQueryFactory {
   private final InQueryFactory inQueryFactory;
   private final ExistsQueryFactory existsQueryFactory;
   private final EqualsQueryFactory equalsQueryFactory;
+  private final QueryOptimizer queryOptimizer;
 
   public static VectorSearchFilterQueryFactory create(VectorQueryFactoryContext factoryContext) {
     return create(factoryContext, DynamicFeatureFlagRegistry.empty());
@@ -47,15 +51,25 @@ public class VectorSearchFilterQueryFactory {
       VectorQueryFactoryContext factoryContext,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     var dateRangeQueryFactory =
-        new DateRangeQueryFactory(
-            factoryContext.getIndexCapabilities(), dynamicFeatureFlagRegistry);
-    var equalsQueryFactory = new EqualsQueryFactory(factoryContext, dateRangeQueryFactory);
+        new DateRangeQueryFactory(factoryContext, dynamicFeatureFlagRegistry);
+    var numericRangeQueryFactory =
+        new NumericRangeQueryFactory(factoryContext, dynamicFeatureFlagRegistry);
+    var equalsQueryFactory =
+        new EqualsQueryFactory(factoryContext, dateRangeQueryFactory, numericRangeQueryFactory);
     var existsQueryFactory = new ExistsQueryFactory(factoryContext);
     var rangeQueryFactory =
-        new RangeQueryFactory(factoryContext, equalsQueryFactory, dateRangeQueryFactory);
+        new RangeQueryFactory(
+            factoryContext, equalsQueryFactory, dateRangeQueryFactory, numericRangeQueryFactory);
     var inQueryFactory = new InQueryFactory(factoryContext, dynamicFeatureFlagRegistry);
+    var queryOptimizer =
+        new QueryOptimizer(DefaultRuleRegistry.get(), factoryContext, dynamicFeatureFlagRegistry);
     return new VectorSearchFilterQueryFactory(
-        factoryContext, rangeQueryFactory, inQueryFactory, existsQueryFactory, equalsQueryFactory);
+        factoryContext,
+        rangeQueryFactory,
+        inQueryFactory,
+        existsQueryFactory,
+        equalsQueryFactory,
+        queryOptimizer);
   }
 
   VectorSearchFilterQueryFactory(
@@ -63,12 +77,14 @@ public class VectorSearchFilterQueryFactory {
       RangeQueryFactory rangeQueryFactory,
       InQueryFactory inQueryFactory,
       ExistsQueryFactory existsQueryFactory,
-      EqualsQueryFactory equalsQueryFactory) {
+      EqualsQueryFactory equalsQueryFactory,
+      QueryOptimizer queryOptimizer) {
     this.factoryContext = factoryContext;
     this.rangeQueryFactory = rangeQueryFactory;
     this.inQueryFactory = inQueryFactory;
     this.existsQueryFactory = existsQueryFactory;
     this.equalsQueryFactory = equalsQueryFactory;
+    this.queryOptimizer = queryOptimizer;
   }
 
   /**
@@ -82,7 +98,8 @@ public class VectorSearchFilterQueryFactory {
 
   Query createLuceneFilter(VectorSearchFilter filter, SingleQueryContext singleQueryContext)
       throws InvalidQueryException, IOException {
-    return switch (filter) {
+    VectorSearchFilter optimized = this.queryOptimizer.optimize(filter).tree();
+    return switch (optimized) {
       case VectorSearchFilter.ClauseFilter clauseFilter ->
           createLuceneFilterFromClause(clauseFilter.clause(), singleQueryContext);
       case VectorSearchFilter.OperatorFilter operatorFilter ->
@@ -193,6 +210,9 @@ public class VectorSearchFilterQueryFactory {
       case OpenRangeBoundComparisonOperator openRangeBoundComparisonOperator ->
           this.rangeQueryFactory.fromBounds(
               openRangeBoundComparisonOperator.getBounds(), List.of(path), singleQueryContext);
+      case ClosedRangeBoundComparisonOperator closedRangeBoundComparisonOperator ->
+          this.rangeQueryFactory.fromFusedBounds(
+              closedRangeBoundComparisonOperator.bounds(), List.of(path), singleQueryContext);
       case EqOperator eqOperator ->
           this.equalsQueryFactory.fromValue(
               eqOperator.value(), path, singleQueryContext.getEmbeddedRoot());
@@ -205,7 +225,9 @@ public class VectorSearchFilterQueryFactory {
               singleQueryContext);
       case InOperator inOperator ->
           this.inQueryFactory.fromValues(
-              inOperator.values(), inOperator.getNonNullValueType(), List.of(path),
+              inOperator.values(),
+              inOperator.getNonNullValueType(),
+              List.of(path),
               singleQueryContext);
       case NinOperator ninOperator ->
           CompoundQueryFactory.negate(

@@ -1,0 +1,140 @@
+package com.xgen.mongot.server.grpc;
+
+import static com.xgen.mongot.server.command.CommandFactoryMarker.Type.COMMAND_FACTORY;
+import static com.xgen.mongot.util.Check.checkArg;
+
+import com.google.common.base.Stopwatch;
+import com.xgen.mongot.server.command.Command;
+import com.xgen.mongot.server.command.CommandFactory;
+import com.xgen.mongot.server.command.ParsedCommand;
+import com.xgen.mongot.server.command.registry.CommandNotFoundException;
+import com.xgen.mongot.server.command.registry.CommandRegistry;
+import com.xgen.mongot.server.executors.BulkheadCommandExecutor;
+import com.xgen.mongot.server.executors.CancelledStreamSkipException;
+import com.xgen.mongot.server.message.MessageUtils;
+import com.xgen.mongot.util.BsonUtils;
+import com.xgen.mongot.util.FutureUtils;
+import com.xgen.mongot.util.mongodb.Errors;
+import io.grpc.Status;
+import io.grpc.stub.ServerCalls;
+import io.grpc.stub.StreamObserver;
+import org.bson.BsonDocument;
+import org.bson.RawBsonDocument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Unary handler for {@code mongodb.BsonCommandService/manageSearchIndex}. Unlike the bidi streaming
+ * {@code search}/{@code vectorSearch} methods, this is a plain single request/single response call
+ * with no cursor or stream state to track.
+ *
+ * <p>Records the same per-command metrics as the streaming and TCP paths: {@code
+ * command.manageSearchIndexCommandTotalLatency} on success and {@code
+ * command.manageSearchIndexCommandFailure} on failure.
+ */
+public class ManageSearchIndexUnaryCallHandler
+    implements ServerCalls.UnaryMethod<RawBsonDocument, RawBsonDocument> {
+
+  private static final Logger LOG =
+      LoggerFactory.getLogger(ManageSearchIndexUnaryCallHandler.class);
+
+  private final CommandRegistry commandRegistry;
+  private final BulkheadCommandExecutor commandExecutor;
+  private final HealthManager healthManager;
+
+  ManageSearchIndexUnaryCallHandler(
+      CommandRegistry commandRegistry,
+      BulkheadCommandExecutor commandExecutor,
+      HealthManager healthManager) {
+    this.commandRegistry = commandRegistry;
+    this.commandExecutor = commandExecutor;
+    this.healthManager = healthManager;
+  }
+
+  @Override
+  public void invoke(RawBsonDocument request, StreamObserver<RawBsonDocument> responseObserver) {
+    if (!this.healthManager.isHealthy()) {
+      responseObserver.onError(Status.UNAVAILABLE.asRuntimeException());
+      return;
+    }
+
+    Stopwatch totalTime = Stopwatch.createStarted();
+    ParsedCommand parsedCommand;
+    CommandRegistry.CommandRegistration registration;
+    try {
+      // The first key is the command name, same convention as BsonMessageCallHandler.
+      parsedCommand = new ParsedCommand(request.getFirstKey(), request);
+      registration = this.commandRegistry.getCommandRegistration(parsedCommand.name());
+    } catch (CommandNotFoundException e) {
+      // Expected during version skew and answered with a coded error, so this is debug-level
+      // detail rather than something to alert on.
+      LOG.atDebug().addKeyValue("command", e.getCommandName()).log("Rejected unknown command");
+      respondWithError(responseObserver, e);
+      return;
+    } catch (Throwable t) {
+      // No registration was resolved, so there are no per-command metrics to record.
+      LOG.error("Got exception. ", t);
+      respondWithError(responseObserver, t);
+      return;
+    }
+
+    try {
+      // manageSearchIndex must resolve to a plain command factory; session-command factories are
+      // not valid on this path and have no meaning here.
+      checkArg(
+          registration.factory.getType() == COMMAND_FACTORY,
+          "do not know how to work with the command factory of %s",
+          parsedCommand.name());
+
+      Command command = ((CommandFactory) registration.factory).create(parsedCommand.body());
+
+      // isCancelled is used for cancelling search and vector search query, and not for search
+      // index management commands. So use a false.
+      this.commandExecutor
+          .execute(command, () -> false)
+          .whenComplete(
+              (response, cause) -> {
+                if (cause != null) {
+                  recordFailure(registration, cause);
+                  respondWithError(responseObserver, cause);
+                } else {
+                  respond(responseObserver, response);
+                  registration.totalTimer.record(totalTime.elapsed());
+                }
+              });
+    } catch (Throwable t) {
+      LOG.error("Got exception. ", t);
+      recordFailure(registration, t);
+      respondWithError(responseObserver, t);
+    }
+  }
+
+  private static void recordFailure(
+      CommandRegistry.CommandRegistration registration, Throwable cause) {
+    Throwable unwrapped = FutureUtils.unwrapCause(cause);
+    if (!(unwrapped instanceof InterruptedException)
+        && !(unwrapped instanceof CancelledStreamSkipException)) {
+      registration.recordFailure(unwrapped);
+    }
+  }
+
+  private static void respond(
+      StreamObserver<RawBsonDocument> responseObserver, BsonDocument response) {
+    responseObserver.onNext(new RawBsonDocument(response, BsonUtils.BSON_DOCUMENT_CODEC));
+    // A unary call sends exactly one response message, so onCompleted() must follow onNext()
+    // to fully close the stream; without it, the client would hang indefinitely waiting for
+    // more data.
+    responseObserver.onCompleted();
+  }
+
+  private void respondWithError(StreamObserver<RawBsonDocument> responseObserver, Throwable cause) {
+    Throwable unwrapped = FutureUtils.unwrapCause(cause);
+
+    BsonDocument error =
+        unwrapped instanceof CommandNotFoundException e
+            ? MessageUtils.createError(Errors.COMMAND_NOT_FOUND, e.errorMessage())
+            : MessageUtils.createErrorBody(
+                unwrapped.getMessage() == null ? "unknown error" : unwrapped.getMessage());
+    respond(responseObserver, error);
+  }
+}

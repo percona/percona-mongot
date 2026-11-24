@@ -8,6 +8,7 @@ import static com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -23,6 +24,8 @@ import static org.mockito.Mockito.verify;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.embedding.EmbeddingRequestContext;
 import com.xgen.mongot.embedding.VectorOrError;
+import com.xgen.mongot.embedding.exceptions.EmbeddingProviderBatchingException;
+import com.xgen.mongot.embedding.exceptions.EmbeddingProviderRateLimitException;
 import com.xgen.mongot.embedding.exceptions.EmbeddingProviderTransientException;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
@@ -30,9 +33,12 @@ import com.xgen.mongot.embedding.providers.congestion.AimdCongestionControl;
 import com.xgen.mongot.embedding.providers.congestion.DynamicSemaphore;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.util.UserFacingException;
 import com.xgen.mongot.util.bson.Vector;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.http.HttpClient;
@@ -44,6 +50,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import javax.net.ssl.SSLHandshakeException;
 import org.bson.BsonDocument;
@@ -347,7 +354,71 @@ public class VoyageClientTest {
   }
 
   @Test
-  public void testEmbed_returnsErrorOnEmptyList() throws Exception {
+  public void embed_invalidRequest_hasHttpInvalidRequestReason() throws Exception {
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn("some error occurred").when(mockResponse).body();
+    doReturn(400).when(mockResponse).statusCode();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_3_LARGE.collectionScan(),
+            METRICS_FACTORY,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    EmbeddingProviderTransientException ex =
+        assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> voyageClient.embed(List.of("invalid input"), dummyContext()));
+    assertEquals(EmbeddingProviderTransientException.Reason.HTTP_INVALID_REQUEST, ex.getReason());
+  }
+
+  @Test
+  public void embed_invalidRequest_truncatesLongResponseBodyInMessage() throws Exception {
+    // The response body can echo request input, and the exception message ends up in a
+    // rate-limited log line (EmbeddingIndexingWorkScheduler), so it must be bounded rather than
+    // embedding the full, potentially large and sensitive provider body.
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    String longBody = "x".repeat(2000);
+    doReturn(longBody).when(mockResponse).body();
+    doReturn(400).when(mockResponse).statusCode();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_3_LARGE.collectionScan(),
+            METRICS_FACTORY,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    EmbeddingProviderTransientException ex =
+        assertThrows(
+            EmbeddingProviderTransientException.class,
+            () -> voyageClient.embed(List.of("invalid input"), dummyContext()));
+    assertTrue(ex.getMessage().length() < longBody.length());
+    assertFalse(ex.getMessage().contains(longBody));
+  }
+
+  @Test
+  public void embed_invalidRequest_queryTierReturnsErrorInsteadOfThrowing() throws Exception {
+    // Query-time embedding is synchronous and not retried, and its caller (VectorSearchCommand)
+    // translates a VectorOrError.errorMessage into its own query error. This tier must preserve
+    // the pre-fix swallow behavior instead of throwing, unlike indexing tiers (see above).
     HttpClient mockClient = mock(HttpClient.class);
     HttpResponse<String> mockResponse = mock(HttpResponse.class);
     doReturn("some error occurred").when(mockResponse).body();
@@ -367,12 +438,304 @@ public class VoyageClientTest {
             false);
     VoyageClient.injectVoyageClient(voyageClient, mockClient);
 
-    assertEquals(
-        voyageClient.embed(List.of("invalid input"), dummyContext()),
-        List.of(
-            new VectorOrError(
-                "Got invalid request, fail fast and give up retries. "
-                    + "Response body: some error occurred.")));
+    List<VectorOrError> results = voyageClient.embed(List.of("invalid input"), dummyContext());
+    assertEquals(1, results.size());
+    assertTrue(results.get(0).errorMessage.isPresent());
+    assertTrue(results.get(0).vector.isEmpty());
+  }
+
+  @Test
+  public void embed_invalidRequest_recordsHttpInvalidRequestMetric() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_3_LARGE.collectionScan(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, httpResponseClient(400, "some error occurred"));
+
+    assertThrows(
+        EmbeddingProviderTransientException.class,
+        () -> voyageClient.embed(List.of("invalid input"), dummyContext()));
+
+    double count =
+        registry
+            .find("test.embeddingProviderErrors")
+            .tags(
+                Tags.of(
+                    "exceptionType", "EmbeddingProviderTransientException",
+                    "reason", "http_invalid_request",
+                    "errorCode", "400"))
+            .counter()
+            .count();
+    assertEquals(1.0, count, 1E-7);
+  }
+
+  @Test
+  public void embed_invalidRequest_queryTierRecordsHttpInvalidRequestMetric() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            VOYAGE_3_LARGE.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, httpResponseClient(400, "some error occurred"));
+
+    // QUERY tier swallows this into a VectorOrError instead of throwing (see
+    // embed_invalidRequest_queryTierReturnsErrorInsteadOfThrowing), but must still record the
+    // failure reason so the SLO can tell it apart from rate limits and oversized batches.
+    List<VectorOrError> results = voyageClient.embed(List.of("invalid input"), dummyContext());
+    assertTrue(results.get(0).errorMessage.isPresent());
+
+    double count =
+        registry
+            .find("test.embeddingProviderErrors")
+            .tags(
+                Tags.of(
+                    "exceptionType", "EmbeddingProviderTransientException",
+                    "reason", "http_invalid_request",
+                    "errorCode", "400"))
+            .counter()
+            .count();
+    assertEquals(1.0, count, 1E-7);
+  }
+
+  @Test
+  public void embed_batchingException_recordsPayloadTooLargeMetric() throws Exception {
+    HttpClient mockClient =
+        httpResponseClient(400, "Please lower the number of tokens in the batch, and try again.");
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_3_LARGE.collectionScan(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    assertThrows(
+        EmbeddingProviderBatchingException.class,
+        () -> voyageClient.embed(List.of("too many tokens"), dummyContext()));
+
+    double count =
+        registry
+            .find("test.embeddingProviderErrors")
+            .tags(
+                Tags.of(
+                    "exceptionType", "EmbeddingProviderTransientException",
+                    "reason", "payload_too_large",
+                    "errorCode", "400",
+                    "rebatchAttempt", "false"))
+            .counter()
+            .count();
+    assertEquals(1.0, count, 1E-7);
+  }
+
+  @Test
+  public void embed_batchingException_rebatchAttempt_tagsMetricRebatchAttemptTrue()
+      throws Exception {
+    HttpClient mockClient =
+        httpResponseClient(400, "Please lower the number of tokens in the batch, and try again.");
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_3_LARGE.collectionScan(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    // Simulates the sub-batch call EmbeddingServiceManager.handleBatchingException makes after an
+    // original batch already hit payload_too_large — a payload_too_large here means rebatching at
+    // the smaller size didn't help, unlike the original attempt.
+    assertThrows(
+        EmbeddingProviderBatchingException.class,
+        () ->
+            voyageClient.embed(
+                List.of("still too many tokens"), dummyContext().withRebatchAttempt()));
+
+    double count =
+        registry
+            .find("test.embeddingProviderErrors")
+            .tags(
+                Tags.of(
+                    "exceptionType", "EmbeddingProviderTransientException",
+                    "reason", "payload_too_large",
+                    "errorCode", "400",
+                    "rebatchAttempt", "true"))
+            .counter()
+            .count();
+    assertEquals(1.0, count, 1E-7);
+  }
+
+  @Test
+  public void embed_success_tokensAtThreshold_recordsQueryTierLatency() throws Exception {
+    assertLatencyTierRecorded(512, "query");
+  }
+
+  @Test
+  public void embed_success_tokensOverThreshold_recordsDocumentTierLatency() throws Exception {
+    assertLatencyTierRecorded(513, "document");
+  }
+
+  @Test
+  public void embed_collectionScanUnderThreshold_stillRecordsDocumentTierLatency()
+      throws Exception {
+    // COLLECTION_SCAN always declares "document" in the X-Voyage-Tier header, regardless of
+    // token count - the token-based override to "document" only applies when we declared
+    // "query" in the first place. A short indexing-tier input must not be mislabeled "query".
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(200).when(mockResponse).statusCode();
+    doReturn(
+            "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\","
+                + "\"embedding\":\"AKBEPACgSbw=\",\"index\":0}],\"model\":\"voyage-3-large\","
+                + "\"usage\":{\"total_tokens\":1}}")
+        .when(mockResponse)
+        .body();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.COLLECTION_SCAN,
+            VOYAGE_3_LARGE.collectionScan(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    voyageClient.embed(List.of("test"), dummyContext());
+
+    assertNull(
+        registry
+            .find("test.embeddingRequestLatencySeconds")
+            .tags(Tags.of("tier", "query"))
+            .summary());
+    long documentTierCount =
+        registry
+            .find("test.embeddingRequestLatencySeconds")
+            .tags(Tags.of("tier", "document"))
+            .summary()
+            .count();
+    assertEquals(1, documentTierCount);
+  }
+
+  @Test
+  public void embed_responseMissingDataEntries_recordsNoLatencySample() throws Exception {
+    // A schema-valid 200 with fewer data entries than non-empty inputs makes iterator.next()
+    // throw while building results, after totalTokens is known but before a response can be
+    // considered genuinely successful; it must not be recorded as a successful latency sample.
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(200).when(mockResponse).statusCode();
+    doReturn(
+            "{\"object\":\"list\",\"data\":[],\"model\":\"voyage-3-large\","
+                + "\"usage\":{\"total_tokens\":1}}")
+        .when(mockResponse)
+        .body();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            VOYAGE_3_LARGE.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    assertThrows(
+        NoSuchElementException.class, () -> voyageClient.embed(List.of("test"), dummyContext()));
+
+    // The histogram is only registered on a successful record() call, so with no successful
+    // request at all in this test, neither tier's meter exists in the registry yet.
+    assertNull(
+        registry
+            .find("test.embeddingRequestLatencySeconds")
+            .tags(Tags.of("tier", "query"))
+            .summary());
+    assertNull(
+        registry
+            .find("test.embeddingRequestLatencySeconds")
+            .tags(Tags.of("tier", "document"))
+            .summary());
+  }
+
+  /**
+   * Drives a single successful embed() call whose response reports {@code totalTokens}, and asserts
+   * the {@code embeddingRequestLatencySeconds} histogram recorded exactly one sample under the
+   * {@code tier} tag. The token-count routing threshold (512) is an implicit agreement with Voyage,
+   * not something mongot can discover dynamically.
+   */
+  private static void assertLatencyTierRecorded(int totalTokens, String expectedTier)
+      throws Exception {
+    HttpClient mockClient = mock(HttpClient.class);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(200).when(mockResponse).statusCode();
+    doReturn(
+            "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\","
+                + "\"embedding\":\"AKBEPACgSbw=\",\"index\":0}],\"model\":\"voyage-3-large\","
+                + "\"usage\":{\"total_tokens\":"
+                + totalTokens
+                + "}}")
+        .when(mockResponse)
+        .body();
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            VOYAGE_3_LARGE.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    voyageClient.embed(List.of("test"), dummyContext());
+
+    long count =
+        registry
+            .find("test.embeddingRequestLatencySeconds")
+            .tags(Tags.of("tier", expectedTier))
+            .summary()
+            .count();
+    assertEquals(1, count);
   }
 
   @Test
@@ -883,9 +1246,7 @@ public class VoyageClientTest {
         captor.getValue().timeout());
   }
 
-  /**
-   * CLOUDP-392208: X-Voyage-Model and X-Voyage-Tier for GLB routing (no route-override header).
-   */
+  /** CLOUDP-392208: X-Voyage-Model and X-Voyage-Tier for GLB routing (no route-override header). */
   @Test
   public void voyageLoadBalancerHeaders_modelAndTierMatchWorkload() throws Exception {
     HttpClient mockClient = mock(HttpClient.class);
@@ -1495,8 +1856,7 @@ public class VoyageClientTest {
         assertThrows(
             EmbeddingProviderTransientException.class,
             () -> voyageClient.embed(List.of("hi"), dummyContext()));
-    assertEquals(
-        EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS, ex.getReason());
+    assertEquals(EmbeddingProviderTransientException.Reason.HTTP_NON_OK_STATUS, ex.getReason());
   }
 
   @Test
@@ -1504,8 +1864,7 @@ public class VoyageClientTest {
     HttpClient mockClient = createMockHttpClient();
     // MTM config with no matching tenant credentials
     var config =
-        createMtmClusterConfig(
-            Map.of("other_tenant", createTenantCredentials("other-token")));
+        createMtmClusterConfig(Map.of("other_tenant", createTenantCredentials("other-token")));
     VoyageClient voyageClient = createMockedVoyageClient(config, mockClient);
     // Use a database name with a tenant prefix that doesn't match
     EmbeddingRequestContext mtmContext =
@@ -1520,8 +1879,7 @@ public class VoyageClientTest {
             EmbeddingProviderTransientException.class,
             () -> voyageClient.embed(List.of("hi"), mtmContext));
     assertEquals(
-        EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE,
-        ex.getReason());
+        EmbeddingProviderTransientException.Reason.TENANT_CREDENTIALS_FAILURE, ex.getReason());
   }
 
   @Test
@@ -1531,14 +1889,35 @@ public class VoyageClientTest {
 
   @Test
   public void embed_429Status_recordsErrorCode429() throws Exception {
-    assertErrorCodeRecorded(
-        httpResponseClient(429, "rate limited"), "rate_limit_exceeded", "429");
+    assertErrorCodeRecorded(httpResponseClient(429, "rate limited"), "rate_limit_exceeded", "429");
+  }
+
+  @Test
+  public void embed_429Status_throwsUserFacingRateLimitException() throws Exception {
+    VoyageClient voyageClient =
+        new VoyageClient(
+            VOYAGE_3_LARGE,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            VOYAGE_3_LARGE.query(),
+            new MetricsFactory("test", new SimpleMeterRegistry()),
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(
+        voyageClient, httpResponseClient(429, "raw voyage internal detail"));
+
+    EmbeddingProviderRateLimitException ex =
+        assertThrows(
+            EmbeddingProviderRateLimitException.class,
+            () -> voyageClient.embed(List.of("hi"), dummyContext()));
+    assertTrue(UserFacingException.isUserFacing(ex));
+    // Message is user-facing — must not contain the raw provider response body.
+    assertEquals("Embedding provider rate limit exceeded, retry later", ex.getMessage());
   }
 
   @Test
   public void embed_500Status_recordsErrorCode500() throws Exception {
-    assertErrorCodeRecorded(
-        httpResponseClient(500, "server error"), "http_non_ok_status", "500");
+    assertErrorCodeRecorded(httpResponseClient(500, "server error"), "http_non_ok_status", "500");
   }
 
   @Test
@@ -1615,5 +1994,175 @@ public class VoyageClientTest {
     assertEquals("int8", getOutputDataType(VectorAutoEmbedQuantization.SCALAR));
     assertEquals("float", getOutputDataType(VectorAutoEmbedQuantization.BINARY));
     assertEquals("binary", getOutputDataType(VectorAutoEmbedQuantization.BINARY_NO_RESCORE));
+  }
+
+  @Test
+  public void embed_recordsAutoEmbeddingTokenAndRequestCounters() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    EmbeddingModelConfig modelConfig =
+        EmbeddingModelConfig.create(
+            "voyage-3-large",
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            createDedicatedClusterConfig("test-token"));
+    VoyageClient voyageClient =
+        new VoyageClient(
+            modelConfig,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            modelConfig.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    VoyageClient.injectVoyageClient(voyageClient, createMockHttpClient());
+
+    voyageClient.embed(List.of("hello"), dummyContext());
+
+    // QUERY tier maps to phase "query"; the mock response reports total_tokens=1.
+    Tags tags = Tags.of("provider", "VOYAGE", "canonicalModel", "voyage-3-large", "phase", "query");
+    assertEquals(1.0, registry.get("autoEmbedding.tokenUsage").tags(tags).counter().count(), 0.0);
+    assertEquals(
+        1.0,
+        registry
+            .get("autoEmbedding.embeddingRequests")
+            .tags(tags.and("status", "success"))
+            .counter()
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void embed_failedRequest_recordsFailedEmbeddingRequestCounter() throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    EmbeddingModelConfig modelConfig =
+        EmbeddingModelConfig.create(
+            "voyage-3-large",
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            createDedicatedClusterConfig("test-token"));
+    VoyageClient voyageClient =
+        new VoyageClient(
+            modelConfig,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            modelConfig.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    HttpClient throwingClient = mock(HttpClient.class);
+    doThrow(new HttpTimeoutException("timed out"))
+        .when(throwingClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    VoyageClient.injectVoyageClient(voyageClient, throwingClient);
+
+    assertThrows(
+        EmbeddingProviderTransientException.class,
+        () -> voyageClient.embed(List.of("hello"), dummyContext()));
+
+    Tags tags = Tags.of("provider", "VOYAGE", "canonicalModel", "voyage-3-large", "phase", "query");
+    assertEquals(
+        1.0,
+        registry
+            .get("autoEmbedding.embeddingRequests")
+            .tags(tags.and("status", "failed").and("errorCode", "408"))
+            .counter()
+            .count(),
+        0.0);
+    assertEquals(
+        0.0,
+        registry
+            .get("autoEmbedding.embeddingRequests")
+            .tags(tags.and("status", "success"))
+            .counter()
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void embed_nonOkStatus_recordsFailedEmbeddingRequestCounterWithHttpCode()
+      throws Exception {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    EmbeddingModelConfig modelConfig =
+        EmbeddingModelConfig.create(
+            "voyage-3-large",
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            createDedicatedClusterConfig("test-token"));
+    VoyageClient voyageClient =
+        new VoyageClient(
+            modelConfig,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            modelConfig.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+    HttpResponse<String> mockResponse = mock(HttpResponse.class);
+    doReturn(500).when(mockResponse).statusCode();
+    doReturn("Internal Server Error").when(mockResponse).body();
+    HttpClient mockClient = mock(HttpClient.class);
+    doReturn(mockResponse)
+        .when(mockClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    VoyageClient.injectVoyageClient(voyageClient, mockClient);
+
+    assertThrows(
+        EmbeddingProviderTransientException.class,
+        () -> voyageClient.embed(List.of("hello"), dummyContext()));
+
+    // The 5xx status is surfaced on the rethrown exception, so the failed series is tagged 500.
+    Tags tags = Tags.of("provider", "VOYAGE", "canonicalModel", "voyage-3-large", "phase", "query");
+    assertEquals(
+        1.0,
+        registry
+            .get("autoEmbedding.embeddingRequests")
+            .tags(tags.and("status", "failed").and("errorCode", "500"))
+            .counter()
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void embed_successAndFailure_shareTagKeysOnPrometheusRegistry() throws Exception {
+    // Prometheus requires all series of a metric name to share one tag-key set. The success
+    // counter registers eagerly (constructor) and a failure lazily adds the status=failed series;
+    // if the two carried different keys, the failed registration/scrape would throw. This guards
+    // that both series carry the errorCode key (success -> "none"). SimpleMeterRegistry does not
+    // enforce this, so the check needs a real PrometheusMeterRegistry.
+    PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+    MetricsFactory metricsFactory = new MetricsFactory("test", registry);
+    EmbeddingModelConfig modelConfig =
+        EmbeddingModelConfig.create(
+            "voyage-3-large",
+            EmbeddingServiceConfig.EmbeddingProvider.VOYAGE,
+            createDedicatedClusterConfig("test-token"));
+    VoyageClient voyageClient =
+        new VoyageClient(
+            modelConfig,
+            EmbeddingServiceConfig.ServiceTier.QUERY,
+            modelConfig.query(),
+            metricsFactory,
+            Optional.empty(),
+            false,
+            false);
+
+    VoyageClient.injectVoyageClient(voyageClient, createMockHttpClient());
+    voyageClient.embed(List.of("hello"), dummyContext());
+
+    HttpClient throwingClient = mock(HttpClient.class);
+    doThrow(new HttpTimeoutException("timed out"))
+        .when(throwingClient)
+        .send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    VoyageClient.injectVoyageClient(voyageClient, throwingClient);
+    assertThrows(
+        EmbeddingProviderTransientException.class,
+        () -> voyageClient.embed(List.of("hello"), dummyContext()));
+
+    // Scrape succeeds (no uniform-tag-key violation) and exposes both series.
+    String scrape = registry.scrape();
+    assertTrue(scrape.contains("status=\"success\""));
+    assertTrue(scrape.contains("status=\"failed\""));
+    assertTrue(scrape.contains("errorCode=\"none\""));
+    assertTrue(scrape.contains("errorCode=\"408\""));
   }
 }

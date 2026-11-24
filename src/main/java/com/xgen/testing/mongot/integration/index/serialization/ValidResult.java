@@ -65,10 +65,7 @@ public class ValidResult extends Result {
         Field.builder("aggregationResults").documentField().asList().optional().noDefault();
 
     static final Field.WithDefault<Boolean> UNORDERED_AGGREGATION_RESULTS =
-        Field.builder("unorderedAggregationResults")
-            .booleanField()
-            .optional()
-            .withDefault(false);
+        Field.builder("unorderedAggregationResults").booleanField().optional().withDefault(false);
 
     static final Field.Optional<MetaResults> META =
         Field.builder("meta")
@@ -76,6 +73,9 @@ public class ValidResult extends Result {
             .disallowUnknownFields()
             .optional()
             .noDefault();
+
+    static final Field.Optional<BsonDocument> AGGREGATION_META =
+        Field.builder("aggregationMeta").documentField().optional().noDefault();
 
     static final Field.Optional<BsonValue> INTERMEDIATE_META =
         Field.builder("intermediateMeta").unparsedValueField().optional().noDefault();
@@ -87,6 +87,7 @@ public class ValidResult extends Result {
   public final Optional<Map<String, ShardZoneConfig.ExplainOutput>> shardedExplainResult;
   private final Optional<List<SearchExplainInformation>> indexPartitionExplainResult;
   private final Optional<MetaResults> metaResult;
+  private final Optional<BsonDocument> aggregationMetaResult;
   private final Optional<BsonValue> intermediateMetaResult;
   private final Optional<List<BsonDocument>> aggregationResults;
   private final boolean unorderedAggregationResults;
@@ -98,6 +99,7 @@ public class ValidResult extends Result {
       Optional<Map<String, ShardZoneConfig.ExplainOutput>> shardedExplainResult,
       Optional<List<SearchExplainInformation>> indexPartitionExplainResult,
       Optional<MetaResults> metaResult,
+      Optional<BsonDocument> aggregationMetaResult,
       Optional<BsonValue> intermediateMetaResult,
       Optional<List<BsonDocument>> aggregationResults,
       boolean unorderedAggregationResults) {
@@ -107,6 +109,7 @@ public class ValidResult extends Result {
     this.shardedExplainResult = shardedExplainResult;
     this.indexPartitionExplainResult = indexPartitionExplainResult;
     this.metaResult = metaResult;
+    this.aggregationMetaResult = aggregationMetaResult;
     this.intermediateMetaResult = intermediateMetaResult;
     this.aggregationResults = aggregationResults;
     this.unorderedAggregationResults = unorderedAggregationResults;
@@ -120,11 +123,12 @@ public class ValidResult extends Result {
     var shardedExplainResult = parser.getField(Fields.SHARDED_EXPLAIN);
     var indexPartitionExplainResult = parser.getField(Fields.INDEX_PARTITION_EXPLAIN);
     var metaResult = parser.getField(Fields.META);
+    var aggregationMetaResult = parser.getField(Fields.AGGREGATION_META);
     var intermediateMetaResult = parser.getField(Fields.INTERMEDIATE_META);
     var aggregationResult = parser.getField(Fields.AGGREGATION_RESULTS);
     var unorderedAggregationResults = parser.getField(Fields.UNORDERED_AGGREGATION_RESULTS);
 
-    // Must have at least search, explain, meta, or aggregation result.
+    // Must have at least search, explain, meta, aggregation meta, or aggregation result.
     parser
         .getGroup()
         .atLeastOneOf(
@@ -133,6 +137,7 @@ public class ValidResult extends Result {
             shardedExplainResult,
             indexPartitionExplainResult,
             metaResult,
+            aggregationMetaResult,
             aggregationResult);
 
     parser.getGroup().atMostOneOf(explainResult, shardedExplainResult);
@@ -144,6 +149,7 @@ public class ValidResult extends Result {
         shardedExplainResult.unwrap(),
         indexPartitionExplainResult.unwrap(),
         metaResult.unwrap(),
+        aggregationMetaResult.unwrap(),
         intermediateMetaResult.unwrap(),
         aggregationResult.unwrap(),
         unorderedAggregationResults.unwrap());
@@ -205,6 +211,10 @@ public class ValidResult extends Result {
 
   public Optional<MetaResults> getMetaResults() {
     return this.metaResult;
+  }
+
+  public Optional<BsonDocument> getAggregationMetaResults() {
+    return this.aggregationMetaResult;
   }
 
   public Optional<BsonValue> getIntermediateMetaResults() {

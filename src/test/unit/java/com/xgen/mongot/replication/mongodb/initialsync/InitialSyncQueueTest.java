@@ -10,14 +10,15 @@ import static com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig
 import static com.xgen.testing.mongot.mock.index.IndexGeneration.mockDefinitionGeneration;
 import static com.xgen.testing.mongot.mock.index.IndexGeneration.uniqueMockGenerationDefinition;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.IGNORE_METRICS;
+import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_COLLECTION_INFO;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
-import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_LAST_OBSERVED_COLLECTION_NAME;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.mockSearchDefinition;
 import static com.xgen.testing.mongot.mock.index.VectorIndex.MOCK_VECTOR_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.VectorIndex.mockAutoEmbeddingVectorDefinition;
 import static com.xgen.testing.mongot.mock.index.VectorIndex.mockVectorDefinition;
 import static com.xgen.testing.mongot.mock.replication.mongodb.common.DocumentIndexer.mockDocumentIndexer;
+import static com.xgen.testing.mongot.mock.replication.mongodb.common.SessionRefresher.mockSessionRefresher;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -31,6 +32,8 @@ import static org.mockito.Mockito.when;
 import com.google.common.base.Supplier;
 import com.google.errorprone.annotations.Keep;
 import com.mongodb.MongoNamespace;
+import com.mongodb.client.MongoClient;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
@@ -40,16 +43,20 @@ import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.mongodb.common.BufferlessIdOrderInitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.BufferlessNaturalOrderInitialSyncResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.BufferlessParallelNaturalOrderInitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncException;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
+import com.xgen.mongot.replication.mongodb.common.PartitionResumeInfo;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.util.Condition;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.functionalinterfaces.CheckedSupplier;
+import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import com.xgen.testing.ControlledBlockingQueue;
 import com.xgen.testing.TestUtils;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionGenerationBuilder;
@@ -58,12 +65,14 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -99,6 +108,16 @@ public class InitialSyncQueueTest {
   private static final String DEFAULT_MONGO_HOST_NAME = "defaultHost";
 
   @Test
+  public void queuedSyncsGaugesCoverEveryIndexTypeTag() throws Exception {
+    // The gauge maps are looked up unchecked via getIndexTypeTag, so a missing tag NPEs the
+    // first initial sync of that index type (search auto-embedding was missing).
+    Mocks mocks = Mocks.create(Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO));
+    Assert.assertEquals(
+        EnumSet.allOf(IndexTypeData.IndexTypeTag.class),
+        mocks.initialSyncQueue.queuedSyncs.keySet());
+  }
+
+  @Test
   public void testSuccessfulBufferlessInitialSync() throws Exception {
     Mocks mocks = Mocks.create(Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO));
 
@@ -120,6 +139,55 @@ public class InitialSyncQueueTest {
 
     ChangeStreamResumeInfo result = future.get(5, TimeUnit.SECONDS);
     Assert.assertEquals(RESUME_INFO, result);
+  }
+
+  /**
+   * Guards the config plumbing from InitialSyncConfig through InitialSyncQueue onto the
+   * InitialSyncContext handed to the InitialSyncManager. Every other boolean is false so a flag
+   * wired from the wrong source cannot accidentally satisfy the assertion, and the partition count
+   * differs from the default of 4.
+   */
+  @Test
+  public void testParallelNaturalOrderScanConfigReachesContext() throws Exception {
+    InitialSyncMongoClient mongoClient = mock(InitialSyncMongoClient.class);
+    when(mongoClient.resolveAndUpdateCollectionName(any())).thenReturn(MOCK_INDEX_COLLECTION_INFO);
+
+    InitialSyncConfig initialSyncConfig =
+        new InitialSyncConfig(
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(false),
+            Optional.of(false),
+            Optional.of(false),
+            Optional.of(true),
+            Optional.of(7));
+
+    Mocks mocks =
+        Mocks.create(
+            Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO),
+            initialSyncConfig,
+            DEFAULT_MONGO_HOST_NAME,
+            Map.of(DEFAULT_MONGO_HOST_NAME, mongoClient));
+
+    CountDownLatch startedLatch = new CountDownLatch(1);
+    CompletableFuture<ChangeStreamResumeInfo> future =
+        mocks.initialSyncQueue.enqueue(
+            DOCUMENT_INDEXER,
+            MOCK_INDEX_DEFINITION_GENERATION,
+            startedLatch::countDown,
+            IGNORE_METRICS,
+            false,
+            false);
+
+    Assert.assertTrue(startedLatch.await(5, TimeUnit.SECONDS));
+
+    InitialSyncContext context = mocks.mockInitialSyncManagerFactory.getContext();
+    Assert.assertTrue(context.isParallelNaturalOrderScanEnabled());
+    Assert.assertEquals(7, context.getParallelPartitionCount());
+
+    mocks.mockInitialSyncManagerFactory.completeSync(MOCK_INDEX_GENERATION_ID);
+    future.get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -320,12 +388,11 @@ public class InitialSyncQueueTest {
             NATURAL_ORDER_INITIAL_SYNC_RESUME_INFO,
             IGNORE_METRICS,
             false,
-            false);
+            true);
 
-    // isNaturalOrderScanSupported should be false and resumeInfo should be set as empty even with a
-    // natural order resume info
-    Assert.assertFalse(mocks.queued.get(index5).getUseNaturalOrderScan());
-    Assert.assertFalse(mocks.queued.get(index5).getResumeInfo().isPresent());
+    // A natural-order resume info is honored when natural-order scan is supported.
+    Assert.assertTrue(mocks.queued.get(index5).getUseNaturalOrderScan());
+    Assert.assertTrue(mocks.queued.get(index5).getResumeInfo().isPresent());
 
     // The first two initial syncs should have started.
     startedLatch0.await(5, TimeUnit.SECONDS);
@@ -373,6 +440,27 @@ public class InitialSyncQueueTest {
   }
 
   @Test
+  public void testBufferlessInitialSyncsQueue_RejectsNaturalOrderResumeInfoWhenScanUnsupported()
+      throws Exception {
+    Mocks mocks = Mocks.create(Map.of(MOCK_INDEX_GENERATION_ID, () -> RESUME_INFO));
+
+    // Resuming from a natural-order scan token is not meaningful when natural-order scan is not
+    // supported. ReplicationIndexManager drops such a token and clears the index before calling
+    // enqueueResume (CLOUDP-449347); the queue rejects the token outright if a caller skips that.
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            mocks.initialSyncQueue.enqueueResume(
+                DOCUMENT_INDEXER,
+                MOCK_INDEX_DEFINITION_GENERATION,
+                () -> {},
+                NATURAL_ORDER_INITIAL_SYNC_RESUME_INFO,
+                IGNORE_METRICS,
+                false,
+                false));
+  }
+
+  @Test
   public void testBufferlessInitialSyncsQueue_ChangeSyncSource() throws Exception {
     List<IndexDefinitionGeneration> definitions =
         IntStream.range(0, 2)
@@ -384,13 +472,11 @@ public class InitialSyncQueueTest {
 
     String syncSourceHost0 = DEFAULT_MONGO_HOST_NAME;
     InitialSyncMongoClient mongoClient0 = mock(InitialSyncMongoClient.class);
-    when(mongoClient0.resolveAndUpdateCollectionName(any()))
-        .thenReturn(MOCK_INDEX_LAST_OBSERVED_COLLECTION_NAME);
+    when(mongoClient0.resolveAndUpdateCollectionName(any())).thenReturn(MOCK_INDEX_COLLECTION_INFO);
 
     String syncSourceHost1 = "anotherTestHost";
     InitialSyncMongoClient mongoClient1 = mock(InitialSyncMongoClient.class);
-    when(mongoClient1.resolveAndUpdateCollectionName(any()))
-        .thenReturn(MOCK_INDEX_LAST_OBSERVED_COLLECTION_NAME);
+    when(mongoClient1.resolveAndUpdateCollectionName(any())).thenReturn(MOCK_INDEX_COLLECTION_INFO);
 
     Map<String, InitialSyncMongoClient> mongoClients =
         Map.of(syncSourceHost0, mongoClient0, syncSourceHost1, mongoClient1);
@@ -446,6 +532,79 @@ public class InitialSyncQueueTest {
     // Complete the remaining initial syncs.
     mocks.mockInitialSyncManagerFactory.completeSync(index1);
     FutureUtils.swallowedFuture(future1).get(5, TimeUnit.SECONDS);
+  }
+
+  /**
+   * A partition's bounds are record ids belonging to the node that planned them, so a parallel
+   * resume that lands on another node fails on the $initialSyncId and costs a full resync.
+   */
+  @Test
+  public void testBufferlessInitialSyncsQueue_ParallelResumeKeepsItsSyncSource() throws Exception {
+    IndexDefinitionGeneration definition = uniqueMockGenerationDefinition();
+    GenerationId index = definition.getGenerationId();
+
+    String defaultHost = DEFAULT_MONGO_HOST_NAME;
+    InitialSyncMongoClient defaultClient = mock(InitialSyncMongoClient.class);
+    when(defaultClient.resolveAndUpdateCollectionName(any()))
+        .thenReturn(MOCK_INDEX_COLLECTION_INFO);
+
+    String plannedOnHost = "anotherTestHost";
+    InitialSyncMongoClient plannedOnClient = mock(InitialSyncMongoClient.class);
+    when(plannedOnClient.resolveAndUpdateCollectionName(any()))
+        .thenReturn(MOCK_INDEX_COLLECTION_INFO);
+
+    Mocks mocks =
+        Mocks.create(
+            Map.of(index, () -> RESUME_INFO),
+            new InitialSyncConfig(true),
+            defaultHost,
+            Map.of(defaultHost, defaultClient, plannedOnHost, plannedOnClient));
+
+    CountDownLatch startedLatch = new CountDownLatch(1);
+    CompletableFuture<ChangeStreamResumeInfo> future =
+        mocks.initialSyncQueue.enqueueResume(
+            DOCUMENT_INDEXER,
+            definition,
+            startedLatch::countDown,
+            new BufferlessParallelNaturalOrderInitialSyncResumeInfo(
+                new BsonTimestamp(),
+                UUID.fromString("390a604a-4979-4d10-9f4f-3d2552224aee"),
+                List.of(
+                    new PartitionResumeInfo(
+                        0, Optional.empty(), Optional.empty(), Optional.of(250L), false)),
+                Optional.of(plannedOnHost)),
+            IGNORE_METRICS,
+            false,
+            true);
+
+    startedLatch.await(5, TimeUnit.SECONDS);
+    verify(mocks.mockInitialSyncManagerFactory.getManager(index), timeout(1000)).sync();
+
+    assertEquals(plannedOnClient, mocks.mockInitialSyncManagerFactory.getClient(index));
+
+    mocks.mockInitialSyncManagerFactory.completeSync(index);
+    FutureUtils.swallowedFuture(future).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void createInitialSyncMongoClients_labelsEachClientWithItsOwnHost() {
+    String defaultHost = DEFAULT_MONGO_HOST_NAME;
+    String otherHost = "anotherTestHost";
+    Map<String, ClientSessionRecord> clientSessions =
+        Map.of(
+            defaultHost,
+            new ClientSessionRecord(mock(MongoClient.class), mockSessionRefresher()),
+            otherHost,
+            new ClientSessionRecord(mock(MongoClient.class), mockSessionRefresher()));
+
+    Map<String, InitialSyncMongoClient> clients =
+        InitialSyncQueue.createInitialSyncMongoClients(
+            clientSessions, new SimpleMeterRegistry(), false);
+
+    // The non-default client is the regression: before the fix it was labelled with the default
+    // host instead of the host it connects to.
+    assertThat(clients.get(defaultHost).getSyncSourceHost()).isEqualTo(defaultHost);
+    assertThat(clients.get(otherHost).getSyncSourceHost()).isEqualTo(otherHost);
   }
 
   @Test
@@ -1479,7 +1638,8 @@ public class InitialSyncQueueTest {
               initialSyncConfig,
               mockInitialSyncManagerFactory,
               rootPath,
-              initialSyncGate);
+              initialSyncGate,
+              FeatureFlags.getDefault());
     }
 
     static Mocks create(
@@ -1510,7 +1670,7 @@ public class InitialSyncQueueTest {
         throws Exception {
       InitialSyncMongoClient mongoClient = mock(InitialSyncMongoClient.class);
       when(mongoClient.resolveAndUpdateCollectionName(any()))
-          .thenReturn(MOCK_INDEX_LAST_OBSERVED_COLLECTION_NAME);
+          .thenReturn(MOCK_INDEX_COLLECTION_INFO);
       return create(
           Map.of(DEFAULT_MONGO_HOST_NAME, mongoClient),
           DEFAULT_MONGO_HOST_NAME,
@@ -1541,7 +1701,7 @@ public class InitialSyncQueueTest {
           syncSourceHost,
           spy(
               IndexingWorkSchedulerFactory.create(
-                  2, mock(Supplier.class), new SimpleMeterRegistry())),
+                  2, mock(Supplier.class), new SimpleMeterRegistry(), true)),
           blockingQueue,
           new HashMap<>(),
           new HashSet<>(),
@@ -1558,6 +1718,12 @@ public class InitialSyncQueueTest {
               Optional.empty(),
               Optional.empty(),
               maxConcurrentEmbeddingInitialSyncs,
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
               Optional.empty(),
               Optional.empty()),
           initialSyncConfig,
@@ -1711,6 +1877,7 @@ public class InitialSyncQueueTest {
           InitialSyncContext context,
           InitialSyncMongoClient mongoClient,
           MongoNamespace namespace,
+          MongoDbCollectionInfo collectionInfo,
           Optional<InitialSyncResumeInfo> resumeInfo) {
         this.context = context;
         this.mongoClients.put(context.getGenerationId(), mongoClient);
@@ -1727,6 +1894,10 @@ public class InitialSyncQueueTest {
 
       InitialSyncMongoClient getClient(GenerationId generationId) {
         return this.mongoClients.get(generationId);
+      }
+
+      InitialSyncContext getContext() {
+        return this.context;
       }
     }
   }

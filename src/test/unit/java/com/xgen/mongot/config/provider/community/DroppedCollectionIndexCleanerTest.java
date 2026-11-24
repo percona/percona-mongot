@@ -13,15 +13,16 @@ import static org.mockito.Mockito.when;
 
 import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.IndexStats;
-import com.xgen.mongot.catalogservice.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.IndexStatusMapper;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.ServerState;
-import com.xgen.mongot.catalogservice.ServerStateEntry;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.schema.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.schema.ServerStateEntry;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.index.definition.IndexDefinition;
@@ -124,7 +125,7 @@ public class DroppedCollectionIndexCleanerTest {
             IndexDefinition.Type.SEARCH,
             Optional.of(
                 new IndexStatsEntry.DetailedIndexStats(
-                    new IndexStatus(IndexStatus.StatusCode.STEADY),
+                    IndexStatusMapper.toPersisted(new IndexStatus(IndexStatus.StatusCode.STEADY)),
                     createSearchIndexDefinition(indexId, "test-db", UUID.randomUUID()),
                     Optional.empty())),
             Optional.empty());
@@ -149,7 +150,8 @@ public class DroppedCollectionIndexCleanerTest {
             IndexDefinition.Type.SEARCH,
             Optional.of(
                 new IndexStatsEntry.DetailedIndexStats(
-                    IndexStatus.doesNotExist(IndexStatus.Reason.INDEX_DROPPED),
+                    IndexStatusMapper.toPersisted(
+                        IndexStatus.doesNotExist(IndexStatus.Reason.INDEX_DROPPED)),
                     createSearchIndexDefinition(indexId, "test-db", UUID.randomUUID()),
                     Optional.empty())),
             Optional.empty());
@@ -342,7 +344,7 @@ public class DroppedCollectionIndexCleanerTest {
             def,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L),
+            new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L, 0L),
             Optional.empty(),
             Optional.empty(),
             Collections.emptyMap());
@@ -497,7 +499,7 @@ public class DroppedCollectionIndexCleanerTest {
         def,
         IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND),
         Collections.emptyList(),
-        new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L),
+        new AggregatedIndexMetrics(0L, 0L, new org.bson.BsonTimestamp(0L), 0L, 0L),
         Optional.empty(),
         Optional.empty(),
         Collections.emptyMap());

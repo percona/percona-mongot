@@ -8,6 +8,7 @@ import static org.junit.Assert.assertSame;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Range;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
@@ -98,7 +99,8 @@ public class OffHeapQuantizedByteVectorValuesTest {
                 SearchIndexCapabilities.CURRENT,
                 new IndexMetricsUpdater.IndexingMetricsUpdater(
                     SearchIndex.mockMetricsFactory(), IndexDefinition.Type.SEARCH),
-                IndexingPolicyBuilderContext.builder().build());
+                IndexingPolicyBuilderContext.builder().build(),
+                FeatureFlags.getDefault());
         IndexableFieldFactory.addKnnVectorField(
             document,
             FIELD_PATH,
@@ -222,6 +224,16 @@ public class OffHeapQuantizedByteVectorValuesTest {
   }
 
   @Test
+  public void byteQuery_scorer_withoutNextDoc_returnsNegativeOne() throws IOException {
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
+
+    VectorScorer scorer = this.vectorValues.scorer(new byte[VEC_DIM]);
+
+    assertEquals(-1, scorer.iterator().docID());
+  }
+
+  @Test
   public void scorer_exactMatch_returnsOne() throws IOException {
     DocIndexIterator iter = this.vectorValues.iterator();
     iter.nextDoc();
@@ -233,6 +245,20 @@ public class OffHeapQuantizedByteVectorValuesTest {
     scorer.iterator().nextDoc();
 
     assertEquals(1f, scorer.score(), TestUtils.EPSILON);
+  }
+
+  @Test
+  public void byteQuery_scorer_exactMatch_returnsOne() throws IOException {
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
+    byte[] query = new byte[this.vectorValues.dimension()];
+    // Create query vector that scores perfectly against first vector.
+    BinaryQuantizationUtils.dequantize(this.vectorValues.vectorValue(iter.index()), query);
+
+    VectorScorer scorer = this.vectorValues.scorer(query);
+    scorer.iterator().nextDoc();
+
+    assertEquals(1, scorer.score(), TestUtils.EPSILON);
   }
 
   @Test
@@ -254,13 +280,46 @@ public class OffHeapQuantizedByteVectorValuesTest {
   }
 
   @Test
+  public void byteQuery_scorer_exactInverse_returnsMinScore() throws IOException {
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
+    byte[] query = new byte[this.vectorValues.dimension()];
+    // Create query vector that complements first vector
+    BinaryQuantizationUtils.dequantize(this.vectorValues.vectorValue(iter.index()), query);
+    for (int i = 0; i < query.length; ++i) {
+      query[i] *= -1;
+    }
+
+    VectorScorer scorer = this.vectorValues.scorer(query);
+    scorer.iterator().nextDoc();
+
+    // See explanation for score in BitRandomVectorScorer.
+    assertEquals(1 - VEC_DIM / (VEC_DIM * 8f), scorer.score(), TestUtils.EPSILON);
+  }
+
+  @Test
   public void scorer_scoreAllDocs_returnsValidScore() throws IOException {
     DocIndexIterator iter = this.vectorValues.iterator();
     iter.nextDoc();
     float[] query = VectorTestUtils.createUnitVector(VEC_DIM);
     VectorScorer scorer = this.vectorValues.scorer(query);
 
-    for (var itr = scorer.iterator(); itr.nextDoc() != NO_MORE_DOCS; itr.nextDoc()) {
+    for (var itr = scorer.iterator(); itr.nextDoc() != NO_MORE_DOCS; ) {
+      assertThat(scorer.score()).isIn(Range.closed(0f, 1f));
+    }
+  }
+
+  @Test
+  public void byteQuery_scorer_scoreAllDocs_returnsValidScore() throws IOException {
+    DocIndexIterator iter = this.vectorValues.iterator();
+    iter.nextDoc();
+    byte[] query = new byte[VEC_DIM];
+    for (int i = 0; i < query.length; ++i) {
+      query[i] = (byte) (i % 2 == 0 ? 1 : -1);
+    }
+    VectorScorer scorer = this.vectorValues.scorer(query);
+
+    for (var itr = scorer.iterator(); itr.nextDoc() != NO_MORE_DOCS; ) {
       assertThat(scorer.score()).isIn(Range.closed(0f, 1f));
     }
   }

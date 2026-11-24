@@ -3,6 +3,9 @@ load("//bazel/java:package.bzl", "java_library")
 java_library(
     name = "sort",
     srcs = [
+        "EmbeddedScopedDateSort.java",
+        "EmbeddedScopedDoubleSort.java",
+        "EmbeddedScopedLongSort.java",
         "IndexSortUtils.java",
         "LuceneSortFactory.java",
         "MqlDateSort.java",
@@ -14,6 +17,7 @@ java_library(
     ],
     visibility = ["//visibility:public"],
     exports = [
+        "//src/main/java/com/xgen/mongot/index/lucene/query/sort/comparator",
         "@maven//:org_apache_lucene_lucene_core",
         "@maven//:org_mongodb_bson",
     ],
@@ -22,6 +26,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/lucene/explain/tracing",
         "//src/main/java/com/xgen/mongot/index/lucene/field",
         "//src/main/java/com/xgen/mongot/index/lucene/query/context",
+        "//src/main/java/com/xgen/mongot/index/lucene/query/custom",
         "//src/main/java/com/xgen/mongot/index/lucene/query/sort/common",
         "//src/main/java/com/xgen/mongot/index/lucene/query/sort/comparator",
         "//src/main/java/com/xgen/mongot/index/lucene/query/sort/mixed",
@@ -31,6 +36,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/version",
         "//src/main/java/com/xgen/mongot/util",
         "@maven//:com_google_guava_guava",
+        "@maven//:io_micrometer_micrometer_core",
         "@maven//:org_apache_lucene_lucene_core",
         "@maven//:org_jetbrains_annotations",
         "@maven//:org_mongodb_bson",

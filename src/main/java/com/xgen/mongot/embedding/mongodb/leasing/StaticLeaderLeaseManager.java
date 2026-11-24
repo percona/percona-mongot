@@ -7,6 +7,7 @@ import static com.xgen.mongot.util.mongodb.MongoDbDatabase.getCollectionInfo;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.Var;
+import com.mongodb.MongoNamespace;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadPreference;
 import com.mongodb.client.MongoClient;
@@ -46,6 +47,7 @@ import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
+import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -149,8 +151,7 @@ public class StaticLeaderLeaseManager implements LeaseManager {
       String defaultDb = this.dbResolver.resolveDefault();
       List<BsonDocument> rawLeases =
           this.operationExecutor.execute(
-              "getLeases",
-              () -> this.getCollection(defaultDb).find().into(new ArrayList<>()));
+              "getLeases", () -> this.getCollection(defaultDb).find().into(new ArrayList<>()));
       for (BsonDocument rawLease : rawLeases) {
         // Populate the database mapping before normalization so that getDatabaseForLease()
         // resolves correctly when normalizedLeaseIfNeeded() calls back into it for UUID resolution.
@@ -161,9 +162,7 @@ public class StaticLeaderLeaseManager implements LeaseManager {
           this.leases.put(lease.id(), lease);
         } else {
           // TODO(CLOUDP-384971): clean up corrupted leases
-          LOG.atError()
-              .addKeyValue("leaseId", parsed.id())
-              .log("Corrupted lease found, skipping");
+          LOG.atError().addKeyValue("leaseId", parsed.id()).log("Corrupted lease found, skipping");
         }
       }
     } catch (Exception e) {
@@ -223,8 +222,7 @@ public class StaticLeaderLeaseManager implements LeaseManager {
         generationId, getIndexDefinitionVersion(indexGeneration));
     this.leaseKeyToDatabase.put(
         getLeaseKey(generationId),
-        this.dbResolver.resolve(
-            indexGeneration.getDefinition().getDatabase()));
+        this.dbResolver.resolve(indexGeneration.getDefinition().getDatabase()));
     if (this.leases.containsKey(getLeaseKey(generationId))) {
       var lease = this.leases.get(getLeaseKey(generationId));
       String versionKey =
@@ -262,24 +260,33 @@ public class StaticLeaderLeaseManager implements LeaseManager {
     if (this.isLeader) {
       String dbName = getDatabaseForLease(leaseKey);
       return CompletableFuture.runAsync(
-              () -> this.getCollection(dbName).deleteOne(new Document("_id", leaseKey)))
-          .exceptionally(
-              throwable -> {
-                LOG.atWarn()
-                    .setCause(throwable)
-                    .addKeyValue("leaseKey", leaseKey)
-                    .log("Failed to delete lease entry in Lease table, ignore it for now.");
-                return null;
+              () -> {
+                try {
+                  // Routed through the operationExecutor to stay consistent with every other
+                  // lease-table op; it retries transient failures and emits
+                  // successfulRequests/failedRequests tagged operation="dropLease".
+                  this.operationExecutor.execute(
+                      "dropLease",
+                      () -> this.getCollection(dbName).deleteOne(new Document("_id", leaseKey)));
+                } catch (Exception e) {
+                  // Best effort cleanup. The lease will expire naturally if we can't delete it.
+                  LOG.atWarn()
+                      .setCause(e)
+                      .addKeyValue("leaseKey", leaseKey)
+                      .log("Failed to delete lease entry in Lease table, ignore it for now.");
+                }
               })
-          .thenRun(() -> {
-            this.leases.remove(leaseKey);
-            this.leaseKeyToDatabase.remove(leaseKey);
-          });
+          .thenRun(() -> evictCachedLease(leaseKey));
     } else {
-      this.leases.remove(leaseKey);
-      this.leaseKeyToDatabase.remove(leaseKey);
+      evictCachedLease(leaseKey);
       return COMPLETED_FUTURE;
     }
+  }
+
+  @Override
+  public void evictCachedLease(String leaseKey) {
+    this.leases.remove(leaseKey);
+    this.leaseKeyToDatabase.remove(leaseKey);
   }
 
   @Override
@@ -369,38 +376,29 @@ public class StaticLeaderLeaseManager implements LeaseManager {
    *
    * @param generationId the generation ID to get status for
    * @param versionKey the definition version key to look up in the status map
-   * @return the effective status, or UNKNOWN if unable to determine
+   * @return the effective status and replication optime, if available
    */
-  private IndexStatus getMaterializedViewReplicationStatus(
+  private FollowerStatus getMaterializedViewReplicationStatus(
       MaterializedViewGenerationId generationId, String versionKey) {
-    @Var
-    Lease.IndexDefinitionVersionStatus requestedStatus =
-        new Lease.IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.UNKNOWN);
-    @Var
-    Lease.IndexDefinitionVersionStatus latestStatus =
-        new Lease.IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.UNKNOWN);
-
     try {
       Lease lease = getLeaseFromDatabase(generationId);
       if (lease != null) {
-        if (lease.indexDefinitionVersionStatusMap().containsKey(versionKey)) {
-          requestedStatus = lease.indexDefinitionVersionStatusMap().get(versionKey);
-        } else {
-          LOG.warn(
-              "Requested version key {} not found in lease for generation ID {}",
-              versionKey,
-              generationId);
-        }
-        latestStatus =
-            lease.indexDefinitionVersionStatusMap().get(lease.latestIndexDefinitionVersion());
-      } else {
-        LOG.warn("No lease found in database for generation ID {}", generationId);
+        IndexStatus effectiveStatus =
+            getEffectiveMaterializedViewStatus(lease, versionKey, generationId);
+        Optional<BsonTimestamp> replicationOpTime =
+            effectiveStatus.canServiceQueries() ? lease.extractHighWaterMark() : Optional.empty();
+        return new FollowerStatus(effectiveStatus, replicationOpTime);
       }
+      LOG.warn("No lease found in database for generation ID {}", generationId);
     } catch (Exception e) {
       LOG.warn("Failed to poll status for generation ID {}", generationId, e);
     }
-    return getEffectiveMaterializedViewStatus(requestedStatus, latestStatus);
+    // No lease, or the read failed: nothing is known about this generation's status.
+    return new FollowerStatus(new IndexStatus(IndexStatus.StatusCode.UNKNOWN), Optional.empty());
   }
+
+  private record FollowerStatus(
+      IndexStatus indexStatus, Optional<BsonTimestamp> replicationOpTime) {}
 
   @VisibleForTesting
   Map<String, Lease> getLeases() {
@@ -413,42 +411,42 @@ public class StaticLeaderLeaseManager implements LeaseManager {
   }
 
   @Override
-  public List<Lease> findGcCandidates(Instant expirationCutoff) {
+  public LeaseManager.GcScanResult findGcCandidates() {
     // Scans only the default internal database — static deployments are single-tenant (see
     // DynamicLeaderLeaseManager#findGcCandidates for the multi-database variant). A healthy
     // leader keeps its lease fresh on every PeriodicIndexCommitter tick (the commit refreshes
     // leaseExpiration even with no source writes), well within the lease TTL, so an idle index
     // does not expire; a lapsed lease means the generator is not running.
-    List<Lease> candidates = new ArrayList<>();
+    List<Lease> leases = new ArrayList<>();
+    @Var boolean complete = true;
+    @Var boolean sawDocuments = false;
     try {
       String defaultDb = this.dbResolver.resolveDefault();
       List<BsonDocument> rawLeases =
           this.operationExecutor.execute(
               "findGcCandidates",
-              () ->
-                  this.getCollection(defaultDb)
-                      .find(
-                          Filters.lt(
-                              Lease.Fields.LEASE_EXPIRATION.getName(),
-                              new BsonDateTime(expirationCutoff.toEpochMilli())))
-                      .into(new ArrayList<>()));
+              () -> this.getCollection(defaultDb).find().into(new ArrayList<>()));
+      sawDocuments = !rawLeases.isEmpty();
       for (BsonDocument rawLease : rawLeases) {
         try {
           Lease lease = Lease.fromBson(rawLease);
           this.leaseKeyToDatabase.putIfAbsent(lease.id(), defaultDb);
-          candidates.add(lease);
+          leases.add(lease);
         } catch (BsonParseException e) {
+          // Corrupted leases are invisible to GC (CLOUDP-384971).
           LOG.atError()
               .addKeyValue("leaseId", extractLeaseId(rawLease))
               .setCause(e)
-              .log("Failed to parse lease document during GC candidate scan, skipping");
+              .log("Failed to parse lease document during GC lease scan, skipping");
         }
       }
     } catch (Exception e) {
-      // Best effort: the periodic GC sweep retries on a later tick.
-      LOG.atWarn().setCause(e).log("Failed to scan database for GC candidate leases");
+      // Safe per the interface contract; the periodic sweep retries on a later tick. Reported as an
+      // incomplete scan so an empty result is not mistaken for an empty lease table.
+      complete = false;
+      LOG.atWarn().setCause(e).log("Failed to scan database for GC leases");
     }
-    return candidates;
+    return new LeaseManager.GcScanResult(leases, complete, sawDocuments);
   }
 
   @Override
@@ -480,8 +478,7 @@ public class StaticLeaderLeaseManager implements LeaseManager {
     try {
       var result =
           this.operationExecutor.execute(
-              "markEligibleForCleanup",
-              () -> this.getCollection(dbName).updateOne(filter, update));
+              "markEligibleForCleanup", () -> this.getCollection(dbName).updateOne(filter, update));
       if (result.getModifiedCount() > 0) {
         this.leases.computeIfPresent(
             leaseKey,
@@ -498,12 +495,200 @@ public class StaticLeaderLeaseManager implements LeaseManager {
     }
   }
 
+  @Override
+  public Optional<MongoNamespace> resolveStaleMatViewNamespace(
+      String leaseKey, long expectedLeaseVersion, Instant expirationCutoff) {
+    // See DynamicLeaderLeaseManager#resolveStaleMatViewNamespace: re-read the lease and surface the
+    // namespace only while it is still marked, still stale, and still at the sweep's version. The
+    // materialized-view manager then drops the collection and deleteStaleLease removes the lease.
+    String dbName;
+    try {
+      dbName = getDatabaseForLease(leaseKey);
+    } catch (IllegalStateException e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("No database mapping for lease during stale mat view resolve, skipping");
+      return Optional.empty();
+    }
+    try {
+      BsonDocument rawLease =
+          this.operationExecutor.execute(
+              "readStaleLease",
+              () -> this.getCollection(dbName).find(Filters.eq("_id", leaseKey)).first());
+      if (rawLease == null) {
+        LOG.atInfo()
+            .addKeyValue("leaseKey", leaseKey)
+            .log("Stale lease already deleted, skipping mat view resolve");
+        return Optional.empty();
+      }
+      Lease lease = Lease.fromBson(rawLease);
+      if (lease.cleanupState() != Lease.CleanupState.ELIGIBLE_FOR_CLEANUP
+          || !lease.leaseExpiration().isBefore(expirationCutoff)
+          || lease.leaseVersion() != expectedLeaseVersion) {
+        LOG.atInfo()
+            .addKeyValue("leaseKey", leaseKey)
+            .addKeyValue("cleanupState", lease.cleanupState())
+            .addKeyValue("leaseExpiration", lease.leaseExpiration())
+            .addKeyValue("leaseVersion", lease.leaseVersion())
+            .addKeyValue("expectedLeaseVersion", expectedLeaseVersion)
+            .log("Lease no longer eligible for cleanup at resolve time, skipping");
+        return Optional.empty();
+      }
+      return LeaseManager.matViewNamespaceOf(dbName, lease);
+    } catch (Exception e) {
+      // Re-read failed; the next sweep re-evaluates.
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("Failed to re-read lease while resolving stale mat view, skipping");
+      return Optional.empty();
+    }
+  }
+
+  @Override
+  public boolean deleteStaleLease(
+      String leaseKey, long expectedLeaseVersion, Instant expirationCutoff) {
+    // OCC delete: see DynamicLeaderLeaseManager#deleteStaleLease. Only commits while the lease is
+    // still marked, still stale, and still at the sweep's version, so a lease resurrected (and thus
+    // version-bumped) after the collection drop cannot be deleted.
+    String dbName;
+    try {
+      dbName = getDatabaseForLease(leaseKey);
+    } catch (IllegalStateException e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("No database mapping for lease during stale lease delete, skipping");
+      return false;
+    }
+    var filter =
+        Filters.and(
+            Filters.eq("_id", leaseKey),
+            Filters.eq(
+                Lease.Fields.CLEANUP_STATE.getName(),
+                Lease.CleanupState.ELIGIBLE_FOR_CLEANUP.name()),
+            Filters.eq(Lease.Fields.LEASE_VERSION.getName(), expectedLeaseVersion),
+            Filters.lt(
+                Lease.Fields.LEASE_EXPIRATION.getName(),
+                new BsonDateTime(expirationCutoff.toEpochMilli())));
+    try {
+      var result =
+          this.operationExecutor.execute(
+              "deleteStaleLease", () -> this.getCollection(dbName).deleteOne(filter));
+      if (result.getDeletedCount() > 0) {
+        evictCachedLease(leaseKey);
+        return true;
+      }
+      return false;
+    } catch (Exception e) {
+      // Best effort: the next sweep re-evaluates this lease.
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("Failed to delete stale lease");
+      return false;
+    }
+  }
+
   /** Best-effort {@code _id} extraction from a possibly corrupted lease document, for logging. */
   private static String extractLeaseId(BsonDocument rawLease) {
     try {
       return rawLease.containsKey("_id") ? rawLease.get("_id").asString().getValue() : "unknown";
     } catch (Exception e) {
       return "unparseable";
+    }
+  }
+
+  @Override
+  public List<DeletedIndexLease> findLeasesForDeletedIndex(ObjectId indexId, String knownLeaseKey) {
+    Optional<String> dbNameIfKnown =
+        databaseForLease(knownLeaseKey, "listing a deleted index's leases");
+    if (dbNameIfKnown.isEmpty()) {
+      return List.of();
+    }
+    String dbName = dbNameIfKnown.get();
+    // Index-bounded prefix prefilter only; Lease#indexId is the authority on lease-id layouts
+    // and does the exact matching below.
+    var filter = Filters.regex("_id", "^" + indexId.toHexString());
+    try {
+      List<BsonDocument> rawLeases =
+          this.operationExecutor.execute(
+              "findLeasesForDeletedIndex",
+              () -> this.getCollection(dbName).find(filter).into(new ArrayList<>()));
+      List<DeletedIndexLease> found = new ArrayList<>();
+      for (BsonDocument rawLease : rawLeases) {
+        Lease lease;
+        try {
+          lease = Lease.fromBson(rawLease);
+        } catch (BsonParseException | RuntimeException e) {
+          // Skip per document, as in the GC lease scan: one bad doc must not hide the rest.
+          LOG.atWarn()
+              .addKeyValue("indexId", indexId)
+              .setCause(e)
+              .log("Failed to parse a lease document while listing a deleted index's leases");
+          continue;
+        }
+        if (!lease.indexId().equals(indexId.toHexString())) {
+          // Prefix-matched but not this index's per Lease#indexId: corrupt data.
+          LOG.atWarn()
+              .addKeyValue("indexId", indexId)
+              .addKeyValue("leaseKey", lease.id())
+              .log("Skipping a prefix-matched lease that does not belong to the deleted index");
+          continue;
+        }
+        this.leaseKeyToDatabase.putIfAbsent(lease.id(), dbName);
+        found.add(new DeletedIndexLease(lease, LeaseManager.matViewNamespaceOf(dbName, lease)));
+      }
+      return found;
+    } catch (Exception e) {
+      LOG.atWarn()
+          .addKeyValue("indexId", indexId)
+          .setCause(e)
+          .log("Failed to list a deleted index's leases");
+      return List.of();
+    }
+  }
+
+  /** The database mapped for {@code leaseKey}, or empty (logging {@code action}) if unknown. */
+  private Optional<String> databaseForLease(String leaseKey, String action) {
+    try {
+      return Optional.of(getDatabaseForLease(leaseKey));
+    } catch (IllegalStateException e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .addKeyValue("action", action)
+          .setCause(e)
+          .log("No database mapping for lease key, skipping");
+      return Optional.empty();
+    }
+  }
+
+  @Override
+  public boolean cleanupLeaseForDeletedIndex(String leaseKey) {
+    Optional<String> dbNameIfKnown = databaseForLease(leaseKey, "deleting a deleted index's lease");
+    if (dbNameIfKnown.isEmpty()) {
+      return false;
+    }
+    String dbName = dbNameIfKnown.get();
+    // Evict the local copy first, as dropLease does: the cached entry must not outlive this
+    // call even when the delete fails (the document is left for the GC either way).
+    this.leases.remove(leaseKey);
+    this.leaseKeyToDatabase.remove(leaseKey);
+    // By id only: the index is gone from the desired config, so owner, staleness, and cleanup
+    // state are all irrelevant — every lease under it is garbage. Concurrent mongots race this
+    // idempotently; deletedCount 0 with no error means another one won.
+    try {
+      this.operationExecutor.execute(
+          "cleanupLeaseForDeletedIndex",
+          () -> this.getCollection(dbName).deleteOne(Filters.eq("_id", leaseKey)));
+      return true;
+    } catch (Exception e) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .setCause(e)
+          .log("Failed to delete a deleted index's lease");
+      return false;
     }
   }
 
@@ -530,17 +715,23 @@ public class StaticLeaderLeaseManager implements LeaseManager {
       return LeaseManager.FollowerPollResult.EMPTY;
     }
     Map<MaterializedViewGenerationId, IndexStatus> statuses = new HashMap<>();
+    Map<MaterializedViewGenerationId, BsonTimestamp> replicationOpTimes = new HashMap<>();
     for (MaterializedViewGenerationId generationId : this.managedGenerationIds) {
       String versionKey = this.generationIdToDefinitionVersion.get(generationId);
       if (versionKey == null) {
         LOG.warn("No definition version found for generation ID {}", generationId);
         continue;
       }
-      IndexStatus status = getMaterializedViewReplicationStatus(generationId, versionKey);
-      statuses.put(generationId, status);
+      FollowerStatus followerStatus =
+          getMaterializedViewReplicationStatus(generationId, versionKey);
+      statuses.put(generationId, followerStatus.indexStatus());
+      followerStatus
+          .replicationOpTime()
+          .ifPresent(opTime -> replicationOpTimes.put(generationId, opTime));
     }
     // Static leader doesn't support dynamic leader election, so no expired leases
-    return new LeaseManager.FollowerPollResult(statuses, Collections.emptySet());
+    return new LeaseManager.FollowerPollResult(
+        statuses, replicationOpTimes, Collections.emptySet());
   }
 
   @Override
@@ -549,8 +740,7 @@ public class StaticLeaderLeaseManager implements LeaseManager {
       MaterializedViewCollectionMetadata proposedMetadata) {
     this.leaseKeyToDatabase.put(
         proposedMetadata.collectionName(),
-        this.dbResolver.resolve(
-            indexDefinitionGeneration.getIndexDefinition().getDatabase()));
+        this.dbResolver.resolve(indexDefinitionGeneration.getIndexDefinition().getDatabase()));
     @Var var existingLease = this.leases.get(proposedMetadata.collectionName());
     if (existingLease == null) {
       // Try to get lease from database and update in memory state.
@@ -608,9 +798,10 @@ public class StaticLeaderLeaseManager implements LeaseManager {
     BsonDocument rawLease =
         this.operationExecutor.execute(
             "getLease",
-            () -> this.getCollection(getDatabaseForLease(collectionName))
-                .find(new Document("_id", collectionName))
-                .first());
+            () ->
+                this.getCollection(getDatabaseForLease(collectionName))
+                    .find(new Document("_id", collectionName))
+                    .first());
     if (rawLease == null) {
       return null;
     }
@@ -629,8 +820,9 @@ public class StaticLeaderLeaseManager implements LeaseManager {
         var filter = Filters.eq("_id", getLeaseKey(generationId));
         this.operationExecutor.execute(
             "createLease",
-            () -> this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
-                .replaceOne(filter, updatedLease.toBson(), REPLACE_OPTIONS));
+            () ->
+                this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
+                    .replaceOne(filter, updatedLease.toBson(), REPLACE_OPTIONS));
         this.leases.put(getLeaseKey(generationId), updatedLease);
       } else {
         // Update with optimistic concurrency control on the lease version to ensure the lease
@@ -659,8 +851,9 @@ public class StaticLeaderLeaseManager implements LeaseManager {
         var result =
             this.operationExecutor.execute(
                 "updateLease",
-                () -> this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
-                    .replaceOne(filter, updatedLease.toBson()));
+                () ->
+                    this.getCollection(getDatabaseForLease(getLeaseKey(generationId)))
+                        .replaceOne(filter, updatedLease.toBson()));
         if (result.getMatchedCount() == 0) {
           // This means the document was not in one of the two desired states described above.
           // TODO(CLOUDP-364787): We should move the index to failed state as this is not a

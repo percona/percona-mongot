@@ -8,7 +8,9 @@ import com.mongodb.ErrorCategory;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoNamespace;
+import com.mongodb.WriteConcern;
 import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.DeleteOneModel;
 import com.mongodb.client.model.Filters;
@@ -117,6 +119,7 @@ public class MaterializedViewWriter implements IndexWriter {
   private final Timer mvWriteThrottleWaitTime;
   private final DistributionSummary bulkWriteNumDocs;
   private final DistributionSummary bulkWritePayloadSize;
+  private final Counter mvUnmatchedFilterUpdates;
 
   /**
    * A pair of read and write locks which are used to synchronize access to the materialized view
@@ -155,9 +158,10 @@ public class MaterializedViewWriter implements IndexWriter {
     this.bulkOperationsRef = new AtomicReference<>(new ConcurrentLinkedQueue<>());
     this.partialBulkWriteErrors = metricsFactory.counter("partialBulkWriteErrors");
     this.mvWriteThrottleCount = metricsFactory.counter("mvWriteThrottleCount");
-    this.mvWriteThrottleWaitTime = metricsFactory.timer("mvWriteThrottleWaitTime");
+    this.mvWriteThrottleWaitTime = metricsFactory.timerSec("mvWriteThrottleWaitTime");
     this.bulkWriteNumDocs = metricsFactory.summary("bulkWriteNumDocs");
     this.bulkWritePayloadSize = metricsFactory.summary("bulkWritePayloadSize");
+    this.mvUnmatchedFilterUpdates = metricsFactory.counter("mvUnmatchedFilterUpdates");
     this.operationExecutor =
         new MongoClientOperationExecutor(
             metricsFactory,
@@ -215,12 +219,44 @@ public class MaterializedViewWriter implements IndexWriter {
 
   @Override
   public void commit(EncodedUserData userData) throws IOException {
+    // The fencing token from the current tenure; identical to the former
+    // getOwnedLeaseVersion() read (CLOUDP-437680).
+    commitInternal(userData, this.leaseManager.getOwnedTenure(this.generationId).leaseVersion());
+  }
+
+  /**
+   * Commits pending writes using the fencing token held by the materialized-view generator.
+   *
+   * <p>The token is an explicit argument because this writer can outlive the generator that
+   * acquired it.
+   */
+  public void commit(EncodedUserData userData, long leaseVersion) throws IOException {
+    commitInternal(userData, leaseVersion);
+  }
+
+  /**
+   * Commits pending writes using the fencing token and the tenure identity pinned by the
+   * materialized-view generator.
+   *
+   * <p>The epoch is accepted but not used yet: a follow-up (CLOUDP-437680) anchors the checkpoint
+   * that follows the MV writes to it. The MV writes themselves keep fencing on the lease version.
+   */
+  public void commit(EncodedUserData userData, long leaseVersion, long epoch) throws IOException {
+    commitInternal(userData, leaseVersion);
+  }
+
+  // Delegated to by all three commit() overloads via a private method, rather than one overload
+  // calling the other directly: a self-call from one public method to another re-enters proxy
+  // dispatch on a Mockito spy, so callers verifying interactions on a spied writer would see two
+  // recorded commit calls instead of one.
+  private void commitInternal(EncodedUserData userData, long leaseVersion) throws IOException {
     ConcurrentLinkedQueue<WriteModel<RawBsonDocument>> bulkOperations;
     try (LockGuard ignored = LockGuard.with(this.shutdownAndCommitExclusiveLock)) {
       ensureOpen("commit");
       bulkOperations = this.bulkOperationsRef.getAndSet(new ConcurrentLinkedQueue<>());
     }
-    if (!bulkOperations.isEmpty()) {
+    boolean materializedViewWriteCompleted = !bulkOperations.isEmpty();
+    if (materializedViewWriteCompleted) {
       // Throttle MV writes if ratelimiter is configured. acquire() blocks until
       // a permit is available, smoothing write bursts.
       this.rateLimiter.ifPresent(
@@ -238,8 +274,7 @@ public class MaterializedViewWriter implements IndexWriter {
       // periodic committer or not have a periodic committer at all since we call commit from the
       // indexing work scheduler directly.
       try {
-        long leaseVersion = this.leaseManager.getLeaseVersion(this.generationId);
-        if (leaseVersion <= 0) {
+        if (!LeaseManager.isUsableLeaseVersion(leaseVersion)) {
           recordMvErrorMetric(
               MaterializedViewNonTransientException.class,
               MaterializedViewNonTransientException.Reason.INVALID_LEASE);
@@ -268,14 +303,34 @@ public class MaterializedViewWriter implements IndexWriter {
             MaterializedViewTransientException.Reason.BULK_WRITE_ERROR);
       }
     }
+    // TODO(CLOUDP-439815): leaseVersion above only fences the MV writes; this checkpoint update
+    // is anchored to whatever DynamicLeaderLeaseManager currently has cached for this lease,
+    // which is not necessarily the same version — the cache can advance (heartbeat renewal, a
+    // same-host reacquisition) between this tenure's beginTenure() and this commit(). Verify
+    // whether that split can produce a checkpoint that doesn't match the fenced data.
     try {
-      this.leaseManager.updateCommitInfo(this.generationId, userData);
+      this.leaseManager.updateCommitInfo(
+          this.generationId, userData, materializedViewWriteCompleted);
     } catch (MaterializedViewTransientException | MaterializedViewNonTransientException ex) {
       LOG.atWarn()
           .addKeyValue("generationId", this.generationId)
           .setCause(ex)
           .log("Fails to commit lease documents");
       throw ex;
+    }
+  }
+
+  /**
+   * Discards any writes buffered since the last commit, without persisting them.
+   *
+   * <p>Used when a lease tenure ends before its buffered work is committed. Without this, a later
+   * tenure's first {@link #commit(EncodedUserData, long)} would drain and fence this writer's
+   * shared queue, stamping the earlier tenure's uncommitted work with the later tenure's lease
+   * version.
+   */
+  public void discardBufferedWrites() {
+    try (LockGuard ignored = LockGuard.with(this.shutdownAndCommitExclusiveLock)) {
+      this.bulkOperationsRef.set(new ConcurrentLinkedQueue<>());
     }
   }
 
@@ -460,23 +515,27 @@ public class MaterializedViewWriter implements IndexWriter {
           docCount,
           payloadSizeBytes);
     }
-    // MV writes use the default write concern (w:1) rather than w:majority. This is safe because
-    // commit() calls updateCommitInfo() after bulkWrite(), and updateCommitInfo() uses w:majority
-    // on the lease collection. Since both write to the same mongod primary, MV writes precede the
-    // checkpoint in the oplog. MongoDB secondaries apply oplog entries in order, so w:majority on
-    // the checkpoint implicitly guarantees all preceding MV writes are also majority-replicated.
-    // If the checkpoint write fails (e.g., primary crash before it completes), the checkpoint does
-    // not advance, and the next leader re-processes the batch.
+    // MV writes use an explicit w:majority write concern: the checkpoint written by commit()'s
+    // updateCommitInfo() (also w:majority) must never cover MV writes that a failover could roll
+    // back. Inheriting the cluster default would make that guarantee environment-dependent —
+    // w:majority is the default on Atlas, but community/EA deployments and clusters with a
+    // customer-set defaultWriteConcern of w:1 could ack these writes from the primary alone, and
+    // a failover would then roll back acked MV writes beneath a majority-committed checkpoint.
     try {
-      this.operationExecutor.execute(
-          "materializedViewBulkWrite",
-          () -> {
-            mongoClientOpt
-                .get()
-                .getDatabase(this.namespace.getDatabaseName())
-                .getCollection(this.namespace.getCollectionName(), RawBsonDocument.class)
-                .bulkWrite(documents, MV_BULK_WRITE_OPTIONS);
-          });
+      // Block-return lambda (not an expression lambda) so this binds to the value-returning
+      // execute(String, CheckedSupplier) overload rather than the void CheckedRunnable one.
+      BulkWriteResult bulkWriteResult =
+          this.operationExecutor.execute(
+              "materializedViewBulkWrite",
+              () -> {
+                return mongoClientOpt
+                    .get()
+                    .getDatabase(this.namespace.getDatabaseName())
+                    .getCollection(this.namespace.getCollectionName(), RawBsonDocument.class)
+                    .withWriteConcern(WriteConcern.MAJORITY)
+                    .bulkWrite(documents, MV_BULK_WRITE_OPTIONS);
+              });
+      recordWriteEffectConservation(documents, bulkWriteResult);
     } catch (MongoBulkWriteException e) {
       // Unordered bulk may report multiple writeErrors (one per failed op).
       // Check if the error is a fencing rejection (DuplicateKey from a fenced upsert).
@@ -564,6 +623,64 @@ public class MaterializedViewWriter implements IndexWriter {
     }
   }
 
+  /**
+   * Write-effect conservation tripwire. On a successful bulk write, every {@link ReplaceOneModel}
+   * is an {@code upsert=true}, so it always either matches an existing document or upserts a new
+   * one — contributing exactly one to {@code matchedCount + upsertedCount}. A {@link
+   * DeleteOneModel} does not affect either count. Only the {@link UpdateOneModel} used for
+   * filter-only / partial-embed {@code $set} updates is {@code upsert=false} and can therefore
+   * match zero documents. The shortfall between the writes we expected to land and those that
+   * actually did equals the number of such zero-match updates.
+   *
+   * <p><b>Interpretation — this is not by itself MV/source drift.</b> An {@link UpdateOneModel}
+   * matches zero documents for two distinct reasons:
+   *
+   * <ol>
+   *   <li><b>Missing MV doc (drift):</b> the target document has not been ingested into the MV yet
+   *       (e.g. a change-stream update arriving before initial sync has upserted the doc) — a
+   *       silent no-op that genuinely drops the intended write.
+   *   <li><b>Fenced out (correct):</b> {@code UpdateOneModel}s carry a fencing predicate ({@code
+   *       Filters.and(idFilter, fencingCondition)}), so the update also matches nothing when a
+   *       newer leader has written a higher {@code _autoEmbed._leaseVersion}. Here the zero match
+   *       is the intended behavior of fencing, not lost data. (A batch containing an upserting
+   *       {@link ReplaceOneModel} would instead surface fencing as a {@code DUPLICATE_KEY}
+   *       rejection on the throw path; an all-{@code UpdateOneModel} batch on a fenced-out writer
+   *       can reach here silently.)
+   * </ol>
+   *
+   * <p>The metric is therefore named for the observable effect (unmatched filter updates), not a
+   * cause; alerting should correlate it with leadership/fencing signals before treating a rise as
+   * drift.
+   *
+   * <p>This is a cheap, always-on signal, not precise accounting: it is evaluated only on the clean
+   * success path (a {@code bulkWrite} that throws is handled by the retry logic above and its
+   * partial effects are not counted), mirroring the "detect general trends" approach of the {@code
+   * bulkWriteNumDocs} metric.
+   */
+  private void recordWriteEffectConservation(
+      List<WriteModel<RawBsonDocument>> documents, BulkWriteResult bulkWriteResult) {
+    if (bulkWriteResult == null || !bulkWriteResult.wasAcknowledged()) {
+      return;
+    }
+    long expectedMatchedOrUpserted =
+        documents.stream()
+            .filter(
+                model -> model instanceof ReplaceOneModel<?> || model instanceof UpdateOneModel<?>)
+            .count();
+    long actualMatchedOrUpserted =
+        (long) bulkWriteResult.getMatchedCount() + bulkWriteResult.getUpserts().size();
+    long unmatchedFilterUpdates = expectedMatchedOrUpserted - actualMatchedOrUpserted;
+    if (unmatchedFilterUpdates > 0) {
+      this.mvUnmatchedFilterUpdates.increment(unmatchedFilterUpdates);
+      LOG.warn(
+          "Materialized view bulk write had {} filter-only/partial-embed update(s) that matched no"
+              + " document: either the MV doc is not yet ingested (dropped write) or this writer"
+              + " was fenced out by a newer leader (correct no-op). generationId={}",
+          unmatchedFilterUpdates,
+          this.generationId);
+    }
+  }
+
   private void recordMvErrorMetric(Class<? extends Exception> exceptionType, Enum<?> reason) {
     this.metricsFactory
         .counter(
@@ -581,9 +698,8 @@ public class MaterializedViewWriter implements IndexWriter {
    * <p>All write model types receive a fencing filter that rejects the operation when the existing
    * document already has a higher leaseVersion. In addition, {@link ReplaceOneModel} embeds the
    * leaseVersion in the replacement document, and {@link UpdateOneModel} adds it via {@code $set}.
-   * {@link DeleteOneModel} gets only the filter —
-   * without it a zombie could delete a doc written by the new leader, then reinsert stale data via
-   * a subsequent upsert.
+   * {@link DeleteOneModel} gets only the filter — without it a zombie could delete a doc written by
+   * the new leader, then reinsert stale data via a subsequent upsert.
    *
    * @param documents the original write models
    * @param leaseVersion the current lease version to embed as a fencing token

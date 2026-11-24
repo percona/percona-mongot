@@ -4,6 +4,7 @@ import com.google.common.net.HostAndPort;
 import com.google.errorprone.annotations.Var;
 import com.mongodb.ConnectionString;
 import com.mongodb.lang.Nullable;
+import com.mongodb.spi.dns.DnsClient;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.mongodb.ConnectionStringUtil.InvalidConnectionStringException;
 import java.net.URLEncoder;
@@ -25,6 +26,7 @@ public class ConnectionStringBuilder {
   @Nullable private List<HostAndPort> hostAndPorts;
   @Nullable private String authenticationDatabase;
   private boolean x509Authentication = false;
+  private boolean oidcAuthentication = false;
 
   private record Option(String name, String value) {}
 
@@ -83,6 +85,26 @@ public class ConnectionStringBuilder {
   }
 
   /**
+   * Configures OIDC authentication on the connection string. Sets {@code
+   * authMechanism=MONGODB-OIDC} and {@code authSource=$external}. A custom (external identity
+   * provider) environment passes {@code Optional.empty()}: its token callback is an object that
+   * cannot be encoded in the URI, so it travels out of band on the {@code MongoCredential}. A
+   * built-in driver environment (e.g. {@code ENVIRONMENT:k8s}) would instead pass the raw {@code
+   * authMechanismProperties} value.
+   *
+   * @param authMechanismProperties the raw {@code authMechanismProperties} value, e.g. {@code
+   *     ENVIRONMENT:k8s}, or empty for no mechanism properties
+   */
+  public ConnectionStringBuilder withOidcConfig(Optional<String> authMechanismProperties) {
+    this.withOption("authSource", "$external");
+    this.withOption("authMechanism", "MONGODB-OIDC");
+    authMechanismProperties.ifPresent(p -> this.withOption("authMechanismProperties", p));
+
+    this.oidcAuthentication = true;
+    return this;
+  }
+
+  /**
    * Sets a single-valued option on the connection string. If an option with the same key was
    * previously set, it is replaced. {@code value} must be urlencoded if required.
    *
@@ -112,13 +134,18 @@ public class ConnectionStringBuilder {
   }
 
   public ConnectionString build() throws InvalidConnectionStringException {
+    return build(Optional.empty());
+  }
+
+  public ConnectionString build(Optional<DnsClient> dnsClient)
+      throws InvalidConnectionStringException {
     Check.stateNotNull(this.hostAndPorts, "At least one host must be provided");
     Check.checkState(!this.hostAndPorts.isEmpty(), "At least one host must be provided");
 
     String scheme = this.scheme;
     @Var String authenticationPrefix = "";
     @Var String authenticationDatabase = "";
-    if (!this.x509Authentication) {
+    if (!this.x509Authentication && !this.oidcAuthentication) {
       authenticationPrefix =
           Optional.ofNullable(this.authenticationCredentials).map(s -> s + "@").orElse("");
       authenticationDatabase = Objects.requireNonNullElse(this.authenticationDatabase, "");
@@ -130,14 +157,14 @@ public class ConnectionStringBuilder {
         this.options.stream().map(e -> e.name() + "=" + e.value()).collect(Collectors.joining("&"));
     String optionsPrefix = options.isEmpty() ? "" : "?";
 
-    return ConnectionStringUtil.toConnectionString(
+    String uri =
         String.format(
             "%s://%s%s/%s%s%s",
-            scheme,
-            authenticationPrefix,
-            hostList,
-            authenticationDatabase,
-            optionsPrefix,
-            options));
+            scheme, authenticationPrefix, hostList, authenticationDatabase, optionsPrefix, options);
+
+    if (dnsClient.isPresent()) {
+      return ConnectionStringUtil.toConnectionString(uri, dnsClient);
+    }
+    return ConnectionStringUtil.toConnectionString(uri);
   }
 }

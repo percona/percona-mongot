@@ -8,8 +8,8 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * Determines when bloom postings should be used for indexing and when bloom bitsets may be loaded
- * on heap while opening segments (via {@link MongotBloomReadPolicy}), driven by dynamic feature
+ * Determines when bloom postings should be used for indexing and when bloom bitsets should be
+ * loaded while opening segments (via {@link MongotBloomReadPolicy}), driven by dynamic feature
  * flags and {@link IndexStatus}.
  *
  * <p>When {@link DynamicFeatureFlags#BLOOM_FILTER_FOR_ID_FIELD} is on and natural-order scan is
@@ -23,8 +23,8 @@ public final class BloomCodecPolicy {
 
   /**
    * Supplier used both by {@link com.xgen.mongot.index.lucene.writer.SingleLuceneIndexWriter}
-   * (whether new and merged segments use bloom-encoded {@code _id}) and by readers when paired
-   * with {@link MongotBloomReadPolicy} (whether bloom payloads load into heap).
+   * (whether new and merged segments use bloom-encoded {@code _id}) and by readers when paired with
+   * {@link MongotBloomReadPolicy} (whether bloom payloads are loaded at all).
    */
   public static BooleanSupplier getBloomFilterEnabledForIdField(
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
@@ -43,16 +43,16 @@ public final class BloomCodecPolicy {
       if (indexStatus.getStatusCode() == IndexStatus.StatusCode.FAILED) {
         return false;
       }
-      
+
       if (!dynamicFeatureFlagRegistry.evaluateClusterInvariant(
           DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD)) {
         return false;
       }
-      
+
       if (!indexStatus.canServiceQueries()) {
         return true;
       }
-      
+
       return dynamicFeatureFlagRegistry.evaluateClusterInvariant(
           DynamicFeatureFlags.BLOOM_FILTER_IN_STEADY_STATE);
     };

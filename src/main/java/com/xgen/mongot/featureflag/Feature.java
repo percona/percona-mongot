@@ -55,13 +55,14 @@ public enum Feature {
   NEW_EMBEDDED_SEARCH_CAPABILITIES("enableNewEmbeddedSearchCapabilities", State.DISABLED),
   SHUT_DOWN_REPLICATION_WHEN_COLLECTION_NOT_FOUND(
       "shutDownReplicationWhenCollectionNotFound", State.DISABLED),
-  INITIAL_INDEX_STATUS_UNKNOWN("initialIndexStatusUnknown", State.ENABLED),
   MAAS_METRICS("enableMaasMetrics", State.DISABLED),
+  INTERNAL_MAAS_METRICS("enableInternalMaasMetrics", State.DISABLED),
   ACCURATE_NUM_EMBEDDED_ROOT_DOCS_METRIC("enableAccurateNumEmbeddedRootDocsMetric", State.DISABLED),
   NON_ZERO_ATTEMPT_UPLOADS("enableNonZeroAttemptUploads", State.DISABLED),
   INDEX_FEATURE_VERSION_FOUR("indexFeatureVersionFour", State.DISABLED),
   FLOOR_SEGMENT_MB("enableFloorSegmentMB", State.DISABLED),
   RESTART_WITH_NO_CONF_CALL("restartWithNoConfCall", State.DISABLED),
+  LOSSLESS_JSON_CODEC("losslessJsonCodec", State.DISABLED),
   SORTED_INDEX("enableSortedIndex", State.DISABLED),
   TRUNCATE_AUTOCOMPLETE_TOKENS("enableTruncateAutocompleteTokens", State.DISABLED),
   ENABLE_VALIDATION_OF_RETURN_STORED_SOURCE("enableValidationOfReturnStoredSource", State.ENABLED),
@@ -76,13 +77,71 @@ public enum Feature {
   CONCURRENT_INDEX_PARTITION_SEARCH("enableConcurrentIndexPartitionSearch", State.DISABLED),
   CANCEL_MERGE("enableCancelMerge", State.DISABLED),
   KNN_FULL_SCAN_HEURISTIC("enableKnnFullScanHeuristic", State.DISABLED),
-  CUSTOM_VECTOR_ENGINE("customVectorEngine", State.DISABLED),
+  VECTORX_INDEX_CREATION_ALLOWED("vectorxIndexCreationAllowed", State.DISABLED),
+  // Gates automatic derivation of $vectorSearch numCandidates when the request omits it.
+  AUTO_NUM_CANDIDATES("enableAutoNumCandidates", State.DISABLED),
   OVERLOAD_RETRY_SIGNAL("overloadRetrySignal", State.DISABLED),
   NESTED_VECTOR("nestedVector", State.ENABLED),
-  QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.DISABLED),
+  QUERY_MEMORY_ATTRIBUTION_METRICS("queryMemoryAttributionMetrics", State.ENABLED),
   METRICS_CACHE("metricsCache", State.DISABLED),
-  MERGE_ATTRIBUTION_METRICS("mergeAttributionMetrics", State.DISABLED),
-  LIFECYCLE_ATTRIBUTION_METRICS("lifecycleAttributionMetrics", State.DISABLED);
+  MERGE_ATTRIBUTION_METRICS("mergeAttributionMetrics", State.ENABLED),
+  LIFECYCLE_ATTRIBUTION_METRICS("lifecycleAttributionMetrics", State.ENABLED),
+  FCIS_CONSISTENT_SNAPSHOTS_LEADERSHIP("fcisConsistentSnapshotsLeadership", State.DISABLED),
+  FCIS_CONSISTENT_SNAPSHOTS_DOWNLOAD("fcisConsistentSnapshotsDownload", State.DISABLED),
+  FCIS_INDEX_DATA_CONDITIONAL_WRITES("fcisIndexDataConditionalWrites", State.DISABLED),
+  // Enabled by default so Search Playground, which does not consult the feature flag system, can
+  // serve $search facet aggregations. MMS can still disable it per group via the conf call.
+  SEARCH_AGGREGATION("searchAggregation", State.ENABLED),
+  BYTE_BINARY_QUANTIZATION("byteBinaryQuantization", State.DISABLED),
+  // Kill-switch for the CLOUDP-416232 one-time stale-internal-search-checkpoint reset guard in
+  // ReplicationIndexManager. Enabled by default; disable to skip the reset without a rollback.
+  RESET_STALE_INTERNAL_SEARCH_CHECKPOINT("resetStaleInternalSearchCheckpoint", State.ENABLED),
+  CHANGE_STREAM_PRIORITY_SCHEDULING("enableChangeStreamPriorityScheduling", State.DISABLED),
+  CHANGE_STREAM_ACTIVITY_OBSERVER("changeStreamActivityObserver", State.DISABLED),
+  PARALLEL_CHANGE_STREAM_READERS("enableParallelChangeStreamReaders", State.DISABLED),
+  // Retries a steady-state getMore rejected by Mongotune ingress rate limiting (code 462).
+  RETRY_THROTTLED_GETMORE_ON_SAME_CURSOR("retryThrottledGetMoreOnSameCursor", State.DISABLED),
+  // Kill-switch for the CLOUDP-429731 mmap bloom read path. Disabled by default, so bloom bitsets
+  // are read in place from the memory-mapped .blm and occupy OS page cache rather than JVM heap.
+  // Enable, and restart, to fall back to copying each segment's bitset onto the heap at open. The
+  // .blm is byte-identical either way, so flipping this needs no reindex in either direction.
+  BLOOM_FILTER_ON_HEAP("bloomFilterOnHeap", State.DISABLED),
+  // Writes new segments in the native Lucene 10.4 on-disk format instead of the 9.11.1 format,
+  // and stamps newly created indexes with indexCreatedVersionMajor 10 (index-wide, permanent).
+  // Enabling is one-way for rollback purposes: anything written under the flag is unreadable by
+  // binaries carrying Lucene < 10.4, and a created-10 index stays that way even after the flag is
+  // disabled — only a re-index clears it. Do not enable until the fleet minimum carries 10.4 jars.
+  LUCENE_104_CODEC("lucene104Codec", State.DISABLED),
+  // Quarantines a config journal entry whose index definition cannot be parsed instead of
+  // failing startup, so that one malformed definition does not take every index on the host
+  // down with it. Disabled by default: until it is enabled the journal is still read
+  // fail-fast, exactly as before.
+  QUARANTINE_UNPARSEABLE_INDEX("quarantineUnparseableIndex", State.DISABLED),
+  // Kill switch for the compat gate. Enabling stops the conf call enforcing either registry, so a
+  // gated member is neither rejected nor carry-forward-checked, without needing a rollback. Named
+  // for the off action so the gate stays on by default and MMS can turn it off by writing true,
+  // the same shape every other flag piped through MongotConfigSvc.configFeatureFlags uses.
+  FORCE_DISABLE_COMPAT_GATE("forceDisableCompatGate", State.DISABLED),
+  // Constructs blobstore snapshotter resources at startup even when blobstore uploads and downloads
+  // are disabled, so a later runtime request can flip them on without restarting mongot.
+  ALWAYS_BOOTSTRAP_SNAPSHOTTER_RESOURCES("alwaysBootstrapSnapshotterResources", State.DISABLED),
+  // CLOUDP-447390: escalates the AE resync id-order tripwire from REPORT (metric + warning,
+  // default) to FAIL — aborting the resync on the first source _id ordering inversion.
+  AE_RESYNC_ID_ORDER_TRIPWIRE_FAIL_FAST("aeResyncIdOrderTripwireFailFast", State.DISABLED),
+  // CLOUDP-449412: selects which AE resync classification acts — the sort-merge (default) or the
+  // per-window hash join. The other one always runs in the background as a cheap, set-based shadow
+  // (no compareDocuments). When the two disagree, resyncMergeClassificationMismatches is
+  // incremented
+  // and the index id plus the first few differing _ids are logged.
+  AE_RESYNC_HASH_JOIN("aeResyncHashJoin", State.DISABLED),
+  // CLOUDP-445915: OIDC authentication to mongod via an enterprise-supplied OidcCallbackFactory.
+  // Enabled in FeatureFlags.enterpriseDefaults() (kill switch); community runtimes reject an
+  // `oidc` config block at parse time via the ENTERPRISE field edition.
+  OIDC_AUTH("oidcAuth", State.DISABLED),
+  // Kill switch for SourceCollectionCountUpdater, in case its hourly collStats calls prove costly.
+  // Named for the off action so the updater runs by default and MMS can stop it by writing true.
+  FORCE_DISABLE_SOURCE_COLLECTION_COUNT_UPDATER(
+      "forceDisableSourceCollectionCountUpdater", State.DISABLED);
 
   private final String name;
   private final State defaultState;

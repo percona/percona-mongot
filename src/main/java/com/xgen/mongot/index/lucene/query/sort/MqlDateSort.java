@@ -29,40 +29,51 @@ public class MqlDateSort extends MqlSortedNumericSortField {
       };
 
   private final boolean enablePruning;
-  private final NullEmptySortPosition nullEmptySortPosition;
+  protected final NullEmptySortPosition nullEmptySortPosition;
 
   MqlDateSort(
       FieldName.TypeField fieldType,
       MongotSortField sortField,
       boolean enablePruning,
       Optional<FieldPath> embeddedRoot,
-      boolean indexSorted) {
+      boolean indexSorted,
+      boolean isIndexWriterConfigSortField) {
     super(
         fieldType.getLuceneFieldName(sortField.field(), embeddedRoot),
         Type.LONG,
         sortField.options().isReverse(),
         sortField.options().selector().numericSelector,
-        indexSorted);
+        indexSorted,
+        isIndexWriterConfigSortField);
     this.enablePruning = enablePruning;
     this.nullEmptySortPosition =
         ((UserFieldSortOptions) sortField.options()).nullEmptySortPosition();
   }
 
   @Override
-  public FieldComparator<?> getComparator(int numHits, Pruning lucenePruning) {
+  protected final FieldComparator<?> createQueryTimeFieldComparator(
+      int numHits, Pruning lucenePruning) {
     // Consider both mongot & lucene pruning configuration
     Pruning configurePruning = this.enablePruning ? lucenePruning : Pruning.NONE;
 
     return new FieldComparatorBsonWrapper<>(
-        new MqlLongComparator(
-            numHits,
-            getField(),
-            getReverse(),
-            configurePruning,
-            getNumericType(),
-            getSelector(),
-            this.nullEmptySortPosition),
+        createComparator(numHits, configurePruning),
         DATE_CONVERTER,
         this.nullEmptySortPosition.getNullMissingSortValue());
+  }
+
+  /**
+   * Builds the underlying long comparator over the encoded dates. Overridden by the
+   * embeddedDoc-scoped variant to reduce over a parent's matching children.
+   */
+  protected MqlLongComparator createComparator(int numHits, Pruning pruning) {
+    return new MqlLongComparator(
+        numHits,
+        getField(),
+        getReverse(),
+        pruning,
+        getNumericType(),
+        getSelector(),
+        this.nullEmptySortPosition);
   }
 }

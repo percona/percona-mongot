@@ -26,7 +26,9 @@ import com.google.errorprone.annotations.Var;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.lucene.codecs.CodecUtil;
+import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.lucene95.OrdToDocDISIReaderConfiguration;
@@ -41,9 +43,9 @@ import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.VectorScorer;
 import org.apache.lucene.store.ChecksumIndexInput;
+import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.ReadAdvice;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -53,7 +55,11 @@ import org.apache.lucene.util.quantization.ScalarQuantizer;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Reads Scalar Quantized vectors from the index segments along with index data structures.
+ * Reads binary-quantized vectors from the index segments along with index data structures.
+ *
+ * <p>Supports both {@code float32} and {@code byte} encoded vector fields. Quantized vectors are
+ * stored as packed 1-bit values; the raw, full-fidelity vectors are delegated to the underlying
+ * {@link FlatVectorsReader}.
  *
  * @lucene.experimental
  */
@@ -69,7 +75,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
   private final FieldInfos fieldInfos;
 
   /**
-   * Reads Scalar Quantized vectors from the index segments along with index data structures.
+   * Reads binary-quantized vectors from the index segments along with index data structures.
    *
    * @param state Quantized segment state.
    * @param rawVectorsReader Unquantized vector reader for forwarding to if needed.
@@ -114,7 +120,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
               Mongot01042BinaryQuantizedFlatVectorsFormat.VECTOR_DATA_CODEC_NAME,
               // Quantized vectors are accessed randomly from their node ID stored in the HNSW
               // graph.
-              state.context.withReadAdvice(ReadAdvice.RANDOM));
+              state.context.withHints(DataAccessHint.RANDOM));
       success = true;
     } finally {
       if (success == false) {
@@ -173,45 +179,60 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
     CodecUtil.checksumEntireFile(this.quantizedVectorData);
   }
 
-  private FieldEntry getFieldEntry(String field) {
+  private static IllegalArgumentException fieldNotFound(String field) {
+    return new IllegalArgumentException("field=\"" + field + "\" not found");
+  }
+
+  // Temporary Fallback: replace this to throw FieldNotFound() on fieldEntry == null when
+  // BINARY_BYTE_QUANTIZATION is fully rolled out. Gating in IndexableFieldFactory for bit quantized
+  // byte vectors means some users will have this feature disabled. [CLOUDP-405857]
+  private Optional<FieldEntry> getFieldEntry(String field) {
     FieldInfo info = this.fieldInfos.fieldInfo(field);
-    FieldEntry fieldEntry;
-    if (info == null || (fieldEntry = this.fields.get(info.name)) == null) {
-      throw new IllegalArgumentException("field=\"" + field + "\" not found");
+    if (info == null) {
+      throw fieldNotFound(field);
     }
-    if (fieldEntry.vectorEncoding != VectorEncoding.FLOAT32) {
+    FieldEntry fieldEntry = this.fields.get(info.name);
+    if (fieldEntry == null) {
+      // The field exists but has no quantized entry (the writer only quantizes FLOAT32 and BYTE).
+      // Return empty so the caller can fall back to the raw reader (e.g. bit-encoded fields).
+      return Optional.empty();
+    }
+    if (fieldEntry.vectorEncoding != VectorEncoding.FLOAT32
+        && fieldEntry.vectorEncoding != VectorEncoding.BYTE) {
       throw new IllegalArgumentException(
           "field=\""
               + field
               + "\" is encoded as: "
               + fieldEntry.vectorEncoding
               + " expected: "
-              + VectorEncoding.FLOAT32);
+              + VectorEncoding.FLOAT32
+              + " or "
+              + VectorEncoding.BYTE);
     }
-    return fieldEntry;
+    return Optional.of(fieldEntry);
   }
 
   @Override
   public FloatVectorValues getFloatVectorValues(String field) throws IOException {
-    FieldEntry fieldEntry = getFieldEntry(field);
-    FloatVectorValues rawVectorValues = this.rawVectorsReader.getFloatVectorValues(field);
-    OffHeapQuantizedByteVectorValues quantizedByteVectorValues =
-        OffHeapQuantizedByteVectorValues.load(
-            fieldEntry.ordToDoc,
-            fieldEntry.dimension,
-            fieldEntry.size,
-            fieldEntry.scalarQuantizer,
-            fieldEntry.similarityFunction,
-            this.vectorScorer,
-            fieldEntry.vectorDataOffset,
-            fieldEntry.vectorDataLength,
-            this.quantizedVectorData);
-    return new QuantizedVectorValues(rawVectorValues, quantizedByteVectorValues);
+    FieldEntry fieldEntry = getFieldEntry(field).orElseThrow(() -> fieldNotFound(field));
+    assert fieldEntry.vectorEncoding == VectorEncoding.FLOAT32;
+    @Nullable FloatVectorValues rawVectorValues = this.rawVectorsReader.getFloatVectorValues(field);
+    OffHeapQuantizedByteVectorValues quantizedByteVectorValues = loadQuantized(fieldEntry);
+    return new QuantizedFloatVectorValues(rawVectorValues, quantizedByteVectorValues);
   }
 
   @Override
+  @Nullable
   public ByteVectorValues getByteVectorValues(String field) throws IOException {
-    return this.rawVectorsReader.getByteVectorValues(field);
+    Optional<FieldEntry> maybeFieldEntry = getFieldEntry(field);
+    if (maybeFieldEntry.isEmpty()) {
+      return this.rawVectorsReader.getByteVectorValues(field);
+    }
+    FieldEntry fieldEntry = maybeFieldEntry.get();
+    assert fieldEntry.vectorEncoding == VectorEncoding.BYTE;
+    ByteVectorValues rawVectorValues = this.rawVectorsReader.getByteVectorValues(field);
+    OffHeapQuantizedByteVectorValues quantizedByteVectorValues = loadQuantized(fieldEntry);
+    return new QuantizedByteVectorValues(rawVectorValues, quantizedByteVectorValues);
   }
 
   private static IndexInput openDataInput(
@@ -257,33 +278,47 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
   @Override
   @Nullable
   public RandomVectorScorer getRandomVectorScorer(String field, float[] target) throws IOException {
-    FieldEntry fieldEntry = getFieldEntry(field);
+    FieldEntry fieldEntry = getFieldEntry(field).orElseThrow(() -> fieldNotFound(field));
+    assert fieldEntry.vectorEncoding == VectorEncoding.FLOAT32;
     if (fieldEntry.scalarQuantizer == null) {
       return this.rawVectorsReader.getRandomVectorScorer(field, target);
     }
-    OffHeapQuantizedByteVectorValues vectorValues =
-        OffHeapQuantizedByteVectorValues.load(
-            fieldEntry.ordToDoc,
-            fieldEntry.dimension,
-            fieldEntry.size,
-            fieldEntry.scalarQuantizer,
-            fieldEntry.similarityFunction,
-            this.vectorScorer,
-            fieldEntry.vectorDataOffset,
-            fieldEntry.vectorDataLength,
-            this.quantizedVectorData);
+    OffHeapQuantizedByteVectorValues vectorValues = loadQuantized(fieldEntry);
     return this.vectorScorer.getRandomVectorScorer(
         fieldEntry.similarityFunction, vectorValues, target);
   }
 
   @Override
+  @Nullable
   public RandomVectorScorer getRandomVectorScorer(String field, byte[] target) throws IOException {
-    return this.rawVectorsReader.getRandomVectorScorer(field, target);
+    Optional<FieldEntry> maybeFieldEntry = getFieldEntry(field);
+    if (maybeFieldEntry.isEmpty()) {
+      return this.rawVectorsReader.getRandomVectorScorer(field, target);
+    }
+    FieldEntry fieldEntry = maybeFieldEntry.get();
+    assert fieldEntry.vectorEncoding == VectorEncoding.BYTE;
+    OffHeapQuantizedByteVectorValues vectorValues = loadQuantized(fieldEntry);
+    return this.vectorScorer.getRandomVectorScorer(
+        fieldEntry.similarityFunction, vectorValues, target);
   }
 
   @Override
   public void close() throws IOException {
     IOUtils.close(this.quantizedVectorData, this.rawVectorsReader);
+  }
+
+  @Override
+  public Map<String, Long> getOffHeapByteSize(FieldInfo fieldInfo) {
+    Map<String, Long> raw = this.rawVectorsReader.getOffHeapByteSize(fieldInfo);
+    FieldEntry fieldEntry = this.fields.get(fieldInfo.name);
+    if (fieldEntry == null) {
+      return raw;
+    }
+    Map<String, Long> quant =
+        Map.of(
+            Mongot01042BinaryQuantizedFlatVectorsFormat.VECTOR_DATA_EXTENSION,
+            fieldEntry.vectorDataLength);
+    return KnnVectorsReader.mergeOffHeapByteSizeMaps(raw, quant);
   }
 
   @Override
@@ -317,7 +352,28 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
   @Nullable
   public OffHeapQuantizedByteVectorValues getQuantizedVectorValues(String fieldName)
       throws IOException {
-    FieldEntry fieldEntry = getFieldEntry(fieldName);
+    Optional<FieldEntry> fieldEntry = getFieldEntry(fieldName);
+    if (fieldEntry.isEmpty()) {
+      return null;
+    }
+    return loadQuantized(fieldEntry.get());
+  }
+
+  /**
+   * Returns the binary quantizer for {@code fieldName}, or {@code null} when the field has no
+   * quantized entry in this reader or the field is empty ({@code size == 0}). It can also return
+   * null in the {@code orElse(null)} case because {@link #getFieldEntry} returns an empty optional
+   * for byte fields which have no corresponding field entry.
+   */
+  @Override
+  @Nullable
+  public ScalarQuantizer getQuantizationState(String fieldName) {
+    // Note, after CLOUDP-431802 is implemented, {@link #getFieldEntry} will not return an empty
+    // optional, so this will never be null and the @Nullable annotation should be removed
+    return getFieldEntry(fieldName).map(fieldEntry -> fieldEntry.scalarQuantizer).orElse(null);
+  }
+
+  private OffHeapQuantizedByteVectorValues loadQuantized(FieldEntry fieldEntry) throws IOException {
     return OffHeapQuantizedByteVectorValues.load(
         fieldEntry.ordToDoc,
         fieldEntry.dimension,
@@ -328,13 +384,6 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
         fieldEntry.vectorDataOffset,
         fieldEntry.vectorDataLength,
         this.quantizedVectorData);
-  }
-
-  @Override
-  @Nullable
-  public ScalarQuantizer getQuantizationState(String fieldName) {
-    FieldEntry fieldEntry = getFieldEntry(fieldName);
-    return fieldEntry.scalarQuantizer;
   }
 
   private static class FieldEntry implements Accountable {
@@ -367,14 +416,14 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
           input.readInt(); // confidenceInterval, unused
           input.readInt(); // minQuantile, unused
           input.readInt(); // maxQuantile, unused
-          this.scalarQuantizer = new BinaryQuantizer();
+          this.scalarQuantizer = BinaryQuantizer.INSTANCE;
         } else {
           input.readInt(); // confidenceInterval, unused
           input.readByte(); // bits
           input.readByte(); // compress
           input.readInt(); // minQuantile, unused
           input.readInt(); // maxQuantile, unused
-          this.scalarQuantizer = new BinaryQuantizer();
+          this.scalarQuantizer = BinaryQuantizer.INSTANCE;
         }
       } else {
         this.scalarQuantizer = null;
@@ -388,12 +437,19 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
     }
   }
 
-  private static final class QuantizedVectorValues extends FloatVectorValues {
+  /**
+   * {@link FloatVectorValues} view that serves raw (full-fidelity) vectors for {@code vectorValue}
+   * but routes {@code scorer} to the quantized values for HNSW traversal. This lets the reader
+   * return a single object that serves both the approximate (quantized) and exact (raw) paths.
+   */
+  private static final class QuantizedFloatVectorValues extends FloatVectorValues {
     private final FloatVectorValues rawVectorValues;
     private final OffHeapQuantizedByteVectorValues quantizedVectorValues;
 
-    QuantizedVectorValues(
-        FloatVectorValues rawVectorValues, OffHeapQuantizedByteVectorValues quantizedVectorValues) {
+    @SuppressWarnings("NullAway")
+    QuantizedFloatVectorValues(
+        @Nullable FloatVectorValues rawVectorValues,
+        OffHeapQuantizedByteVectorValues quantizedVectorValues) {
       this.rawVectorValues = rawVectorValues;
       this.quantizedVectorValues = quantizedVectorValues;
     }
@@ -414,13 +470,72 @@ public final class Mongot01042BinaryQuantizedFlatVectorsReader extends FlatVecto
     }
 
     @Override
+    public int ordToDoc(int ord) {
+      return this.rawVectorValues.ordToDoc(ord);
+    }
+
+    @Override
     public FloatVectorValues copy() throws IOException {
-      return new QuantizedVectorValues(
+      return new QuantizedFloatVectorValues(
           this.rawVectorValues.copy(), this.quantizedVectorValues.copy());
     }
 
     @Override
     public VectorScorer scorer(float[] query) throws IOException {
+      return this.quantizedVectorValues.scorer(query);
+    }
+
+    @Override
+    public DocIndexIterator iterator() {
+      return this.rawVectorValues.iterator();
+    }
+  }
+
+  /**
+   * {@link ByteVectorValues} view that serves raw (full-fidelity) vectors for {@code vectorValue}
+   * but routes {@code scorer} to the quantized values for HNSW traversal. This lets the reader
+   * return a single object that serves both the approximate (quantized) and exact (raw) paths.
+   */
+  private static final class QuantizedByteVectorValues extends ByteVectorValues {
+    private final ByteVectorValues rawVectorValues;
+    private final OffHeapQuantizedByteVectorValues quantizedVectorValues;
+
+    @SuppressWarnings("NullAway")
+    QuantizedByteVectorValues(
+        @Nullable ByteVectorValues rawVectorValues,
+        OffHeapQuantizedByteVectorValues quantizedVectorValues) {
+      this.rawVectorValues = rawVectorValues;
+      this.quantizedVectorValues = quantizedVectorValues;
+    }
+
+    @Override
+    public int dimension() {
+      return this.rawVectorValues.dimension();
+    }
+
+    @Override
+    public int size() {
+      return this.rawVectorValues.size();
+    }
+
+    @Override
+    public byte[] vectorValue(int ord) throws IOException {
+      return this.rawVectorValues.vectorValue(ord);
+    }
+
+    @Override
+    public int ordToDoc(int ord) {
+      return this.rawVectorValues.ordToDoc(ord);
+    }
+
+    @Override
+    public ByteVectorValues copy() throws IOException {
+      return new QuantizedByteVectorValues(
+          this.rawVectorValues.copy(), this.quantizedVectorValues.copy());
+    }
+
+    @Override
+    public VectorScorer scorer(byte[] query) throws IOException {
       return this.quantizedVectorValues.scorer(query);
     }
 

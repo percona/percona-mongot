@@ -2,6 +2,7 @@ package com.xgen.testing.mongot.index.analyzer.custom;
 
 import com.xgen.mongot.index.analyzer.custom.AsciiFoldingTokenFilterDefinition;
 import com.xgen.mongot.index.analyzer.custom.DaitchMokotoffSoundexTokenFilterDefinition;
+import com.xgen.mongot.index.analyzer.custom.DoubleMetaphoneTokenFilterDefinition;
 import com.xgen.mongot.index.analyzer.custom.EdgeGramTokenFilterDefinition;
 import com.xgen.mongot.index.analyzer.custom.EnglishMinimalStemmingTokenFilterDefinition;
 import com.xgen.mongot.index.analyzer.custom.EnglishPossessiveTokenFilterDefinition;
@@ -204,6 +205,29 @@ public class TokenFilterDefinitionBuilder {
     }
   }
 
+  public static class DoubleMetaphoneTokenFilter {
+    private OriginalTokens originalTokens = OriginalTokens.INCLUDE;
+    private Optional<Integer> maxCodeLength = Optional.empty();
+
+    public static DoubleMetaphoneTokenFilter builder() {
+      return new DoubleMetaphoneTokenFilter();
+    }
+
+    public DoubleMetaphoneTokenFilter originalTokens(OriginalTokens originalTokens) {
+      this.originalTokens = originalTokens;
+      return this;
+    }
+
+    public DoubleMetaphoneTokenFilter maxCodeLength(int maxCodeLength) {
+      this.maxCodeLength = Optional.of(maxCodeLength);
+      return this;
+    }
+
+    public DoubleMetaphoneTokenFilterDefinition build() {
+      return new DoubleMetaphoneTokenFilterDefinition(this.originalTokens, this.maxCodeLength);
+    }
+  }
+
   public static class EdgeGramTokenFilter {
     private int minGram;
     private int maxGram;
@@ -292,8 +316,8 @@ public class TokenFilterDefinitionBuilder {
 
     public ShingleTokenFilterDefinition build() {
       if (this.minShingleSize > this.maxShingleSize) {
-        throw new
-            IllegalArgumentException("minShingleSize must not be greater than maxShingleSize");
+        throw new IllegalArgumentException(
+            "minShingleSize must not be greater than maxShingleSize");
       }
       return new ShingleTokenFilterDefinition(this.minShingleSize, this.maxShingleSize);
     }

@@ -8,6 +8,8 @@ import static org.junit.Assert.assertTrue;
 
 import com.google.common.base.CaseFormat;
 import com.xgen.mongot.util.Enums;
+import com.xgen.testing.mongot.metrics.FilteredCompositeRegistry;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.LongTaskTimer;
 import io.micrometer.core.instrument.Meter;
@@ -360,5 +362,104 @@ public class PerIndexMetricsFactoryTest {
         MeterNotFoundException.class,
         () -> meterRegistry.get("counter").tags(Tags.of("generationId logString", "2")).counter());
     assertEquals(1, meterRegistry.getMeters().size());
+  }
+
+  // Exercises the auto-embedding-facing wiring — identitySafeClose threaded to the
+  // closed per-index factories and the ensure-re-register delegate. Two factories
+  // share a generation id (as matview attempts a0/a1 do); dropping the predecessor must not remove
+  // the successor's live gauge, and ensure re-registers it if it is evicted.
+  @Test
+  public void testMatviewIdentitySafeCloseAndSelfHeal() {
+    var meterRegistry = this.meterAndFtdcRegistry.meterRegistry();
+    PerIndexMetricsFactory a0 =
+        new PerIndexMetricsFactory(
+            "test",
+            this.meterAndFtdcRegistry,
+            "matview-abc-u0",
+            "abc",
+            /* identitySafeClose= */ true);
+    PerIndexMetricsFactory a1 =
+        new PerIndexMetricsFactory(
+            "test",
+            this.meterAndFtdcRegistry,
+            "matview-abc-u0",
+            "abc",
+            /* identitySafeClose= */ true);
+
+    a0.perIndexObjectValueGauge("leaderStatus", new AtomicLong(), Number::doubleValue);
+    AtomicLong a1State =
+        a1.perIndexObjectValueGauge("leaderStatus", new AtomicLong(), Number::doubleValue);
+    a1State.set(1);
+
+    // Dropping a0 must leave a1's live gauge intact (Fix B).
+    a0.close();
+    Gauge gauge = meterRegistry.get(name("leaderStatus")).gauge();
+    assertEquals(1.0, gauge.value(), 0.0);
+
+    // If the gauge is evicted, ensure re-registers it against the existing state object (Fix D).
+    meterRegistry.remove(gauge);
+    assertThrows(
+        MeterNotFoundException.class, () -> meterRegistry.get(name("leaderStatus")).gauge());
+    assertTrue(
+        a1.ensurePerIndexObjectValueGaugeRegistered("leaderStatus", a1State, Number::doubleValue));
+    assertEquals(1.0, meterRegistry.get(name("leaderStatus")).gauge().value(), 0.0);
+  }
+
+  @Test
+  public void indexIdTag_returnsOnlyTheIndexIdTag() {
+    Tags tags = PerIndexMetricsFactory.indexIdTag(INDEX_ID);
+
+    assertEquals(INDEX_IDS, tags);
+  }
+
+  @Test
+  public void indexIdTag_usesTheSameTagKeyAsTagsFor() {
+    // Callers that identify an index without a generation must land on the same label as the
+    // per-index factory, or their series will not join with the rest of index.stats.
+    Tags indexIdOnly = PerIndexMetricsFactory.indexIdTag(INDEX_ID);
+    Tags withGeneration = PerIndexMetricsFactory.tagsFor(INDEX_GENERATION_ID, INDEX_ID);
+
+    assertEquals(
+        indexIdOnly.stream().toList(),
+        withGeneration.stream()
+            .filter(tag -> tag.getKey().equals(indexIdOnly.stream().toList().get(0).getKey()))
+            .toList());
+  }
+
+  @Test
+  public void perIndexCounter_compositeWithDeniedChildren_readsRecordedValue() {
+    var factory =
+        new PerIndexMetricsFactory(
+            "test", FilteredCompositeRegistry.create(), INDEX_GENERATION_ID, INDEX_ID);
+    Counter counter = factory.perIndexCounter("counter");
+
+    counter.increment(5);
+
+    assertEquals(5, counter.count(), 0.0);
+  }
+
+  @Test
+  public void processCounter_compositeWithDeniedChildren_readsRecordedValue() {
+    var factory =
+        new PerIndexMetricsFactory(
+            "test", FilteredCompositeRegistry.create(), INDEX_GENERATION_ID, INDEX_ID);
+    Counter counter = factory.getProcessMetricsFactory().counter("counter");
+
+    counter.increment(5);
+
+    assertEquals(5, counter.count(), 0.0);
+  }
+
+  @Test
+  public void childPerIndexCounter_compositeWithDeniedChildren_readsRecordedValue() {
+    var factory =
+        new PerIndexMetricsFactory(
+                "test", FilteredCompositeRegistry.create(), INDEX_GENERATION_ID, INDEX_ID)
+            .childMetricsFactory("child");
+    Counter counter = factory.perIndexCounter("counter");
+
+    counter.increment(5);
+
+    assertEquals(5, counter.count(), 0.0);
   }
 }

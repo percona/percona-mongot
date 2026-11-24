@@ -96,6 +96,20 @@
       "errorMessageContains": "The following field type definitions are disallowed in a typeSet definition: "
     },
     {
+      "description": "autoEmbed in types",
+      "value": {
+        "name": "foo",
+        "types": [
+          {
+            "type": "autoEmbed",
+            "model": "voyage-3-large",
+            "modality": "text"
+          }
+        ]
+      },
+      "errorMessageContains": "The following field type definitions are disallowed in a typeSet definition: "
+    },
+    {
       "description": "invalid types value",
       "value": {
         "name": "foo",

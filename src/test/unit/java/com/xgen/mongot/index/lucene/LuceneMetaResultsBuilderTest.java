@@ -68,8 +68,19 @@ import org.apache.lucene.store.ByteBuffersDirectory;
 import org.bson.BsonInt64;
 import org.bson.BsonString;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
+/** Runs under every {@link LuceneCodec.WriteFormat}: results must be write-format-invariant. */
+@RunWith(Parameterized.class)
 public class LuceneMetaResultsBuilderTest {
+
+  @Parameterized.Parameters(name = "{0}")
+  public static LuceneCodec.WriteFormat[] writeFormats() {
+    return LuceneCodec.WriteFormat.values();
+  }
+
+  @Parameterized.Parameter public LuceneCodec.WriteFormat writeFormat;
 
   private static final String PRICE_FIELD = "price";
   private static final String CATEGORY_FIELD = "category";
@@ -193,7 +204,12 @@ public class LuceneMetaResultsBuilderTest {
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
           metaResultsBuilder.buildFacetMetaResults(
-              searcherReference, topDocs, facetsCollector, collectorQuery, false);
+              searcherReference,
+              topDocs,
+              facetsCollector,
+              collectorQuery,
+              false,
+              /* embeddedScopedFacetsEnabled= */ false);
 
       // Assert count results
       assertThat(metaResults.count().getTotal()).hasValue(6L);
@@ -292,7 +308,12 @@ public class LuceneMetaResultsBuilderTest {
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
           metaResultsBuilder.buildFacetMetaResults(
-              searcherReference, topDocs, facetsCollector, collectorQuery, false);
+              searcherReference,
+              topDocs,
+              facetsCollector,
+              collectorQuery,
+              false,
+              /* embeddedScopedFacetsEnabled= */ false);
 
       assertThat(metaResults.count().getTotal()).hasValue(6L);
       assertThat(metaResults.facet()).isPresent();
@@ -379,7 +400,12 @@ public class LuceneMetaResultsBuilderTest {
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
           metaResultsBuilder.buildFacetMetaResults(
-              searcherReference, topDocs, facetsCollector, collectorQuery, false);
+              searcherReference,
+              topDocs,
+              facetsCollector,
+              collectorQuery,
+              false,
+              /* embeddedScopedFacetsEnabled= */ false);
 
       assertThat(metaResults.count().getTotal()).hasValue(0L);
       assertThat(metaResults.facet()).isPresent();
@@ -418,7 +444,8 @@ public class LuceneMetaResultsBuilderTest {
 
     try (var directory = new ByteBuffersDirectory();
         var writer =
-            new IndexWriter(directory, new IndexWriterConfig().setCodec(new LuceneCodec()))) {
+            new IndexWriter(
+                directory, new IndexWriterConfig().setCodec(new LuceneCodec(this.writeFormat)))) {
 
       // Add documents with different category values
       // electronics: 3 docs
@@ -468,7 +495,12 @@ public class LuceneMetaResultsBuilderTest {
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
           metaResultsBuilder.buildFacetMetaResults(
-              searcherReference, topDocs, facetsCollector, collectorQuery, false);
+              searcherReference,
+              topDocs,
+              facetsCollector,
+              collectorQuery,
+              false,
+              /* embeddedScopedFacetsEnabled= */ false);
 
       assertThat(metaResults.count().getTotal()).hasValue(6L);
       assertThat(metaResults.facet()).isPresent();
@@ -518,7 +550,8 @@ public class LuceneMetaResultsBuilderTest {
 
     try (var directory = new ByteBuffersDirectory();
         var writer =
-            new IndexWriter(directory, new IndexWriterConfig().setCodec(new LuceneCodec()))) {
+            new IndexWriter(
+                directory, new IndexWriterConfig().setCodec(new LuceneCodec(this.writeFormat)))) {
 
       // Add documents with different category values
       // electronics: 4 docs
@@ -571,7 +604,12 @@ public class LuceneMetaResultsBuilderTest {
       var metaResultsBuilder = new LuceneMetaResultsBuilder(facetContext, Optional.empty());
       MetaResults metaResults =
           metaResultsBuilder.buildFacetMetaResults(
-              searcherReference, topDocs, result.facetsCollector(), collectorQuery, false);
+              searcherReference,
+              topDocs,
+              result.facetsCollector(),
+              collectorQuery,
+              false,
+              /* embeddedScopedFacetsEnabled= */ false);
 
       assertThat(metaResults.facet()).isPresent();
 

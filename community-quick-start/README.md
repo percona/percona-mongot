@@ -12,14 +12,24 @@ The steps listed will:
 ## Before You Begin:
 
 * Download Docker v4.40 or higher
-* Download Docker Compose
-* Download the `curl` and `openssl` commands
+  * When running Docker Desktop on macOS note that v4.87+ of Docker Desktop uses a Linux VM with Kernel 7.0.12+. Which is incompatible with MongoDB Community 8.3.11 and below. Installing Docker Desktop v4.86 can workaround this issue.
+* Download Docker Compose.
+* Download the `curl`
+* (macOS Users) Install `openssl@3`. macOS ships with an older version LibreSSL that is incompatible with the certificate generation scripts in the community `Makefile`. Install the latest OpenSSL (e.g. with Homebrew: `brew install openssl@3`) and ensure it shadows the system binary.
+
+  Add the following to your shell init script (e.g. `~/.zshrc`, `~/.bashrc`) and restart your shell:
+  ```shell
+  # Apple Silicon:
+  export PATH="/opt/homebrew/opt/openssl@3/bin:$PATH"
+  # Intel Mac:
+  export PATH="/usr/local/opt/openssl@3/bin:$PATH"
+  ```
 * Download `mongosh` locally or have access to it through Docker
 * Download the sample data:
 
-```shell
-curl https://atlas-education.s3.amazonaws.com/sampledata.archive -o community-quick-start/sampledata.archive
-```
+   ```shell
+   curl https://atlas-education.s3.amazonaws.com/sampledata.archive -o community-quick-start/sampledata.archive
+   ```
 
 * If you would like to change the password, update the `pwfile` and `init-mongo.sh` with
 the new password before starting the services.
@@ -32,6 +42,7 @@ MongoDB Community Search supports two build modes:
 Builds `mongot` from your local source code. This is useful for development and testing local changes.
 
 ```shell
+cd community-quick-start/
 make docker.up
 # or explicitly:
 make docker.up MODE=local
@@ -74,7 +85,7 @@ make docker.clear
 make docker.ps
 
 # View logs for specific service
-make docker.logs                # for mongot logs in local mode 
+make docker.logs                # for mongot logs in local mode
 make docker.logs SERVICE=mongot # for mongot logs in latest mode
 make docker.logs SERVICE=mongod # for mongod logs
 
@@ -84,11 +95,63 @@ make docker.up
 
 # Connect to MongoDB
 make docker.connect # Simple alias for:
-mongosh --tls --tlsCAFile ./community-quick-start/tls/ca.pem --tlsCertificateKeyFile ./community-quick-start/tls/client-combined.pem
+mongosh --tls --tlsCAFile ./tls/ca.pem --tlsCertificateKeyFile ./tls/client-combined.pem
 
 # Check metrics endpoint
 curl http://localhost:9946/metrics
 ```
+
+## Query tracing (opt-in)
+
+Self-managed mongot can export OpenTelemetry spans for `$search` and `$vectorSearch`
+as OTLP-JSON through its structured logs. Tracing is **disabled by default**; it is
+only intended to be enabled while diagnosing slow or failing queries.
+
+To enable it, set `tracing.enabled: true` in `mongot.conf` and start (or restart) the
+stack:
+
+```shell
+make docker.up MODE=local
+```
+
+Then run a query and look for `com.xgen.mongot.trace.Slf4jExporter` records in the
+mongot logs:
+
+```shell
+make docker.logs | grep Slf4jExporter
+```
+
+Each record contains a `traceId`, the root span (`SearchCommand.run` or
+`VectorSearchCommand.getSearchResults`), child stage timings, and result counts.
+Traces are local to mongot — they are not stitched to mongod/mongos — and are emitted
+once the processor's sampling window drains (internally a 300s window exporting the
+10 slowest traces). The Community config exposes only enablement and sampling:
+
+```yaml
+tracing:
+   enabled: true
+   searchSamplingStrategy: tail
+   vectorSamplingStrategy: head
+   searchTracingSamplerRate: 0.01
+   vectorTracingSamplerRate: 0.01
+```
+
+`searchSamplingStrategy` and `vectorSamplingStrategy` default to `tail` and `head`
+respectively. The `*TracingSamplerRate` values apply **only when the corresponding
+strategy is `head`**; tail sampling keeps a trace regardless of rate and selects the
+slowest traces for export after the query runs. With the defaults, every `$search`
+query is recorded (`tail`), but only about 1% of `$vectorSearch` queries are (`head` at
+`0.01`); when diagnosing vector queries, raise `vectorTracingSamplerRate` (for example to
+`1.0`) or set `vectorSamplingStrategy: tail`.
+
+Cost is bounded in a few ways. Export is capped at the 10 slowest traces per 300s window
+regardless of sampling rate, so log volume is bounded. In-flight trace state is capped at
+10,000 traces with a 30-minute expiry. The remaining cost is per-query span recording:
+every query under `tail`, and `rate` × queries under `head`. Traces appear when the 300s
+window drains; traces still buffered are flushed on graceful shutdown.
+
+`enabled` is read once at startup and there is no runtime kill switch: to stop tracing,
+set `tracing.enabled: false` and restart mongot.
 
 ## Create a MongoDB Search index
 

@@ -1,11 +1,11 @@
 package com.xgen.mongot.embedding.mongodb.common;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.mongodb.ConnectionString;
 import com.mongodb.client.MongoClient;
+import com.mongodb.lang.Nullable;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
+import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.MongoClientBuilder;
-import com.xgen.mongot.util.mongodb.SslContextFactory;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Optional;
@@ -22,6 +22,7 @@ public class AutoEmbeddingMongoClient {
   private static final Logger LOG = LoggerFactory.getLogger(AutoEmbeddingMongoClient.class);
   private static final int RESOLVER_MONGO_CLIENT_MAX_CONNECTIONS = 1;
   private static final int LEASE_MANAGER_MONGO_CLIENT_MAX_CONNECTIONS = 2;
+  private static final int PROBE_MONGO_CLIENT_MAX_CONNECTIONS = 1;
 
   // Use for createCollection and listCollections for MaterializedView Collections.
   private final AtomicReference<MongoClient> materializedViewResolverMongoClient =
@@ -31,12 +32,14 @@ public class AutoEmbeddingMongoClient {
       new AtomicReference<>();
   // Use for LeaseManager for managing leases and metadata.
   private final AtomicReference<MongoClient> leaseManagerMongoClient = new AtomicReference<>();
+  // Use for mongod-disk probe (dbStats); kept at pool size 1 to avoid contending with write pool.
+  private final AtomicReference<MongoClient> probeMongoClient = new AtomicReference<>();
   private final MeterRegistry meterRegistry;
 
   /**
-   * Set to true by {@link #close()} so callers (e.g. retry loops in
-   * {@link com.xgen.mongot.embedding.utils.MongoClientOperationExecutor}) can abort in-flight work
-   * during mongot shutdown rather than burning their full retry budget against torn-down clients.
+   * Set to true by {@link #close()} so callers (e.g. retry loops in {@link
+   * com.xgen.mongot.embedding.utils.MongoClientOperationExecutor}) can abort in-flight work during
+   * mongot shutdown rather than burning their full retry budget against torn-down clients.
    */
   private final AtomicBoolean closed = new AtomicBoolean(false);
 
@@ -52,10 +55,28 @@ public class AutoEmbeddingMongoClient {
       MongoClient leaseManagerMongoClient,
       MongoClient materializedViewWriterMongoClient,
       MeterRegistry meterRegistry) {
+    this(
+        syncSourceConfig,
+        materializedViewResolverMongoClient,
+        leaseManagerMongoClient,
+        materializedViewWriterMongoClient,
+        /* probe= */ null,
+        meterRegistry);
+  }
+
+  @VisibleForTesting
+  public AutoEmbeddingMongoClient(
+      SyncSourceConfig syncSourceConfig,
+      MongoClient materializedViewResolverMongoClient,
+      MongoClient leaseManagerMongoClient,
+      MongoClient materializedViewWriterMongoClient,
+      @Nullable MongoClient probeMongoClient,
+      MeterRegistry meterRegistry) {
     this.syncSourceConfig = Optional.of(syncSourceConfig);
     this.materializedViewResolverMongoClient.set(materializedViewResolverMongoClient);
     this.leaseManagerMongoClient.set(leaseManagerMongoClient);
     this.materializedViewWriterMongoClient.set(materializedViewWriterMongoClient);
+    this.probeMongoClient.set(probeMongoClient);
     this.meterRegistry = meterRegistry;
     var defaults = AutoEmbeddingMaterializedViewConfig.getDefault();
     this.materializedViewWriterSocketTimeoutMs = defaults.materializedViewWriterSocketTimeoutMs;
@@ -78,7 +99,7 @@ public class AutoEmbeddingMongoClient {
   /** Updates SyncSource for mongo clients. */
   public synchronized void updateSyncSource(SyncSourceConfig syncSourceConfig) {
     // Only recreate clients when the cluster URI changes. initClients() exclusively uses
-    // mongodClusterReadWriteUri to build all three clients, so that is the only field we need
+    // mongodClusterReadWriteUri to build all clients, so that is the only field we need
     // to compare. Single-host replication URIs can flip between empty and present (e.g. the
     // startup NoOp cycle in community) without affecting the cluster URI, and recreating clients
     // in that case would close connections still held by collaborators such as
@@ -95,6 +116,7 @@ public class AutoEmbeddingMongoClient {
     var resolverClient = Optional.ofNullable(this.materializedViewResolverMongoClient.get());
     var leaseManagerClient = Optional.ofNullable(this.leaseManagerMongoClient.get());
     var writerClient = Optional.ofNullable(this.materializedViewWriterMongoClient.get());
+    var oldProbeClient = Optional.ofNullable(this.probeMongoClient.get());
 
     initClients(syncSourceConfig);
 
@@ -102,6 +124,7 @@ public class AutoEmbeddingMongoClient {
     resolverClient.ifPresent(MongoClient::close);
     leaseManagerClient.ifPresent(MongoClient::close);
     writerClient.ifPresent(MongoClient::close);
+    oldProbeClient.ifPresent(MongoClient::close);
   }
 
   private synchronized void initClients(SyncSourceConfig syncSourceConfig) {
@@ -115,13 +138,11 @@ public class AutoEmbeddingMongoClient {
     var connectionInfo = syncSourceConfig.mongodClusterReadWriteUri;
     // Update sync source first
     this.materializedViewResolverMongoClient.set(
-        createMaterializedViewResolverMongoClient(
-            connectionInfo.uri(), connectionInfo.sslContextFactory()));
-    this.leaseManagerMongoClient.set(
-        createLeaseManagerMongoClient(connectionInfo.uri(), connectionInfo.sslContextFactory()));
+        createMaterializedViewResolverMongoClient(connectionInfo));
+    this.leaseManagerMongoClient.set(createLeaseManagerMongoClient(connectionInfo));
     this.materializedViewWriterMongoClient.set(
-        createMaterializedViewWriterMongoClient(
-            connectionInfo.uri(), connectionInfo.sslContextFactory()));
+        createMaterializedViewWriterMongoClient(connectionInfo));
+    this.probeMongoClient.set(createProbeMongoClient(connectionInfo));
   }
 
   public Optional<MongoClient> getMaterializedViewResolverMongoClient() {
@@ -136,12 +157,17 @@ public class AutoEmbeddingMongoClient {
     return Optional.ofNullable(this.materializedViewWriterMongoClient.get());
   }
 
+  public Optional<MongoClient> getProbeMongoClient() {
+    return Optional.ofNullable(this.probeMongoClient.get());
+  }
+
   /** Closes all mongo clients, only triggered by ConfigManager::close */
   public void close() {
     this.closed.set(true);
     getMaterializedViewResolverMongoClient().ifPresent(MongoClient::close);
     getLeaseManagerMongoClient().ifPresent(MongoClient::close);
     getMaterializedViewWriterMongoClient().ifPresent(MongoClient::close);
+    getProbeMongoClient().ifPresent(MongoClient::close);
   }
 
   /** Returns true once {@link #close()} has been invoked. */
@@ -153,42 +179,51 @@ public class AutoEmbeddingMongoClient {
     return this.syncSourceConfig;
   }
 
-  private MongoClient createLeaseManagerMongoClient(
-      ConnectionString connectionString, Optional<SslContextFactory> sslContextFactory) {
+  private MongoClient createLeaseManagerMongoClient(ConnectionInfo connectionInfo) {
     LOG.atInfo()
-        .addKeyValue("hosts", connectionString.getHosts())
-        .addKeyValue("replicaSet", connectionString.getRequiredReplicaSetName())
+        .addKeyValue("hosts", connectionInfo.uri().getHosts())
+        .addKeyValue("replicaSet", connectionInfo.uri().getRequiredReplicaSetName())
         .log("Creating MongoClient for DynamicLeaderLeaseManager");
     return MongoClientBuilder.buildNonReplicationWithDefaults(
-        connectionString,
+        connectionInfo,
         "Dynamic Lease Manager mongo client",
         LEASE_MANAGER_MONGO_CLIENT_MAX_CONNECTIONS,
-        sslContextFactory,
         this.meterRegistry);
   }
 
-  private MongoClient createMaterializedViewResolverMongoClient(
-      ConnectionString connectionString, Optional<SslContextFactory> sslContextFactory) {
+  private MongoClient createProbeMongoClient(ConnectionInfo connectionInfo) {
+    // Short timeouts so a single tick cannot stall the disk-monitor executor indefinitely.
+    // The dbStats command itself is already capped by maxTimeMS=2000; server selection and
+    // socket timeouts provide an outer bound in case the primary is unreachable.
     LOG.atInfo()
-        .addKeyValue("hosts", connectionString.getHosts())
+        .addKeyValue("hosts", connectionInfo.uri().getHosts())
+        .log("Creating MongoClient for mongod-disk probe");
+    return MongoClientBuilder.builder(connectionInfo, this.meterRegistry)
+        .description("AutoEmbedding mongod-disk probe")
+        .maxConnections(PROBE_MONGO_CLIENT_MAX_CONNECTIONS)
+        .serverSelectionTimeoutMs(3_000L)
+        .socketTimeoutMs(3_000)
+        .buildNonReplicationClient();
+  }
+
+  private MongoClient createMaterializedViewResolverMongoClient(ConnectionInfo connectionInfo) {
+    LOG.atInfo()
+        .addKeyValue("hosts", connectionInfo.uri().getHosts())
         .log("Creating MongoClient for MaterializedViewCollectionResolver");
     return MongoClientBuilder.buildNonReplicationWithDefaults(
-        connectionString,
+        connectionInfo,
         "AutoEmbedding Materialized View Collection Resolver",
         RESOLVER_MONGO_CLIENT_MAX_CONNECTIONS,
-        sslContextFactory,
         this.meterRegistry);
   }
 
-  private MongoClient createMaterializedViewWriterMongoClient(
-      ConnectionString connectionString, Optional<SslContextFactory> sslContextFactory) {
+  private MongoClient createMaterializedViewWriterMongoClient(ConnectionInfo connectionInfo) {
     LOG.atInfo()
-        .addKeyValue("hosts", connectionString.getHosts())
+        .addKeyValue("hosts", connectionInfo.uri().getHosts())
         .addKeyValue("socketTimeoutSeconds", this.materializedViewWriterSocketTimeoutMs / 1000)
         .addKeyValue("maxConnections", this.matViewWriterMaxConnections)
         .log("Creating MongoClient for MaterializedViewWriter");
-    return MongoClientBuilder.builder(connectionString, this.meterRegistry)
-        .sslContextFactory(sslContextFactory)
+    return MongoClientBuilder.builder(connectionInfo, this.meterRegistry)
         .description("AutoEmbedding Materialized View Writer")
         .maxConnections(this.matViewWriterMaxConnections)
         .socketTimeoutMs(Math.toIntExact(this.materializedViewWriterSocketTimeoutMs))

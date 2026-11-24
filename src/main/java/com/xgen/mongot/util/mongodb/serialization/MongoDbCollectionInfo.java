@@ -59,8 +59,14 @@ public sealed interface MongoDbCollectionInfo
     }
   }
 
-  record Collection(String name, MongoDbCollectionInfo.Collection.Info info)
+  record Collection(
+      String name, MongoDbCollectionInfo.Collection.Info info, Collection.Options options)
       implements MongoDbCollectionInfo {
+
+    /** Creates a collection reporting no options that mongot models. */
+    public Collection(String name, MongoDbCollectionInfo.Collection.Info info) {
+      this(name, info, Options.NONE);
+    }
 
     public record Info(UUID uuid) implements DocumentEncodable {
       private static class Fields {
@@ -78,9 +84,59 @@ public sealed interface MongoDbCollectionInfo
       }
     }
 
+    /** The {@code listCollections} creation options mongot cares about. */
+    public record Options(boolean isClustered, Optional<BsonDocument> collation)
+        implements DocumentEncodable {
+
+      /** Options for a collection reporting none that mongot models. */
+      public static final Options NONE = new Options(false);
+
+      /** Convenience for existing callers that only model clustering. */
+      public Options(boolean isClustered) {
+        this(isClustered, Optional.empty());
+      }
+
+      private static class Fields {
+        /** Clustered collections report this; ordinary collections omit it. */
+        public static final Field.Optional<BsonDocument> CLUSTERED_INDEX =
+            Field.builder("clusteredIndex").documentField().optional().noDefault();
+
+        /**
+         * The collection's default collation, reported by listCollections as {@code
+         * options.collation}.
+         */
+        public static final Field.Optional<BsonDocument> COLLATION =
+            Field.builder("collation").documentField().optional().noDefault();
+      }
+
+      private static Options fromBson(DocumentParser parser) throws BsonParseException {
+        return new Options(
+            parser.getField(Fields.CLUSTERED_INDEX).unwrap().isPresent(),
+            parser.getField(Fields.COLLATION).unwrap());
+      }
+
+      /** Encodes presence only; the sync source's {@code clusteredIndex} body is not modelled. */
+      @Override
+      public BsonDocument toBson() {
+        return BsonDocumentBuilder.builder()
+            .field(
+                Fields.CLUSTERED_INDEX,
+                this.isClustered ? Optional.of(new BsonDocument()) : Optional.<BsonDocument>empty())
+            .field(Fields.COLLATION, this.collation)
+            .build();
+      }
+    }
+
     private static class Fields {
       public static final Field.Required<Info> INFO =
           Field.builder("info").classField(Info::fromBson).allowUnknownFields().required();
+
+      public static final Field.WithDefault<Options> OPTIONS =
+          Field.builder("options")
+              .classField(Options::fromBson)
+              .allowUnknownFields()
+              .optional()
+              .withDefault(Options.NONE);
     }
 
     private static Optional<MongoDbCollectionInfo> fromBson(DocumentParser parser)
@@ -88,7 +144,8 @@ public sealed interface MongoDbCollectionInfo
       return Optional.of(
           new Collection(
               parser.getField(MongoDbCollectionInfo.Fields.NAME).unwrap(),
-              parser.getField(Fields.INFO).unwrap()));
+              parser.getField(Fields.INFO).unwrap(),
+              parser.getField(Fields.OPTIONS).unwrap()));
     }
 
     @Override

@@ -9,6 +9,7 @@ import static com.xgen.testing.mongot.mock.index.SearchIndex.mockInitializedInde
 import static com.xgen.testing.mongot.mock.replication.mongodb.common.SessionRefresher.mockSessionRefresher;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -22,7 +23,12 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.Keep;
+import com.mongodb.AuthenticationMechanism;
+import com.mongodb.ConnectionString;
+import com.mongodb.MongoCredential;
+import com.mongodb.MongoCredential.OidcCallback;
 import com.mongodb.client.MongoClient;
+import com.mongodb.client.internal.MongoClientImpl;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.cursor.MongotCursorManager;
@@ -33,7 +39,6 @@ import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.monitor.Gate;
-import com.xgen.mongot.replication.mongodb.IndexManager;
 import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
@@ -41,9 +46,12 @@ import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
 import com.xgen.mongot.replication.mongodb.common.MongoDbReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.ReplicationOptimeUpdater;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
+import com.xgen.mongot.replication.mongodb.common.SourceCollectionCountUpdater;
+import com.xgen.mongot.replication.mongodb.common.SteadyStateSchedulingMethod;
 import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
+import com.xgen.mongot.replication.mongodb.steadystate.changestream.SteadyStateReplicationConfig;
 import com.xgen.mongot.replication.mongodb.synonyms.SynonymManager;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Crash;
@@ -51,12 +59,14 @@ import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.mongot.util.mongodb.BatchMongoClient;
+import com.xgen.mongot.util.mongodb.ConnectionInfo;
 import com.xgen.mongot.util.mongodb.ConnectionStringUtil;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.version.GenerationIdBuilder;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
+import com.xgen.testing.mongot.replication.mongodb.common.MongoDbReplicationConfigBuilder;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.file.Path;
@@ -72,9 +82,40 @@ import java.util.function.Supplier;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 public class MongoDbReplicationManagerTest {
+
+  private static MongoCredential oidcCredentialForTesting() {
+    OidcCallback callback = context -> null;
+    return MongoCredential.createOidcCredential(null)
+        .withMechanismProperty(MongoCredential.OIDC_CALLBACK_KEY, callback);
+  }
+
+  @Test
+  public void testGetSteadyStateReplicationConfigCopiesPrioritySchedulingFields() {
+    MongoDbReplicationConfig replicationConfig =
+        MongoDbReplicationConfigBuilder.builder()
+            .optionalSteadyStateSchedulingMethod(
+                Optional.of(SteadyStateSchedulingMethod.OPTIME_LAG))
+            .optionalSteadyStatePriorityRatio(Optional.of(3))
+            .optionalSteadyStatePriorityOptimeThresholdSeconds(Optional.of(20))
+            .optionalChangeStreamInactivityThresholdSec(Optional.of(900))
+            .optionalChangeStreamKeepAliveIntervalSec(Optional.of(1800))
+            .build();
+
+    SteadyStateReplicationConfig steadyStateReplicationConfig =
+        MongoDbReplicationManager.getSteadyStateReplicationConfig(replicationConfig);
+
+    assertEquals(
+        SteadyStateSchedulingMethod.OPTIME_LAG,
+        steadyStateReplicationConfig.getSteadyStateSchedulingMethod());
+    assertEquals(3, steadyStateReplicationConfig.getSteadyStatePriorityRatio());
+    assertEquals(20, steadyStateReplicationConfig.getSteadyStatePriorityOptimeThresholdSeconds());
+    assertEquals(900, steadyStateReplicationConfig.getChangeStreamInactivityThresholdSec());
+    assertEquals(1800, steadyStateReplicationConfig.getChangeStreamKeepAliveIntervalSec());
+  }
 
   @Test
   public void testDropIndex() throws Exception {
@@ -258,6 +299,42 @@ public class MongoDbReplicationManagerTest {
         .getIndexingWorkSchedulers()
         .forEach((strategy, scheduler) -> verify(scheduler).shutdown());
     verify(shardedMocks.decodingScheduler).shutdown();
+  }
+
+  @Test
+  public void testShutdownAbortsReplicationClientsBeforeSubManagerShutdown() throws Exception {
+    Mocks mocks = Mocks.create();
+    MongoClient syncMongoClient = mocks.clientSessionRecordMap.get("test").syncMongoClient();
+
+    mocks.manager.shutdown().get(5, TimeUnit.SECONDS);
+
+    // The replication clients must be closed to unblock any in-flight reads before we start
+    // awaiting the sub-managers, whose executors would otherwise hang on a stuck getMore.
+    InOrder inOrder =
+        Mockito.inOrder(
+            syncMongoClient,
+            mocks.syncBatchMongoClient,
+            mocks.initialSyncQueue,
+            mocks.steadyStateManager,
+            mocks.synonymManager);
+    inOrder.verify(syncMongoClient).close();
+    inOrder.verify(mocks.syncBatchMongoClient).close();
+    inOrder.verify(mocks.initialSyncQueue).shutdown();
+    inOrder.verify(mocks.steadyStateManager).shutdown();
+    inOrder.verify(mocks.synonymManager).shutdown();
+  }
+
+  @Test
+  public void testShardedShutdownAbortsSynonymsClientBeforeSubManagerShutdown() throws Exception {
+    Mocks mocks = Mocks.createSharded();
+    MongoClient synonymsSyncClient =
+        Check.isPresent(mocks.synonymsSyncMongoClient, "synonymsSyncMongoClient");
+
+    mocks.manager.shutdown().get(5, TimeUnit.SECONDS);
+
+    InOrder inOrder = Mockito.inOrder(synonymsSyncClient, mocks.steadyStateManager);
+    inOrder.verify(synonymsSyncClient).close();
+    inOrder.verify(mocks.steadyStateManager).shutdown();
   }
 
   @Test
@@ -512,6 +589,18 @@ public class MongoDbReplicationManagerTest {
   }
 
   @Test
+  public void indexManagerStateGauge_readsStateWithoutLock() {
+    Mocks mocks = Mocks.create();
+    ReplicationIndexManager replicationIndexManager = mocks.mockReplicationIndexManager();
+    when(replicationIndexManager.getStateWithoutLock()).thenReturn(IndexManager.State.SHUT_DOWN);
+
+    mocks.addIndexForReplication(mockIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION));
+
+    mocks.waitForIndexReplicationManagerGaugeMetric(IndexManager.State.SHUT_DOWN.name(), 1);
+    verify(replicationIndexManager, never()).getState();
+  }
+
+  @Test
   public void testShutdownAfterNewManagerCreated() {
     Mocks mocks = Mocks.create();
 
@@ -588,6 +677,65 @@ public class MongoDbReplicationManagerTest {
     Assert.assertTrue(result2.containsKey("localhost1"));
     Assert.assertTrue(result2.containsKey("localhost2"));
     Assert.assertTrue(result2.containsKey("localhost3"));
+  }
+
+  @Test
+  public void getSyncMongoClient_oidcCredentialPresent_appliesCredential() {
+    var connectionInfo =
+        new ConnectionInfo(
+            new ConnectionString("mongodb://localhost1:27017"),
+            Optional.empty(),
+            Optional.of(oidcCredentialForTesting()));
+
+    MongoClient client =
+        MongoDbReplicationManager.getSyncMongoClient(
+            connectionInfo, "test", new SimpleMeterRegistry(), 1);
+    try {
+      assertEquals(
+          AuthenticationMechanism.MONGODB_OIDC,
+          ((MongoClientImpl) client).getSettings().getCredential().getAuthenticationMechanism());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void getSyncMongoClient_noOidcCredential_hasNoCredential() throws Exception {
+    var connectionInfo = ConnectionStringUtil.toConnectionInfo("mongodb://localhost1:27017");
+
+    MongoClient client =
+        MongoDbReplicationManager.getSyncMongoClient(
+            connectionInfo, "test", new SimpleMeterRegistry(), 1);
+    try {
+      assertNull(((MongoClientImpl) client).getSettings().getCredential());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void getSyncBatchMongoClient_oidcCredentialPresent_appliesCredential() {
+    var connectionInfo =
+        new ConnectionInfo(
+            new ConnectionString("mongodb://localhost1:27017"),
+            Optional.empty(),
+            Optional.of(oidcCredentialForTesting()));
+    var syncSourceConfig =
+        SyncSourceConfig.builder()
+            .mongodClusterReplicationUri(connectionInfo)
+            .mongodClusterReadWriteUri(connectionInfo)
+            .build();
+
+    BatchMongoClient client =
+        MongoDbReplicationManager.getSyncBatchMongoClient(
+            syncSourceConfig, 1, "test", new SimpleMeterRegistry());
+    try {
+      assertEquals(
+          AuthenticationMechanism.MONGODB_OIDC,
+          client.getSettings().getCredential().getAuthenticationMechanism());
+    } finally {
+      client.close();
+    }
   }
 
   @Test
@@ -676,6 +824,7 @@ public class MongoDbReplicationManagerTest {
                 MeterAndFtdcRegistry.createWithSimpleRegistries(),
                 Duration.ofSeconds(1),
                 mock(BatchMongoClient.class),
+                Optional.empty(),
                 Optional.empty()));
   }
 
@@ -714,6 +863,7 @@ public class MongoDbReplicationManagerTest {
                 MeterAndFtdcRegistry.createWithSimpleRegistries(),
                 Duration.ofSeconds(1),
                 mock(BatchMongoClient.class),
+                Optional.empty(),
                 Optional.empty()));
   }
 
@@ -765,6 +915,8 @@ public class MongoDbReplicationManagerTest {
     @Keep final IndexingWorkSchedulerFactory indexingWorkSchedulerFactory;
     @Keep final MongotCursorManager cursorManager;
     final Map<String, ClientSessionRecord> clientSessionRecordMap;
+    final BatchMongoClient syncBatchMongoClient;
+    final Optional<MongoClient> synonymsSyncMongoClient;
     final Optional<SessionRefresher> synonymsSessionRefresher;
     final InitialSyncQueue initialSyncQueue;
     final SteadyStateManager steadyStateManager;
@@ -800,6 +952,8 @@ public class MongoDbReplicationManagerTest {
       this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
       this.cursorManager = cursorManager;
       this.clientSessionRecordMap = clientSessionRecordMap;
+      this.syncBatchMongoClient = syncBatchMongoClient;
+      this.synonymsSyncMongoClient = synonymsSyncMongoClient;
       this.synonymsSessionRefresher = synonymsSessionRefresher;
       this.initialSyncQueue = initialSyncQueue;
       this.steadyStateManager = steadyStateManager;
@@ -851,10 +1005,12 @@ public class MongoDbReplicationManagerTest {
                   lifecycleManagers,
                   commitExecutor,
                   mock(ReplicationOptimeUpdater.class),
+                  mock(SourceCollectionCountUpdater.class),
                   initializedIndexCatalog,
                   commitInterval,
                   requestRateLimitBackoffMs,
-                  false);
+                  false,
+                  Optional.empty());
       this.manager = this.managerSupplier.get();
     }
 

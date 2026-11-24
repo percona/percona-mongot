@@ -1,38 +1,92 @@
 package com.xgen.mongot.index.autoembedding;
 
+import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.same;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.google.errorprone.annotations.Var;
+import com.mongodb.MongoNamespace;
+import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
+import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
+import com.xgen.mongot.index.EncodedUserData;
+import com.xgen.mongot.index.Index;
+import com.xgen.mongot.index.IndexFactory;
+import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.InitializedIndex;
+import com.xgen.mongot.index.InitializedSearchIndex;
+import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.definition.AnalyzerBoundSearchIndexDefinition;
+import com.xgen.mongot.index.definition.DocumentFieldDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchIndexVectorFieldDefinition;
+import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
+import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
+import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
+import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.index.status.StaleStatusReason;
 import com.xgen.mongot.index.version.Generation;
+import com.xgen.mongot.index.version.IndexFormatVersion;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingCommitMetadata;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
+import com.xgen.mongot.replication.mongodb.common.StaleStateInfo;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.EmbeddingModelCatalogTestUtils;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import org.bson.BsonDocument;
+import org.bson.BsonString;
+import org.bson.BsonTimestamp;
 import org.bson.types.ObjectId;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
- * Tests for {@link AutoEmbeddingIndexGenerationFactory#derivedIndexDefinitionGeneration}, covering
- * both vector and search auto-embed source definitions.
+ * Tests for {@link AutoEmbeddingIndexGenerationFactory}: the source-collection gate in {@link
+ * AutoEmbeddingIndexGenerationFactory#getAutoEmbeddingIndexGeneration} and {@link
+ * AutoEmbeddingIndexGenerationFactory#derivedIndexDefinitionGeneration} (vector and search
+ * auto-embed source definitions).
  */
 public class AutoEmbeddingIndexGenerationFactoryTest {
 
+  @Before
+  public void registerTestModels() {
+    EmbeddingModelCatalogTestUtils.resetCatalogAndRegisterAutoEmbedModel("voyage-3-large");
+  }
+
   private static final String MV_DATABASE_NAME = "__mdb_internal_search";
+  // Multi-tenant internal-search database: NOT the plain "__mdb_internal_search". On a
+  // multi-tenant cluster the name is namespaced per tenant, so it cannot be recomputed
+  // offline and must come from the persisted commit metadata.
+  private static final String TENANT_MV_DATABASE_NAME = "acme___mdb_internal_search";
   private static final UUID MV_COLLECTION_UUID = UUID.randomUUID();
 
   @Test
@@ -66,7 +120,7 @@ public class AutoEmbeddingIndexGenerationFactoryTest {
   public void derivedIndexDefinitionGeneration_searchIndex_buildsSearchDerivedDefinition() {
     ObjectId indexId = new ObjectId();
     SearchAutoEmbedFieldDefinition autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+        new SearchAutoEmbedFieldDefinition("voyage-3-large");
     SearchIndexDefinition searchDef =
         SearchIndexDefinitionBuilder.builder()
             .defaultMetadata()
@@ -79,7 +133,7 @@ public class AutoEmbeddingIndexGenerationFactoryTest {
                 DocumentFieldDefinitionBuilder.builder()
                     .dynamic(false)
                     .field(
-                        "content_embed",
+                        "content",
                         FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
                     .build())
             .build();
@@ -100,12 +154,704 @@ public class AutoEmbeddingIndexGenerationFactoryTest {
     assertEquals(MV_COLLECTION_UUID, derived.getIndexDefinition().getCollectionUuid());
   }
 
+  @Test
+  public void searchAutoEmbedLuceneOnlyUpdate_reusesMatViewAndRebuildsDerivedIndex() {
+    ObjectId indexId = new ObjectId();
+    UUID collectionUuid = UUID.randomUUID();
+    SearchAutoEmbedFieldDefinition oldField =
+        new SearchAutoEmbedFieldDefinition(
+            new VectorAutoEmbedFieldSpecification(
+                512,
+                VectorSimilarity.DOT_PRODUCT,
+                VectorAutoEmbedQuantization.FLOAT,
+                new VectorIndexingAlgorithm.HnswIndexingAlgorithm(),
+                "voyage-3-large",
+                "text"));
+    SearchAutoEmbedFieldDefinition newField =
+        new SearchAutoEmbedFieldDefinition(
+            new VectorAutoEmbedFieldSpecification(
+                512,
+                VectorSimilarity.COSINE,
+                VectorAutoEmbedQuantization.FLOAT,
+                new VectorIndexingAlgorithm.HnswIndexingAlgorithm(
+                    new VectorFieldSpecification.HnswOptions(32, 200)),
+                "voyage-3-large",
+                "text"));
+    SearchIndexDefinition oldDefinition =
+        searchAutoEmbedDefinition(indexId, collectionUuid, 1L, FieldPath.parse("title"), oldField);
+    SearchIndexDefinition newDefinition =
+        searchAutoEmbedDefinition(indexId, collectionUuid, 2L, FieldPath.parse("title"), newField);
+
+    assertTrue(
+        "Lucene-only update must reuse the existing materialized view",
+        MaterializedViewIndexGenerationUtil.skipInitialSync(oldDefinition, newDefinition));
+    SearchIndexDefinitionGeneration rawGeneration =
+        new SearchIndexDefinitionGeneration(
+            AnalyzerBoundSearchIndexDefinition.create(newDefinition, Collections.emptyList()),
+            Generation.CURRENT);
+    InitializedMaterializedViewIndex matViewIndex = matViewIndexMock();
+    when(matViewIndex.getSchemaMetadata()).thenReturn(collectionMetadata().schemaMetadata());
+    IndexDefinitionGeneration derivedGeneration =
+        AutoEmbeddingIndexGenerationFactory.derivedIndexDefinitionGeneration(
+            rawGeneration, matViewIndex);
+    SearchIndexVectorFieldDefinition derivedVectorField =
+        getDerivedVectorField(
+            (SearchIndexDefinition) derivedGeneration.getIndexDefinition(), "_autoEmbed.title");
+
+    assertEquals(512, derivedVectorField.specification().numDimensions());
+    assertEquals(VectorSimilarity.COSINE, derivedVectorField.specification().similarity());
+    assertEquals(
+        new VectorIndexingAlgorithm.HnswIndexingAlgorithm(
+            new VectorFieldSpecification.HnswOptions(32, 200)),
+        derivedVectorField.specification().indexingAlgorithm());
+  }
+
+  private static SearchIndexDefinition searchAutoEmbedDefinition(
+      ObjectId indexId,
+      UUID collectionUuid,
+      long definitionVersion,
+      FieldPath autoEmbedPath,
+      SearchAutoEmbedFieldDefinition autoEmbedField) {
+    return SearchIndexDefinitionBuilder.builder()
+        .defaultMetadata()
+        .indexId(indexId)
+        .name("mock")
+        .database("mock")
+        .lastObservedCollectionName("mock")
+        .collectionUuid(collectionUuid)
+        .definitionVersion(definitionVersion)
+        .mappings(
+            DocumentFieldDefinitionBuilder.builder()
+                .dynamic(false)
+                .field(
+                    autoEmbedPath.toString(),
+                    FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                .build())
+        .build();
+  }
+
+  private static SearchIndexVectorFieldDefinition getDerivedVectorField(
+      SearchIndexDefinition definition, String dottedPath) {
+    List<String> segments = new ArrayList<>();
+    FieldPath.parse(dottedPath).getSegments().forEach(segments::add);
+    @Var DocumentFieldDefinition current = definition.getMappings();
+    for (int i = 0; i < segments.size() - 1; i++) {
+      current = current.fields().get(segments.get(i)).documentFieldDefinition().orElseThrow();
+    }
+    return current
+        .fields()
+        .get(segments.get(segments.size() - 1))
+        .searchIndexVectorFieldDefinition()
+        .orElseThrow();
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_sourceCollectionAbsent_skipsMaterializedView()
+      throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory = indexFactoryWithCommit(Optional.empty());
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(true);
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(
+        "Absent source collection must yield an unresolved generation",
+        result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    IndexStatus status = result.getIndex().getStatus();
+    assertEquals(IndexStatus.StatusCode.DOES_NOT_EXIST, status.getStatusCode());
+    assertEquals(Optional.of(IndexStatus.Reason.COLLECTION_NOT_FOUND), status.getReason());
+    // The unresolved generation must carry the source collection UUID so the recovery stager can
+    // re-stage it once the collection reappears on this shard (see IndexRecoveryStagerTest).
+    assertEquals(
+        rawGen.getIndexDefinition().getCollectionUuid(),
+        result.getDefinition().getCollectionUuid());
+    // No materialized view collection, lease, or leaderStatus gauge is created on a shard that does
+    // not host the source collection.
+    verify(matViewIndexFactory, never()).getIndex(any());
+    verify(indexFactory, never()).getIndex(any());
+    verify(indexFactory, never()).getInitializedIndex(any(), any(), any());
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_sourceCollectionAbsentWithCommit_retainsCleanupIndex()
+      throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(IndexCommitUserData.createExceeded("test").toEncodedData()));
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    Index cleanupIndex = mock(Index.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(true);
+    when(indexFactory.getIndex(same(rawGen))).thenReturn(cleanupIndex);
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(
+        IndexStatus.StatusCode.DOES_NOT_EXIST, result.getIndex().getStatus().getStatusCode());
+    assertEquals(
+        Optional.of(IndexStatus.Reason.COLLECTION_NOT_FOUND),
+        result.getIndex().getStatus().getReason());
+    assertThat(((UnresolvedAutoEmbeddingIndex) result.getIndex()).getReconstructedDerivedIndex())
+        .isEmpty();
+    verify(matViewIndexFactory, never()).getIndex(any());
+    verify(indexFactory).getIndex(same(rawGen));
+    verify(indexFactory, never()).getInitializedIndex(any(), any(), any());
+
+    result.getIndex().close();
+    result.getIndex().drop();
+
+    var inOrder = inOrder(cleanupIndex);
+    inOrder.verify(cleanupIndex).close();
+    inOrder.verify(cleanupIndex).drop();
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_constructionFails_closesGenerationMetrics()
+      throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    AutoEmbeddingGenerationMetrics generationMetrics = mock(AutoEmbeddingGenerationMetrics.class);
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(IndexCommitUserData.createExceeded("test").toEncodedData()));
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(true);
+    when(matViewIndexFactory.createAutoEmbeddingGenerationMetrics(any()))
+        .thenReturn(generationMetrics);
+    when(indexFactory.getIndex(same(rawGen))).thenReturn(mock(InitializedVectorIndex.class));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+                indexFactory,
+                matViewIndexFactory,
+                rawGen,
+                mock(InitializedIndexCatalog.class),
+                () -> false));
+
+    verify(generationMetrics).recordCollectionNotFound();
+    verify(generationMetrics).close();
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_sourceCollectionPresent_buildsCompositeGeneration()
+      throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory = mock(IndexFactory.class);
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    // Build the mat-view mock before stubbing — matViewIndexMock() does its own stubbing, which
+    // Mockito disallows nested inside a thenReturn(...).
+    InitializedMaterializedViewIndex matViewIndex = matViewIndexMock();
+    when(matViewIndex.isCompatibleWith(any())).thenReturn(true);
+    Index derivedIndex = mock(Index.class);
+    when(derivedIndex.isCompatibleWith(any())).thenReturn(true);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any())).thenReturn(matViewIndex);
+    when(indexFactory.getIndex(any())).thenReturn(derivedIndex);
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(
+        "Present source collection must build a composite auto-embedding generation",
+        result instanceof AutoEmbeddingIndexGeneration);
+    verify(matViewIndexFactory).getIndex(any());
+    // Precedence: when the lease/materialized view resolves, the mongod-backed status is the source
+    // of truth and the on-disk fallback is never consulted.
+    verify(indexFactory, never()).readPersistedCommitUserData(any());
+  }
+
+  @Test
+  public void
+      getAutoEmbeddingIndexGeneration_mongodBroken_diskQueryableNotReconstructable_reportsRetry()
+          throws Exception {
+    // wasMatViewReady=true but the commit lacks the metadata to rebuild and timestamp the derived
+    // index offline (e.g. a pre-feature commit that persisted the ready flag alone), so it cannot
+    // serve STALE and parks in a recoverable RETRY.
+    IndexGeneration result =
+        resolveWithBrokenMongod(
+            Optional.of(
+                IndexCommitUserData.EMPTY
+                    .withAutoEmbeddingMetadata(new AutoEmbeddingCommitMetadata(true))
+                    .toEncodedData()));
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(
+        Optional.of(IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY),
+        result.getIndex().getStatus().getReason());
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_mongodBroken_diskUnreadable_reportsFailed()
+      throws Exception {
+    // Unreadable commit (I/O error, corrupt, or no on-disk commit): readPersistedCommitUserData
+    // returns empty, so the fallback conservatively treats the index as not-queryable -> FAILED.
+    IndexGeneration result = resolveWithBrokenMongod(Optional.empty());
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(
+        Optional.of(IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY),
+        result.getIndex().getStatus().getReason());
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_mongodBroken_diskMissingMetadata_reportsFailed()
+      throws Exception {
+    // Post-upgrade commit written before this feature: the commit parses but has no
+    // autoEmbeddingMetadata sub-document, so the fallback treats it as not-queryable -> FAILED.
+    IndexGeneration result =
+        resolveWithBrokenMongod(Optional.of(IndexCommitUserData.EMPTY.toEncodedData()));
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(
+        Optional.of(IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY),
+        result.getIndex().getStatus().getReason());
+  }
+
+  @Test
+  public void
+      getAutoEmbeddingIndexGeneration_mongodBroken_diskQueryableWithMetadata_servesStaleOffline()
+          throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    BsonTimestamp committedOptime = new BsonTimestamp(42, 1);
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(
+                IndexCommitUserData.createStale(
+                        StaleStateInfo.create(committedOptime, StaleStatusReason.DOCS_EXCEEDED))
+                    .withAutoEmbeddingMetadata(reconstructableMetadata(TENANT_MV_DATABASE_NAME))
+                    .toEncodedData()));
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+    InitializedVectorIndex reconstructed = mock(InitializedVectorIndex.class);
+    when(reconstructed.getStatus())
+        .thenReturn(IndexStatus.stale("serving offline", committedOptime));
+    when(indexFactory.getIndex(any())).thenReturn(mock(Index.class));
+    when(indexFactory.getInitializedIndex(any(), any(), any())).thenReturn(reconstructed);
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    // The factory sets the reconstructed derived index STALE as of the commit's optime, and the
+    // unresolved generation delegates its status to it -> reported STALE, not FAILED.
+    ArgumentCaptor<IndexStatus> staleStatus = ArgumentCaptor.forClass(IndexStatus.class);
+    verify(reconstructed).setStatus(staleStatus.capture());
+    verify(indexFactory).getInitializedIndex(any(), any(), any());
+    assertEquals(IndexStatus.StatusCode.STALE, staleStatus.getValue().getStatusCode());
+    assertEquals(Optional.of(committedOptime), staleStatus.getValue().getOptime());
+    assertEquals(IndexStatus.StatusCode.STALE, result.getIndex().getStatus().getStatusCode());
+    UnresolvedAutoEmbeddingIndex unresolved = (UnresolvedAutoEmbeddingIndex) result.getIndex();
+    assertThat(unresolved.getReconstructedDerivedIndex()).hasValue(reconstructed);
+    // The persisted user->internal field mapping is threaded onto the unresolved index so
+    // VectorSearchCommand can remap the query path while serving offline.
+    assertThat(unresolved.getAutoEmbeddingFieldsMapping())
+        .containsExactly(FieldPath.parse("title"), FieldPath.parse("_autoEmbed.title"));
+  }
+
+  @Test
+  public void
+      getAutoEmbeddingIndexGeneration_mongodBroken_openDerivedReaderFails_retainsCleanupIndex()
+          throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    BsonTimestamp committedOptime = new BsonTimestamp(42, 1);
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(
+                IndexCommitUserData.createStale(
+                        StaleStateInfo.create(committedOptime, StaleStatusReason.DOCS_EXCEEDED))
+                    .withAutoEmbeddingMetadata(reconstructableMetadata(TENANT_MV_DATABASE_NAME))
+                    .toEncodedData()));
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+    Index cleanupIndex = mock(Index.class);
+    when(indexFactory.getIndex(any())).thenReturn(cleanupIndex);
+    when(indexFactory.getInitializedIndex(same(cleanupIndex), any(), any()))
+        .thenThrow(new IOException("disk gone"));
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(IndexStatus.StatusCode.FAILED, result.getIndex().getStatus().getStatusCode());
+    assertEquals(
+        Optional.of(IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY),
+        result.getIndex().getStatus().getReason());
+    UnresolvedAutoEmbeddingIndex unresolved = (UnresolvedAutoEmbeddingIndex) result.getIndex();
+    assertThat(unresolved.getReconstructedDerivedIndex()).isEmpty();
+    verify(indexFactory).getInitializedIndex(same(cleanupIndex), any(), any());
+
+    result.getIndex().close();
+    result.getIndex().drop();
+
+    var inOrder = inOrder(cleanupIndex);
+    inOrder.verify(cleanupIndex).close();
+    inOrder.verify(cleanupIndex).drop();
+  }
+
+  @Test
+  public void
+      getAutoEmbeddingIndexGeneration_mongodBroken_persistedViewNotReady_retainsCleanupIndex()
+          throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    AutoEmbeddingCommitMetadata metadata =
+        new AutoEmbeddingCommitMetadata(
+            false, Optional.of(TENANT_MV_DATABASE_NAME), Optional.of(collectionMetadata()));
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory = indexFactoryWithCommit(Optional.of(commitWith(metadata)));
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+    Index cleanupIndex = mock(Index.class);
+    when(indexFactory.getIndex(any())).thenReturn(cleanupIndex);
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(IndexStatus.StatusCode.FAILED, result.getIndex().getStatus().getStatusCode());
+    verify(indexFactory, never()).getInitializedIndex(any(), any(), any());
+
+    result.getIndex().close();
+    result.getIndex().drop();
+
+    var inOrder = inOrder(cleanupIndex);
+    inOrder.verify(cleanupIndex).close();
+    inOrder.verify(cleanupIndex).drop();
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_mongodBroken_malformedResumeToken_reportsRetry()
+      throws Exception {
+    // A reconstructable commit whose only optime source is a resume token that is valid hex but
+    // not a timestamp payload: optime extraction must degrade (no STALE without an optime) instead
+    // of aborting resolution, parking the index in a recoverable RETRY.
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(
+                IndexCommitUserData.createChangeStreamResume(
+                        ChangeStreamResumeInfo.create(
+                            new MongoNamespace("db", "coll"),
+                            new BsonDocument("_data", new BsonString("00"))),
+                        IndexFormatVersion.CURRENT.versionNumber)
+                    .withAutoEmbeddingMetadata(reconstructableMetadata(TENANT_MV_DATABASE_NAME))
+                    .toEncodedData()));
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+    Index cleanupIndex = mock(Index.class);
+    when(indexFactory.getIndex(any())).thenReturn(cleanupIndex);
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(IndexStatus.StatusCode.FAILED, result.getIndex().getStatus().getStatusCode());
+    assertEquals(
+        Optional.of(IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY),
+        result.getIndex().getStatus().getReason());
+    // The derived index is retained for cleanup, but no reader is opened without a valid optime.
+    verify(indexFactory, never()).getInitializedIndex(any(), any(), any());
+    assertThat(((UnresolvedAutoEmbeddingIndex) result.getIndex()).getReconstructedDerivedIndex())
+        .isEmpty();
+    result.getIndex().close();
+    result.getIndex().drop();
+    verify(cleanupIndex).close();
+    verify(cleanupIndex).drop();
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_persistedTenantMetadata_rebuildsWithTenantDatabase()
+      throws Exception {
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(commitWith(reconstructableMetadata(TENANT_MV_DATABASE_NAME))));
+    InitializedVectorIndex reconstructed = mock(InitializedVectorIndex.class);
+    ArgumentCaptor<IndexDefinitionGeneration> derivedGen =
+        ArgumentCaptor.forClass(IndexDefinitionGeneration.class);
+    when(indexFactory.getIndex(derivedGen.capture())).thenReturn(mock(Index.class));
+    when(indexFactory.getInitializedIndex(any(), any(), any())).thenReturn(reconstructed);
+
+    Optional<InitializedIndex> result =
+        AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+            indexFactory, autoEmbedVectorGen());
+
+    assertThat(result).isPresent();
+    assertEquals(reconstructed, result.get());
+    // MTM: the derived definition is rebuilt using the persisted tenant-namespaced internal-search
+    // database name and mongod-assigned collection UUID, neither derivable offline any other way.
+    assertEquals(TENANT_MV_DATABASE_NAME, derivedGen.getValue().getIndexDefinition().getDatabase());
+    assertEquals(
+        MV_COLLECTION_UUID, derivedGen.getValue().getIndexDefinition().getCollectionUuid());
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_noPersistedCommit_returnsEmpty() throws Exception {
+    IndexFactory indexFactory = indexFactoryWithCommit(Optional.empty());
+    assertThat(
+            AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+                indexFactory, autoEmbedVectorGen()))
+        .isEmpty();
+  }
+
+  @Test
+  public void getAutoEmbeddingIndexGeneration_noPersistedCommit_doesNotCreateCleanupIndex()
+      throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory = indexFactoryWithCommit(Optional.empty());
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    verify(indexFactory, never()).getIndex(any());
+  }
+
+  @Test
+  public void
+      getAutoEmbeddingIndexGeneration_cleanupIndexCreationFails_degradesWithoutCleanupIndex()
+          throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(Optional.of(IndexCommitUserData.EMPTY.toEncodedData()));
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+    when(indexFactory.getIndex(same(rawGen))).thenThrow(new IOException("disk unavailable"));
+
+    IndexGeneration result =
+        AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+            indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+
+    assertTrue(result instanceof UnresolvedAutoEmbeddingIndexGeneration);
+    assertEquals(IndexStatus.StatusCode.FAILED, result.getIndex().getStatus().getStatusCode());
+    assertThat(((UnresolvedAutoEmbeddingIndex) result.getIndex()).getReconstructedDerivedIndex())
+        .isEmpty();
+
+    result.getIndex().close();
+    result.getIndex().drop();
+    verify(indexFactory).getIndex(same(rawGen));
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_commitWithoutAutoEmbeddingMetadata_returnsEmpty()
+      throws Exception {
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(Optional.of(IndexCommitUserData.EMPTY.toEncodedData()));
+    assertThat(
+            AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+                indexFactory, autoEmbedVectorGen()))
+        .isEmpty();
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_metadataMissingDatabaseName_returnsEmpty()
+      throws Exception {
+    AutoEmbeddingCommitMetadata metadata =
+        new AutoEmbeddingCommitMetadata(true, Optional.empty(), Optional.of(collectionMetadata()));
+    IndexFactory indexFactory = indexFactoryWithCommit(Optional.of(commitWith(metadata)));
+    assertThat(
+            AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+                indexFactory, autoEmbedVectorGen()))
+        .isEmpty();
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_metadataMissingCollectionMetadata_returnsEmpty()
+      throws Exception {
+    AutoEmbeddingCommitMetadata metadata =
+        new AutoEmbeddingCommitMetadata(
+            true, Optional.of(TENANT_MV_DATABASE_NAME), Optional.empty());
+    IndexFactory indexFactory = indexFactoryWithCommit(Optional.of(commitWith(metadata)));
+    assertThat(
+            AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+                indexFactory, autoEmbedVectorGen()))
+        .isEmpty();
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_searchAutoEmbedSource_rebuildsDerivedSearchIndex()
+      throws Exception {
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(commitWith(reconstructableMetadata(TENANT_MV_DATABASE_NAME))));
+    InitializedIndex reconstructed = mock(InitializedSearchIndex.class);
+    ArgumentCaptor<IndexDefinitionGeneration> derivedGen =
+        ArgumentCaptor.forClass(IndexDefinitionGeneration.class);
+    when(indexFactory.getIndex(derivedGen.capture())).thenReturn(mock(Index.class));
+    when(indexFactory.getInitializedIndex(any(), any(), any())).thenReturn(reconstructed);
+
+    Optional<InitializedIndex> result =
+        AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+            indexFactory, autoEmbedSearchGen());
+
+    assertThat(result).isPresent();
+    assertEquals(reconstructed, result.get());
+    // The derived search definition is rebuilt against the persisted materialized-view database
+    // and collection UUID, same as the vector path.
+    assertThat(derivedGen.getValue()).isInstanceOf(SearchIndexDefinitionGeneration.class);
+    assertEquals(TENANT_MV_DATABASE_NAME, derivedGen.getValue().getIndexDefinition().getDatabase());
+    assertEquals(
+        MV_COLLECTION_UUID, derivedGen.getValue().getIndexDefinition().getCollectionUuid());
+  }
+
+  @Test
+  public void reconstructOfflineDerivedIndex_openingIndexThrows_returnsEmpty() throws Exception {
+    IndexFactory indexFactory =
+        indexFactoryWithCommit(
+            Optional.of(commitWith(reconstructableMetadata(TENANT_MV_DATABASE_NAME))));
+    when(indexFactory.getIndex(any())).thenReturn(mock(Index.class));
+    when(indexFactory.getInitializedIndex(any(), any(), any()))
+        .thenThrow(new IOException("disk gone"));
+    assertThat(
+            AutoEmbeddingIndexGenerationFactory.reconstructOfflineDerivedIndex(
+                indexFactory, autoEmbedVectorGen()))
+        .isEmpty();
+  }
+
+  /**
+   * Resolves an auto-embedding generation while the materialized view is unreachable (mongod
+   * broken), stubbing the on-disk commit read to return {@code persistedCommit}.
+   */
+  private static IndexGeneration resolveWithBrokenMongod(Optional<EncodedUserData> persistedCommit)
+      throws Exception {
+    VectorIndexDefinitionGeneration rawGen = autoEmbedVectorGen();
+    MaterializedViewIndexFactory matViewIndexFactory = matViewIndexFactoryMock();
+    IndexFactory indexFactory = mock(IndexFactory.class);
+    InitializedIndexCatalog catalog = mock(InitializedIndexCatalog.class);
+    when(matViewIndexFactory.isSourceCollectionAbsentOnMongod(any())).thenReturn(false);
+    when(matViewIndexFactory.getIndex(any()))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "mongod unreachable", MaterializedViewTransientException.Reason.UNKNOWN));
+    when(indexFactory.readPersistedCommitUserData(any())).thenReturn(persistedCommit);
+    when(indexFactory.getIndex(any())).thenReturn(mock(Index.class));
+
+    return AutoEmbeddingIndexGenerationFactory.getAutoEmbeddingIndexGeneration(
+        indexFactory, matViewIndexFactory, rawGen, catalog, () -> false);
+  }
+
+  private static VectorIndexDefinitionGeneration autoEmbedVectorGen() {
+    VectorIndexDefinition def =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(new ObjectId())
+            .name("mock")
+            .database("mock")
+            .lastObservedCollectionName("mock")
+            .collectionUuid(UUID.randomUUID())
+            .withAutoEmbedField("title")
+            .build();
+    return new VectorIndexDefinitionGeneration(def, Generation.CURRENT);
+  }
+
+  private static MaterializedViewIndexFactory matViewIndexFactoryMock() {
+    MaterializedViewIndexFactory factory = mock(MaterializedViewIndexFactory.class);
+    when(factory.createAutoEmbeddingGenerationMetrics(any()))
+        .thenReturn(mock(AutoEmbeddingGenerationMetrics.class));
+    return factory;
+  }
+
   private static InitializedMaterializedViewIndex matViewIndexMock() {
     InitializedMaterializedViewIndex matViewIndex = mock(InitializedMaterializedViewIndex.class);
     when(matViewIndex.getMaterializedViewDatabaseName()).thenReturn(MV_DATABASE_NAME);
     when(matViewIndex.getMaterializedViewCollectionUuid()).thenReturn(MV_COLLECTION_UUID);
     when(matViewIndex.getSchemaMetadata())
         .thenReturn(new MaterializedViewSchemaMetadata(0, Map.of()));
+    when(matViewIndex.getMaterializedViewCollectionMetadata()).thenReturn(collectionMetadata());
     return matViewIndex;
+  }
+
+  private static IndexFactory indexFactoryWithCommit(Optional<EncodedUserData> persistedCommit) {
+    IndexFactory indexFactory = mock(IndexFactory.class);
+    when(indexFactory.readPersistedCommitUserData(any())).thenReturn(persistedCommit);
+    return indexFactory;
+  }
+
+  private static EncodedUserData commitWith(AutoEmbeddingCommitMetadata metadata) {
+    return IndexCommitUserData.EMPTY.withAutoEmbeddingMetadata(metadata).toEncodedData();
+  }
+
+  /**
+   * A commit carrying everything offline reconstruction needs: the ready flag, the (tenant)
+   * database name, and the collection metadata whose schema maps the raw autoEmbed field "title" to
+   * its derived internal path "_autoEmbed.title" as a materialized view would persist.
+   */
+  private static AutoEmbeddingCommitMetadata reconstructableMetadata(String databaseName) {
+    return new AutoEmbeddingCommitMetadata(
+        true, Optional.of(databaseName), Optional.of(collectionMetadata()));
+  }
+
+  private static MaterializedViewCollectionMetadata collectionMetadata() {
+    MaterializedViewSchemaMetadata schema =
+        new MaterializedViewSchemaMetadata(
+            1L, Map.of(FieldPath.parse("title"), FieldPath.parse("_autoEmbed.title")));
+    return new MaterializedViewCollectionMetadata(schema, MV_COLLECTION_UUID, "movies");
+  }
+
+  private static SearchIndexDefinitionGeneration autoEmbedSearchGen() {
+    SearchAutoEmbedFieldDefinition autoEmbedField =
+        new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(new ObjectId())
+            .name("mock")
+            .database("mock")
+            .lastObservedCollectionName("mock")
+            .collectionUuid(UUID.randomUUID())
+            .mappings(
+                DocumentFieldDefinitionBuilder.builder()
+                    .dynamic(false)
+                    .field(
+                        "content",
+                        FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                    .build())
+            .build();
+    return new SearchIndexDefinitionGeneration(
+        AnalyzerBoundSearchIndexDefinition.create(searchDef, Collections.emptyList()),
+        Generation.CURRENT);
   }
 }

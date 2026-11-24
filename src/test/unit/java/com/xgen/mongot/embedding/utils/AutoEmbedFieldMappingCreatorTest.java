@@ -2,6 +2,7 @@ package com.xgen.mongot.embedding.utils;
 
 import static com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils.HASH_FIELD_SUFFIX;
 
+import com.google.common.collect.ImmutableSet;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.SearchIndexAutoEmbedFieldMapping;
 import com.xgen.mongot.embedding.VectorAutoEmbedFieldMapping;
@@ -9,6 +10,7 @@ import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
+import com.xgen.mongot.index.definition.AutoEmbedFieldSet;
 import com.xgen.mongot.index.definition.BooleanFieldDefinition;
 import com.xgen.mongot.index.definition.DocumentFieldDefinition;
 import com.xgen.mongot.index.definition.SearchAutoEmbedFieldDefinition;
@@ -25,12 +27,15 @@ import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.EmbeddedDocumentsFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.StringFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -40,6 +45,86 @@ public class AutoEmbedFieldMappingCreatorTest {
   private static final MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata
       MAT_VIEW_SCHEMA_METADATA =
           new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(0, Map.of());
+
+  @Test
+  public void hasSourcePassthroughFields_reflectsMapping() {
+    AutoEmbedFieldMapping vectorEmbedOnly =
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(
+            VectorIndexDefinitionBuilder.builder()
+                .setFields(
+                    List.of(
+                        new VectorAutoEmbedFieldDefinition(
+                            "voyage-3-large", FieldPath.parse("text"))))
+                .build());
+    Assert.assertFalse(vectorEmbedOnly.hasSourcePassthroughFields());
+
+    AutoEmbedFieldMapping vectorWithFilter =
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(
+            VectorIndexDefinitionBuilder.builder()
+                .setFields(
+                    List.of(
+                        new VectorAutoEmbedFieldDefinition(
+                            "voyage-3-large", FieldPath.parse("text")),
+                        new VectorIndexFilterFieldDefinition(FieldPath.parse("tenant"))))
+                .build());
+    Assert.assertTrue(vectorWithFilter.hasSourcePassthroughFields());
+
+    AutoEmbedFieldMapping searchStaticEmbedOnly =
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(
+            SearchIndexDefinitionBuilder.builder()
+                .defaultMetadata()
+                .mappings(
+                    DocumentFieldDefinitionBuilder.builder()
+                        .dynamic(false)
+                        .field(
+                            "embedding",
+                            FieldDefinitionBuilder.builder()
+                                .searchAutoEmbed(
+                                    new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                                .build())
+                        .build())
+                .build());
+    Assert.assertFalse(searchStaticEmbedOnly.hasSourcePassthroughFields());
+
+    AutoEmbedFieldMapping searchStaticWithPassthrough =
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(
+            SearchIndexDefinitionBuilder.builder()
+                .defaultMetadata()
+                .mappings(
+                    DocumentFieldDefinitionBuilder.builder()
+                        .dynamic(false)
+                        .field(
+                            "flag",
+                            FieldDefinitionBuilder.builder()
+                                .bool(new BooleanFieldDefinition())
+                                .build())
+                        .field(
+                            "embedding",
+                            FieldDefinitionBuilder.builder()
+                                .searchAutoEmbed(
+                                    new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                                .build())
+                        .build())
+                .build());
+    Assert.assertTrue(searchStaticWithPassthrough.hasSourcePassthroughFields());
+
+    AutoEmbedFieldMapping searchDynamic =
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(
+            SearchIndexDefinitionBuilder.builder()
+                .defaultMetadata()
+                .mappings(
+                    DocumentFieldDefinitionBuilder.builder()
+                        .dynamic(true)
+                        .field(
+                            "embedding",
+                            FieldDefinitionBuilder.builder()
+                                .searchAutoEmbed(
+                                    new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                                .build())
+                        .build())
+                .build());
+    Assert.assertTrue(searchDynamic.hasSourcePassthroughFields());
+  }
 
   @BeforeClass
   public static void registerTestModels() {
@@ -282,14 +367,12 @@ public class AutoEmbedFieldMappingCreatorTest {
 
   @Test
   public void createAutoEmbedMapping_search_dynamicWithOnlyAutoEmbed() {
-    var autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
     DocumentFieldDefinition mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(true)
             .field(
-                "embedding",
-                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
             .build();
     SearchIndexDefinition searchDef =
         SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
@@ -303,7 +386,7 @@ public class AutoEmbedFieldMappingCreatorTest {
         "Search factory must not return VectorAutoEmbedFieldMapping",
         mapping instanceof VectorAutoEmbedFieldMapping);
 
-    // Embed field keyed on sourceField()
+    // Embed field keyed on path()
     Assert.assertTrue(mapping.isEmbed(FieldPath.parse("content")));
     Assert.assertFalse(mapping.isPassthrough(FieldPath.parse("content")));
     // Dynamic mode → any non-embed path is passthrough
@@ -313,14 +396,12 @@ public class AutoEmbedFieldMappingCreatorTest {
 
   @Test
   public void createAutoEmbedMapping_search_staticWithFilterField() {
-    var autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
     DocumentFieldDefinition mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(false)
             .field(
-                "embedding",
-                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
             .field(
                 "active",
                 FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
@@ -338,18 +419,379 @@ public class AutoEmbedFieldMappingCreatorTest {
     Assert.assertFalse(
         "Undeclared paths must not be passthrough in static mode",
         mapping.isPassthrough(FieldPath.parse("random")));
+    Assert.assertTrue(mapping.enumeratesAllIndexedPaths());
   }
 
   @Test
-  public void createAutoEmbedMapping_search_embedKeyedBySourceFieldNotMappingKey() {
-    // Declaration key differs from sourceField: sourceField must win.
-    var autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("source_text"));
+  public void createAutoEmbedMapping_search_nestedAutoEmbedUnderDocument() {
+    // Auto-embed field nested under a `document` field must be found and embedded (keyed by its
+    // full dotted source path), the sibling non-auto-embed field must be passthrough at its dotted
+    // path, and the containing document must be descended into rather than passed through
+    // wholesale.
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    DocumentFieldDefinition nested =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("parent", FieldDefinitionBuilder.builder().document(nested).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    // Embedded and keyed by its full dotted source path.
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("parent.content")));
+    Assert.assertFalse(mapping.isEmbed(FieldPath.parse("content")));
+    // The sibling non-auto-embed field is passthrough at its full dotted path, and the containing
+    // document is descended into (not wholesale passthrough).
+    Assert.assertTrue(mapping.isPassthrough(FieldPath.parse("parent.active")));
+    Assert.assertTrue(mapping.subDocumentExists(FieldPath.parse("parent")));
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_dynamicDocumentWithAutoEmbed() {
+    // A dynamic `document` containing an auto-embed declaration is passed through wholesale — its
+    // undeclared children must reach the MV for the derived index's dynamic mapping — while the
+    // auto-embed inside it is still collected and its source stays out of the copy.
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    DocumentFieldDefinition nested =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field(
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("parent", FieldDefinitionBuilder.builder().document(nested).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("parent.content")));
+    Assert.assertTrue(
+        "Dynamic document is a wholesale passthrough at its own path",
+        mapping.isPassthrough(FieldPath.parse("parent")));
+    Assert.assertTrue(
+        "Undeclared children under the dynamic document are passthrough",
+        mapping.isPassthrough(FieldPath.parse("parent.color")));
+    Assert.assertFalse(
+        "Embed source under the dynamic document is owned by the embed pipeline",
+        mapping.isPassthrough(FieldPath.parse("parent.content")));
+    Assert.assertTrue(
+        "MV writer must descend into the wholesale document",
+        mapping.passthroughDescendPredicate().test(FieldPath.parse("parent")));
+    Assert.assertFalse(
+        "Declared children are covered by the wholesale root, not enumerated",
+        ((SearchIndexAutoEmbedFieldMapping) mapping)
+            .explicitPassthroughPaths()
+            .contains(FieldPath.parse("parent.active")));
+    Assert.assertFalse(mapping.enumeratesAllIndexedPaths());
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_dynamicEmbeddedDocumentsIsNotEnumerable() {
+    var nested = EmbeddedDocumentsFieldDefinitionBuilder.builder().dynamic(true).build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("items", FieldDefinitionBuilder.builder().embeddedDocuments(nested).build())
+            .field(
+                "title",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertFalse(mapping.enumeratesAllIndexedPaths());
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_dynamicAncestorOfNestedAutoEmbed() {
+    // dynamic article > static meta > embed: the wholesale passthrough root is the dynamic
+    // ancestor; nothing beneath it is enumerated, and the embed is still collected.
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    DocumentFieldDefinition meta =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "summary", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .build();
+    DocumentFieldDefinition article =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field("meta", FieldDefinitionBuilder.builder().document(meta).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("article", FieldDefinitionBuilder.builder().document(article).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("article.meta.summary")));
+    Assert.assertTrue(mapping.isPassthrough(FieldPath.parse("article")));
+    Assert.assertTrue(
+        "Undeclared fields anywhere under the dynamic ancestor are passthrough",
+        mapping.isPassthrough(FieldPath.parse("article.tags")));
+    Assert.assertFalse(
+        "No per-field enumeration below the wholesale root",
+        ((SearchIndexAutoEmbedFieldMapping) mapping)
+            .explicitPassthroughPaths()
+            .contains(FieldPath.parse("article.meta")));
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_scalarAndDocumentAlternatives() {
+    // A field declared as both a scalar and a document containing an auto-embed (search mappings
+    // may declare several types per field): the scalar alternative's source value must reach the
+    // MV, so the whole field is passthrough while the nested embed is still collected.
+    DocumentFieldDefinition nested =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "text",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .build();
     DocumentFieldDefinition mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(false)
             .field(
-                "declared_key",
+                "parent",
+                FieldDefinitionBuilder.builder()
+                    .document(nested)
+                    .bool(new BooleanFieldDefinition())
+                    .build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("parent.text")));
+    Assert.assertTrue(
+        "Field with a scalar alternative is a wholesale passthrough at its own path",
+        ((SearchIndexAutoEmbedFieldMapping) mapping)
+            .explicitPassthroughPaths()
+            .contains(FieldPath.parse("parent")));
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_autoEmbedAndScalarAlternatives() {
+    // autoEmbed + non-text scalar on one key: the field key carries real source data for the
+    // scalar alternative and must be passthrough alongside the collected embed.
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "text",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .bool(new BooleanFieldDefinition())
+                    .build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("text")));
+    Assert.assertTrue(mapping.isPassthrough(FieldPath.parse("text")));
+  }
+
+  @Test
+  public void
+      createAutoEmbedMapping_search_embedPathAlsoDeclaredScalar_isBothEmbedAndPassthrough() {
+    // Dual role: a declared scalar field shares the embed source path, so the mapping must treat
+    // the path as both an embed input and a passthrough copy for the MV.
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "description",
+                FieldDefinitionBuilder.builder()
+                    .string(StringFieldDefinitionBuilder.builder().build())
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(mapping.isEmbed(FieldPath.parse("description")));
+    Assert.assertTrue(mapping.isPassthrough(FieldPath.parse("description")));
+  }
+
+  @Test
+  public void collectAutoEmbedSourcePaths_nestedDocuments_collectsFullDottedPaths() {
+    DocumentFieldDefinition parent =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "content",
+                FieldDefinitionBuilder.builder()
+                    .string(StringFieldDefinitionBuilder.builder().build())
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("parent", FieldDefinitionBuilder.builder().document(parent).build())
+            .field(
+                "title",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .build();
+
+    ImmutableSet<FieldPath> sourcePaths = AutoEmbedFieldSet.create(mappings).byPath().keySet();
+
+    Assert.assertEquals(
+        Set.of(FieldPath.parse("parent.content"), FieldPath.parse("title")), sourcePaths);
+  }
+
+  @Test
+  public void collectDualRoleSourcePaths_insideWholesaleSubtree_addsOnlyAutoEmbedSources() {
+    // A dynamic document is copied wholesale; its explicitly declared scalar child is only
+    // enumerated when it is also an auto-embed source, so the embed-path carve-out does not drop
+    // its raw value while unrelated children stay covered by the wholesale root.
+    DocumentFieldDefinition parent =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field(
+                "content",
+                FieldDefinitionBuilder.builder()
+                    .string(StringFieldDefinitionBuilder.builder().build())
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("parent", FieldDefinitionBuilder.builder().document(parent).build())
+            .build();
+    ImmutableSet<FieldPath> autoEmbedSourcePaths =
+        AutoEmbedFieldSet.create(mappings).byPath().keySet();
+    ImmutableSet.Builder<FieldPath> passthroughBuilder = ImmutableSet.builder();
+
+    AutoEmbedFieldMappingCreator.collectDualRoleSourcePaths(
+        mappings.fields(), Optional.empty(), autoEmbedSourcePaths, passthroughBuilder);
+
+    Assert.assertEquals(Set.of(FieldPath.parse("parent.content")), passthroughBuilder.build());
+  }
+
+  @Test
+  public void producesSameMatViewContent_dynamicDualRoleDeclaration_returnsFalse() {
+    // A dual-role declaration changes MV content even in dynamic mode: the raw value is copied for
+    // the explicitly declared source path, so the mapping diff must not reuse the old MV.
+    SearchIndexAutoEmbedFieldMapping plain =
+        (SearchIndexAutoEmbedFieldMapping)
+            AutoEmbedFieldMappingCreator.createAutoEmbedMapping(dynamicParentSearchDef(false));
+    SearchIndexAutoEmbedFieldMapping dualRole =
+        (SearchIndexAutoEmbedFieldMapping)
+            AutoEmbedFieldMappingCreator.createAutoEmbedMapping(dynamicParentSearchDef(true));
+
+    Assert.assertFalse(plain.producesSameMatViewContent(dualRole));
+    Assert.assertFalse(dualRole.producesSameMatViewContent(plain));
+  }
+
+  /** Top-level dynamic mapping with a dynamic parent document containing an auto-embed. */
+  private static SearchIndexDefinition dynamicParentSearchDef(boolean declareDualRoleScalar) {
+    var autoEmbed = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    FieldDefinitionBuilder contentBuilder =
+        FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbed);
+    if (declareDualRoleScalar) {
+      contentBuilder.string(StringFieldDefinitionBuilder.builder().build());
+    }
+    DocumentFieldDefinition parent =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field("content", contentBuilder.build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field("parent", FieldDefinitionBuilder.builder().document(parent).build())
+            .build();
+    return SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_staticDocumentEnumeratesDeclaredChildren() {
+    DocumentFieldDefinition nested =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "content",
+                FieldDefinitionBuilder.builder()
+                    .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                    .build())
+            .field("parent", FieldDefinitionBuilder.builder().document(nested).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    SearchIndexAutoEmbedFieldMapping mapping =
+        AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
+
+    Assert.assertTrue(
+        mapping.explicitPassthroughPaths().contains(FieldPath.parse("parent.active")));
+    Assert.assertFalse(mapping.explicitPassthroughPaths().contains(FieldPath.parse("parent")));
+    Assert.assertTrue(mapping.isPassthrough(FieldPath.parse("parent.active")));
+    Assert.assertFalse(
+        "Undeclared children under a static document must stay out of the MV",
+        mapping.isPassthrough(FieldPath.parse("parent.undeclared")));
+    Assert.assertTrue(
+        "The document ancestor remains a scalar fallback for ancestor overwrites",
+        mapping.isPassthrough(FieldPath.parse("parent")));
+    Assert.assertTrue(mapping.subDocumentExists(FieldPath.parse("parent")));
+  }
+
+  @Test
+  public void createAutoEmbedMapping_search_embedKeyedByPathNotMappingKey() {
+    // Embed-only declaration: the embed is keyed by the field's source path, and the field is not
+    // a passthrough source.
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "source_text",
                 FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
             .build();
     SearchIndexDefinition searchDef =
@@ -358,12 +800,85 @@ public class AutoEmbedFieldMappingCreatorTest {
     AutoEmbedFieldMapping mapping = AutoEmbedFieldMappingCreator.createAutoEmbedMapping(searchDef);
 
     Assert.assertTrue(mapping.isEmbed(FieldPath.parse("source_text")));
-    Assert.assertFalse(mapping.isEmbed(FieldPath.parse("declared_key")));
-    // The declaration key should not leak in as a passthrough either — it describes the embed
-    // output, not a source field.
     Assert.assertFalse(
-        "Declaration key of an auto-embed field is not a passthrough source field",
-        mapping.isPassthrough(FieldPath.parse("declared_key")));
+        "An embed-only field is not a passthrough source",
+        mapping.isPassthrough(FieldPath.parse("source_text")));
+  }
+
+  /**
+   * CLOUDP-402522: when the schema mapping remaps a filter field under the source nestedRoot, the
+   * MV mapping must reflect the same MV path so that compareDocuments and downstream readers locate
+   * the filter at its actual MV location instead of its (no-longer-present) source path.
+   */
+  @Test
+  public void createMatViewAutoEmbedMapping_filterUnderNestedRoot_remappedToMvPath() {
+    var schemaMetadata =
+        new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
+            1,
+            Map.of(
+                FieldPath.parse("sections.section_content"),
+                FieldPath.parse("_autoEmbed.sections.section_content"),
+                FieldPath.parse("sections.section_name"),
+                FieldPath.parse("_autoEmbed.sections.section_name")));
+    var autoEmbedUnderNested =
+        new VectorAutoEmbedFieldDefinition(
+            "voyage-3-large",
+            "text",
+            FieldPath.parse("sections.section_content"),
+            1024,
+            VectorSimilarity.COSINE,
+            VectorAutoEmbedQuantization.FLOAT);
+    var nestedFilter =
+        new VectorIndexFilterFieldDefinition(FieldPath.parse("sections.section_name"));
+    var topLevelFilter = new VectorIndexFilterFieldDefinition(FieldPath.parse("name"));
+    var indexDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .setFields(List.of(autoEmbedUnderNested, nestedFilter, topLevelFilter))
+            .nestedRoot("sections")
+            .build();
+
+    var matViewMapping =
+        AutoEmbedFieldMappingCreator.createMatViewAutoEmbedMapping(indexDefinition, schemaMetadata);
+
+    FieldPath remappedFilterPath = FieldPath.parse("_autoEmbed.sections.section_name");
+    Assert.assertTrue(
+        "Filter under source nestedRoot must be remapped to the MV path.",
+        matViewMapping.fieldMap().containsKey(remappedFilterPath));
+    Assert.assertTrue(
+        "Top-level filter must keep its source path (no schema mapping entry).",
+        matViewMapping.fieldMap().containsKey(FieldPath.parse("name")));
+    Assert.assertFalse(
+        "Source filter path must not be present after remap.",
+        matViewMapping.fieldMap().containsKey(FieldPath.parse("sections.section_name")));
+  }
+
+  @Test
+  public void isFilterUnderSourceNestedRoot_descendantPath_returnsTrue() {
+    Assert.assertTrue(
+        AutoEmbedFieldMappingCreator.isFilterUnderSourceNestedRoot(
+            FieldPath.parse("sections.section_name"), Optional.of(FieldPath.parse("sections"))));
+  }
+
+  @Test
+  public void isFilterUnderSourceNestedRoot_topLevelPath_returnsFalse() {
+    Assert.assertFalse(
+        AutoEmbedFieldMappingCreator.isFilterUnderSourceNestedRoot(
+            FieldPath.parse("name"), Optional.of(FieldPath.parse("sections"))));
+  }
+
+  @Test
+  public void isFilterUnderSourceNestedRoot_noNestedRoot_returnsFalse() {
+    Assert.assertFalse(
+        AutoEmbedFieldMappingCreator.isFilterUnderSourceNestedRoot(
+            FieldPath.parse("sections.section_name"), Optional.empty()));
+  }
+
+  @Test
+  public void isFilterUnderSourceNestedRoot_pathEqualToNestedRoot_returnsFalse() {
+    Assert.assertFalse(
+        "isChildOf is strict; the nestedRoot itself is not a child of itself.",
+        AutoEmbedFieldMappingCreator.isFilterUnderSourceNestedRoot(
+            FieldPath.parse("sections"), Optional.of(FieldPath.parse("sections"))));
   }
 
   // ---- getMatViewNestedRoot ----
@@ -394,8 +909,7 @@ public class AutoEmbedFieldMappingCreatorTest {
     Assert.assertEquals(
         nestedRoot,
         AutoEmbedFieldMappingCreator.getMatViewNestedRoot(
-            nestedRoot,
-            Map.of(FieldPath.parse("title"), FieldPath.parse("_autoEmbed.title"))));
+            nestedRoot, Map.of(FieldPath.parse("title"), FieldPath.parse("_autoEmbed.title"))));
   }
 
   @Test
@@ -477,14 +991,12 @@ public class AutoEmbedFieldMappingCreatorTest {
     var schemaMetadata =
         new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
             1, Map.of(FieldPath.parse("content"), FieldPath.parse("_autoEmbed.content")));
-    var autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
     DocumentFieldDefinition mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(false)
             .field(
-                "embedding",
-                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
             .field(
                 "active",
                 FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
@@ -519,14 +1031,12 @@ public class AutoEmbedFieldMappingCreatorTest {
     var schemaMetadata =
         new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
             1, Map.of(FieldPath.parse("content"), FieldPath.parse("_autoEmbed.content")));
-    var autoEmbedField =
-        new SearchAutoEmbedFieldDefinition("voyage-3-large", FieldPath.parse("content"));
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
     DocumentFieldDefinition mappings =
         DocumentFieldDefinitionBuilder.builder()
             .dynamic(true)
             .field(
-                "embedding",
-                FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
             .build();
     SearchIndexDefinition searchDef =
         SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
@@ -542,5 +1052,99 @@ public class AutoEmbedFieldMappingCreatorTest {
         searchMapping
             .explicitPassthroughPaths()
             .contains(FieldPath.parse("_autoEmbed." + HASH_FIELD_SUFFIX + ".content")));
+  }
+
+  @Test
+  public void createMatViewAutoEmbedMapping_search_nestedAutoEmbedUnderDocument() {
+    // The MV-side mapping must mirror the source-side walk for auto-embed declarations nested
+    // under `document` fields: embed keyed at the MV-rewritten path, hash passthrough added, and
+    // the sibling non-auto-embed field passthrough at its full dotted path. Without the descent,
+    // the initial-sync scanner's MV-doc collector never descends into `_autoEmbed`, so every doc
+    // is reported stale and re-embedded on resync.
+    var schemaMetadata =
+        new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
+            1,
+            Map.of(
+                FieldPath.parse("parent.content"), FieldPath.parse("_autoEmbed.parent.content")));
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    DocumentFieldDefinition nested =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field(
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("parent", FieldDefinitionBuilder.builder().document(nested).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping =
+        AutoEmbedFieldMappingCreator.createMatViewAutoEmbedMapping(searchDef, schemaMetadata);
+
+    FieldPath matViewEmbedPath = FieldPath.parse("_autoEmbed.parent.content");
+    FieldPath hashPath = FieldPath.parse("_autoEmbed." + HASH_FIELD_SUFFIX + ".parent.content");
+    Assert.assertTrue(
+        "Nested auto-embed should be keyed at the MV-rewritten path",
+        mapping.embedFields().containsKey(matViewEmbedPath));
+    Assert.assertTrue("Hash path should be a passthrough", mapping.isPassthrough(hashPath));
+    Assert.assertTrue(
+        "Sibling non-auto-embed field should be passthrough at its dotted path",
+        mapping.isPassthrough(FieldPath.parse("parent.active")));
+    Assert.assertFalse(
+        "Containing document should be descended into, not passed through wholesale",
+        mapping.isPassthrough(FieldPath.parse("parent.content")));
+    Assert.assertTrue(
+        "MV-doc collectors must descend into _autoEmbed",
+        mapping.subDocumentExists(FieldPath.parse("_autoEmbed")));
+  }
+
+  @Test
+  public void createMatViewAutoEmbedMapping_search_dynamicDocumentWithAutoEmbed() {
+    // MV-side mirror of the wholesale rule: the dynamic document is a single passthrough at its
+    // source path (passthrough paths keep their source paths on the MV), the embed is keyed at the
+    // MV-rewritten path, and the hash passthrough is added.
+    var schemaMetadata =
+        new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(
+            1,
+            Map.of(
+                FieldPath.parse("parent.content"), FieldPath.parse("_autoEmbed.parent.content")));
+    var autoEmbedField = new SearchAutoEmbedFieldDefinition("voyage-3-large");
+    DocumentFieldDefinition nested =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(true)
+            .field(
+                "content", FieldDefinitionBuilder.builder().searchAutoEmbed(autoEmbedField).build())
+            .field(
+                "active",
+                FieldDefinitionBuilder.builder().bool(new BooleanFieldDefinition()).build())
+            .build();
+    DocumentFieldDefinition mappings =
+        DocumentFieldDefinitionBuilder.builder()
+            .dynamic(false)
+            .field("parent", FieldDefinitionBuilder.builder().document(nested).build())
+            .build();
+    SearchIndexDefinition searchDef =
+        SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+
+    AutoEmbedFieldMapping mapping =
+        AutoEmbedFieldMappingCreator.createMatViewAutoEmbedMapping(searchDef, schemaMetadata);
+
+    FieldPath hashPath = FieldPath.parse("_autoEmbed." + HASH_FIELD_SUFFIX + ".parent.content");
+    Assert.assertTrue(
+        "Embed keyed at the MV-rewritten path",
+        mapping.embedFields().containsKey(FieldPath.parse("_autoEmbed.parent.content")));
+    Assert.assertTrue("Hash path is a passthrough", mapping.isPassthrough(hashPath));
+    Assert.assertTrue(
+        "Dynamic document is a wholesale passthrough on the MV side",
+        mapping.isPassthrough(FieldPath.parse("parent")));
+    Assert.assertTrue(
+        "MV-doc collectors must descend into _autoEmbed",
+        mapping.subDocumentExists(FieldPath.parse("_autoEmbed")));
   }
 }

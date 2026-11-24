@@ -5,11 +5,11 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.embedding.providers.congestion.AimdCongestionControl;
 import com.xgen.mongot.embedding.providers.congestion.DynamicSemaphore;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.util.Optional;
@@ -23,8 +23,7 @@ public class EmbeddingClientFactoryTest {
 
   private static EmbeddingModelConfig voyageModelWithQueryAndCollectionScan() {
     EmbeddingServiceConfig.VoyageEmbeddingCredentials creds =
-        new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
-            "token", "2024-10-15T22:32:20.925Z");
+        new EmbeddingServiceConfig.VoyageEmbeddingCredentials("token", "2024-10-15T22:32:20.925Z");
     EmbeddingServiceConfig.WorkloadParams queryParams =
         new EmbeddingServiceConfig.WorkloadParams(
             Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(creds));
@@ -55,8 +54,7 @@ public class EmbeddingClientFactoryTest {
 
   private static EmbeddingModelConfig voyageModelFlexTierDisabled() {
     EmbeddingServiceConfig.VoyageEmbeddingCredentials creds =
-        new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
-            "token", "2024-10-15T22:32:20.925Z");
+        new EmbeddingServiceConfig.VoyageEmbeddingCredentials("token", "2024-10-15T22:32:20.925Z");
     EmbeddingServiceConfig.WorkloadParams collectionScanParams =
         new EmbeddingServiceConfig.WorkloadParams(
             Optional.empty(), Optional.empty(), Optional.of(creds), Optional.empty());

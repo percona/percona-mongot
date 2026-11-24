@@ -73,7 +73,7 @@ public class DecodingWorkScheduler extends Thread {
 
     this.shutdownFuture = new CompletableFuture<>();
     this.shutdown = false;
-    
+
     Tag replicationTag = ServerStatusDataExtractor.Scope.REPLICATION.getTag();
 
     this.schedulerQueue = new SchedulerQueue<>(type, metricsFactory);
@@ -91,14 +91,12 @@ public class DecodingWorkScheduler extends Thread {
         metricsFactory.timer("decodingBatchSchedulingDurations", Tags.of(replicationTag));
   }
 
-  // TODO(CLOUDP-405327): remove test-only overloads once LIFECYCLE_ATTRIBUTION_METRICS rolls out.
   public static DecodingWorkScheduler create(int numDecodingThreads, MeterRegistry registry) {
-    return create(numDecodingThreads, DEFAULT, registry, false);
-  }
-
-  public static DecodingWorkScheduler create(
-      int numDecodingThreads, CommonReplicationConfig.Type type, MeterRegistry registry) {
-    return create(numDecodingThreads, type, registry, false);
+    return create(
+        numDecodingThreads,
+        DEFAULT,
+        registry,
+        Optional.of(new ThreadPoolResourceMetrics.Bindings()));
   }
 
   /**
@@ -111,14 +109,13 @@ public class DecodingWorkScheduler extends Thread {
       int numDecodingThreads,
       CommonReplicationConfig.Type type,
       MeterRegistry registry,
-      boolean enableLifecycleAttributionMetrics) {
+      Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings) {
     var executor =
         Executors.fixedSizeThreadPool(
             type.metricsNamespacePrefix + "decoding", numDecodingThreads, registry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create(type.resourceAttributionSubsystem)
-          .register(executor, registry);
-    }
+    attributionBindings.ifPresent(
+        bindings ->
+            bindings.forSubsystem(type.resourceAttributionSubsystem).register(executor, registry));
     var scheduler =
         new DecodingWorkScheduler(
             numDecodingThreads,

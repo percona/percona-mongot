@@ -1,6 +1,5 @@
 package com.xgen.mongot.config.manager;
 
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Streams;
 import com.google.errorprone.annotations.Var;
@@ -8,6 +7,7 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.config.backup.ConfigJournalV1;
+import com.xgen.mongot.config.backup.JournalEntry;
 import com.xgen.mongot.config.backup.JournalWriter;
 import com.xgen.mongot.config.util.Invariants;
 import com.xgen.mongot.cursor.MongotCursorManager;
@@ -23,6 +23,7 @@ import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.GenerationId;
+import com.xgen.mongot.index.version.IndexEngine;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.lifecycle.LifecycleManager;
@@ -79,6 +80,13 @@ public class ConfigState {
   public final IndexCatalog indexCatalog;
 
   /**
+   * The indexes whose config journal entry could not be parsed, and which therefore cannot be
+   * initialized or queried. Tracked so that mongot can report why they are unusable rather than
+   * behaving as though they do not exist.
+   */
+  public final IncompatibleIndexes incompatibleIndexes;
+
+  /**
    * Indexes on the way to be dropped, waiting for their cursors to be killed.
    *
    * <p>If mongot restarts at any point these can be dropped (cursors are not persisted). Thus,
@@ -127,6 +135,7 @@ public class ConfigState {
   private ConfigState(
       StagedIndexes staged,
       IndexCatalog indexCatalog,
+      IncompatibleIndexes incompatibleIndexes,
       PhasingOutIndexes phasingOut,
       InitializedIndexCatalog initializedIndexCatalog,
       MongotCursorManager cursorManager,
@@ -138,6 +147,7 @@ public class ConfigState {
       JournalWriter journalWriter) {
     this.staged = staged;
     this.indexCatalog = indexCatalog;
+    this.incompatibleIndexes = incompatibleIndexes;
     this.phasingOut = phasingOut;
     this.isInitializedFromConfigJournal = false;
     this.maxUserIndexVersionNumberPerIndex = new HashMap<>();
@@ -157,6 +167,7 @@ public class ConfigState {
   public static ConfigState create(
       StagedIndexes staged,
       IndexCatalog indexCatalog,
+      IncompatibleIndexes incompatibleIndexes,
       PhasingOutIndexes phasingOut,
       InitializedIndexCatalog initializedIndexCatalog,
       MongotCursorManager cursorManager,
@@ -175,6 +186,7 @@ public class ConfigState {
         new ConfigState(
             staged,
             indexCatalog,
+            incompatibleIndexes,
             phasingOut,
             initializedIndexCatalog,
             cursorManager,
@@ -393,18 +405,26 @@ public class ConfigState {
   /**
    * Instantiate a new journal representing the current config state. It may differ from the journal
    * persisted to disk.
+   *
+   * <p>The quarantined entries in {@link #incompatibleIndexes} are folded back in alongside the
+   * indexes mongot actually holds, so that they are preserved despite having no index to be derived
+   * from. Quarantined deleted entries are not carried: their data is dropped at startup.
    */
   ConfigJournalV1 currentJournal() {
     return new ConfigJournalV1(
-        definitions(this.staged.getIndexes()),
-        definitions(this.indexCatalog.getIndexes()),
+        entries(this.staged.getIndexes(), this.incompatibleIndexes.getStagedIndexes()),
+        entries(this.indexCatalog.getIndexes(), this.incompatibleIndexes.getLiveIndexes()),
         // if we restart at any point, we can just drop the phasing out indexes.
-        definitions(this.phasingOut.getIndexes()));
+        entries(this.phasingOut.getIndexes(), List.of()));
   }
 
-  private List<IndexDefinitionGeneration> definitions(Collection<IndexGeneration> indexes) {
-    return indexes.stream()
-        .map(IndexGeneration::getDefinitionGeneration)
+  private static List<JournalEntry<? extends IndexDefinitionGeneration>> entries(
+      Collection<IndexGeneration> indexes, Collection<QuarantinedIndex> quarantined) {
+    return Stream.concat(
+            indexes.stream()
+                .map(IndexGeneration::getDefinitionGeneration)
+                .map(JournalEntry::<IndexDefinitionGeneration>parsed),
+            quarantined.stream().map(QuarantinedIndex::asJournalEntry))
         .collect(Collectors.toList());
   }
 
@@ -416,11 +436,14 @@ public class ConfigState {
           this.getGenerations.get().stream()
               .filter(
                   indexGeneration ->
-                      indexGeneration
-                          .getDefinitionGeneration()
-                          .generation()
-                          .indexFormatVersion
-                          .equals(this.indexFormatVersion))
+                      indexGeneration.getDefinitionGeneration().generation().formatVersion.engine()
+                              == IndexEngine.LUCENE
+                          && indexGeneration
+                                  .getDefinitionGeneration()
+                                  .generation()
+                                  .formatVersion
+                                  .versionNumber()
+                              == this.indexFormatVersion.versionNumber)
               .count();
     }
   }
@@ -443,17 +466,29 @@ public class ConfigState {
   }
 
   /**
-   * Resets index status for unresolved auto embedding indexes, IndexRecoverStager will pick them up
-   * and retry.
+   * Resets index status for unresolved auto embedding indexes so IndexRecoveryStager picks them up
+   * and retries. Generations already reporting {@code DOES_NOT_EXIST} (source collection absent on
+   * this shard) are left untouched -- they are not transient resolution failures and recover via
+   * the collection-reappearance path, so resetting them would replace the intended quiet {@code
+   * COLLECTION_NOT_FOUND} status with a spurious failure.
    */
   private void resetUnresolvedAutoEmbeddingIndexes() {
     Stream.concat(this.staged.getIndexes().stream(), this.indexCatalog.getIndexes().stream())
         .filter(AutoEmbeddingIndexGenerationFactory::isAutoEmbeddingResolutionFailed)
+        // COLLECTION_NOT_FOUND (source collection absent on this shard) is unresolved by type
+        // but is not a transient failure: keep it a quiet DOES_NOT_EXIST and let it recover via
+        // the collection-reappearance path (IndexRecoveryStager), not this transient-retry reset.
+        .filter(indexGeneration -> !indexGeneration.getIndex().getStatus().isCollectionNotFound())
+        // A STALE index is serving offline from its reconstructed derived Lucene; leave it serving
+        // (IndexRecoveryStager re-stages it by type). Reset the rest to a recoverable RETRY.
+        .filter(
+            indexGeneration ->
+                indexGeneration.getIndex().getStatus().getStatusCode()
+                    != IndexStatus.StatusCode.STALE)
         .forEach(
             unresolvedIndexGeneration ->
                 unresolvedIndexGeneration
                     .getIndex()
-                    // Set a failed status but recoverable (AUTO_EMBEDDING_RESOLUTION_RETRY)
                     .setStatus(
                         IndexStatus.failed(
                             AutoEmbeddingFailureMessages.withFailurePrefix(

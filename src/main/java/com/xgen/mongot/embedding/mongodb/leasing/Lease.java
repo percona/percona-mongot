@@ -66,7 +66,8 @@ import org.bson.codecs.pojo.annotations.BsonId;
  *      }
  *     },
  *     "steadyAsOfOplogPosition": {"$timestamp": {"t": 1702857600, "i": 1}},
- *     "cleanupState": "NOT_ELIGIBLE"
+ *     "cleanupState": "NOT_ELIGIBLE",
+ *     "epoch": 42
  *   }
  * </pre>
  */
@@ -83,7 +84,8 @@ public record Lease(
     Map<String, IndexDefinitionVersionStatus> indexDefinitionVersionStatusMap,
     @NonNull MaterializedViewCollectionMetadata materializedViewCollectionMetadata,
     @Nullable BsonTimestamp steadyAsOfOplogPosition,
-    @NonNull CleanupState cleanupState)
+    @NonNull CleanupState cleanupState,
+    long epoch)
     implements DocumentEncodable {
 
   /**
@@ -105,16 +107,20 @@ public record Lease(
 
   @VisibleForTesting static final long FIRST_LEASE_VERSION = 1L;
 
+  @VisibleForTesting static final long FIRST_EPOCH = 0L;
+
   /** Lease expiration time in milliseconds (5 minutes). */
   public static final long LEASE_EXPIRATION_MS = 300000L;
 
   /**
    * GC cleanup state of the lease (and its 1:1 materialized view collection). {@link
-   * CleanupState#NOT_ELIGIBLE} is the steady state; {@link CleanupState#ELIGIBLE_FOR_CLEANUP} is a
-   * one-way terminal state set by the stale-lease scanner when a superseded lease's heartbeat has
-   * gone stale beyond the cleanup window. The scanner subsequently drops the materialized view
-   * collection and the lease document. It is named for its narrow GC scope — it is not a general
-   * lease lifecycle status.
+   * CleanupState#NOT_ELIGIBLE} is the steady state; the stale-lease scanner marks a superseded
+   * lease {@link CleanupState#ELIGIBLE_FOR_CLEANUP} once its heartbeat has gone stale beyond the
+   * cleanup window, after which it drops the materialized view collection and the lease document.
+   * The mark is not terminal: any active-use write that extends the lease's expiration
+   * (renewal/acquisition, checkpoint, status update, new index-definition version) clears it back
+   * to {@code NOT_ELIGIBLE}, so a lease that returns to service is never cleaned up. It is named
+   * for its narrow GC scope — it is not a general lease lifecycle status.
    *
    * <p>This field was added after the lease document was already in use in production. For
    * backwards compatibility, documents missing this field are treated as {@code NOT_ELIGIBLE} on
@@ -124,6 +130,18 @@ public record Lease(
   public enum CleanupState {
     NOT_ELIGIBLE,
     ELIGIBLE_FOR_CLEANUP
+  }
+
+  /**
+   * The index this lease belongs to. The lease id is the MV collection name; its layout is only
+   * knowable from the name itself (an orphaned lease has no index definition left to consult): v0 =
+   * bare dash-free indexId, v1+ = {@code "<indexId>-<hash>-<nameFormatVersion>-<aeVersion>"} (see
+   * {@code MaterializedViewCollectionResolver}). A name matching neither layout is returned whole,
+   * so the lease groups only with itself and the GC current-version safeguard protects it.
+   */
+  public String indexId() {
+    String[] segments = this.id.split("-");
+    return segments.length == 4 ? segments[0] : this.id;
   }
 
   static class Fields {
@@ -236,9 +254,30 @@ public record Lease(
             .asUpperUnderscore()
             .optional()
             .withDefault(CleanupState.NOT_ELIGIBLE);
+
+    /**
+     * Monotonically increasing counter bumped only when lease ownership transfers to a new tenure
+     * (including same-host reacquisition of an expired lease); preserved across renewal,
+     * checkpoint, and status updates. See {@link #withNewTenure} for how the increment can jump
+     * forward to stay compatible with pre-existing {@code leaseVersion}-derived tokens.
+     *
+     * <p>No static default: a document with this field absent — a legacy lease predating it, or one
+     * written by an older binary during a rollback/rolling-upgrade window that drops it — reads
+     * with {@code epoch} defaulted to that same document's {@code leaseVersion} (see {@link
+     * #fromBson(DocumentParser)}), never to a fixed constant. {@code leaseVersion} is an upper
+     * bound on any {@code epoch} that could have existed before it went missing (the two always
+     * advance together on a real tenure change, and {@code leaseVersion} alone only ever
+     * increases), so it is a safe replacement — a fencing floor, not a guess. Applied only when the
+     * field is absent: an explicitly present {@code epoch} below {@code leaseVersion} is legitimate
+     * (renewals advance {@code leaseVersion} between tenure changes) and must be read back exactly
+     * as stored.
+     */
+    public static final Field.Optional<Long> EPOCH =
+        Field.builder("epoch").longField().optional().noDefault();
   }
 
   public static Lease fromBson(DocumentParser parser) throws BsonParseException {
+    long leaseVersion = parser.getField(Fields.LEASE_VERSION).unwrap();
     return new Lease(
         parser.getField(Fields._ID).unwrap(),
         parser.getField(Fields.SCHEMA_VERSION).unwrap(),
@@ -246,7 +285,7 @@ public record Lease(
         parser.getField(Fields.COLLECTION_NAME).unwrap(),
         parser.getField(Fields.LEASE_OWNER).unwrap(),
         Instant.ofEpochMilli(parser.getField(Fields.LEASE_EXPIRATION).unwrap().getValue()),
-        parser.getField(Fields.LEASE_VERSION).unwrap(),
+        leaseVersion,
         parser.getField(Fields.COMMIT_INFO).unwrap(),
         parser.getField(Fields.LATEST_INDEX_DEFINITION_VERSION).unwrap(),
         parser.getField(Fields.INDEX_DEFINITION_VERSION_STATUS_MAP).unwrap(),
@@ -265,7 +304,11 @@ public record Lease(
         // Backwards-compat: leases predating the cleanupState field read as NOT_ELIGIBLE via the
         // field's withDefault. Applied on read (not via normalize-on-startup) so every in-memory
         // Lease is complete; durable upgrade happens the next time the document is written.
-        parser.getField(Fields.CLEANUP_STATE).unwrap());
+        parser.getField(Fields.CLEANUP_STATE).unwrap(),
+        // Backwards-compat / rollback-safety: an absent epoch (legacy lease, or one written by an
+        // older binary that drops the field) reads as leaseVersion — a safe fencing floor, never a
+        // fixed constant. See Fields.EPOCH for why leaseVersion is a valid stand-in.
+        parser.getField(Fields.EPOCH).unwrap().orElse(leaseVersion));
   }
 
   public static Lease fromBson(BsonDocument bsonDocument) throws BsonParseException {
@@ -293,11 +336,11 @@ public record Lease(
 
     private static class Fields {
       /**
-       * Whether the index definition version is queryable. This field durably tracks the
-       * transition from building to queryable. Once it becomes queryable, it always remains so
-       * (one-way ratchet). A new version may inherit queryable=true from the previous version
-       * when {@code skipInitialSync=true} (Lucene-only or same-version change), since the MV
-       * data is preserved and the index can continue serving queries.
+       * Whether the index definition version is queryable. This field durably tracks the transition
+       * from building to queryable. Once it becomes queryable, it always remains so (one-way
+       * ratchet). A new version may inherit queryable=true from the previous version when {@code
+       * skipInitialSync=true} (Lucene-only or same-version change), since the MV data is preserved
+       * and the index can continue serving queries.
        */
       public static final Field.Required<Boolean> IS_QUERYABLE =
           Field.builder("isQueryable").booleanField().required();
@@ -306,8 +349,8 @@ public record Lease(
        * The status code of the index definition version.
        *
        * <p>Uses {@code UNKNOWN} as a fallback so an older binary can tolerate a newer {@code
-       * StatusCode} value written by a newer binary during rollback or rolling updates. Without
-       * the fallback, an unrecognized status string would throw {@link
+       * StatusCode} value written by a newer binary during rollback or rolling updates. Without the
+       * fallback, an unrecognized status string would throw {@link
        * com.xgen.mongot.util.bson.parser.BsonParseException} and break lease loading for the
        * affected index. See CLOUDP-401373.
        */
@@ -346,7 +389,8 @@ public record Lease(
             new IndexDefinitionVersionStatus(false, initialIndexStatus.getStatusCode())),
         materializedViewCollectionMetadata,
         null,
-        CleanupState.NOT_ELIGIBLE);
+        CleanupState.NOT_ELIGIBLE,
+        FIRST_EPOCH);
   }
 
   public static Lease newLease(
@@ -372,7 +416,8 @@ public record Lease(
             new IndexDefinitionVersionStatus(false, initialIndexStatus.getStatusCode())),
         materializedViewCollectionMetadata,
         null,
-        CleanupState.NOT_ELIGIBLE);
+        CleanupState.NOT_ELIGIBLE,
+        FIRST_EPOCH);
   }
 
   public Lease withUpdatedCheckpoint(EncodedUserData commitInfo) {
@@ -389,7 +434,8 @@ public record Lease(
         this.indexDefinitionVersionStatusMap,
         this.materializedViewCollectionMetadata,
         this.steadyAsOfOplogPosition,
-        this.cleanupState);
+        CleanupState.NOT_ELIGIBLE,
+        this.epoch);
   }
 
   /**
@@ -435,7 +481,7 @@ public record Lease(
                         new BufferlessIdOrderInitialSyncResumeInfo(
                             highWaterMark, BsonUtils.MIN_KEY);
                     return IndexCommitUserData.createInitialSyncResume(
-                            IndexFormatVersion.CURRENT, resumeInfo)
+                            IndexFormatVersion.CURRENT.versionNumber, resumeInfo)
                         .toEncodedData()
                         .asString();
                   })
@@ -454,7 +500,51 @@ public record Lease(
         newVersionStatus,
         this.materializedViewCollectionMetadata,
         skipInitialSync ? this.steadyAsOfOplogPosition : null,
-        this.cleanupState);
+        CleanupState.NOT_ELIGIBLE,
+        this.epoch);
+  }
+
+  /**
+   * Returns a copy that records {@code versionKey} as the latest definition version, adding it to
+   * the version-status map if missing; everything else is unchanged. Returns {@code this} when the
+   * version is already recorded. Used when an existing lease is reused for a definition version it
+   * has not seen (a revert back to a previous definition): definition versions only grow, so the
+   * version in use is always the lease's latest.
+   */
+  public Lease withRecordedIndexDefinitionVersion(String versionKey) {
+    // Reject at the boundary: a null would otherwise slip past the short-circuited equals below
+    // and only fail much later, inside the BSON writer of whichever write persists this lease.
+    Objects.requireNonNull(versionKey, "versionKey");
+    boolean hasVersion = this.indexDefinitionVersionStatusMap.containsKey(versionKey);
+    if (hasVersion && versionKey.equals(this.latestIndexDefinitionVersion)) {
+      return this;
+    }
+    @Var
+    Map<String, IndexDefinitionVersionStatus> newVersionStatus =
+        this.indexDefinitionVersionStatusMap;
+    if (!hasVersion) {
+      // Same placeholder a resolver uses for a missing entry: not queryable until the leader's
+      // status writes report the truth. The change behind the new version may require a resync
+      // (e.g. a filter change), so queryability must not carry over from the previous version.
+      newVersionStatus = new HashMap<>(this.indexDefinitionVersionStatusMap);
+      newVersionStatus.put(
+          versionKey, new IndexDefinitionVersionStatus(false, IndexStatus.StatusCode.UNKNOWN));
+    }
+    return new Lease(
+        this.id,
+        SCHEMA_VERSION,
+        this.collectionUuid,
+        this.collectionName,
+        this.leaseOwner,
+        this.leaseExpiration,
+        this.leaseVersion,
+        this.commitInfo,
+        versionKey,
+        newVersionStatus,
+        this.materializedViewCollectionMetadata,
+        this.steadyAsOfOplogPosition,
+        this.cleanupState,
+        this.epoch);
   }
 
   /**
@@ -496,23 +586,62 @@ public record Lease(
         newVersionStatus,
         this.materializedViewCollectionMetadata,
         newSteadyPosition,
-        this.cleanupState);
+        CleanupState.NOT_ELIGIBLE,
+        this.epoch);
   }
 
   /**
-   * Creates a renewed lease with a new owner, updated expiration, and incremented version. Used for
-   * lease acquisition and renewal (heartbeat).
+   * Returns a copy of this lease with only the expiration refreshed and the GC cleanup state reset
+   * to {@link CleanupState#NOT_ELIGIBLE}. Used by the lease heartbeat (renewal), which must not
+   * change ownership, bump {@code leaseVersion}, or rewrite {@code commitInfo} — those are owned by
+   * acquisition ({@link #withNewTenure}) and the checkpoint/staleness writers respectively
+   * (CLOUDP-449935).
    *
-   * @param newOwner the hostname of the new lease owner
-   * @return a new Lease with updated ownership, expiration, and version
+   * <p>Preserving {@code leaseVersion} and {@code epoch} (and {@code commitInfo}) means a renew
+   * never rolls back a concurrent checkpoint. The {@code $max} on {@code leaseExpiration} applied
+   * in the database advances expiration forward; this in-memory merge mirrors that by taking the
+   * later of the cached and new expiration rather than overwriting.
+   *
+   * @param newExpiration the new expiration time.
+   * @return a new Lease with the later of the cached/new expiration and {@code NOT_ELIGIBLE}
+   *     cleanup state.
    */
-  public Lease withRenewedOwnership(String newOwner) {
+  public Lease withRenewedExpiration(Instant newExpiration) {
+    Instant mergedExpiration =
+        this.leaseExpiration.isAfter(newExpiration) ? this.leaseExpiration : newExpiration;
     return new Lease(
         this.id,
         SCHEMA_VERSION,
         this.collectionUuid,
         this.collectionName,
-        newOwner,
+        this.leaseOwner,
+        mergedExpiration,
+        this.leaseVersion,
+        this.commitInfo,
+        this.latestIndexDefinitionVersion,
+        this.indexDefinitionVersionStatusMap,
+        this.materializedViewCollectionMetadata,
+        this.steadyAsOfOplogPosition,
+        CleanupState.NOT_ELIGIBLE,
+        this.epoch);
+  }
+
+  /**
+   * Creates a renewed lease for the same tenure: new expiration and incremented version, owner
+   * unchanged. Used for lease renewal (heartbeat) with the CLOUDP-449935 flag off (the master
+   * path), which must not bump {@link #epoch}. Takes no owner argument — renewal by definition
+   * cannot change ownership; an actual ownership change must go through {@link #withNewTenure} so
+   * {@link #epoch} bumps with it.
+   *
+   * @return a new Lease with updated expiration and version
+   */
+  public Lease withRenewedOwnership() {
+    return new Lease(
+        this.id,
+        SCHEMA_VERSION,
+        this.collectionUuid,
+        this.collectionName,
+        this.leaseOwner,
         Instant.now().plusMillis(LEASE_EXPIRATION_MS),
         this.leaseVersion + 1,
         this.commitInfo,
@@ -520,9 +649,54 @@ public record Lease(
         this.indexDefinitionVersionStatusMap,
         this.materializedViewCollectionMetadata,
         this.steadyAsOfOplogPosition,
-        this.cleanupState);
+        CleanupState.NOT_ELIGIBLE,
+        this.epoch);
   }
 
+  /**
+   * Creates a lease for a new tenure: new owner, updated expiration, and incremented version,
+   * unlike {@link #withRenewedExpiration}, this also bumps {@link #epoch}. Used whenever ownership
+   * transfers to {@code newOwner} — including same-host reacquisition of an expired lease, which is
+   * a new tenure even though the owner string does not change.
+   *
+   * <p>{@code epoch} normally just increments by one alongside {@code leaseVersion}, but is rebased
+   * to {@code leaseVersion + 1} whenever that would otherwise pull it ahead — i.e. {@code newEpoch
+   * = max(epoch + 1, leaseVersion + 1)}. {@code leaseVersion} bumps on every write while {@code
+   * epoch} bumps only here, so {@code epoch} converges to equal {@code leaseVersion} immediately
+   * after each new tenure and then drifts behind it until the next one; the rebased branch, not the
+   * plain increment, is what actually fires on essentially every real acquisition. This keeps
+   * {@code epoch} from ever falling behind {@code leaseVersion}, which callers have historically
+   * embedded in MV documents as {@code _autoEmbed._leaseVersion}.
+   *
+   * <p>This method is not what heals a missing {@code epoch} (a legacy lease, or one dropped by an
+   * older binary during a rollback/rolling-upgrade window): {@link #fromBson(DocumentParser)}
+   * already defaults an absent {@code epoch} to that document's {@code leaseVersion} at read time,
+   * before this method ever sees it — so the value it rebases from is already a safe one.
+   *
+   * @param newOwner the hostname of the new lease owner
+   * @return a new Lease with updated ownership, expiration, version, and epoch
+   */
+  public Lease withNewTenure(String newOwner) {
+    long nextLeaseVersion = this.leaseVersion + 1;
+    long nextEpoch = Math.max(this.epoch + 1, nextLeaseVersion);
+    return new Lease(
+        this.id,
+        SCHEMA_VERSION,
+        this.collectionUuid,
+        this.collectionName,
+        newOwner,
+        Instant.now().plusMillis(LEASE_EXPIRATION_MS),
+        nextLeaseVersion,
+        this.commitInfo,
+        this.latestIndexDefinitionVersion,
+        this.indexDefinitionVersionStatusMap,
+        this.materializedViewCollectionMetadata,
+        this.steadyAsOfOplogPosition,
+        CleanupState.NOT_ELIGIBLE,
+        nextEpoch);
+  }
+
+  /** Returns a copy of this lease with the materialized view collection UUID updated. */
   public Lease withResolvedMatViewUuid(UUID matViewCollectionUuid) {
     var newMetadata =
         new MaterializedViewCollectionMetadata(
@@ -543,7 +717,8 @@ public record Lease(
         this.indexDefinitionVersionStatusMap(),
         newMetadata,
         this.steadyAsOfOplogPosition,
-        this.cleanupState);
+        this.cleanupState,
+        this.epoch);
   }
 
   /**
@@ -564,21 +739,23 @@ public record Lease(
         this.indexDefinitionVersionStatusMap,
         this.materializedViewCollectionMetadata,
         this.steadyAsOfOplogPosition,
-        this.cleanupState);
+        this.cleanupState,
+        this.epoch);
   }
 
   /**
    * Returns a copy of this lease with the GC cleanup state changed. Used by the stale-lease scanner
-   * to transition {@link CleanupState#NOT_ELIGIBLE} to {@link CleanupState#ELIGIBLE_FOR_CLEANUP} (a
-   * one-way move by design).
+   * to mark a lease {@link CleanupState#ELIGIBLE_FOR_CLEANUP}.
    *
    * <p>Does not bump {@code leaseVersion}: this is a cleanupState-only change and must not
    * invalidate concurrent OCC updates on other fields. Race coordination between the resolver
    * (which checks {@code cleanupState != ELIGIBLE_FOR_CLEANUP} before reusing) and the scanner is
    * via the conditional filter on the update, not via OCC on {@code leaseVersion}.
    *
-   * <p>The one-way invariant is not enforced here; the scanner is the sole writer and is
-   * responsible for never moving back to NOT_ELIGIBLE.
+   * <p>The mark is not terminal: this method only sets it, but the active-use lease builders that
+   * extend the lease's expiration (renewal, checkpoint, status update, new index-definition
+   * version) clear it back to {@code NOT_ELIGIBLE}, so a lease still in active use is never left a
+   * cleanup target.
    */
   public Lease withCleanupState(CleanupState newCleanupState) {
     return new Lease(
@@ -594,7 +771,8 @@ public record Lease(
         this.indexDefinitionVersionStatusMap,
         this.materializedViewCollectionMetadata,
         this.steadyAsOfOplogPosition,
-        newCleanupState);
+        newCleanupState,
+        this.epoch);
   }
 
   /**
@@ -605,9 +783,9 @@ public record Lease(
     EncodedUserData encodedUserData = EncodedUserData.fromString(this.commitInfo);
     IndexCommitUserData userData =
         IndexCommitUserData.fromEncodedData(encodedUserData, Optional.empty());
-    if (userData.getResumeInfo().isPresent()) {
+    if (userData.resumeInfo().isPresent()) {
       try {
-        BsonDocument resumeToken = userData.getResumeInfo().get().getResumeToken();
+        BsonDocument resumeToken = userData.resumeInfo().get().getResumeToken();
         return Optional.of(ResumeTokenUtils.opTimeFromResumeToken(resumeToken));
       } catch (DecoderException e) {
         return Optional.empty();
@@ -652,6 +830,7 @@ public record Lease(
         .field(
             Fields.STEADY_AS_OF_OPLOG_POSITION, Optional.ofNullable(this.steadyAsOfOplogPosition))
         .field(Fields.CLEANUP_STATE, this.cleanupState)
+        .field(Fields.EPOCH, Optional.of(this.epoch))
         .build();
   }
 }

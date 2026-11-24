@@ -1,5 +1,6 @@
 package com.xgen.mongot.replication.mongodb.common;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.flogger.FluentLogger;
@@ -7,27 +8,41 @@ import com.google.errorprone.annotations.Var;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import com.mongodb.client.model.changestream.OperationType;
+import com.mongodb.client.model.changestream.UpdateDescription;
 import com.xgen.mongot.embedding.AutoEmbedFieldMapping;
+import com.xgen.mongot.embedding.AutoEmbedFieldMapping.AutoEmbedField;
 import com.xgen.mongot.embedding.utils.AutoEmbedFieldMappingCreator;
 import com.xgen.mongot.embedding.utils.AutoEmbeddingDocumentUtils;
+import com.xgen.mongot.embedding.utils.MaterializedViewArrayElementType;
+import com.xgen.mongot.embedding.utils.PartialEmbedClassification;
+import com.xgen.mongot.embedding.utils.PartialEmbedFallbackReason;
 import com.xgen.mongot.index.DocumentEvent;
 import com.xgen.mongot.index.DocumentMetadata;
 import com.xgen.mongot.index.definition.FieldDefinitionResolver;
+import com.xgen.mongot.index.definition.HierarchicalFieldDefinition;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
+import com.xgen.mongot.replication.mongodb.common.ViewFieldDependencies.ViewDerivationFallbackReason;
+import com.xgen.mongot.replication.mongodb.common.ViewFieldDependencies.ViewFullProcessingReason;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Crash;
+import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.LazyTransformationList;
 import com.xgen.mongot.util.LazyTransformationList.Transformer;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import org.bson.BsonBinaryWriter;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
@@ -47,6 +62,8 @@ public class ChangeStreamDocumentUtils {
   private static final Codec<ChangeStreamDocument<RawBsonDocument>> CHANGE_STREAM_DOCUMENT_CODEC =
       ChangeStreamDocument.createCodec(RawBsonDocument.class, REGISTRY);
 
+  private static final FieldPath MATERIALIZED_VIEW_NAMESPACE = FieldPath.newRoot("_autoEmbed");
+
   private static final FluentLogger LOG = FluentLogger.forEnclosingClass();
   private static final Logger logger = LoggerFactory.getLogger(ChangeStreamDocumentUtils.class);
 
@@ -57,6 +74,20 @@ public class ChangeStreamDocumentUtils {
     public final int skippedDocumentsWithoutMetadataNamespace;
     public final int applicableDocumentsTotal;
     public final long applicableDocumentsTotalBytes;
+    // Partial-embed observability (CLOUDP-412617): partial-embeds applied, and per-reason
+    // full-re-index fallback counts.
+    public final int partialEmbedApplied;
+    public final Map<PartialEmbedFallbackReason, Integer> partialEmbedFallbacks;
+    // Non-view auto-embed observability: filter-only partials applied (the non-view analog of
+    // viewFilterOnlyPartialApplied below).
+    public final int filterOnlyPartialApplied;
+    // View auto-embed observability: per-decision reasons, view filter-only partials applied, and
+    // (first batch per index only) the derivation fallback reason.
+    public final Map<ViewFullProcessingReason, Integer> viewDecisions;
+    public final int viewFilterOnlyPartialApplied;
+    public final Optional<ViewDerivationFallbackReason> viewDerivationFallbackReason;
+    public final Map<MaterializedViewArrayElementType, Integer>
+        materializedViewWritesWithDuplicatedArrayElements;
 
     private DocumentEventBatch(
         List<DocumentEvent> finalChangeEvents,
@@ -64,13 +95,29 @@ public class ChangeStreamDocumentUtils {
         int updatesApplicable,
         int skippedDocumentsWithoutMetadataNamespace,
         int applicableDocumentsTotal,
-        long applicableDocumentsTotalBytes) {
+        long applicableDocumentsTotalBytes,
+        int partialEmbedApplied,
+        Map<PartialEmbedFallbackReason, Integer> partialEmbedFallbacks,
+        int filterOnlyPartialApplied,
+        Map<ViewFullProcessingReason, Integer> viewDecisions,
+        int viewFilterOnlyPartialApplied,
+        Optional<ViewDerivationFallbackReason> viewDerivationFallbackReason,
+        Map<MaterializedViewArrayElementType, Integer>
+            materializedViewWritesWithDuplicatedArrayElements) {
       this.finalChangeEvents = finalChangeEvents;
       this.updatesWitnessed = updatesWitnessed;
       this.updatesApplicable = updatesApplicable;
       this.skippedDocumentsWithoutMetadataNamespace = skippedDocumentsWithoutMetadataNamespace;
       this.applicableDocumentsTotal = applicableDocumentsTotal;
       this.applicableDocumentsTotalBytes = applicableDocumentsTotalBytes;
+      this.partialEmbedApplied = partialEmbedApplied;
+      this.partialEmbedFallbacks = partialEmbedFallbacks;
+      this.filterOnlyPartialApplied = filterOnlyPartialApplied;
+      this.viewDecisions = viewDecisions;
+      this.viewFilterOnlyPartialApplied = viewFilterOnlyPartialApplied;
+      this.viewDerivationFallbackReason = viewDerivationFallbackReason;
+      this.materializedViewWritesWithDuplicatedArrayElements =
+          materializedViewWritesWithDuplicatedArrayElements;
     }
   }
 
@@ -80,6 +127,17 @@ public class ChangeStreamDocumentUtils {
     private int skippedDocumentWithoutMetadataNamespaceCounter;
     private int applicableDocumentsTotalCounter;
     private long applicableDocumentsTotalBytesCounter;
+    private int partialEmbedAppliedCounter;
+    private final EnumMap<PartialEmbedFallbackReason, Integer> partialEmbedFallbackCounters =
+        new EnumMap<>(PartialEmbedFallbackReason.class);
+    private int filterOnlyPartialAppliedCounter;
+    private final EnumMap<ViewFullProcessingReason, Integer> viewDecisionCounters =
+        new EnumMap<>(ViewFullProcessingReason.class);
+    private int viewFilterOnlyPartialAppliedCounter;
+    private final EnumMap<MaterializedViewArrayElementType, Integer>
+        materializedViewWritesWithDuplicatedArrayElements =
+            new EnumMap<>(MaterializedViewArrayElementType.class);
+    private Optional<ViewDerivationFallbackReason> viewDerivationFallbackReason = Optional.empty();
 
     public ChangeStreamBatchMetrics() {
       this.witnessedUpdatesCounter = 0;
@@ -87,10 +145,46 @@ public class ChangeStreamDocumentUtils {
       this.skippedDocumentWithoutMetadataNamespaceCounter = 0;
       this.applicableDocumentsTotalCounter = 0;
       this.applicableDocumentsTotalBytesCounter = 0;
+      this.partialEmbedAppliedCounter = 0;
     }
 
     public void updateWitnessed() {
       this.witnessedUpdatesCounter++;
+    }
+
+    /** An UPDATE was classified partial-embed-safe and handled without a full re-index. */
+    public void partialEmbedApplied() {
+      this.partialEmbedAppliedCounter++;
+    }
+
+    /** A change fell back to a full document re-index, tagged with why. */
+    public void partialEmbedFallback(PartialEmbedFallbackReason reason) {
+      this.partialEmbedFallbackCounters.merge(reason, 1, Integer::sum);
+    }
+
+    /** A view-based UPDATE was classified partial|full, tagged with the reason. */
+    public void viewDecision(ViewFullProcessingReason reason) {
+      this.viewDecisionCounters.merge(reason, 1, Integer::sum);
+    }
+
+    /** A non-view UPDATE took the filter-only partial path (no embed field changed). */
+    public void filterOnlyPartialApplied() {
+      this.filterOnlyPartialAppliedCounter++;
+    }
+
+    /** A view-based UPDATE took the filter-only partial path. */
+    public void viewFilterOnlyPartialApplied() {
+      this.viewFilterOnlyPartialAppliedCounter++;
+    }
+
+    /** A partial $set body contained a UUID or vector array element the old writer duplicated. */
+    public void documentHasDuplicatedArrayElements(MaterializedViewArrayElementType element) {
+      this.materializedViewWritesWithDuplicatedArrayElements.merge(element, 1, Integer::sum);
+    }
+
+    /** Records (once per index) why derivation fell back to full processing. */
+    public void recordViewDerivationFallback(ViewDerivationFallbackReason reason) {
+      this.viewDerivationFallbackReason = Optional.of(reason);
     }
 
     public void updateApplicable() {
@@ -127,6 +221,35 @@ public class ChangeStreamDocumentUtils {
 
     public long getApplicableDocumentsTotalBytes() {
       return this.applicableDocumentsTotalBytesCounter;
+    }
+
+    public int getPartialEmbedApplied() {
+      return this.partialEmbedAppliedCounter;
+    }
+
+    public Map<PartialEmbedFallbackReason, Integer> getPartialEmbedFallbacks() {
+      return this.partialEmbedFallbackCounters;
+    }
+
+    public int getFilterOnlyPartialApplied() {
+      return this.filterOnlyPartialAppliedCounter;
+    }
+
+    public Map<ViewFullProcessingReason, Integer> getViewDecisions() {
+      return this.viewDecisionCounters;
+    }
+
+    public int getViewFilterOnlyPartialApplied() {
+      return this.viewFilterOnlyPartialAppliedCounter;
+    }
+
+    public Map<MaterializedViewArrayElementType, Integer>
+        getMaterializedViewDocsWithDuplicatedArrayElements() {
+      return this.materializedViewWritesWithDuplicatedArrayElements;
+    }
+
+    public Optional<ViewDerivationFallbackReason> getViewDerivationFallbackReason() {
+      return this.viewDerivationFallbackReason;
     }
   }
 
@@ -189,12 +312,25 @@ public class ChangeStreamDocumentUtils {
             (raw) -> raw.decode(CHANGE_STREAM_DOCUMENT_CODEC), eventChecker));
   }
 
-  public static void recordChangeStreamEventSizes(
+  /**
+   * Records the on-the-wire size of every raw event in a change-stream batch via {@code
+   * eventSizeRecorder} and returns the batch's total raw size in bytes, traversing the batch once.
+   * Callers that need both the per-event sizes (e.g. large-event thresholds) and the batch total
+   * (e.g. batch-fullness classification) thus pay for only a single pass (CLOUDP-353521,
+   * CLOUDP-425971).
+   *
+   * <p>The returned total is the sum of per-event raw payload bytes — roughly what counts against
+   * the server's ~16MB response cap — as opposed to the post-filter applicable byte count.
+   */
+  public static long recordChangeStreamEventSizes(
       List<RawBsonDocument> batch, Consumer<Integer> eventSizeRecorder) {
+    @Var long total = 0;
     for (RawBsonDocument rawDoc : batch) {
       int size = rawDoc.getByteBuffer().remaining();
       eventSizeRecorder.accept(size);
+      total += size;
     }
+    return total;
   }
 
   /**
@@ -204,23 +340,98 @@ public class ChangeStreamDocumentUtils {
    *
    * <p>We will skip updates that do not touch fields that are in this index definition.
    */
+  @VisibleForTesting
+  static DocumentEventBatch handleDocumentEvents(
+      List<ChangeStreamDocument<RawBsonDocument>> batch,
+      IndexDefinition indexDefinition,
+      FieldDefinitionResolver fieldDefinitionResolver,
+      boolean areUpdateEventsPrefiltered,
+      Optional<ViewFieldDependencies> viewFieldDependencies) {
+    // Convenience overload: no runtime config, never reports the derivation fallback (tests).
+    return handleDocumentEvents(
+        batch,
+        indexDefinition,
+        fieldDefinitionResolver,
+        areUpdateEventsPrefiltered,
+        viewFieldDependencies,
+        Optional.empty(),
+        false);
+  }
+
+  /** As above, with the auto-embedding runtime config; does not report the derivation fallback. */
+  public static DocumentEventBatch handleDocumentEvents(
+      List<ChangeStreamDocument<RawBsonDocument>> batch,
+      IndexDefinition indexDefinition,
+      FieldDefinitionResolver fieldDefinitionResolver,
+      boolean areUpdateEventsPrefiltered,
+      Optional<ViewFieldDependencies> viewFieldDependencies,
+      Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig) {
+    return handleDocumentEvents(
+        batch,
+        indexDefinition,
+        fieldDefinitionResolver,
+        areUpdateEventsPrefiltered,
+        viewFieldDependencies,
+        autoEmbeddingMaterializedViewConfig,
+        false);
+  }
+
+  /**
+   * Handles a document-event batch. {@code reportDerivationFallback} is set by the caller on the
+   * first batch per index so the view derivation fallback is counted once.
+   */
   public static DocumentEventBatch handleDocumentEvents(
       List<ChangeStreamDocument<RawBsonDocument>> batch,
       IndexDefinition indexDefinition,
       FieldDefinitionResolver fieldDefinitionResolver,
       // TODO(CLOUDP-324852): Remove this parameter once initial sync and steady state logic are
       //  aligned.
-      boolean areUpdateEventsPrefiltered) {
+      boolean areUpdateEventsPrefiltered,
+      // Derived once per index definition by the caller (see deriveViewFieldDependencies); empty
+      // for non-view or non-auto-embedding indexes.
+      Optional<ViewFieldDependencies> viewFieldDependencies,
+      Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig,
+      // True on the first batch per index only, so the derivation fallback is counted once.
+      boolean reportDerivationFallback) {
 
     ChangeStreamBatchMetrics metrics = new ChangeStreamBatchMetrics();
+    if (reportDerivationFallback) {
+      viewFieldDependencies
+          .flatMap(ViewFieldDependencies::derivationFallbackReason)
+          .ifPresent(metrics::recordViewDerivationFallback);
+    }
     Set<BsonDocument> processedDocs = new HashSet<>();
 
-    Optional<AutoEmbedFieldMapping> autoEmbedMapping =
-        (indexDefinition instanceof VectorIndexDefinition vectorDef
-                && MaterializedViewIndexDefinitionGeneration.isMaterializedViewBasedIndex(
-                    indexDefinition))
-            ? Optional.of(AutoEmbedFieldMappingCreator.createAutoEmbedMapping(vectorDef))
-            : Optional.empty();
+    Optional<AutoEmbedFieldMapping> autoEmbedMapping = deriveAutoEmbedFieldMapping(indexDefinition);
+    boolean partialUpdatesSupported =
+        autoEmbedMapping
+            .map(mapping -> supportsPartialUpdates(indexDefinition, mapping))
+            .orElse(false);
+    boolean forceFullUpdate =
+        partialUpdatesSupported
+            && autoEmbeddingMaterializedViewConfig
+                .map(AutoEmbeddingMaterializedViewConfig::forceChangeStreamFullUpdate)
+                .orElse(false);
+
+    // Identify docs whose collapsed-away predecessors required full processing.
+    Set<BsonDocument> autoEmbedDocsRequiringFullUpdate = new HashSet<>();
+    if (partialUpdatesSupported && !forceFullUpdate) {
+      Set<BsonDocument> seenSurvivor = new HashSet<>();
+      for (var event : Lists.reverse(batch)) {
+        BsonDocument key = event.getDocumentKey();
+        if (seenSurvivor.add(key)) {
+          continue;
+        }
+        if (eventRequiresAutoEmbedFullUpdate(
+            event,
+            indexDefinition,
+            fieldDefinitionResolver,
+            autoEmbedMapping.get(),
+            viewFieldDependencies)) {
+          autoEmbedDocsRequiringFullUpdate.add(key);
+        }
+      }
+    }
 
     List<DocumentEvent> finalChangeEvents = new ArrayList<>();
 
@@ -239,7 +450,11 @@ public class ChangeStreamDocumentUtils {
                 fieldDefinitionResolver,
                 metrics,
                 areUpdateEventsPrefiltered,
-                autoEmbedMapping);
+                autoEmbedMapping,
+                viewFieldDependencies,
+                autoEmbedDocsRequiringFullUpdate.contains(event.getDocumentKey()),
+                forceFullUpdate,
+                partialUpdatesSupported);
         if (docEvent.isPresent()) {
           finalChangeEvents.add(docEvent.get());
 
@@ -254,7 +469,14 @@ public class ChangeStreamDocumentUtils {
         metrics.getApplicableUpdates(),
         metrics.getSkippedDocumentsWithoutMetadataNamespace(),
         metrics.getApplicableDocumentsTotal(),
-        metrics.getApplicableDocumentsTotalBytes());
+        metrics.getApplicableDocumentsTotalBytes(),
+        metrics.getPartialEmbedApplied(),
+        metrics.getPartialEmbedFallbacks(),
+        metrics.getFilterOnlyPartialApplied(),
+        metrics.getViewDecisions(),
+        metrics.getViewFilterOnlyPartialApplied(),
+        metrics.getViewDerivationFallbackReason(),
+        metrics.getMaterializedViewDocsWithDuplicatedArrayElements());
   }
 
   /**
@@ -267,7 +489,11 @@ public class ChangeStreamDocumentUtils {
       FieldDefinitionResolver fieldDefinitionResolver,
       ChangeStreamBatchMetrics metrics,
       boolean areUpdateEventsPrefiltered,
-      Optional<AutoEmbedFieldMapping> autoEmbedMapping) {
+      Optional<AutoEmbedFieldMapping> autoEmbedMapping,
+      Optional<ViewFieldDependencies> viewFieldDependencies,
+      boolean docRequiresFullUpdate,
+      boolean forceFullUpdate,
+      boolean partialUpdatesSupported) {
 
     DocumentMetadata metadata = createMetadata(event, indexDefinition);
 
@@ -304,40 +530,181 @@ public class ChangeStreamDocumentUtils {
 
         metrics.updateWitnessed();
 
+        // A collapsed-away predecessor required full processing; the survivor must too.
+        if (docRequiresFullUpdate) {
+          metrics.updateApplicable();
+          incrementApplicableDocumentMetrics(metrics, event);
+          metrics.partialEmbedFallback(
+              PartialEmbedFallbackReason.INTRA_BATCH_PREDECESSOR_REQUIRES_FULL);
+          if (indexDefinition.getView().isPresent()) {
+            metrics.viewDecision(ViewFullProcessingReason.INTRA_BATCH_PREDECESSOR_REQUIRES_FULL);
+          }
+          return Optional.of(DocumentEvent.createUpdate(metadata, event.getFullDocument()));
+        }
+
         // We can skip the updateDescriptionAppliesToIndex check if the updates have already been
         // filtered at an earlier iteration.
         if (areUpdateEventsPrefiltered
             || ChangeStreams.updateDescriptionAppliesToIndex(
-                event.getUpdateDescription(), fieldDefinitionResolver, indexDefinition.getView())) {
+                event.getUpdateDescription(),
+                indexDefinition,
+                fieldDefinitionResolver,
+                indexDefinition.getView())) {
           metrics.updateApplicable();
           incrementApplicableDocumentMetrics(metrics, event);
 
-          // For materialized view based auto-embedding indexes, skip embedding and use partial
-          // updates when only filter fields changed. The old EMBEDDING strategy (TEXT fields,
-          // version 1) writes directly to Lucene and does not support partial updates.
-          // Partial updates are not supported on view-based indexes: detection of which base
-          // fields the indexed document depends on is missing, so every update re-embeds
-          // (HELP-94834: partial updates silently dropped documents transitioning into the view).
-          // TODO(CLOUDP-412469): derive view-pipeline field dependencies to restore the
-          // optimization.
-          if (autoEmbedMapping.isPresent() && indexDefinition.getView().isEmpty()) {
+          if (forceFullUpdate) {
+            metrics.partialEmbedFallback(
+                PartialEmbedFallbackReason.FEATURE_FLAG_FORCED_FULL_UPDATE);
+            if (indexDefinition.getView().isPresent()) {
+              metrics.viewDecision(ViewFullProcessingReason.FEATURE_FLAG_FORCED_FULL_UPDATE);
+            }
+            return Optional.of(DocumentEvent.createUpdate(metadata, event.getFullDocument()));
+          }
+
+          // For materialized view based auto-embedding indexes (AUTO_EMBED fields, version >= 2),
+          // decide between a partial $set and a full ReplaceOne.
+          //
+          // For NON-VIEW indexes: classify the update (CLOUDP-412617). When only filter fields
+          // changed, emit a filter-only $set; when only a subset of embed fields changed, emit a
+          // partial-embed $set carrying just the changed embed texts; otherwise fall back to a
+          // full re-index. Partial-embed metrics are recorded at the *committed* outcome below.
+          //
+          // For VIEW-BASED indexes: ViewFieldDependencies statically derives, per embed source,
+          // the base fields it depends on plus the membership/computed-filter triggers
+          // (CLOUDP-412469). A change touching only a subset of embed feeders re-embeds just that
+          // subset (read from the view-resolved fullDocument); a membership/computed-filter change
+          // takes the full path (HELP-94834: partial updates silently dropped documents
+          // transitioning into the view). Unknown dependencies fall back to full processing.
+          //
+          // The old EMBEDDING strategy (TEXT fields, version 1) writes directly to Lucene and
+          // does not support partial updates.
+          if (partialUpdatesSupported) {
             AutoEmbedFieldMapping mapping = autoEmbedMapping.get();
-            if (!AutoEmbeddingDocumentUtils.requiresEmbeddingGeneration(
-                event.getUpdateDescription(), mapping)) {
-              BsonDocument filterFieldUpdates =
-                  AutoEmbeddingDocumentUtils.extractFilterFieldValues(
-                      event.getFullDocument(), mapping);
-              // Use partial update if filter fields were extracted successfully.
-              // If empty (extraction failed or only non-indexed fields changed), fall back to full
-              // document replacement to ensure data correctness.
-              if (!filterFieldUpdates.isEmpty()) {
-                return Optional.of(
-                    DocumentEvent.createPartialUpdate(
-                        metadata,
-                        event.getFullDocument(),
-                        filterFieldUpdates,
-                        ImmutableMap.of()));
+            if (indexDefinition.getView().isPresent()) {
+              // Classify the view update: re-embed only the embed sources whose base feeders
+              // changed (the view-resolved fullDocument already carries the recomputed text), or
+              // emit a filter-only $set when no embed source changed. Absent dependencies or a
+              // membership/computed-filter change fall through to the full (embed + upsert) path.
+              if (viewFieldDependencies.isPresent()) {
+                ViewFieldDependencies deps = viewFieldDependencies.get();
+                ViewFieldDependencies.ViewUpdateClassification decision =
+                    deps.classifyViewUpdate(event.getUpdateDescription());
+                if (decision.requiresFull()) {
+                  metrics.viewDecision(decision.fullProcessingReason());
+                } else {
+                  boolean embedChanged = !decision.changedEmbedPaths().isEmpty();
+                  @Var ImmutableMap<FieldPath, String> changedEmbedTexts = ImmutableMap.of();
+                  @Var Optional<PartialEmbedFallbackReason> fallbackReason = Optional.empty();
+                  if (embedChanged) {
+                    PartialEmbedClassification classification =
+                        AutoEmbeddingDocumentUtils.extractChangedEmbedTexts(
+                            decision.changedEmbedPaths(), event.getFullDocument(), mapping);
+                    changedEmbedTexts = classification.changedTexts().orElse(ImmutableMap.of());
+                    fallbackReason = classification.fallbackReason();
+                  }
+                  if (fallbackReason.isEmpty()) {
+                    Optional<BsonDocument> filterFieldUpdates =
+                        AutoEmbeddingDocumentUtils.extractFilterFieldValues(
+                            event.getFullDocument(), mapping);
+                    // A base $set overwriting a filter's ancestor (e.g. {meta: null} dropping
+                    // meta.category) or destructively touching a filter can't be mirrored by a
+                    // partial $set built from the post-image; force a full replace (CLOUDP-402522).
+                    Optional<PartialEmbedFallbackReason> filterOnlyUnsafe =
+                        partialUpdateFallbackReason(
+                            event.getUpdateDescription(),
+                            indexDefinition,
+                            fieldDefinitionResolver,
+                            mapping);
+                    if (filterOnlyUnsafe.isEmpty()
+                        && filterFieldUpdates.isPresent()
+                        && (!changedEmbedTexts.isEmpty() || !filterFieldUpdates.get().isEmpty())) {
+                      metrics.viewDecision(ViewFullProcessingReason.NONE);
+                      if (embedChanged) {
+                        metrics.partialEmbedApplied();
+                      } else {
+                        metrics.viewFilterOnlyPartialApplied();
+                      }
+                      AutoEmbeddingDocumentUtils.detectDuplicatedArrayElementTypes(
+                              filterFieldUpdates.get(), mapping)
+                          .forEach(metrics::documentHasDuplicatedArrayElements);
+                      return Optional.of(
+                          DocumentEvent.createPartialUpdate(
+                              metadata,
+                              event.getFullDocument(),
+                              filterFieldUpdates.get(),
+                              changedEmbedTexts));
+                    }
+                    if (filterOnlyUnsafe.isPresent()) {
+                      fallbackReason = filterOnlyUnsafe;
+                    } else if (embedChanged) {
+                      fallbackReason =
+                          Optional.of(PartialEmbedFallbackReason.FILTER_EXTRACTION_FAILED);
+                    }
+                  }
+                  fallbackReason.ifPresent(metrics::partialEmbedFallback);
+                  metrics.viewDecision(ViewFullProcessingReason.PARTIAL_UPDATE_FALLBACK);
+                }
+              } else {
+                metrics.viewDecision(ViewFullProcessingReason.VIEW_DEPENDENCIES_UNAVAILABLE);
               }
+            } else {
+              boolean embedFieldChanged =
+                  AutoEmbeddingDocumentUtils.requiresEmbeddingGeneration(
+                      event.getUpdateDescription(), mapping);
+              @Var ImmutableMap<FieldPath, String> changedEmbedTexts = ImmutableMap.of();
+              @Var Optional<PartialEmbedFallbackReason> fallbackReason = Optional.empty();
+              if (embedFieldChanged) {
+                PartialEmbedClassification classification =
+                    AutoEmbeddingDocumentUtils.computePartialEmbedChangedTexts(
+                        event.getUpdateDescription(), event.getFullDocument(), mapping);
+                changedEmbedTexts = classification.changedTexts().orElse(ImmutableMap.of());
+                fallbackReason = classification.fallbackReason();
+              }
+              if (fallbackReason.isEmpty()) {
+                // Empty Optional = extraction failed; fall back to a full replace rather than
+                // issue a partial $set that would silently drop filter fields. A present-but-empty
+                // body is valid (index has no filter fields) and still supports a partial embed.
+                // The filter-only path additionally needs a non-empty body to be worth a partial
+                // update.
+                Optional<BsonDocument> filterFieldUpdates =
+                    AutoEmbeddingDocumentUtils.extractFilterFieldValues(
+                        event.getFullDocument(), mapping);
+                // A partial $set can't clear a filter removed ($unset/$pop/$slice) or dropped by a
+                // $set overwriting its parent; those fall back to a full replace (CLOUDP-402522).
+                Optional<PartialEmbedFallbackReason> filterOnlyUnsafe =
+                    partialUpdateFallbackReason(
+                        event.getUpdateDescription(),
+                        indexDefinition,
+                        fieldDefinitionResolver,
+                        mapping);
+                if (filterOnlyUnsafe.isEmpty()
+                    && filterFieldUpdates.isPresent()
+                    && (!changedEmbedTexts.isEmpty() || !filterFieldUpdates.get().isEmpty())) {
+                  if (embedFieldChanged) {
+                    metrics.partialEmbedApplied();
+                  } else {
+                    metrics.filterOnlyPartialApplied();
+                  }
+                  AutoEmbeddingDocumentUtils.detectDuplicatedArrayElementTypes(
+                          filterFieldUpdates.get(), mapping)
+                      .forEach(metrics::documentHasDuplicatedArrayElements);
+                  return Optional.of(
+                      DocumentEvent.createPartialUpdate(
+                          metadata,
+                          event.getFullDocument(),
+                          filterFieldUpdates.get(),
+                          changedEmbedTexts));
+                }
+                // Couldn't issue a partial $set: a filter it can't maintain forces a full replace;
+                // for an embed-changing update the only other cause is a filter-extraction failure.
+                if (filterOnlyUnsafe.isPresent()) {
+                  fallbackReason = filterOnlyUnsafe;
+                } else if (embedFieldChanged) {
+                  fallbackReason = Optional.of(PartialEmbedFallbackReason.FILTER_EXTRACTION_FAILED);
+                }
+              }
+              fallbackReason.ifPresent(metrics::partialEmbedFallback);
             }
           }
           // Full document replacement
@@ -351,6 +718,13 @@ public class ChangeStreamDocumentUtils {
       }
       case REPLACE -> {
         incrementApplicableDocumentMetrics(metrics, event);
+        // A REPLACE re-embeds the whole document; count it as a full-re-index fallback
+        // (CLOUDP-412617) for every index that can take a partial UPDATE.
+        if (partialUpdatesSupported
+            && shouldRecordReplaceEventAsPartialFallback(
+                indexDefinition, viewFieldDependencies, forceFullUpdate)) {
+          metrics.partialEmbedFallback(PartialEmbedFallbackReason.REPLACE_EVENT);
+        }
         return Optional.of(DocumentEvent.createUpdate(metadata, event.getFullDocument()));
       }
       case DELETE -> {
@@ -366,6 +740,51 @@ public class ChangeStreamDocumentUtils {
     return Check.unreachable("Unhandled OperationType");
   }
 
+  /**
+   * Returns true if the given change-stream event, considered alone, must take the full (embed +
+   * upsert) write path on a materialized-view auto-embedding index. Used by the batch-aware
+   * pre-pass in {@link #handleDocumentEvents} to detect events that would be lost behind a
+   * filter-only survivor after intra-batch dedup.
+   *
+   * <p>INSERT and REPLACE always require full processing (they are full writes by definition). An
+   * UPDATE requires full processing when it would destructively drop a filter ({@link
+   * AutoEmbeddingDocumentUtils#filterOnlyPartialUpdateFallbackReason}) — otherwise a collapsed
+   * filter-dropping event would leave a stale filter behind a partial-update survivor (views and
+   * non-views alike). View-based indexes additionally consult {@link
+   * ViewFieldDependencies#requiresFullProcessing}. Non-view UPDATEs additionally consult {@link
+   * AutoEmbeddingDocumentUtils#requiresEmbeddingGeneration}. Other operation types (DELETE,
+   * INVALIDATE, etc.) do not interact with the partial-update path.
+   */
+  private static boolean eventRequiresAutoEmbedFullUpdate(
+      ChangeStreamDocument<RawBsonDocument> event,
+      IndexDefinition indexDefinition,
+      FieldDefinitionResolver fieldDefinitionResolver,
+      AutoEmbedFieldMapping autoEmbedMapping,
+      Optional<ViewFieldDependencies> viewFieldDependencies) {
+    return switch (event.getOperationType()) {
+      case INSERT, REPLACE -> true;
+      case UPDATE -> {
+        Optional<PartialEmbedFallbackReason> filterOnlyUnsafe =
+            partialUpdateFallbackReason(
+                event.getUpdateDescription(),
+                indexDefinition,
+                fieldDefinitionResolver,
+                autoEmbedMapping);
+        if (indexDefinition.getView().isPresent()) {
+          boolean requiresFull =
+              viewFieldDependencies
+                  .map(deps -> deps.requiresFullProcessing(event.getUpdateDescription()))
+                  .orElse(true);
+          yield requiresFull || filterOnlyUnsafe.isPresent();
+        }
+        yield AutoEmbeddingDocumentUtils.requiresEmbeddingGeneration(
+                event.getUpdateDescription(), autoEmbedMapping)
+            || filterOnlyUnsafe.isPresent();
+      }
+      default -> false;
+    };
+  }
+
   private static void incrementApplicableDocumentMetrics(
       ChangeStreamBatchMetrics metrics, ChangeStreamDocument<RawBsonDocument> event) {
     metrics.applicableDocumentsTotal();
@@ -373,6 +792,179 @@ public class ChangeStreamDocumentUtils {
         Optional.ofNullable(event.getFullDocument())
             .map(rawDocument -> rawDocument.getByteBuffer().remaining())
             .orElse(0));
+  }
+
+  /**
+   * Creates the source-side auto-embed mapping for materialized-view indexes. Kept separate from
+   * partial-update eligibility so unsupported Search shapes can retain full-update behavior while
+   * sharing the same mapping model.
+   */
+  public static Optional<AutoEmbedFieldMapping> deriveAutoEmbedFieldMapping(
+      IndexDefinition indexDefinition) {
+    if (!MaterializedViewIndexDefinitionGeneration.isMaterializedViewBasedIndex(indexDefinition)) {
+      return Optional.empty();
+    }
+    return Optional.of(AutoEmbedFieldMappingCreator.createAutoEmbedMapping(indexDefinition));
+  }
+
+  private static boolean supportsPartialUpdates(
+      IndexDefinition indexDefinition, AutoEmbedFieldMapping mapping) {
+    return switch (indexDefinition) {
+      case VectorIndexDefinition ignored -> true;
+      case SearchIndexDefinition ignored ->
+          mapping.enumeratesAllIndexedPaths()
+              && !hasPassthroughInMaterializedViewNamespace(mapping);
+    };
+  }
+
+  /**
+   * A REPLACE is a partial-update fallback only when the index could otherwise emit a partial
+   * update in this batch. Views with unbounded or unavailable dependencies, or with the force-full
+   * control knob enabled, always select full processing, so counting their REPLACE events as
+   * partial fallbacks would inflate that metric.
+   */
+  private static boolean shouldRecordReplaceEventAsPartialFallback(
+      IndexDefinition indexDefinition,
+      Optional<ViewFieldDependencies> viewFieldDependencies,
+      boolean forceFullUpdate) {
+    if (forceFullUpdate) {
+      return false;
+    }
+    if (indexDefinition.getView().isEmpty()) {
+      return true;
+    }
+    return viewFieldDependencies
+        .map(dependencies -> dependencies.derivationFallbackReason().isEmpty())
+        .orElse(false);
+  }
+
+  private static boolean hasPassthroughInMaterializedViewNamespace(AutoEmbedFieldMapping mapping) {
+    // Passthrough extraction writes a nested _autoEmbed document, while partial embedding and
+    // fencing add dotted _autoEmbed.* keys. MongoDB rejects those parent/child paths in one $set.
+    return mapping.fieldMap().entrySet().stream()
+        .anyMatch(
+            entry ->
+                entry.getValue() instanceof AutoEmbedField.PassthroughField
+                    && (entry.getKey().equals(MATERIALIZED_VIEW_NAMESPACE)
+                        || entry.getKey().isChildOf(MATERIALIZED_VIEW_NAMESPACE)));
+  }
+
+  private static Optional<FieldPath> sourceNestedRoot(IndexDefinition indexDefinition) {
+    return indexDefinition instanceof VectorIndexDefinition vectorDefinition
+        ? vectorDefinition.getNestedRoot()
+        : Optional.empty();
+  }
+
+  private static Optional<PartialEmbedFallbackReason> partialUpdateFallbackReason(
+      UpdateDescription updateDescription,
+      IndexDefinition indexDefinition,
+      FieldDefinitionResolver fieldDefinitionResolver,
+      AutoEmbedFieldMapping mapping) {
+    return AutoEmbeddingDocumentUtils.filterOnlyPartialUpdateFallbackReason(
+            updateDescription, mapping, sourceNestedRoot(indexDefinition))
+        .or(
+            () ->
+                searchDocumentOverwriteFallbackReason(updateDescription, fieldDefinitionResolver));
+  }
+
+  private static Optional<PartialEmbedFallbackReason> searchDocumentOverwriteFallbackReason(
+      UpdateDescription updateDescription, FieldDefinitionResolver fieldDefinitionResolver) {
+    if (!(fieldDefinitionResolver instanceof SearchFieldDefinitionResolver searchResolver)
+        || updateDescription == null
+        || updateDescription.getUpdatedFields() == null) {
+      return Optional.empty();
+    }
+    for (var update : updateDescription.getUpdatedFields().entrySet()) {
+      FieldPath path = FieldPath.parse(update.getKey());
+      boolean replacesMappedDocument =
+          searchResolver
+                  .getFieldDefinition(path, Optional.empty())
+                  .map(
+                      field ->
+                          field.documentFieldDefinition().isPresent()
+                              || field.embeddedDocumentsFieldDefinition().isPresent())
+                  .orElse(false)
+              && !update.getValue().isDocument()
+              && !update.getValue().isArray();
+      if (replacesMappedDocument) {
+        return Optional.of(PartialEmbedFallbackReason.ANCESTOR_OVERWRITE);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * Derives the view-pipeline field dependencies for a materialized-view auto-embedding index, or
+   * empty for any other index. This is a pure function of the immutable index definition, so
+   * callers should compute it once per index (e.g. memoized) rather than per change-stream batch.
+   */
+  public static Optional<ViewFieldDependencies> deriveViewFieldDependencies(
+      IndexDefinition indexDefinition) {
+    return deriveAutoEmbedFieldMapping(indexDefinition)
+        .flatMap(
+            mapping ->
+                indexDefinition
+                    .getView()
+                    .flatMap(view -> view.getEffectivePipeline())
+                    .map(
+                        pipeline -> {
+                          if (hasNonEnumerableDynamicSearchMapping(indexDefinition)) {
+                            // Dynamic Search has open-ended passthroughs, so any source update may
+                            // change indexed view output.
+                            return ViewFieldDependencies.fullProcessingForUnsupportedShape();
+                          }
+                          // Vector and static Search enumerate indexed paths, allowing bounded
+                          // dependency derivation.
+                          return ViewFieldDependencies.derive(
+                              pipeline,
+                              embedSourcePaths(mapping),
+                              filterOrPassthroughPaths(mapping));
+                        }));
+  }
+
+  /**
+   * Returns the source paths of the index's embed fields. Both AUTO_EMBED and TEXT fields are embed
+   * sources (see AutoEmbedFieldMappingCreator), so both must be tracked — omitting TEXT would
+   * under-collect and serve stale embeddings on a mixed index.
+   */
+  private static Set<FieldPath> embedSourcePaths(AutoEmbedFieldMapping mapping) {
+    return mapping.embedFields().keySet();
+  }
+
+  /**
+   * Returns the enumerated source paths copied through to the materialized view. For Vector these
+   * are FILTER fields; for static Search these are explicit lexical/passthrough fields.
+   */
+  private static Set<FieldPath> filterOrPassthroughPaths(AutoEmbedFieldMapping mapping) {
+    return mapping.fieldMap().entrySet().stream()
+        .filter(entry -> entry.getValue() instanceof AutoEmbedField.PassthroughField)
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toSet());
+  }
+
+  /**
+   * Dynamic Search mappings cannot enumerate all lexical fields that may be computed by the view.
+   * Dependency derivation must therefore conservatively force full processing.
+   */
+  private static boolean hasNonEnumerableDynamicSearchMapping(IndexDefinition indexDefinition) {
+    return indexDefinition instanceof SearchIndexDefinition searchDefinition
+        && hasEnabledDynamicMapping(searchDefinition.getMappings());
+  }
+
+  private static boolean hasEnabledDynamicMapping(
+      HierarchicalFieldDefinition hierarchicalDefinition) {
+    return hierarchicalDefinition.dynamic().isEnabled()
+        || hierarchicalDefinition.fields().values().stream()
+            .anyMatch(
+                field ->
+                    field
+                            .documentFieldDefinition()
+                            .map(ChangeStreamDocumentUtils::hasEnabledDynamicMapping)
+                            .orElse(false)
+                        || field
+                            .embeddedDocumentsFieldDefinition()
+                            .map(ChangeStreamDocumentUtils::hasEnabledDynamicMapping)
+                            .orElse(false));
   }
 
   private static DocumentMetadata createMetadata(

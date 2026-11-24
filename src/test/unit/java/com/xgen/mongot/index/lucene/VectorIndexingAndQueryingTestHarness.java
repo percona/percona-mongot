@@ -255,7 +255,6 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             indexPath,
             metadataPath,
             luceneConfig,
-            FeatureFlags.getDefault(),
             mergeScheduler,
             new TieredMergePolicy(),
             new QueryCacheProvider.DefaultQueryCacheProvider(),
@@ -263,14 +262,12 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
             this.concurrentSearchExecutor,
             Optional.empty(),
             vectorIndexDefinition,
-            vectorIndexDefinitionGeneration.generation().indexFormatVersion,
+            vectorIndexDefinitionGeneration.generation().formatVersion.asLucene(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             metricsFactory);
     FeatureFlags featureFlags =
         enableConcurrentPartitionSearch
-            ? FeatureFlags.withDefaults()
-                .enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH)
-                .build()
+            ? FeatureFlags.withDefaults().enable(Feature.CONCURRENT_INDEX_PARTITION_SEARCH).build()
             : FeatureFlags.getDefault();
     InitializedVectorIndex initializedIndex =
         InitializedLuceneVectorIndex.create(
@@ -308,16 +305,23 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
 
   public BsonArray runVectorSearchQuery(Vector queryVector, boolean exact)
       throws IOException, ReaderClosedException, InvalidQueryException {
+    return runVectorSearchQuery(queryVector, exact, Optional.empty());
+  }
+
+  public BsonArray runVectorSearchQuery(
+      Vector queryVector, boolean exact, Optional<Boolean> concurrentOverride)
+      throws IOException, ReaderClosedException, InvalidQueryException {
     // Ensure that all the documents updates will be visible in the tests.
     this.indexReader.refresh();
     this.index.setStatus(IndexStatus.steady());
-    var vectorQuery = getQuery(queryVector, exact);
+    var vectorQuery = getQuery(queryVector, exact, concurrentOverride);
     return this.indexReader.query(
         new MaterializedVectorSearchQuery(vectorQuery, vectorQuery.criteria().queryVector().get()),
         QueryExecutionContext.empty());
   }
 
-  private VectorSearchQuery getQuery(Vector queryVector, boolean exact) {
+  private VectorSearchQuery getQuery(
+      Vector queryVector, boolean exact, Optional<Boolean> concurrentOverride) {
     VectorSearchCriteria criteria =
         exact
             ? ExactVectorCriteriaBuilder.builder()
@@ -331,10 +335,12 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
                 .numCandidates(this.numCandidates)
                 .limit(this.limit)
                 .build();
-    return VectorQueryBuilder.builder()
-        .index(MOCK_VECTOR_INDEX_DEFINITION_GENERATION.getIndexDefinition().getName())
-        .criteria(criteria)
-        .build();
+    var builder =
+        VectorQueryBuilder.builder()
+            .index(MOCK_VECTOR_INDEX_DEFINITION_GENERATION.getIndexDefinition().getName())
+            .criteria(criteria);
+    concurrentOverride.ifPresent(builder::concurrent);
+    return builder.build();
   }
 
   public int getDocId(BsonDocument doc) {
@@ -450,6 +456,7 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
       case BIT ->
           euclideanSimilarityBitVector(
               vector1.asBitVector().getBitVector(), vector2.asBitVector().getBitVector());
+      case FLOAT16 -> throw new RuntimeException("float16 vectors are not supported by Lucene");
     };
   }
 
@@ -487,6 +494,7 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
           dotProductSimilarityByteVector(
               vector1.asByteVector().getByteVector(), vector2.asByteVector().getByteVector());
       case BIT -> throw new RuntimeException("dot product similarity not supported for bit vector");
+      case FLOAT16 -> throw new RuntimeException("float16 vectors are not supported by Lucene");
     };
   }
 
@@ -518,6 +526,7 @@ public class VectorIndexingAndQueryingTestHarness implements AutoCloseable {
           cosineSimilarityByteVector(
               vector1.asByteVector().getByteVector(), vector2.asByteVector().getByteVector());
       case BIT -> throw new RuntimeException("dot product similarity not supported for bit vector");
+      case FLOAT16 -> throw new RuntimeException("float16 vectors are not supported by Lucene");
     };
   }
 

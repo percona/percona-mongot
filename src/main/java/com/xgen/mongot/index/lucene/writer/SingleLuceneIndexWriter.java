@@ -38,6 +38,8 @@ import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.LoggableIdUtils;
 import com.xgen.mongot.util.concurrent.LockGuard;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.util.HashMap;
@@ -185,13 +187,15 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
     Map<FieldPath, VectorFieldSpecification> vectorFields =
         LuceneCodecUtils.extractVectorFieldsFromVectorIndex(indexDefinition.getFields());
 
+    LuceneCodec codec =
+        LuceneCodec.Factory.forIndexWithBloomFilter(
+            vectorFields, useIdBloomFilter, Optional.of(indexingMetricsUpdater), featureFlags);
     IndexWriterConfig indexWriterConfig =
         new org.apache.lucene.index.IndexWriterConfig()
-            .setCodec(
-                LuceneCodec.Factory.forIndexWithBloomFilter(
-                    vectorFields, useIdBloomFilter, Optional.of(indexingMetricsUpdater)))
-            // This is needed to separate lucene codec upgrade from code upgrade.
-            .setIndexCreatedVersionMajor(LuceneCodec.CODEC_VERSION_MAJOR)
+            .setCodec(codec)
+            // This is needed to separate lucene codec upgrade from code upgrade. Only applies
+            // when creating a new index; existing indexes keep their stamp.
+            .setIndexCreatedVersionMajor(codec.getIndexCreatedVersionMajor())
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)
             .setMergeScheduler(mergeScheduler)
@@ -204,13 +208,16 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
         new org.apache.lucene.index.IndexWriter(directory, indexWriterConfig);
 
     LuceneIndexingPolicy luceneIndexingPolicy =
-        DefaultIndexingPolicy.create(indexDefinition, indexCapabilities, indexingMetricsUpdater);
+        DefaultIndexingPolicy.create(
+            indexDefinition, indexCapabilities, indexingMetricsUpdater, featureFlags);
 
     Set<FieldPath> customVectorEngineFields =
-        vectorFields.entrySet().stream()
-            .filter(entry -> entry.getValue().isCustomVectorEngine())
-            .map(Map.Entry::getKey)
-            .collect(Collectors.toSet());
+        indexDefinition.isCustomVectorEngineIndex()
+            ? Set.copyOf(vectorFields.keySet())
+            : vectorFields.entrySet().stream()
+                .filter(entry -> entry.getValue().isCustomVectorEngine())
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
     SingleLuceneIndexWriter writer =
         new SingleLuceneIndexWriter(
             luceneIndexWriter,
@@ -254,15 +261,18 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
     Similarity similarity = LuceneSimilarity.from(resolver.indexDefinition);
 
     Map<FieldPath, VectorFieldSpecification> pathToField =
-        LuceneCodecUtils.extractVectorFieldsFromSearchMappings(resolver.getFields());
+        LuceneCodecUtils.extractVectorFieldsFromSearchMappings(
+            resolver.indexDefinition.getMappings());
 
+    LuceneCodec codec =
+        LuceneCodec.Factory.forIndexWithBloomFilter(
+            pathToField, useIdBloomFilter, Optional.of(indexingMetricsUpdater), featureFlags);
     IndexWriterConfig indexWriterConfig =
         new org.apache.lucene.index.IndexWriterConfig(indexAnalyzer)
-            .setCodec(
-                LuceneCodec.Factory.forIndexWithBloomFilter(
-                    pathToField, useIdBloomFilter, Optional.of(indexingMetricsUpdater)))
-            // This is needed to separate lucene codec upgrade from code upgrade.
-            .setIndexCreatedVersionMajor(LuceneCodec.CODEC_VERSION_MAJOR)
+            .setCodec(codec)
+            // This is needed to separate lucene codec upgrade from code upgrade. Only applies
+            // when creating a new index; existing indexes keep their stamp.
+            .setIndexCreatedVersionMajor(codec.getIndexCreatedVersionMajor())
             .setSimilarity(similarity)
             .setMergePolicy(mergePolicy)
             .setRAMBufferSizeMB(ramBufferSizeMb)
@@ -290,7 +300,7 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
         new org.apache.lucene.index.IndexWriter(directory, indexWriterConfig);
 
     LuceneIndexingPolicy luceneIndexingPolicy =
-        DefaultIndexingPolicy.create(indexAnalyzer, resolver, indexingMetricsUpdater);
+        DefaultIndexingPolicy.create(indexAnalyzer, resolver, indexingMetricsUpdater, featureFlags);
 
     SingleLuceneIndexWriter writer =
         new SingleLuceneIndexWriter(
@@ -597,10 +607,20 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
       try {
         this.luceneWriter.updateDocuments(
             LuceneDocumentIdEncoder.documentIdTerm(encodedDocumentId), documentBlock);
+      } catch (RegexLimitExceededException | RegexInterruptedException e) {
+        throw e;
       } catch (Exception e) {
         recordIndexingFailure(e, event.getEventType().name());
         throw e;
       }
+    } catch (RegexLimitExceededException e) {
+      this.indexingMetricsUpdater
+          .getMetricsFactory()
+          .counter("regexAnalysisLimitExceeded")
+          .increment();
+      throw e;
+    } catch (RegexInterruptedException e) {
+      throw e;
     } catch (Throwable e) {
       // Rate limiting the exception logging with `_id` inside the log message to help debugging.
       logIndexingFailureWithRateLimited(e, event.getEventType().name(), encodedDocumentId);
@@ -696,6 +716,20 @@ public class SingleLuceneIndexWriter implements LuceneIndexWriter {
     try (LockGuard ignored = LockGuard.with(this.shutdownSharedLock)) {
       ensureOpen("cancelMerges");
       cancelMergesInternal();
+    }
+  }
+
+  @Override
+  public void forceMerge(int maxNumSegments) throws IOException {
+    try (LockGuard ignored = LockGuard.with(this.shutdownSharedLock)) {
+      ensureOpen("forceMerge");
+      this.logger.atInfo().addKeyValue("maxNumSegments", maxNumSegments).log("Force-merging index");
+      try {
+        this.luceneWriter.forceMerge(maxNumSegments);
+      } catch (Exception e) {
+        recordIndexingFailure(e, "forceMerge");
+        throw e;
+      }
     }
   }
 

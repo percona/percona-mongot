@@ -1,5 +1,6 @@
 package com.xgen.mongot.embedding.mongodb.leasing;
 
+import com.mongodb.MongoNamespace;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewNonTransientException;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
@@ -10,14 +11,21 @@ import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import org.bson.BsonTimestamp;
+import org.bson.types.ObjectId;
 import org.jetbrains.annotations.TestOnly;
+import org.slf4j.LoggerFactory;
 
 // TODO(CLOUDP-371278): Refactor interface to have stricter type that only allows MatView related
 // IndexGeneration and GenerationId
@@ -29,8 +37,8 @@ public interface LeaseManager {
   /**
    * Result of polling follower statuses from the lease manager.
    *
-   * <p>Contains both the current status of each follower generation and the set of generation IDs
-   * that are eligible for leadership acquisition. This includes:
+   * <p>Contains the current status and replication optime of each follower generation, plus the set
+   * of generation IDs that are eligible for leadership acquisition. This includes:
    *
    * <ul>
    *   <li>Leases that have expired (previous leader failed or timed out)
@@ -39,14 +47,24 @@ public interface LeaseManager {
    * </ul>
    *
    * @param statuses Map of generation IDs to their current replication status
+   * @param replicationOpTimes Map of generation IDs to replication optimes extracted from their
+   *     lease checkpoints
    * @param acquirableLeases Set of generation IDs eligible for leadership acquisition
    */
   record FollowerPollResult(
       Map<MaterializedViewGenerationId, IndexStatus> statuses,
+      Map<MaterializedViewGenerationId, BsonTimestamp> replicationOpTimes,
       Set<MaterializedViewGenerationId> acquirableLeases) {
-    /** An empty result with no statuses and no acquirable leases. */
+    /** An empty result with no statuses, replication optimes, or acquirable leases. */
     public static final FollowerPollResult EMPTY =
-        new FollowerPollResult(Collections.emptyMap(), Collections.emptySet());
+        new FollowerPollResult(
+            Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet());
+
+    public FollowerPollResult(
+        Map<MaterializedViewGenerationId, IndexStatus> statuses,
+        Set<MaterializedViewGenerationId> acquirableLeases) {
+      this(statuses, Collections.emptyMap(), acquirableLeases);
+    }
   }
 
   /**
@@ -72,7 +90,9 @@ public interface LeaseManager {
   void add(IndexGeneration indexGeneration, boolean skipInitialSync);
 
   /**
-   * Drops the given index generation from the tracking list in LeaseManager.
+   * Drops the given index generation from the tracking list in LeaseManager. Local generation
+   * tracking only: touches neither the lease document nor the leaseKey-keyed local state (see
+   * {@link #evictCachedLease} and {@link #dropLease} for those).
    *
    * @param generationId the generation id to remove the lease for
    */
@@ -80,13 +100,29 @@ public interface LeaseManager {
 
   /**
    * Deletes the lease entirely in both database and memory, only call this when corresponding
-   * materialized view collection is GC'd or user deletes the whole index.
+   * materialized view collection is GC'd or user deletes the whole index. For forgetting the local
+   * state without deleting the document, see {@link #evictCachedLease}.
    *
    * @param leaseKey the string lease key for lease to be removed, should be same as collection
    *     name.
    * @return a future that completes when the lease has been dropped
    */
   CompletableFuture<Void> dropLease(String leaseKey);
+
+  /**
+   * Evicts this mongot's cached copy of the lease (in-memory lease entry and database mapping)
+   * without touching the lease document in the database — the cache is rebuilt from the database
+   * when needed. The database-deleting paths ({@link #dropLease}, {@link #deleteStaleLease}) call
+   * this as their local-cleanup tail. The supersession path calls it directly: there the lease
+   * document deliberately stays behind for the stale-lease GC, and the cached copy would otherwise
+   * outlive it — a later re-initialization of the same definition would then read stale
+   * materialized-view metadata (a recreated MV collection keeps its name but gets a new UUID). The
+   * GC path is unaffected by the eviction: it re-registers the database mapping from the database
+   * on every sweep.
+   *
+   * @param leaseKey the string lease key, same as the materialized view collection name
+   */
+  void evictCachedLease(String leaseKey);
 
   /**
    * Returns true if the current mongot is the leader for the given generation id.
@@ -104,6 +140,50 @@ public interface LeaseManager {
    */
   void updateCommitInfo(MaterializedViewGenerationId generationId, EncodedUserData encodedUserData)
       throws MaterializedViewTransientException, MaterializedViewNonTransientException;
+
+  /**
+   * Same as {@link #updateCommitInfo(MaterializedViewGenerationId, EncodedUserData)}, but also says
+   * whether a materialized-view bulk write finished just before this checkpoint. The flag is for
+   * metrics only -- it must not change what the checkpoint does.
+   */
+  default void updateCommitInfo(
+      MaterializedViewGenerationId generationId,
+      EncodedUserData encodedUserData,
+      boolean materializedViewWriteCompleted)
+      throws MaterializedViewTransientException, MaterializedViewNonTransientException {
+    updateCommitInfo(generationId, encodedUserData);
+  }
+
+  /**
+   * Clears this process's checkpoint-risk flag. Call it when the database confirms the checkpoint
+   * was written, or when the risk stops mattering: the index or source collection was deleted, or
+   * the materialized-view collection is known to be gone.
+   *
+   * <p>The bar is high on purpose. Renewing the lease or taking it back does not count -- both bump
+   * leaseVersion but copy commitInfo over unchanged, so the write behind the risk still has no
+   * checkpoint. Only a checkpoint write the database accepts counts as recovery. Dropping or
+   * retiring a generation does not count either, because the replacement and retry paths keep the
+   * collection and whatever it holds.
+   *
+   * <p>This flag lives in memory on one host, so it cannot clear a flag on another host. If a
+   * stale-lease GC elsewhere cleans things up, the host that set the flag still has it set.
+   *
+   * @param generationId the generation whose checkpoint risk is over
+   */
+  default void clearCheckpointCommitRisk(MaterializedViewGenerationId generationId) {}
+
+  /**
+   * Clears checkpoint risk for every generation of {@code indexId}. Use this when the whole index
+   * is done for, not just one generation -- the index was deleted, or its source collection was.
+   *
+   * <p>Generations of the same index share a materialized-view collection when their definitions
+   * hash the same, and deletion cleans up all their leases together. Clearing only the current
+   * generation would leave an older, retired one flagged forever, since retiring deliberately keeps
+   * the flag.
+   *
+   * @param indexId the index whose generations no longer carry checkpoint risk
+   */
+  default void clearCheckpointCommitRiskForIndex(ObjectId indexId) {}
 
   /**
    * Returns the commit info (replication checkpoint state) for the given generation id.
@@ -128,31 +208,45 @@ public interface LeaseManager {
       throws MaterializedViewTransientException, MaterializedViewNonTransientException;
 
   /**
-   * Returns every lease whose {@code leaseExpiration} is older than {@code expirationCutoff} —
-   * the stale-lease GC's candidate set. Scans the internal databases known to this manager (see
-   * the implementations for how that set is built).
-   * Reads the database, not the in-memory map: the map only holds leases for generations
-   * currently configured on this mongot, so an orphaned lease (its generation dropped, possibly
-   * before a restart) is visible only through this query.
+   * The outcome of one GC lease scan.
    *
-   * <p>Leases already marked {@link Lease.CleanupState#ELIGIBLE_FOR_CLEANUP} are deliberately
-   * included: the same candidate set serves both GC phases — the mark pass skips them, while the
-   * cleaner pass (CLOUDP-384018) consumes exactly those.
-   *
-   * <p>Side effect: registers the lease→database mapping for each returned lease, so a subsequent
-   * {@link #markEligibleForCleanup} resolves the database even when no configured generation ever
-   * registered the lease on this mongot.
-   *
-   * <p>Best effort, never throws: unparseable (corrupted) lease documents are skipped — invisible
-   * to GC (CLOUDP-384971 owns their cleanup) — and a failed per-database scan is logged and drops
-   * only that database's candidates, so the result may be incomplete. Callers must not treat it
-   * as a complete census of stale leases; the periodic sweep re-scans every tick, so a candidate
-   * missed this round is picked up on a later one.
-   *
-   * @param expirationCutoff only leases that expired before this instant are returned
-   * @return the stale leases found by the scan, possibly partial on query failure; never null
+   * @param leases every lease read this scan
+   * @param complete true only if every targeted database was read without error, so an empty {@code
+   *     leases} can be trusted to mean "there is nothing to collect" rather than "the read failed"
+   * @param sawDocuments true if any document at all was read, parseable or not. A corrupted lease
+   *     document is skipped from {@code leases} but still counts here, so a table holding only
+   *     corrupted documents is not mistaken for an empty one.
    */
-  List<Lease> findGcCandidates(Instant expirationCutoff);
+  record GcScanResult(List<Lease> leases, boolean complete, boolean sawDocuments) {
+    public GcScanResult(List<Lease> leases, boolean complete, boolean sawDocuments) {
+      this.leases = List.copyOf(leases);
+      this.complete = complete;
+      this.sawDocuments = sawDocuments;
+    }
+
+    /** A scan whose documents all parsed: {@code sawDocuments} follows from {@code leases}. */
+    public GcScanResult(List<Lease> leases, boolean complete) {
+      this(leases, complete, !leases.isEmpty());
+    }
+
+    /** True if the scan read every targeted database and none held a single document. */
+    public boolean isCompleteAndEmpty() {
+      return this.complete && !this.sawDocuments;
+    }
+  }
+
+  /**
+   * Returns every lease in the internal databases known to this manager — the single scan both GC
+   * passes work from. Reads the database (not the in-memory map) so orphaned leases are visible,
+   * and registers each lease's database mapping for the mark/delete that may follow.
+   *
+   * <p>Best effort, never throws: corrupted leases are skipped (CLOUDP-384971) and a failed
+   * per-database scan drops that database's leases. Partial results are safe — marking requires a
+   * returned higher-version sibling, and databases scan all-or-nothing. A partial scan is reported
+   * through {@link GcScanResult#complete()}, so callers can tell a genuinely empty lease table from
+   * one that could not be read.
+   */
+  GcScanResult findGcCandidates();
 
   /**
    * Conditionally marks a lease {@link Lease.CleanupState#ELIGIBLE_FOR_CLEANUP} via an OCC update:
@@ -160,15 +254,61 @@ public interface LeaseManager {
    * cleanupState field) <em>and</em> its {@code leaseExpiration} is older than {@code
    * expirationCutoff}. Encoding the staleness check in the write makes it self-guarding — a caller
    * acting on a stale in-memory view cannot mark a lease that is still being heartbeated.
-   * Idempotent: a no-op returning {@code false} when already marked or not yet stale —
-   * {@code true} means this call performed the transition, so concurrent leaderless scanners
-   * report each mark exactly once.
+   * Idempotent: a no-op returning {@code false} when already marked or not yet stale — {@code true}
+   * means this call performed the transition, so concurrent leaderless scanners report each mark
+   * exactly once.
    *
    * @param leaseKey the lease document {@code _id}
    * @param expirationCutoff a lease is eligible only if it expired before this instant
    * @return true if this call flipped the lease to {@code ELIGIBLE_FOR_CLEANUP}
    */
   boolean markEligibleForCleanup(String leaseKey, Instant expirationCutoff);
+
+  /**
+   * Re-reads {@code leaseKey} and returns its materialized view collection to drop, but only while
+   * the lease is still eligible, stale past {@code expirationCutoff}, and at {@code
+   * expectedLeaseVersion} — so a lease reused (and version-bumped) since the sweep is left alone.
+   * Best effort, never throws.
+   */
+  Optional<MongoNamespace> resolveStaleMatViewNamespace(
+      String leaseKey, long expectedLeaseVersion, Instant expirationCutoff);
+
+  /**
+   * Deletes the lease {@code leaseKey} — the final cleanup step, after its collection is dropped.
+   * Commits only while the lease is still eligible, stale past {@code expirationCutoff}, and at
+   * {@code expectedLeaseVersion}, so a reused lease is left in place. Best effort, never throws.
+   */
+  boolean deleteStaleLease(String leaseKey, long expectedLeaseVersion, Instant expirationCutoff);
+
+  /**
+   * A deleted index's lease paired with the materialized view namespace its document points at.
+   * {@code matViewNamespace} is empty when the lease carries no usable collection metadata — then
+   * there is nothing to deliberately drop and the lease is left for the stale-lease GC.
+   */
+  record DeletedIndexLease(Lease lease, Optional<MongoNamespace> matViewNamespace) {}
+
+  /**
+   * Returns every lease document belonging to {@code indexId}: the deleted index's own lease plus
+   * any leftovers from earlier supersessions. All of an index's leases live in the database of
+   * {@code knownLeaseKey}, keyed by index-id prefix, so this is a single prefix scan. Each lease is
+   * paired with its MV namespace, and its database mapping is registered for the cleanup calls that
+   * follow. Best effort, never throws; an unknown database or a failed read returns an empty list.
+   */
+  List<DeletedIndexLease> findLeasesForDeletedIndex(ObjectId indexId, String knownLeaseKey);
+
+  /**
+   * Deliberately removes the lease document {@code leaseKey} of a deleted index — regardless of
+   * owner, staleness, or cleanup state, since the index is authoritatively gone from the desired
+   * config and every lease under it is garbage. Run only after the lease's materialized view
+   * collection has been dropped, preserving the drop-before-delete ordering the stale-lease GC
+   * relies on. Also evicts this node's cached copy. Best effort, never throws.
+   *
+   * @param leaseKey the lease document {@code _id}
+   * @return {@code true} if the document is gone (deleted now, or already absent — concurrent
+   *     mongots race this idempotently); {@code false} if the database is unknown or the delete
+   *     failed
+   */
+  boolean cleanupLeaseForDeletedIndex(String leaseKey);
 
   /**
    * Returns all generation IDs where this instance is the leader.
@@ -191,9 +331,11 @@ public interface LeaseManager {
    * <p>For dynamic leader election, this also identifies leases that are eligible for leadership
    * acquisition (expired leases, leases we own, or new indexes without leases).
    *
-   * @return a {@link FollowerPollResult} containing the status map and the set of acquirable
-   *     leases. Returns {@link FollowerPollResult#EMPTY} if this instance is the leader or if there
-   *     are no follower generation IDs.
+   * @return a {@link FollowerPollResult} containing status and replication optime maps and the set
+   *     of acquirable leases. Returns an empty result in three cases: (1) this instance is the
+   *     leader, (2) there are no follower generation IDs, or (3) a transient DB failure prevented
+   *     the batch fetch. Callers MUST treat an empty result as "no new information" and preserve
+   *     whatever status and optime they last applied.
    */
   FollowerPollResult pollFollowerStatuses();
 
@@ -218,15 +360,46 @@ public interface LeaseManager {
   boolean isCurrentVersionQueryable(
       MaterializedViewGenerationId generationId, long indexDefinitionVersion);
 
+  /** Sentinel in an {@link OwnedTenure} when no usable fencing token exists. */
+  long INVALID_LEASE_VERSION = -1;
+
+  /** Returns whether a tenure's fencing token can be used for MV writes. */
+  static boolean isUsableLeaseVersion(long leaseVersion) {
+    return leaseVersion > 0;
+  }
+
   /**
-   * Returns the current lease version for the given generation ID. Used as a fencing token for MV
-   * writes.
+   * The fencing token and the tenure identity this lease manager would hand out for the given
+   * generation's lease, read from a single lease snapshot: {@code leaseVersion} is the MV-write
+   * fencing token, used so a host that does not own the lease never receives one (a token it does
+   * not own would be indistinguishable from the real leader's); {@code epoch} identifies the
+   * leadership tenure, constant within a tenure and changed by every ownership transfer, including
+   * a same-host reacquisition (see {@code Lease.Fields.EPOCH}). Tenures that pin both from one read
+   * cannot observe a mismatched pair. {@link #INVALID_LEASE_VERSION} in both fields means there is
+   * no usable tenure (no lease, owned by another host, or expired); static leaders return {@link
+   * Long#MAX_VALUE} in both fields (fencing is skipped).
+   *
+   * <p>Replaces the former {@code getOwnedLeaseVersion} (CLOUDP-437680): callers needing only the
+   * fencing token consume {@link OwnedTenure#leaseVersion()}, which is that method's behavior
+   * exactly.
+   */
+  record OwnedTenure(long leaseVersion, long epoch) {}
+
+  /**
+   * Returns the current tenure for the given generation ID <em>if this host owns the lease</em>:
+   * the fencing token and the tenure identity, from one lease read, with ownership and expiration
+   * checked against that single read.
    *
    * @param generationId the generation ID
-   * @return the current lease version, or Long.MAX_VALUE for static leaders
+   * @return the owned lease's (leaseVersion, epoch), or an unusable tenure ({@link
+   *     #INVALID_LEASE_VERSION} in both fields) if there is no lease, it is owned by another host,
+   *     or it is expired; {@link Long#MAX_VALUE} in both fields for static leaders
    */
-  default long getLeaseVersion(MaterializedViewGenerationId generationId) {
-    return Long.MAX_VALUE;
+  default OwnedTenure getOwnedTenure(MaterializedViewGenerationId generationId) {
+    // The static-leader tenure: fencing skipped, no dynamic tenure, in both fields -- the same
+    // default shape the former getOwnedLeaseVersion default had, so static leader election
+    // needs no override.
+    return new OwnedTenure(Long.MAX_VALUE, Long.MAX_VALUE);
   }
 
   /**
@@ -265,6 +438,20 @@ public interface LeaseManager {
   default void releaseLeadership(MaterializedViewGenerationId generationId) {}
 
   /**
+   * Returns true if retiring a fenced generator (releasing leadership and installing a follower)
+   * makes sense for this lease manager, i.e. {@link #releaseLeadership} and {@link
+   * #tryAcquireLeadership} actually do something.
+   *
+   * <p>Default implementation returns {@code false}: static leader election's {@code
+   * releaseLeadership()}/{@code tryAcquireLeadership()} are no-ops, since leadership is
+   * pre-assigned and never changes, so a static leader must keep resyncing in place instead of
+   * being retired to a follower it can never be reactivated from.
+   */
+  default boolean supportsFencingRecovery() {
+    return false;
+  }
+
+  /**
    * Initializes an unowned Lease by trying to insert the proposed lease document into the database.
    * This operation should be synchronized across all mongots in the same replicaSet, so only one
    * Mongot wins in insertOne and the winner Lease with MaterializedViewCollectionMetadata should be
@@ -297,5 +484,73 @@ public interface LeaseManager {
    */
   default boolean isInLeaseAcquisitionBlackout() {
     return false;
+  }
+
+  /**
+   * Groups {@code leases} by {@link Lease#indexId()} and returns the key(s) at the highest version
+   * per index — the set the GC mark pass must never mark (the current version is the live index).
+   * Safe over a partial {@link #findGcCandidates()} result: exposing a lease as non-current
+   * requires a present higher-version sibling; absence only protects.
+   */
+  static Set<String> currentVersionLeaseKeys(Collection<Lease> leases) {
+    Map<String, List<Lease>> leasesByIndexId = new HashMap<>();
+    for (Lease lease : leases) {
+      leasesByIndexId.computeIfAbsent(lease.indexId(), key -> new ArrayList<>()).add(lease);
+    }
+    Set<String> currentVersionKeys = new HashSet<>();
+    for (List<Lease> group : leasesByIndexId.values()) {
+      boolean anyUnparseable =
+          group.stream()
+              .anyMatch(
+                  lease -> parseDefinitionVersion(lease.latestIndexDefinitionVersion()).isEmpty());
+      if (anyUnparseable) {
+        // Cannot tell which lease is current; conservatively protect every lease of this index.
+        group.forEach(lease -> currentVersionKeys.add(lease.id()));
+        continue;
+      }
+      long highestVersion =
+          group.stream()
+              .mapToLong(
+                  lease -> parseDefinitionVersion(lease.latestIndexDefinitionVersion()).getAsLong())
+              .max()
+              .orElseThrow();
+      group.stream()
+          .filter(
+              lease ->
+                  parseDefinitionVersion(lease.latestIndexDefinitionVersion()).getAsLong()
+                      == highestVersion)
+          .forEach(lease -> currentVersionKeys.add(lease.id()));
+    }
+    return currentVersionKeys;
+  }
+
+  /**
+   * The MV namespace {@code lease} points at, or empty (logged) when its metadata is missing or
+   * invalid. Shared by the deleted-index scan and the GC's stale-namespace resolution.
+   */
+  static Optional<MongoNamespace> matViewNamespaceOf(String dbName, Lease lease) {
+    try {
+      return Optional.of(
+          new MongoNamespace(dbName, lease.materializedViewCollectionMetadata().collectionName()));
+    } catch (RuntimeException e) {
+      LoggerFactory.getLogger(LeaseManager.class)
+          .atWarn()
+          .addKeyValue("leaseKey", lease.id())
+          .setCause(e)
+          .log("Lease carries no usable materialized view namespace");
+      return Optional.empty();
+    }
+  }
+
+  private static OptionalLong parseDefinitionVersion(String version) {
+    if (version == null) {
+      // Treat a missing version as unparseable so the index is conservatively protected.
+      return OptionalLong.empty();
+    }
+    try {
+      return OptionalLong.of(Long.parseLong(version));
+    } catch (NumberFormatException e) {
+      return OptionalLong.empty();
+    }
   }
 }

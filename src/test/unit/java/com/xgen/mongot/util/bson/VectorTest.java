@@ -1,5 +1,6 @@
 package com.xgen.mongot.util.bson;
 
+import static com.xgen.mongot.util.bson.FloatVector.OriginalType.BSON;
 import static com.xgen.mongot.util.bson.FloatVector.OriginalType.NATIVE;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -7,7 +8,17 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 
+import com.xgen.mongot.util.bson.parser.BsonParseContext;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.testing.TestUtils;
+import java.util.List;
+import org.bson.BsonArray;
+import org.bson.BsonBoolean;
+import org.bson.BsonDecimal128;
+import org.bson.BsonDouble;
+import org.bson.BsonInt32;
+import org.bson.BsonInt64;
+import org.bson.types.Decimal128;
 import org.junit.Test;
 
 public class VectorTest {
@@ -17,11 +28,27 @@ public class VectorTest {
     try {
       Vector fromFloatVector = Vector.fromFloats(new float[] {}, NATIVE);
       assertNotNull(fromFloatVector);
-      Vector fromByteVector = Vector.fromBytes(new byte[]{});
+      Vector fromByteVector = Vector.fromBytes(new byte[] {});
       assertNotNull(fromByteVector);
     } catch (Exception e) {
       fail("Exception thrown when trying to create a VectorWrapper");
     }
+  }
+
+  @Test
+  public void getBsonEncoding_mapsEachVectorFormToItsWireEncoding() {
+    assertEquals(
+        Vector.BsonEncoding.ARRAY, Vector.fromFloats(new float[] {1.0f}, NATIVE).getBsonEncoding());
+    assertEquals(
+        Vector.BsonEncoding.BIN_DATA_FLOAT32,
+        Vector.fromFloats(new float[] {1.0f}, BSON).getBsonEncoding());
+    assertEquals(
+        Vector.BsonEncoding.BIN_DATA_FLOAT16,
+        Vector.fromFloat16Bytes(new byte[] {0, 60}).getBsonEncoding());
+    assertEquals(
+        Vector.BsonEncoding.BIN_DATA_INT8, Vector.fromBytes(new byte[] {1}).getBsonEncoding());
+    assertEquals(
+        Vector.BsonEncoding.BIN_DATA_BIT, Vector.fromBits(new byte[] {1}).getBsonEncoding());
   }
 
   @Test
@@ -83,5 +110,29 @@ public class VectorTest {
     Vector vector = Vector.fromFloats(floats, NATIVE);
     Exception e = assertThrows(UnsupportedOperationException.class, vector::getBytes);
     assertEquals("Expected to be one of types [BYTE,BIT] but found: FLOAT", e.getMessage());
+  }
+
+  @Test
+  public void fromBson_mixedNativeArray_preservesOriginalType() throws BsonParseException {
+    var value = new BsonArray(List.of(new BsonInt32(10), new BsonInt64(20), new BsonDouble(3.03)));
+
+    var vector = Vector.fromBson(BsonParseContext.root(), value);
+
+    assertEquals(NATIVE, vector.asFloatVector().getOriginalType());
+    assertArrayEquals(new float[] {10f, 20f, 3.03f}, vector.asFloatVector().getFloatVector(), 0f);
+  }
+
+  @Test
+  public void fromBson_invalidElement_throwsBsonParseException() {
+    var value = new BsonArray(List.of(new BsonBoolean(false)));
+
+    assertThrows(BsonParseException.class, () -> Vector.fromBson(BsonParseContext.root(), value));
+  }
+
+  @Test
+  public void fromBson_decimal128Element_throwsBsonParseException() {
+    var value = new BsonArray(List.of(new BsonDecimal128(new Decimal128(1))));
+
+    assertThrows(BsonParseException.class, () -> Vector.fromBson(BsonParseContext.root(), value));
   }
 }

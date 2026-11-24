@@ -6,9 +6,11 @@ import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.FieldDefinitionResolver;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.QueryTimeMappingChecks;
+import com.xgen.mongot.index.query.sort.Sort;
 import com.xgen.mongot.index.version.IndexCapabilities;
 import com.xgen.mongot.util.FieldPath;
 import java.util.Optional;
@@ -69,6 +71,9 @@ public interface QueryFactoryContext {
   /** Returns the {@link IndexCapabilities} associated with the targeted index. */
   IndexCapabilities getIndexCapabilities();
 
+  /** Returns the index sort spec configured for the index this query targets, if any. */
+  Optional<Sort> getIndexSort();
+
   /**
    * Returns the {@link FieldDefinitionResolver} associated with the {@link IndexDefinition} that
    * the current query is targeting.
@@ -85,6 +90,13 @@ public interface QueryFactoryContext {
       getVectorIndexFieldDefinition(FieldPath path) {
     return Optional.empty();
   }
+
+  /**
+   * Returns the auto-embedding quantization of the field's autoEmbed specification, which
+   * determines the indexed embedding encoding; empty for non-autoEmbed fields.
+   */
+  Optional<VectorAutoEmbedQuantization> getAutoEmbedQuantization(FieldPath fieldPath)
+      throws InvalidQueryException;
 
   /**
    * Returns the nested root path for embedded vector documents, if specified at the index level.

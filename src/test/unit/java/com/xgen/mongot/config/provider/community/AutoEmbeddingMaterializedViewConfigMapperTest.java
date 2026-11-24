@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
@@ -20,7 +21,9 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
 
   @Test
   public void toAutoEmbeddingMaterializedViewConfig_honorsConfiguredValues() throws Exception {
-    CommunityConfig config = CommunityConfig.readFromFile(TUNING_CONFIG).config();
+    CommunityConfig config =
+        CommunityConfig.readFromFile(TUNING_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
 
     AutoEmbeddingMaterializedViewConfig ae =
         AutoEmbeddingMaterializedViewConfigMapper.toAutoEmbeddingMaterializedViewConfig(
@@ -45,7 +48,9 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
 
   @Test
   public void toAutoEmbeddingMaterializedViewConfig_appliesDefaultsWhenUnset() throws Exception {
-    CommunityConfig config = CommunityConfig.readFromFile(MINIMAL_CONFIG).config();
+    CommunityConfig config =
+        CommunityConfig.readFromFile(MINIMAL_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
 
     AutoEmbeddingMaterializedViewConfig ae =
         AutoEmbeddingMaterializedViewConfigMapper.toAutoEmbeddingMaterializedViewConfig(
@@ -64,7 +69,9 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
   @Test
   public void toAutoEmbeddingMaterializedViewConfig_derivesInitialSyncsFromReplication()
       throws Exception {
-    CommunityConfig base = CommunityConfig.readFromFile(MINIMAL_CONFIG).config();
+    CommunityConfig base =
+        CommunityConfig.readFromFile(MINIMAL_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
     var replicationConfig =
         new CommunityReplicationConfig(
             Optional.of(
@@ -78,7 +85,8 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
                     Optional.empty(),
                     Optional.empty(),
                     Optional.empty(),
-                    Optional.empty())));
+                    Optional.empty())),
+            Optional.empty());
     CommunityConfig config = withReplicationConfig(base, replicationConfig);
 
     AutoEmbeddingMaterializedViewConfig ae =
@@ -91,7 +99,9 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
   @Test
   public void toAutoEmbeddingMaterializedViewConfig_takesRateLimitsAndBudgetsFromMaterializedView()
       throws Exception {
-    CommunityConfig base = CommunityConfig.readFromFile(MINIMAL_CONFIG).config();
+    CommunityConfig base =
+        CommunityConfig.readFromFile(MINIMAL_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
     var autoEmbeddingConfig =
         new CommunityAutoEmbeddingConfig(
             Optional.of(
@@ -125,11 +135,12 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
 
   @Test
   public void toAutoEmbeddingMaterializedViewConfig_propagatesGlobalPauseKnobs() throws Exception {
-    CommunityConfig config = CommunityConfig.readFromFile(TUNING_CONFIG).config();
+    CommunityConfig config =
+        CommunityConfig.readFromFile(TUNING_CONFIG, Optional.of(DeploymentEnvironment.COMMUNITY))
+            .config();
     var global =
         MongoDbReplicationConfigMapper.toGlobalReplicationConfig(
-            config.advancedConfigs()
-                .flatMap(AdvancedConfigs::replicationConfig));
+            config.advancedConfigs().flatMap(AdvancedConfigs::replicationConfig));
 
     AutoEmbeddingMaterializedViewConfig ae =
         AutoEmbeddingMaterializedViewConfigMapper.toAutoEmbeddingMaterializedViewConfig(
@@ -137,8 +148,7 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
 
     assertTrue(ae.getPauseAllInitialSyncs());
     assertEquals(
-        List.of(
-            new ObjectId("507f1f77bcf86cd799439011"), new ObjectId("507f1f77bcf86cd799439012")),
+        List.of(new ObjectId("507f1f77bcf86cd799439011"), new ObjectId("507f1f77bcf86cd799439012")),
         ae.getPauseInitialSyncOnIndexIds());
   }
 
@@ -152,15 +162,18 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
         base.healthCheckConfig(),
         base.loggingConfig(),
         base.embeddingConfig(),
-        Optional.of(new AdvancedConfigs(
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(replicationConfig),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty())));
+        Optional.of(
+            new AdvancedConfigs(
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of(replicationConfig),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty())),
+        Optional.empty(),
+        Optional.empty());
   }
 
   private static CommunityConfig withAutoEmbeddingConfig(
@@ -173,14 +186,17 @@ public class AutoEmbeddingMaterializedViewConfigMapperTest {
         base.healthCheckConfig(),
         base.loggingConfig(),
         base.embeddingConfig(),
-        Optional.of(new AdvancedConfigs(
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(autoEmbeddingConfig),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty())));
+        Optional.of(
+            new AdvancedConfigs(
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of(autoEmbeddingConfig),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty())),
+        Optional.empty(),
+        Optional.empty());
   }
 }

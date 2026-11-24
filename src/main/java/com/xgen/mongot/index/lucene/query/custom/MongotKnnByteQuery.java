@@ -4,13 +4,13 @@ import com.xgen.mongot.index.IndexMetricsUpdater;
 import java.io.IOException;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.QueryTimeout;
+import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.KnnByteVectorQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.knn.KnnCollectorManager;
-import org.apache.lucene.util.Bits;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -33,11 +33,11 @@ public class MongotKnnByteQuery extends KnnByteVectorQuery {
    * target vector.
    *
    * @param metrics - a metrics updater that holds counters relating to query execution.
-   * @param field   – the lucene field name that has been indexed as a KnnByteVectorField.
-   * @param target  – the target query vector
-   * @param k       – the number of documents to find
-   * @param filter  – an optional filter applied before the vector search, or null if the search is
-   *                unfiltered.
+   * @param field – the lucene field name that has been indexed as a KnnByteVectorField.
+   * @param target – the target query vector
+   * @param k – the number of documents to find
+   * @param filter – an optional filter applied before the vector search, or null if the search is
+   *     unfiltered.
    * @throws IllegalArgumentException – if k is less than 1
    */
   public MongotKnnByteQuery(
@@ -54,7 +54,7 @@ public class MongotKnnByteQuery extends KnnByteVectorQuery {
   @Override
   protected TopDocs approximateSearch(
       LeafReaderContext context,
-      @Nullable Bits acceptDocs,
+      AcceptDocs acceptDocs,
       int visitedLimit,
       KnnCollectorManager knnCollectorManager)
       throws IOException {

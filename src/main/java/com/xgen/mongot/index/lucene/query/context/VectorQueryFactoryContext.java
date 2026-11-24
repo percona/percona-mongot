@@ -2,14 +2,17 @@ package com.xgen.mongot.index.lucene.query.context;
 
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
 import com.xgen.mongot.index.definition.VectorFieldDefinitionResolver;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
 import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.VectorQueryTimeMappingChecks;
+import com.xgen.mongot.index.query.sort.Sort;
 import com.xgen.mongot.index.version.IndexCapabilities;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.util.FieldPath;
@@ -86,6 +89,12 @@ public class VectorQueryFactoryContext implements QueryFactoryContext {
   }
 
   @Override
+  public Optional<Sort> getIndexSort() {
+    // Vector indexes never support index sort.
+    return Optional.empty();
+  }
+
+  @Override
   public VectorFieldDefinitionResolver getFieldDefinitionResolver() {
     return this.resolver;
   }
@@ -99,6 +108,15 @@ public class VectorQueryFactoryContext implements QueryFactoryContext {
   public boolean isAutoEmbedField(FieldPath fieldPath) {
     return this.resolver.isIndexed(fieldPath, VectorIndexFieldDefinition.Type.TEXT)
         || this.resolver.isIndexed(fieldPath, VectorIndexFieldDefinition.Type.AUTO_EMBED);
+  }
+
+  @Override
+  public Optional<VectorAutoEmbedQuantization> getAutoEmbedQuantization(FieldPath fieldPath)
+      throws InvalidQueryException {
+    return resolveVectorFieldSpecification(fieldPath)
+            instanceof VectorAutoEmbedFieldSpecification autoEmbedSpecification
+        ? Optional.of(autoEmbedSpecification.autoEmbedQuantization())
+        : Optional.empty();
   }
 
   private VectorFieldSpecification resolveVectorFieldSpecification(FieldPath fieldPath)

@@ -4,6 +4,7 @@ import static com.xgen.mongot.index.IndexTypeData.INDEX_TYPE_TAG_NAME;
 import static com.xgen.mongot.index.IndexTypeData.getIndexTypeTag;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.CaseFormat;
 import com.google.common.flogger.FluentLogger;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
@@ -20,19 +21,30 @@ import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.mql.MqlFilterOperator;
 import com.xgen.mongot.index.query.scores.Score;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor;
 import com.xgen.mongot.util.Bytes;
+import com.xgen.mongot.util.Enums;
+import com.xgen.mongot.util.bson.Vector;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.io.Closeable;
+import java.io.IOException;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.apache.lucene.search.TotalHits;
 import org.jetbrains.annotations.TestOnly;
@@ -57,6 +69,40 @@ public class IndexMetricsUpdater implements Closeable {
    * 10k bucket-limit context; use {@code sum}/{@code count} on export for mean demand.
    */
   private static final double[] TOTAL_FACET_BUCKETS_BUCKETS = {1000, 10_000, 50_000};
+
+  /**
+   * Histogram bounds for query-optimizer fixed-point iteration counts. Most queries finish in 1
+   * iteration. Counts never exceed the engines' 8-iteration cap; a run aborted at the cap records
+   * exactly 8, indistinguishable here from convergence in 8, so cap aborts surface only in the
+   * engines' warning logs.
+   */
+  private static final double[] OPTIMIZER_ITERATIONS_BUCKETS = {1, 2, 4, 8};
+
+  /**
+   * Histogram bounds (seconds) for the wall-clock cost of one optimize call. Spans 50us through
+   * 10ms; samples above 10ms fall in the implicit +Inf bucket and signal a regression to
+   * investigate.
+   */
+  private static final double[] OPTIMIZER_LATENCY_SECONDS_BUCKETS = {
+    0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01
+  };
+
+  /**
+   * Metric prefix for per-rule optimizer firing counters. The full metric name is {@code
+   * <prefix><RuleName>}, so each new rule adds one counter. Rule names are matched against the
+   * strings in {@code RewriteRule.name()} when the engine increments on a successful firing.
+   */
+  private static final String OPTIMIZER_RULE_FIRED_PREFIX = "optimizer.rule.fired.";
+
+  /** Rule name constants for the range-bounds merge optimizer rules. */
+  public static final String OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_MQL_SIMPLE_CLAUSE =
+      "RangeBoundsMergeMqlSimpleClauseRule";
+
+  public static final String OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_MQL_AND_CLAUSE =
+      "RangeBoundsMergeMqlAndClauseRule";
+
+  public static final String OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_OPERATOR =
+      "RangeBoundsMergeOperatorRule";
 
   private final IndexDefinition indexDefinition;
   private final PerIndexMetricsFactory metricsFactory;
@@ -116,7 +162,8 @@ public class IndexMetricsUpdater implements Closeable {
             metricsFactory.childMetricsFactory(QueryingMetricsUpdater.NAMESPACE),
             getIndexTypeTag(indexDefinition),
             indexDefinition.getParsedIndexFeatureVersion(),
-            true),
+            true,
+            /* isSearchAggregationEnabled= */ true),
         new ReplicationMetricsUpdater(
             metricsFactory.childMetricsFactory(ReplicationMetricsUpdater.NAMESPACE),
             indexDefinition),
@@ -162,6 +209,16 @@ public class IndexMetricsUpdater implements Closeable {
     return this.indexMetricValuesSupplier.getCachedIndexSize();
   }
 
+  /** Recomputes the index size in bytes, refreshing the value {@link #getIndexSize()} reports. */
+  public long refreshAndGetIndexSize() throws IOException {
+    return this.indexMetricValuesSupplier.refreshAndGetIndexSize();
+  }
+
+  /** Returns the index's current document counts, without snapshotting the other metrics. */
+  public DocCounts getDocCounts() {
+    return this.indexMetricValuesSupplier.getDocCounts();
+  }
+
   /**
    * Gets a snapshot of the current value of all the index metrics tracked by this {@code
    * IndexMetricsUpdater}.
@@ -173,13 +230,23 @@ public class IndexMetricsUpdater implements Closeable {
    */
   public IndexMetrics getMetrics() {
     IndexDefinition indexDefinition = getIndexDefinition();
+    // Refresh once so the getters below read a single snapshot rather than re-reading per value.
+    this.indexMetricValuesSupplier.refreshMetrics();
+    // Mockito mocks of the supplier return null from this record-typed default method.
+    VectorliteIndexMetrics engineMetrics =
+        Objects.requireNonNullElse(
+            this.indexMetricValuesSupplier.getVectorliteIndexMetrics(),
+            VectorliteIndexMetrics.ZERO);
+    VectorliteIndexMetrics.TieredStorageMetrics tiered = engineMetrics.tieredStorage();
     return IndexMetrics.create(
         indexDefinition,
         this.indexMetricValuesSupplier.getIndexStatus(),
         getIndexingMetricsUpdater()
-            .getMetrics(this.indexMetricValuesSupplier,
-                computeNumNestedVectorFields(indexDefinition)),
-        getQueryingMetricsUpdater().getMetrics());
+            .getMetrics(
+                this.indexMetricValuesSupplier,
+                computeNumNestedVectorFields(indexDefinition),
+                tiered),
+        getQueryingMetricsUpdater().getMetrics(tiered));
   }
 
   private int computeNumNestedVectorFields(IndexDefinition indexDefinition) {
@@ -191,9 +258,10 @@ public class IndexMetricsUpdater implements Closeable {
       return 0;
     }
     var nestedRoot = vectorDef.getNestedRoot().get();
-    return (int) vectorDef.getFields().stream()
-        .filter(field -> field.isVectorField() && field.getPath().isChildOf(nestedRoot))
-        .count();
+    return (int)
+        vectorDef.getFields().stream()
+            .filter(field -> field.isVectorField() && field.getPath().isChildOf(nestedRoot))
+            .count();
   }
 
   /** De-registers all metrics for the index. */
@@ -213,11 +281,15 @@ public class IndexMetricsUpdater implements Closeable {
     static final String OPTIME_GAUGE_NAME = "replicationOpTime";
     static final String MAX_POSSIBLE_OPTIME_NAME = "maxPossibleReplicationOpTime";
     static final String REPLICATION_LAG_MILLISECONDS_NAME = "replicationLagMs";
+    static final String LUCENE_VISIBLE_OPTIME_NAME = "luceneVisibleOpTime";
     static final String COMMIT_TIMER_NAME = "commitDurations";
     static final String INITIAL_SYNC_EXCEPTION_COUNTER_NAME = "initialSyncExceptions";
     static final String CONSECUTIVE_INITIAL_SYNC_RESYNC_EXCEPTIONS_NAME =
         "consecutiveInitialSyncResyncExceptions";
     static final String STEADY_STATE_EXCEPTION_COUNTER_NAME = "steadyStateExceptions";
+    static final String SOURCE_COLLECTION_DOC_COUNT_NAME = "sourceCollectionDocCount";
+    static final String SOURCE_COLLECTION_CHECK_INDEXED_DOC_COUNT_NAME =
+        "sourceCollectionCheckIndexedDocCount";
     static final String SORTABLE_STRING_TRUNCATED = "sortableStringTruncated";
     static final String INVALID_GEOMETRY_FIELD = "invalidGeometryField";
     static final String VECTOR_FIELDS_INDEXED = "vectorFieldsIndexed";
@@ -236,6 +308,7 @@ public class IndexMetricsUpdater implements Closeable {
     private final Timer commitTimer;
     private final Counter initialSyncExceptionCounter;
     private final AtomicLong consecutiveInitialSyncResyncExceptions;
+    private final AtomicReference<Optional<SourceCollectionDocCounts>> sourceCollectionDocCounts;
     private final Counter steadyStateExceptionCounter;
     private final Counter sortableStringTruncated;
     private final Counter invalidGeometryField;
@@ -272,14 +345,17 @@ public class IndexMetricsUpdater implements Closeable {
           isIndexFeatureVersionFourEnabled
               ? Tags.of(INDEX_FEATURE_VERSION_NAME, String.valueOf(indexFeatureVersion))
               : Tags.empty();
+      Tags indexTypeTags = Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue);
       this.metricsFactory = metricsFactory;
+      // Process-level factory for metrics that don't need a per-index breakdown in FTDC or MMS
+      // (see PerIndexMetricsFactory#getProcessMetricsFactory). Only the per-index metrics
+      // serialized into the IndexStats snapshot below stay on the per-index factory.
+      MetricsFactory processMetricsFactory = metricsFactory.getProcessMetricsFactory();
       this.totalBytesProcessedCounter =
           metricsFactory.perIndexCounter(TOTAL_BYTES_PROCESSED_COUNTER_NAME);
-      this.commitTimer = metricsFactory.perIndexTimer(COMMIT_TIMER_NAME);
+      this.commitTimer = processMetricsFactory.timer(COMMIT_TIMER_NAME, TimeUnit.MILLISECONDS);
       this.documentEventTypeCounterMap =
-          metricsFactory.getPerIndexEnumCounterMap(
-              DocumentEvent.EventType.class,
-              Tags.of(INDEX_TYPE_TAG_NAME, indexType.name().toLowerCase()));
+          metricsFactory.getPerIndexEnumCounterMap(DocumentEvent.EventType.class, indexTypeTags);
       this.initialSyncExceptionCounter =
           metricsFactory.perIndexCounter(
               INITIAL_SYNC_EXCEPTION_COUNTER_NAME, indexFeatureVersionTag);
@@ -288,12 +364,25 @@ public class IndexMetricsUpdater implements Closeable {
       this.steadyStateExceptionCounter =
           metricsFactory.perIndexCounter(
               STEADY_STATE_EXCEPTION_COUNTER_NAME, indexFeatureVersionTag);
-      this.sortableStringTruncated = metricsFactory.counter(SORTABLE_STRING_TRUNCATED);
-      this.invalidGeometryField = metricsFactory.counter(INVALID_GEOMETRY_FIELD);
-      this.vectorFieldsIndexed = metricsFactory.counter(VECTOR_FIELDS_INDEXED);
+      // The source collection's fast count and the index's source-document count, sampled
+      // together so that they can be compared. NaN until the first sample, or when the counts are
+      // not comparable for this index.
+      this.sourceCollectionDocCounts = new AtomicReference<>(Optional.empty());
+      metricsFactory.perIndexObjectValueGauge(
+          SOURCE_COLLECTION_DOC_COUNT_NAME,
+          this.sourceCollectionDocCounts,
+          counts -> counts.get().map(c -> (double) c.collectionDocs()).orElse(Double.NaN));
+      metricsFactory.perIndexObjectValueGauge(
+          SOURCE_COLLECTION_CHECK_INDEXED_DOC_COUNT_NAME,
+          this.sourceCollectionDocCounts,
+          counts -> counts.get().map(c -> (double) c.indexedDocs()).orElse(Double.NaN));
+      this.sortableStringTruncated = processMetricsFactory.counter(SORTABLE_STRING_TRUNCATED);
+      this.invalidGeometryField = processMetricsFactory.counter(INVALID_GEOMETRY_FIELD);
+      this.vectorFieldsIndexed = processMetricsFactory.counter(VECTOR_FIELDS_INDEXED);
       this.bloomFilterIdPostingCreatedCounter =
-          metricsFactory.counter(BLOOM_FILTER_ID_POSTING_CREATED);
-      this.lucene99IdPostingCreatedCounter = metricsFactory.counter(LUCENE_99_ID_POSTING_CREATED);
+          processMetricsFactory.counter(BLOOM_FILTER_ID_POSTING_CREATED);
+      this.lucene99IdPostingCreatedCounter =
+          processMetricsFactory.counter(LUCENE_99_ID_POSTING_CREATED);
 
       this.replicationOpTimeInfo = new ReplicationOpTimeInfo();
       this.metricsFactory.perIndexObjectValueGauge(
@@ -329,17 +418,26 @@ public class IndexMetricsUpdater implements Closeable {
                   .orElse(Double.NaN),
           Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue));
 
+      this.metricsFactory.perIndexObjectValueGauge(
+          LUCENE_VISIBLE_OPTIME_NAME,
+          this.replicationOpTimeInfo,
+          opTimeInfo ->
+              opTimeInfo.visibleOpTime().isPresent()
+                  ? (double) opTimeInfo.visibleOpTime().getAsLong()
+                  : Double.NaN,
+          Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue));
+
       this.batchIndexingTimer =
           this.metricsFactory.timer(
               ServerStatusDataExtractor.ReplicationMeterData.IndexingMeterData
                   .INDEXING_BATCH_DURATIONS,
-              Tags.of("indexType", indexType.name().toLowerCase()));
+              indexTypeTags);
 
       this.changeStreamEventSizeCounters = new HashMap<>();
       for (Bytes threshold : CHANGE_STREAM_EVENT_SIZE_THRESHOLDS) {
         this.changeStreamEventSizeCounters.put(
             threshold,
-            this.metricsFactory.counter(
+            processMetricsFactory.counter(
                 LARGE_CHANGE_STREAM_EVENTS, Tags.of("threshold", threshold.toMebi() + "MiB")));
       }
     }
@@ -364,6 +462,21 @@ public class IndexMetricsUpdater implements Closeable {
       return this.steadyStateExceptionCounter;
     }
 
+    /** Sets the latest pair of counts, or clears both with an empty value. */
+    public void setSourceCollectionDocCounts(Optional<SourceCollectionDocCounts> counts) {
+      this.sourceCollectionDocCounts.set(counts);
+    }
+
+    public Optional<SourceCollectionDocCounts> getSourceCollectionDocCounts() {
+      return this.sourceCollectionDocCounts.get();
+    }
+
+    /**
+     * A source collection's document count, and the index's source-document count read right after
+     * it.
+     */
+    public record SourceCollectionDocCounts(long collectionDocs, long indexedDocs) {}
+
     public Counter getSortableStringTruncatedCounter() {
       return this.sortableStringTruncated;
     }
@@ -383,7 +496,7 @@ public class IndexMetricsUpdater implements Closeable {
     public Counter getLucene99IdPostingCreatedCounter() {
       return this.lucene99IdPostingCreatedCounter;
     }
-    
+
     public Timer getCommitTimer() {
       return this.commitTimer;
     }
@@ -409,7 +522,9 @@ public class IndexMetricsUpdater implements Closeable {
 
     @VisibleForTesting
     IndexMetrics.IndexingMetrics getMetrics(
-        IndexMetricValuesSupplier indexMetricValuesSupplier, int numNestedVectorFields) {
+        IndexMetricValuesSupplier indexMetricValuesSupplier,
+        int numNestedVectorFields,
+        VectorliteIndexMetrics.TieredStorageMetrics tiered) {
       DocCounts docCounts = indexMetricValuesSupplier.getDocCounts();
       return IndexMetrics.IndexingMetrics.create(
           this.documentEventTypeCounterMap,
@@ -428,7 +543,8 @@ public class IndexMetricsUpdater implements Closeable {
           docCounts.numMongoDbDocs,
           getBatchIndexingTimer(),
           indexMetricValuesSupplier.getRequiredMemoryForVectorData(),
-          numNestedVectorFields);
+          numNestedVectorFields,
+          tiered);
     }
 
     @Override
@@ -439,6 +555,15 @@ public class IndexMetricsUpdater implements Closeable {
 
   public static class QueryingMetricsUpdater implements Closeable {
     public static final String NAMESPACE = "query";
+
+    @VisibleForTesting
+    static final String SCOPED_SORT_CHILD_EVALUATION_LATENCY_TIMER_NAME =
+        "embeddedScopedSortChildEvaluationLatency";
+
+    @VisibleForTesting
+    static final String SCOPED_SORT_MATCHING_CHILDREN_SUMMARY_NAME =
+        "embeddedScopedSortMatchingChildrenPerSegment";
+
     private static final FluentLogger flogger = FluentLogger.forEnclosingClass();
     private final PerIndexMetricsFactory metricsFactory;
     private final Counter totalQueryCounter;
@@ -507,6 +632,9 @@ public class IndexMetricsUpdater implements Closeable {
     /** Measures time spent on lucene search/searchAfter to collect topDocs. */
     private final Timer luceneTopDocsSearchLatencyTimer;
 
+    /** Process-level search aggregation phase timings. */
+    private final SearchAggregationMetricsReporter searchAggregationMetricsReporter;
+
     /** Measures time spent on lucene vectorSearch to collect initialSearch topDocs. */
     private final Timer vectorSearchInitialTopDocsLatencyTimer;
 
@@ -527,10 +655,31 @@ public class IndexMetricsUpdater implements Closeable {
     private final Timer tokenFacetsStateRefreshLatencyTimer;
     private final Timer stringFacetsStateRefreshLatencyTimer;
 
+    /**
+     * Wall time of the first successful child-bitset materialization per segment and scoped sort
+     * key. Excludes operator compilation and cache hits; measures the lazy child-query work that
+     * shared child evaluation (CLOUDP-441986) could avoid.
+     */
+    private final Timer scopedSortChildEvaluationLatencyTimer;
+
+    /**
+     * Cardinality of a scoped key's child bitset per materialized segment, independent of the main
+     * query's parent matches. This is a candidate count, not reducer visits: selective parent
+     * queries may visit fewer children, and mixed-type comparators can visit a child more than
+     * once.
+     */
+    private final DistributionSummary scopedSortMatchingChildrenPerSegment;
+
     private final DistributionSummary numCandidatesUnquantized;
     private final DistributionSummary numCandidatesScalarQuantized;
     private final DistributionSummary numCandidatesBinaryQuantized;
     private final DistributionSummary limitPerQuery;
+
+    /** Number of queries where numCandidates was auto-computed (omitted by user). */
+    private final Counter autoNumCandidatesCounter;
+
+    /** Distribution of auto-computed numCandidates values. */
+    private final DistributionSummary autoNumCandidatesValues;
 
     /** Distribution of total requested string facet buckets per facet query. */
     private final DistributionSummary totalFacetBucketsPerQuery;
@@ -540,6 +689,9 @@ public class IndexMetricsUpdater implements Closeable {
 
     /** Number of queries where the query sort can benefit from index sort optimization. */
     private final Counter benefitFromIndexSortCounter;
+
+    /** Number of range queries where the index-sort range query optimization was applied. */
+    private final Counter indexSortRangeQueryOptimizationAppliedCounter;
 
     /**
      * Tracks dynamic HNSW search method selected per segment. Exported as
@@ -561,13 +713,39 @@ public class IndexMetricsUpdater implements Closeable {
     private final DistributionSummary vectorSearchVisitedNodesPerSegmentUnfilteredExact;
     private final DistributionSummary vectorSearchVisitedNodesPerSegmentFilteredExact;
 
+    /**
+     * Query-optimizer invocation counter. Incremented once per QueryOptimizer.optimize call made
+     * while the optimizer is enabled; flag-off calls record nothing.
+     */
+    private final Counter optimizerInvocations;
+
+    /** Distribution of fixed-point iterations performed by the query optimizer. */
+    private final DistributionSummary optimizerIterations;
+
+    /**
+     * Distribution of wall-clock latency (seconds) per QueryOptimizer.optimize call with active
+     * rules. Calls short-circuited for lack of rules record no sample.
+     */
+    private final DistributionSummary optimizerLatencySeconds;
+
+    /** Optimize calls that threw and fell back to the unoptimized tree. */
+    private final Counter optimizerFailures;
+
+    /**
+     * Counters for individual optimizer rule firings, keyed by rule name. Populated up-front so the
+     * rewrite engines can increment without going through the metrics-factory lookup on every fire.
+     * New rules add an entry here.
+     */
+    private final Map<String, Counter> optimizerRuleFiredCounters;
+
     @VisibleForTesting
     public QueryingMetricsUpdater(PerIndexMetricsFactory metricsFactory) {
       this(
           metricsFactory,
           IndexTypeData.IndexTypeTag.TAG_SEARCH,
           SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
-          true);
+          true,
+          /* isSearchAggregationEnabled= */ true);
     }
 
     /** An updater for query time metrics. */
@@ -575,137 +753,183 @@ public class IndexMetricsUpdater implements Closeable {
         PerIndexMetricsFactory metricsFactory,
         IndexTypeData.IndexTypeTag indexTypeTag,
         int indexFeatureVersion,
-        boolean isIndexFeatureVersionFourEnabled) {
+        boolean isIndexFeatureVersionFourEnabled,
+        boolean isSearchAggregationEnabled) {
       // Search indices don't need per-index vector metrics, and likewise when roles are reversed.
-      boolean isSearchIndex = indexTypeTag == IndexTypeData.IndexTypeTag.TAG_SEARCH;
-      boolean isVectorIndex =
-          indexTypeTag == IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH
-              || indexTypeTag == IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH_AUTO_EMBEDDING;
+      boolean isSearchIndex =
+          indexTypeTag == IndexTypeData.IndexTypeTag.TAG_SEARCH
+              || indexTypeTag == IndexTypeData.IndexTypeTag.TAG_SEARCH_AUTO_EMBEDDING;
       Tags indexFeatureVersionTag =
           isIndexFeatureVersionFourEnabled
               ? Tags.of(INDEX_FEATURE_VERSION_NAME, String.valueOf(indexFeatureVersion))
               : Tags.empty();
+      Tags indexTypeTags = Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue);
       this.metricsFactory = metricsFactory;
+      // Process-level factory for metrics that don't need a per-index breakdown in FTDC or MMS
+      // (see PerIndexMetricsFactory#getProcessMetricsFactory). Metrics serialized into the
+      // IndexStats snapshot (see #getMetrics) and the per-index QueryFeatures counters stay on the
+      // per-index factory so their per-index values remain readable.
+      MetricsFactory processMetricsFactory = metricsFactory.getProcessMetricsFactory();
       this.totalQueryCounter =
-          metricsFactory.perIndexCounter("totalQueries", indexFeatureVersionTag);
+          metricsFactory.perIndexCounter("totalQueries", indexFeatureVersionTag.and(indexTypeTags));
       this.failedQueryCounter =
-          metricsFactory.perIndexCounter("failedQueries", indexFeatureVersionTag);
-      this.invalidQueryCounter = metricsFactory.counter("invalidQueries");
+          metricsFactory.perIndexCounter(
+              "failedQueries", indexFeatureVersionTag.and(indexTypeTags));
+      this.invalidQueryCounter = processMetricsFactory.counter("invalidQueries");
       this.internallyFailedQueryCounter =
-          metricsFactory.counter("internallyFailedQueries", indexFeatureVersionTag);
-      this.failedExplainQueryAggregate = metricsFactory.counter("failedExplainQueryAggregate");
-      this.npeQueryCounter = metricsFactory.counter("npeQueries");
+          processMetricsFactory.counter("internallyFailedQueries", indexFeatureVersionTag);
+      this.failedExplainQueryAggregate =
+          processMetricsFactory.counter("failedExplainQueryAggregate");
+      this.npeQueryCounter = processMetricsFactory.counter("npeQueries");
       this.lenientFailureCounter = metricsFactory.counter("lenientFailures");
       this.searchGetMoreCommandCounter =
           isSearchIndex
-              ? metricsFactory.perIndexCounter("getMoreCommandCalls")
-              : metricsFactory.counter("getMoreCommandCalls");
+              ? metricsFactory.perIndexCounter("getMoreCommandCalls", indexTypeTags)
+              : MetricsFactory.NOOP_COUNTER;
       this.vectorCommandCounter =
-          isVectorIndex
-              ? metricsFactory.perIndexCounter(
-                  "vectorCommandCalls", Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue))
-              : metricsFactory.counter("vectorCommandCalls");
-      this.extractableLimitQueryCounter = metricsFactory.counter("extractableLimitQueries");
+          processMetricsFactory.counter(
+              "vectorCommandCalls", Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue));
+      this.extractableLimitQueryCounter = processMetricsFactory.counter("extractableLimitQueries");
       this.extractableLimitQuerySecondBatchCounter =
-          metricsFactory.counter("extractableLimitSecondBatchQueries");
-      this.totalHitsLowerBoundCount = metricsFactory.counter("totalHitsCount");
-      this.searchGetMoreCommandPerQuery = metricsFactory.summary("getMoreCommandCallsPerQuery");
+          processMetricsFactory.counter("extractableLimitSecondBatchQueries");
+      this.totalHitsLowerBoundCount = processMetricsFactory.counter("totalHitsCount");
+      this.searchGetMoreCommandPerQuery =
+          processMetricsFactory.summary("getMoreCommandCallsPerQuery");
       this.searchResultBatchLatencyTimer =
           isSearchIndex
               ? metricsFactory.perIndexTimer("searchResultBatchLatencies", indexFeatureVersionTag)
-              : metricsFactory.timer("searchResultBatchLatencies");
+              : MetricsFactory.NOOP_TIMER;
       this.vectorResultLatencyTimer =
-          isVectorIndex
-              ? metricsFactory.perIndexTimer(
-                  "vectorResultLatencies",
-                  Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue).and(indexFeatureVersionTag))
-              : metricsFactory.timer("vectorResultLatencies");
+          processMetricsFactory.timer(
+              "vectorResultLatencies",
+              Tags.of(INDEX_TYPE_TAG_NAME, indexTypeTag.tagValue),
+              TimeUnit.MILLISECONDS);
       this.vectorSearchQueriesOverSearchIndexes =
-          metricsFactory.perIndexCounter("vectorSearchQueriesOverSearchIndexes");
-      this.luceneTopDocsSearchLatencyTimer = metricsFactory.timer("luceneTopDocsSearchLatencies");
+          processMetricsFactory.counter("vectorSearchQueriesOverSearchIndexes");
+      this.luceneTopDocsSearchLatencyTimer =
+          processMetricsFactory.timer("luceneTopDocsSearchLatencies", TimeUnit.MILLISECONDS);
+      this.searchAggregationMetricsReporter =
+          MicrometerSearchAggregationMetricsReporter.create(
+              processMetricsFactory, isSearchAggregationEnabled);
 
       this.vectorSearchInitialTopDocsLatencyTimer =
-          metricsFactory.timer("vectorSearchInitialTopDocsLatencyTimer");
+          processMetricsFactory.timer(
+              "vectorSearchInitialTopDocsLatencyTimer", TimeUnit.MILLISECONDS);
       this.vectorSearchGetMoreTopDocsLatencyTimer =
-          metricsFactory.timer("vectorSearchGetMoreTopDocsLatencyTimer");
-      this.queryFeaturesMetricsUpdater = new QueryFeaturesMetricsUpdater(metricsFactory);
+          processMetricsFactory.timer(
+              "vectorSearchGetMoreTopDocsLatencyTimer", TimeUnit.MILLISECONDS);
+      this.queryFeaturesMetricsUpdater =
+          new QueryFeaturesMetricsUpdater(metricsFactory, isSearchAggregationEnabled);
 
-      this.orphanedDeletedDocsRatio = metricsFactory.summary("orphanedDeletedDocsRatio");
+      this.orphanedDeletedDocsRatio = processMetricsFactory.summary("orphanedDeletedDocsRatio");
 
-      this.batchDocumentCount = metricsFactory.summary("batchDocumentCount");
-      this.batchDataSize = metricsFactory.summary("batchDataSize");
-      this.vectorRescoringFailureCounter = metricsFactory.counter("vectorRescoringFailureCount");
-      this.batchWithTiesCounter = metricsFactory.counter("batchWithTies");
-      this.noProgressBatchCounter = metricsFactory.counter("noProgressBatches");
+      this.batchDocumentCount = processMetricsFactory.summary("batchDocumentCount");
+      this.batchDataSize = processMetricsFactory.summary("batchDataSize");
+      this.vectorRescoringFailureCounter =
+          processMetricsFactory.counter("vectorRescoringFailureCount");
+      this.batchWithTiesCounter = processMetricsFactory.counter("batchWithTies");
+      this.noProgressBatchCounter = processMetricsFactory.counter("noProgressBatches");
       this.tokenFacetsStateRefreshLatencyTimer =
           isSearchIndex
               ? metricsFactory.perIndexTimer("tokenFacetsStateRefreshLatency")
-              : metricsFactory.timer("tokenFacetsStateRefreshLatency");
+              : MetricsFactory.NOOP_TIMER;
       this.stringFacetsStateRefreshLatencyTimer =
           isSearchIndex
               ? metricsFactory.perIndexTimer("stringFacetsStateRefreshLatency")
-              : metricsFactory.timer("stringFacetsStateRefreshLatency");
+              : MetricsFactory.NOOP_TIMER;
+      // Process-level: scoped sort is a search-index feature, and neither metric is part of the
+      // IndexStats snapshot, so they don't need a per-index breakdown.
+      this.scopedSortChildEvaluationLatencyTimer =
+          processMetricsFactory.timer(
+              SCOPED_SORT_CHILD_EVALUATION_LATENCY_TIMER_NAME, TimeUnit.MILLISECONDS);
+      this.scopedSortMatchingChildrenPerSegment =
+          processMetricsFactory.summary(SCOPED_SORT_MATCHING_CHILDREN_SUMMARY_NAME);
       this.numCandidatesUnquantized =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "numCandidatesPerQuery",
               Tags.of("quantization", "unquantized"),
               NUM_CANDIDATES_BUCKETS);
       this.numCandidatesScalarQuantized =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "numCandidatesPerQuery",
               Tags.of("quantization", "scalarQuantized"),
               NUM_CANDIDATES_BUCKETS);
       this.numCandidatesBinaryQuantized =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "numCandidatesPerQuery",
               Tags.of("quantization", "binaryQuantized"),
               NUM_CANDIDATES_BUCKETS);
       this.knnSearchModeCounter =
           metricsFactory.getEnumCounterMap(
               KnnSearchMode.class,
-              (String s) -> metricsFactory.counter("knnSearchMode", Tags.of("mode", s)));
-      this.limitPerQuery = metricsFactory.histogram("limitPerQuery", LIMIT_BUCKETS);
+              (String s) -> processMetricsFactory.counter("knnSearchMode", Tags.of("mode", s)));
+      this.limitPerQuery = processMetricsFactory.histogram("limitPerQuery", LIMIT_BUCKETS);
+      this.autoNumCandidatesCounter = processMetricsFactory.counter("autoNumCandidatesQueries");
+      this.autoNumCandidatesValues =
+          processMetricsFactory.histogram("autoNumCandidatesValues", NUM_CANDIDATES_BUCKETS);
       this.totalFacetBucketsPerQuery =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "totalFacetBucketsPerQuery", Tags.empty(), TOTAL_FACET_BUCKETS_BUCKETS);
-      this.phantomSearcherCleanupCounter = metricsFactory.counter("phantomSearcherCleanupCount");
-      this.benefitFromIndexSortCounter = metricsFactory.counter("benefitFromIndexSortCount");
+      this.phantomSearcherCleanupCounter =
+          processMetricsFactory.counter("phantomSearcherCleanupCount");
+      this.benefitFromIndexSortCounter = processMetricsFactory.counter("benefitFromIndexSortCount");
+      this.indexSortRangeQueryOptimizationAppliedCounter =
+          processMetricsFactory.counter("indexSortRangeQueryOptimizationAppliedCount");
       this.vectorSearchVisitedNodesUnfilteredApproximateCounter =
-          metricsFactory.counter(
+          processMetricsFactory.counter(
               "vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "approximate"));
       this.vectorSearchVisitedNodesUnfilteredExactCounter =
-          metricsFactory.counter(
+          processMetricsFactory.counter(
               "vectorSearchVisitedNodes", Tags.of("filter", "false", "mode", "exact"));
       this.vectorSearchVisitedNodesFilteredApproximateCounter =
-          metricsFactory.counter(
+          processMetricsFactory.counter(
               "vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "approximate"));
       this.vectorSearchVisitedNodesFilteredExactCounter =
-          metricsFactory.counter(
+          processMetricsFactory.counter(
               "vectorSearchVisitedNodes", Tags.of("filter", "true", "mode", "exact"));
       this.vectorSearchVisitedNodesPerSegmentUnfilteredApproximate =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "vectorSearchVisitedNodesPerSegment",
               Tags.of("filter", "false", "mode", "approximate"),
               VISITED_NODES_BUCKETS);
       this.vectorSearchVisitedNodesPerSegmentFilteredApproximate =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "vectorSearchVisitedNodesPerSegment",
               Tags.of("filter", "true", "mode", "approximate"),
               VISITED_NODES_BUCKETS);
       this.vectorSearchVisitedNodesPerSegmentUnfilteredExact =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "vectorSearchVisitedNodesPerSegment",
               Tags.of("filter", "false", "mode", "exact"),
               VISITED_NODES_BUCKETS);
       this.vectorSearchVisitedNodesPerSegmentFilteredExact =
-          metricsFactory.histogram(
+          processMetricsFactory.histogram(
               "vectorSearchVisitedNodesPerSegment",
               Tags.of("filter", "true", "mode", "exact"),
               VISITED_NODES_BUCKETS);
       this.fallBackHeuristicSuccessCounter =
-          metricsFactory.counter("fallBackHeuristicSuccessCounter");
+          processMetricsFactory.counter("fallBackHeuristicSuccessCounter");
       this.fallBackHeuristicFailureCounter =
-          metricsFactory.counter("fallBackHeuristicFailureCounter");
+          processMetricsFactory.counter("fallBackHeuristicFailureCounter");
+      this.optimizerInvocations = processMetricsFactory.counter("optimizerInvocations");
+      this.optimizerIterations =
+          processMetricsFactory.histogram("optimizerIterations", OPTIMIZER_ITERATIONS_BUCKETS);
+      this.optimizerLatencySeconds =
+          processMetricsFactory.histogram(
+              "optimizerLatencySeconds", OPTIMIZER_LATENCY_SECONDS_BUCKETS);
+      this.optimizerFailures = processMetricsFactory.counter("optimizerFailures");
+      this.optimizerRuleFiredCounters =
+          Map.of(
+              OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_MQL_SIMPLE_CLAUSE,
+              metricsFactory.counter(
+                  OPTIMIZER_RULE_FIRED_PREFIX
+                      + OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_MQL_SIMPLE_CLAUSE),
+              OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_OPERATOR,
+              metricsFactory.counter(
+                  OPTIMIZER_RULE_FIRED_PREFIX + OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_OPERATOR),
+              OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_MQL_AND_CLAUSE,
+              metricsFactory.counter(
+                  OPTIMIZER_RULE_FIRED_PREFIX + OPTIMIZER_RULE_RANGE_BOUNDS_MERGE_MQL_AND_CLAUSE));
     }
 
     public Counter getTotalQueryCounter() {
@@ -778,8 +1002,8 @@ public class IndexMetricsUpdater implements Closeable {
     }
 
     /**
-     * Records total requested facet buckets for facet queries when {@code enabled} returns true
-     * and the query has positive bucket demand (string {@code numBuckets} plus number/date
+     * Records total requested facet buckets for facet queries when {@code enabled} returns true and
+     * the query has positive bucket demand (string {@code numBuckets} plus number/date
      * boundary-derived buckets). Called from the search execution path after a successful query
      * (e.g. {@link MeteredSearchIndexReader}), consistent with other query-time distribution
      * metrics.
@@ -806,19 +1030,28 @@ public class IndexMetricsUpdater implements Closeable {
       return this.npeQueryCounter;
     }
 
-    // Increments the total failedQueryCounter. And depending on the exception is from malformed
-    // user query, or the internal query processing error, increases corresponding counters.
-    public void handleQueryException(Exception e, String queryDebugString) {
+    /**
+     * Increments the total failedQueryCounter. And depending on the exception is from malformed
+     * user query, or the internal query processing error, increases corresponding counters.
+     *
+     * <p>{@code queryContext} is written to the service log, so it must carry no customer content:
+     * a caller-supplied constant identifying the call site, optionally with a {@link QueryShape}
+     * describing the query's operator structure. Never pass the query body or any value read off it
+     * — search terms, filter values and embedding vectors are customer content, and this log is
+     * operator-readable and shipped to log aggregation. The exception's own message and stack
+     * trace, attached via {@code withCause}, are what identify the failure itself.
+     */
+    public void handleQueryException(Exception e, String queryContext) {
       this.failedQueryCounter.increment();
       if (e instanceof InvalidQueryException) {
         flogger.atWarning().atMostEvery(1, TimeUnit.HOURS).withCause(e).log(
-            "Hit an invalid query: %s", queryDebugString);
+            "Hit an invalid query: %s", queryContext);
         this.invalidQueryCounter.increment();
       } else {
         // Mongot internal processing error should be rare, log with a low limit. We still need a
         // limit because the warning log level may cause a flush().
         flogger.atWarning().atMostEvery(1, TimeUnit.MINUTES).withCause(e).log(
-            "Internal processing error for query: %s", queryDebugString);
+            "Internal processing error for query: %s", queryContext);
 
         if (e instanceof NullPointerException) {
           this.npeQueryCounter.increment();
@@ -875,6 +1108,15 @@ public class IndexMetricsUpdater implements Closeable {
       return this.luceneTopDocsSearchLatencyTimer;
     }
 
+    /**
+     * The search-aggregation reporter owned by this updater. Callers time phases and record
+     * plan-time shape metrics (group type, metric type, nesting, requested buckets) through this
+     * rather than requesting individual instruments.
+     */
+    public SearchAggregationMetricsReporter getSearchAggregationMetricsReporter() {
+      return this.searchAggregationMetricsReporter;
+    }
+
     public Timer getVectorSearchInitialTopDocsLatencyTimer() {
       return this.vectorSearchInitialTopDocsLatencyTimer;
     }
@@ -903,6 +1145,14 @@ public class IndexMetricsUpdater implements Closeable {
       return this.noProgressBatchCounter;
     }
 
+    public Timer getScopedSortChildEvaluationLatencyTimer() {
+      return this.scopedSortChildEvaluationLatencyTimer;
+    }
+
+    public DistributionSummary getScopedSortMatchingChildrenPerSegment() {
+      return this.scopedSortMatchingChildrenPerSegment;
+    }
+
     public Timer getTokenFacetsStateRefreshLatencyTimer() {
       return this.tokenFacetsStateRefreshLatencyTimer;
     }
@@ -923,6 +1173,14 @@ public class IndexMetricsUpdater implements Closeable {
       return this.numCandidatesBinaryQuantized;
     }
 
+    public Counter getAutoNumCandidatesCounter() {
+      return this.autoNumCandidatesCounter;
+    }
+
+    public DistributionSummary getAutoNumCandidatesValues() {
+      return this.autoNumCandidatesValues;
+    }
+
     public DistributionSummary getLimitPerQuery() {
       return this.limitPerQuery;
     }
@@ -935,16 +1193,46 @@ public class IndexMetricsUpdater implements Closeable {
       return this.benefitFromIndexSortCounter;
     }
 
+    public Counter getIndexSortRangeQueryOptimizationAppliedCounter() {
+      return this.indexSortRangeQueryOptimizationAppliedCounter;
+    }
+
+    public Counter getOptimizerInvocations() {
+      return this.optimizerInvocations;
+    }
+
+    public DistributionSummary getOptimizerIterations() {
+      return this.optimizerIterations;
+    }
+
+    public DistributionSummary getOptimizerLatencySeconds() {
+      return this.optimizerLatencySeconds;
+    }
+
+    public Counter getOptimizerFailures() {
+      return this.optimizerFailures;
+    }
+
+    /**
+     * Returns the {@code optimizer.rule.fired.<ruleName>} counter for the named rule, or {@code
+     * null} if the rule is not registered for metrics. The engine guards on null so a rule without
+     * a pre-instantiated counter is silently skipped instead of throwing.
+     */
+    public Counter getOptimizerRuleFiredCounter(String ruleName) {
+      return this.optimizerRuleFiredCounters.get(ruleName);
+    }
+
     public void recordDynamicFeatureFlagLatencyTimer(long durationNs) {
       for (Tags tags : DynamicFeatureFlagsMetricsRecorder.getTagsPerFlag()) {
         this.metricsFactory
+            .getProcessMetricsFactory()
             .timer("dynamicFeatureFlagLatencies", tags)
             .record(durationNs, TimeUnit.NANOSECONDS);
       }
     }
 
     @VisibleForTesting
-    IndexMetrics.QueryingMetrics getMetrics() {
+    IndexMetrics.QueryingMetrics getMetrics(VectorliteIndexMetrics.TieredStorageMetrics tiered) {
       return IndexMetrics.QueryingMetrics.create(
           this.totalQueryCounter,
           this.failedQueryCounter,
@@ -953,7 +1241,8 @@ public class IndexMetricsUpdater implements Closeable {
           this.searchResultBatchLatencyTimer,
           this.tokenFacetsStateRefreshLatencyTimer,
           this.stringFacetsStateRefreshLatencyTimer,
-          this.queryFeaturesMetricsUpdater.getMetrics());
+          this.queryFeaturesMetricsUpdater.getMetrics(),
+          tiered);
     }
 
     public QueryFeaturesMetricsUpdater getQueryFeaturesMetricsUpdater() {
@@ -994,6 +1283,9 @@ public class IndexMetricsUpdater implements Closeable {
       /** Tag prefix for MQL pre-filter operators. */
       private static final String VECTOR_SEARCH_FILTER_TAG_PREFIX = "vectorSearch_operator_";
 
+      /** Tag prefix for the BSON encoding of the {@code queryVector} in vector search queries. */
+      static final String QUERY_VECTOR_ENCODING_TAG_PREFIX = "vectorSearch_queryVector_";
+
       // redundant legacy synonyms counter, keeping to avoid breaking changes to counters
       private static final String SYNONYMS_COUNTER_NAME = "synonyms";
       private static final String TEXT_SYNONYMS_COUNTER_NAME = "textSynonyms";
@@ -1003,6 +1295,8 @@ public class IndexMetricsUpdater implements Closeable {
       private static final String FUZZY_COUNTER_NAME = "fuzzy";
       private static final String WILDCARD_PATHS_COUNTER_NAME = "wildcardPaths";
       private static final String HIGHLIGHTING_COUNTER_NAME = "highlighting";
+      private static final String HIGHLIGHT_WITH_AUTOCOMPLETE_COUNTER_NAME =
+          "highlightWithAutocomplete";
       private static final String CONCURRENT_COUNTER_NAME = "concurrent";
       private static final String SORT_COUNTER_NAME = "sort";
       private static final String TRACKING_COUNTER_NAME = "tracking";
@@ -1011,11 +1305,12 @@ public class IndexMetricsUpdater implements Closeable {
       private static final String REQUIRE_SEQUENCE_TOKENS_COUNTER_NAME = "requireSequenceTokens";
       private static final String RETURN_STORED_SOURCE_COUNTER_NAME = "returnStoredSource";
       private static final String RETURN_SCOPE_COUNTER_NAME = "returnScope";
+      private static final String SCOPED_FACET_COUNTER_NAME = "embeddedScopedFacet";
+      private static final String SCOPED_SORT_COUNTER_NAME = "embeddedScopedSort";
       private static final String VECTOR_SEARCH_FILTER_COUNTER_NAME = "vectorSearch_filter";
       private static final String EXPLAIN_COUNTER_NAME = "explain";
       private static final String FACET_DRILL_SIDEWAYS_COUNTER_NAME =
           "query_collector_facet_drill_sideways";
-      private static final String FACET_DRILL_SIDEWAYS_TYPE_TAG = "type";
 
       private final PerIndexMetricsFactory metricsFactory;
       private final Map<Collector.Type, Counter> collectorTypeCounterMap;
@@ -1039,6 +1334,7 @@ public class IndexMetricsUpdater implements Closeable {
       private final Counter fuzzyCounter;
       private final Counter wildcardPathsCounter;
       private final Counter highlightingCounter;
+      private final Counter highlightWithAutocompleteCounter;
       private final Counter concurrentCounter;
       private final Counter scoreDetailsCounter;
       // incremented when pagination token is present in the request
@@ -1049,15 +1345,29 @@ public class IndexMetricsUpdater implements Closeable {
       private final Counter trackingCounter;
       private final Counter returnStoredSourceCounter;
       private final Counter returnScopeCounter;
+      private final Counter scopedFacetCounter;
+      private final Counter scopedSortCounter;
       private final Counter explainCounter;
       private final Map<QueryOptimizationStatus, Counter> facetDrillSidewaysCounterMap;
+
+      /**
+       * Whether search aggregation is enabled; when it is off the {@code aggregation} collector
+       * counter is not registered, so we don't export a permanently-zero timeseries for a feature
+       * that cannot be used.
+       */
+      private final boolean aggregationEnabled;
 
       /** Counts the number vector search queries with a pre-filter. */
       private final Counter vectorSearchFilterCounter;
 
+      /** Counter per BSON encoding (array vs binData dtypes) of the supplied query vector. */
+      private final Map<Vector.BsonEncoding, Counter> vectorSearchQueryVectorEncodingCounterMap;
+
       @SuppressWarnings("checkstyle:MissingJavadocMethod")
-      public QueryFeaturesMetricsUpdater(PerIndexMetricsFactory metricsFactory) {
+      public QueryFeaturesMetricsUpdater(
+          PerIndexMetricsFactory metricsFactory, boolean aggregationEnabled) {
         this.metricsFactory = metricsFactory;
+        this.aggregationEnabled = aggregationEnabled;
         this.synonymsCounter = createCounter(metricsFactory, SYNONYMS_COUNTER_NAME);
         this.textSynonymsCounter = createCounter(metricsFactory, TEXT_SYNONYMS_COUNTER_NAME);
         this.phraseSynonymsCounter = createCounter(metricsFactory, PHRASE_SYNONYMS_COUNTER_NAME);
@@ -1066,6 +1376,8 @@ public class IndexMetricsUpdater implements Closeable {
         this.fuzzyCounter = createCounter(metricsFactory, FUZZY_COUNTER_NAME);
         this.wildcardPathsCounter = createCounter(metricsFactory, WILDCARD_PATHS_COUNTER_NAME);
         this.highlightingCounter = createCounter(metricsFactory, HIGHLIGHTING_COUNTER_NAME);
+        this.highlightWithAutocompleteCounter =
+            createPerProcessCounter(metricsFactory, HIGHLIGHT_WITH_AUTOCOMPLETE_COUNTER_NAME);
         this.concurrentCounter = createCounter(metricsFactory, CONCURRENT_COUNTER_NAME);
         this.sortCounter = createCounter(metricsFactory, SORT_COUNTER_NAME);
         this.trackingCounter = createCounter(metricsFactory, TRACKING_COUNTER_NAME);
@@ -1076,24 +1388,24 @@ public class IndexMetricsUpdater implements Closeable {
         this.returnStoredSourceCounter =
             createCounter(metricsFactory, RETURN_STORED_SOURCE_COUNTER_NAME);
         this.returnScopeCounter = createCounter(metricsFactory, RETURN_SCOPE_COUNTER_NAME);
+        this.scopedFacetCounter = createCounter(metricsFactory, SCOPED_FACET_COUNTER_NAME);
+        this.scopedSortCounter = createCounter(metricsFactory, SCOPED_SORT_COUNTER_NAME);
         this.explainCounter = createCounter(metricsFactory, EXPLAIN_COUNTER_NAME);
+        // Encode the optimization status in the "name" tag value rather than a separate "type" tag,
+        // so every registration of the "feature" metric shares the single [name] tag-key set that
+        // Prometheus requires.
         this.facetDrillSidewaysCounterMap =
             Map.of(
                 QueryOptimizationStatus.OPTIMIZABLE,
-                metricsFactory.counter(
-                    METRIC_NAME,
-                    Tags.of(NAME_TAG, FACET_DRILL_SIDEWAYS_COUNTER_NAME)
-                        .and(
-                            FACET_DRILL_SIDEWAYS_TYPE_TAG,
-                            QueryOptimizationStatus.OPTIMIZABLE.name().toLowerCase())),
+                createCounter(
+                    metricsFactory,
+                    facetDrillSidewaysCounterName(QueryOptimizationStatus.OPTIMIZABLE)),
                 QueryOptimizationStatus.GENERIC,
-                metricsFactory.counter(
-                    METRIC_NAME,
-                    Tags.of(NAME_TAG, FACET_DRILL_SIDEWAYS_COUNTER_NAME)
-                        .and(
-                            FACET_DRILL_SIDEWAYS_TYPE_TAG,
-                            QueryOptimizationStatus.GENERIC.name().toLowerCase())));
-        this.collectorTypeCounterMap = createEnumCounterMap(metricsFactory, Collector.Type.class);
+                createCounter(
+                    metricsFactory,
+                    facetDrillSidewaysCounterName(QueryOptimizationStatus.GENERIC)));
+        this.collectorTypeCounterMap =
+            createCollectorTypeCounterMap(metricsFactory, aggregationEnabled);
         this.operatorTypeCounterMap = createEnumCounterMap(metricsFactory, Operator.Type.class);
         this.scoreTypeCounterMap = createEnumCounterMap(metricsFactory, Score.Type.class);
         this.textMatchCriteriaCounterMap =
@@ -1113,10 +1425,29 @@ public class IndexMetricsUpdater implements Closeable {
                 metricsFactory, MqlFilterOperator.Category.class, VECTOR_SEARCH_FILTER_TAG_PREFIX);
         this.vectorSearchFilterCounter =
             createCounter(metricsFactory, VECTOR_SEARCH_FILTER_COUNTER_NAME);
+        this.vectorSearchQueryVectorEncodingCounterMap =
+            createEnumCounterMap(
+                metricsFactory, Vector.BsonEncoding.class, QUERY_VECTOR_ENCODING_TAG_PREFIX);
+      }
+
+      private static String facetDrillSidewaysCounterName(QueryOptimizationStatus status) {
+        return String.format(
+            "%s_%s", FACET_DRILL_SIDEWAYS_COUNTER_NAME, status.name().toLowerCase(Locale.ROOT));
       }
 
       private static Counter createCounter(PerIndexMetricsFactory metricsFactory, String tagValue) {
         return metricsFactory.counter(METRIC_NAME, Tags.of(NAME_TAG, tagValue));
+      }
+
+      /**
+       * Like {@link #createCounter}, but registers only the process-wide timeseries: this counter
+       * has no per-index consumer, so the per-index FTDC series would be pure cost.
+       */
+      private static Counter createPerProcessCounter(
+          PerIndexMetricsFactory metricsFactory, String tagValue) {
+        return metricsFactory
+            .getProcessMetricsFactory()
+            .counter(METRIC_NAME, Tags.of(NAME_TAG, tagValue));
       }
 
       private static <T extends Enum<T>> Map<T, Counter> createEnumCounterMap(
@@ -1132,6 +1463,25 @@ public class IndexMetricsUpdater implements Closeable {
                 metricsFactory.counter(
                     METRIC_NAME,
                     Tags.of(NAME_TAG, String.format("%s%s", featureNameTagPrefix, featureName))));
+      }
+
+      /**
+       * Skips the {@code aggregation} counter while search aggregation is disabled, so {@code
+       * collectorTypeCount} doesn't report a feature that cannot be used.
+       */
+      private static Map<Collector.Type, Counter> createCollectorTypeCounterMap(
+          PerIndexMetricsFactory metricsFactory, boolean aggregationEnabled) {
+        Map<Collector.Type, Counter> counters = new EnumMap<>(Collector.Type.class);
+        EnumSet<Collector.Type> types =
+            aggregationEnabled
+                ? EnumSet.allOf(Collector.Type.class)
+                : EnumSet.complementOf(EnumSet.of(Collector.Type.AGGREGATION));
+        for (Collector.Type type : types) {
+          counters.put(
+              type,
+              createCounter(metricsFactory, Enums.convertNameTo(CaseFormat.LOWER_CAMEL, type)));
+        }
+        return counters;
       }
 
       public Counter getSynonymsCounter() {
@@ -1162,8 +1512,29 @@ public class IndexMetricsUpdater implements Closeable {
         return this.highlightingCounter;
       }
 
+      /**
+       * Queries that both highlight and use the autocomplete operator, tracking exposure to the
+       * exact-term highlight regression IFV 5 introduces when autocomplete fields stop writing
+       * offsets.
+       *
+       * <p>Overcounts: it does not check that the highlighted field is the autocompleted one, so a
+       * query autocompleting {@code title} while highlighting {@code body} is counted but pays
+       * nothing.
+       */
+      public Counter getHighlightWithAutocompleteCounter() {
+        return this.highlightWithAutocompleteCounter;
+      }
+
       public Counter getReturnScopeCounter() {
         return this.returnScopeCounter;
+      }
+
+      public Counter getScopedFacetCounter() {
+        return this.scopedFacetCounter;
+      }
+
+      public Counter getScopedSortCounter() {
+        return this.scopedSortCounter;
       }
 
       public Counter getConcurrentCounter() {
@@ -1180,6 +1551,10 @@ public class IndexMetricsUpdater implements Closeable {
 
       public Counter getCollectorTypeCounter(Collector.Type collectorType) {
         return this.collectorTypeCounterMap.get(collectorType);
+      }
+
+      public boolean isAggregationEnabled() {
+        return this.aggregationEnabled;
       }
 
       public Counter getFacetDrillSidewaysCounter(QueryOptimizationStatus status) {
@@ -1232,6 +1607,11 @@ public class IndexMetricsUpdater implements Closeable {
         return this.vectorSearchQueryTypeCounterMap.get(vectorSearchQueryType);
       }
 
+      /** Counter for the BSON encoding of a vector search query's {@code queryVector}. */
+      public Counter getVectorSearchQueryVectorEncodingCounter(Vector.BsonEncoding encoding) {
+        return this.vectorSearchQueryVectorEncodingCounterMap.get(encoding);
+      }
+
       public Counter getKnnBetaFilterOperatorTypeCounterMap(Operator.Type operatorType) {
         return this.knnBetaFilterOperatorTypeCounterMap.get(operatorType);
       }
@@ -1262,6 +1642,9 @@ public class IndexMetricsUpdater implements Closeable {
             this.vectorSearchQueryTypeCounterMap,
             this.knnBetaFilterOperatorTypeCounterMap,
             this.searchVectorSearchFilterOperatorTypeCounterMap,
+            this.vectorSearchFilterOperatorCounterMap,
+            this.vectorSearchQueryVectorEncodingCounterMap,
+            this.vectorSearchFilterCounter,
             this.synonymsCounter,
             this.textSynonymsCounter,
             this.textDeprecatedSynonymsCounter,
@@ -1278,6 +1661,8 @@ public class IndexMetricsUpdater implements Closeable {
             this.trackingCounter,
             this.requireSequenceTokensCounter,
             this.returnScopeCounter,
+            this.scopedFacetCounter,
+            this.scopedSortCounter,
             this.facetDrillSidewaysCounterMap.get(QueryOptimizationStatus.OPTIMIZABLE).count(),
             this.facetDrillSidewaysCounterMap.get(QueryOptimizationStatus.GENERIC).count());
       }
@@ -1338,7 +1723,7 @@ public class IndexMetricsUpdater implements Closeable {
       static final String TOTAL_APPLICABLE_BYTES = "totalApplicableBytes";
 
       private final PerIndexMetricsFactory metricsFactory;
-      private final Tags tags;
+      private final IdFieldTypeGauge idFieldTypeGauge;
       private final DistributionSummary collScanBatchTotalApplicableDocuments;
       private final DistributionSummary collScanBatchTotalApplicableBytes;
       private final DistributionSummary changeStreamBatchTotalApplicableDocuments;
@@ -1349,38 +1734,45 @@ public class IndexMetricsUpdater implements Closeable {
 
       InitialSyncMetrics(PerIndexMetricsFactory metricsFactory, Tags tags) {
         this.metricsFactory = metricsFactory;
-        this.tags = tags;
+        this.idFieldTypeGauge = new IdFieldTypeGauge(metricsFactory, tags);
+        // These replication summaries/timers/counters are diagnostic-only: they are not part of
+        // any per-index IndexStats snapshot, and serverStatus initialSync/changeStream stats come
+        // from a separate Scope.REPLICATION meter set. Register them per-process so they do not add
+        // per-index FTDC fanout (see PerIndexMetricsFactory#getProcessMetricsFactory). The
+        // indexType
+        // breakdown is preserved via the passed-in tags.
+        MetricsFactory processMetricsFactory = metricsFactory.getProcessMetricsFactory();
         this.collScanBatchTotalApplicableDocuments =
-            this.metricsFactory.summary(
+            processMetricsFactory.summary(
                 COLL_SCAN_BATCH_TOTAL_APPLICABLE_DOCUMENTS,
                 tags,
                 PerIndexMetricsFactory.defaultSummaryPercentiles);
 
         this.collScanBatchTotalApplicableBytes =
-            this.metricsFactory.summary(
+            processMetricsFactory.summary(
                 COLL_SCAN_BATCH_TOTAL_APPLICABLE_BYTES,
                 tags,
                 PerIndexMetricsFactory.defaultSummaryPercentiles);
 
         this.changeStreamBatchTotalApplicableDocuments =
-            this.metricsFactory.summary(
+            processMetricsFactory.summary(
                 CHANGE_STREAM_BATCH_TOTAL_APPLICABLE_DOCUMENTS,
                 tags,
                 PerIndexMetricsFactory.defaultSummaryPercentiles);
 
         this.changeStreamBatchTotalApplicableBytes =
-            this.metricsFactory.summary(
+            processMetricsFactory.summary(
                 CHANGE_STREAM_BATCH_TOTAL_APPLICABLE_BYTES,
                 tags,
                 PerIndexMetricsFactory.defaultSummaryPercentiles);
 
         this.collScanBatchGetMoreTimer =
-            this.metricsFactory.timer(COLL_SCAN_BATCH_GET_MORE_TIMER, tags);
+            processMetricsFactory.timer(COLL_SCAN_BATCH_GET_MORE_TIMER, tags);
 
         this.changeStreamBatchGetMoreTimer =
-            this.metricsFactory.timer(CHANGE_STREAM_BATCH_GET_MORE_TIMER, tags);
+            processMetricsFactory.timer(CHANGE_STREAM_BATCH_GET_MORE_TIMER, tags);
 
-        this.totalApplicableBytes = this.metricsFactory.counter(TOTAL_APPLICABLE_BYTES, tags);
+        this.totalApplicableBytes = processMetricsFactory.counter(TOTAL_APPLICABLE_BYTES, tags);
       }
 
       public DistributionSummary getCollectionScanBatchTotalApplicableDocuments() {
@@ -1412,7 +1804,12 @@ public class IndexMetricsUpdater implements Closeable {
       }
 
       public void reportIdKeyFieldType(String idFieldTypeName) {
-        reportIdKeyFieldTypeGauge(this.metricsFactory, this, idFieldTypeName, this.tags);
+        this.idFieldTypeGauge.report(idFieldTypeName);
+      }
+
+      /** Resets the {@code _id} field type gauge to 0 when the index leaves initial sync. */
+      public void resetIdKeyFieldType() {
+        this.idFieldTypeGauge.reset();
       }
 
       @Override
@@ -1427,31 +1824,45 @@ public class IndexMetricsUpdater implements Closeable {
       static final String BATCH_TOTAL_APPLICABLE_BYTES = "batchTotalApplicableBytes";
       static final String BATCH_GET_MORE_TIMER = "getMoreDurations";
       static final String BATCH_DECODING_TIMER = "decodingBatchDurations";
+      static final String BATCH_SCHEDULING_TIMER = "schedulingDurations";
+      static final String PER_INDEX_GET_MORE_TIMER = "perIndexGetMoreDurations";
+
+      private static final double[] NO_PERCENTILES = {};
 
       private final PerIndexMetricsFactory metricsFactory;
-      private final Tags tags;
+      private final IdFieldTypeGauge idFieldTypeGauge;
       private final DistributionSummary batchTotalApplicableDocuments;
       private final DistributionSummary batchTotalApplicableBytes;
       private final Timer batchGetMoreTimer;
       private final Timer batchDecodingTimer;
+      private final Timer batchSchedulingTimer;
+      private final Timer perIndexGetMoreTimer;
 
       SteadyStateMetrics(PerIndexMetricsFactory metricsFactory, Tags tags) {
         this.metricsFactory = metricsFactory;
-        this.tags = tags;
+        this.idFieldTypeGauge = new IdFieldTypeGauge(metricsFactory, tags);
+        // Diagnostic-only replication metrics: register per-process to avoid per-index FTDC fanout
+        // (see PerIndexMetricsFactory#getProcessMetricsFactory). The indexType breakdown is
+        // preserved via the passed-in tags.
+        MetricsFactory processMetricsFactory = metricsFactory.getProcessMetricsFactory();
         this.batchTotalApplicableDocuments =
-            this.metricsFactory.summary(
+            processMetricsFactory.summary(
                 BATCH_TOTAL_APPLICABLE_DOCUMENTS,
                 tags,
                 PerIndexMetricsFactory.defaultSummaryPercentiles);
 
         this.batchTotalApplicableBytes =
-            this.metricsFactory.summary(
+            processMetricsFactory.summary(
                 BATCH_TOTAL_APPLICABLE_BYTES,
                 tags,
                 PerIndexMetricsFactory.defaultSummaryPercentiles);
 
-        this.batchGetMoreTimer = this.metricsFactory.timer(BATCH_GET_MORE_TIMER, tags);
-        this.batchDecodingTimer = this.metricsFactory.timer(BATCH_DECODING_TIMER, tags);
+        this.batchGetMoreTimer = processMetricsFactory.timer(BATCH_GET_MORE_TIMER, tags);
+        this.batchDecodingTimer = processMetricsFactory.timer(BATCH_DECODING_TIMER, tags);
+        this.batchSchedulingTimer =
+            this.metricsFactory.perIndexTimer(BATCH_SCHEDULING_TIMER, tags, NO_PERCENTILES);
+        this.perIndexGetMoreTimer =
+            this.metricsFactory.perIndexTimer(PER_INDEX_GET_MORE_TIMER, tags, NO_PERCENTILES);
       }
 
       public DistributionSummary getBatchTotalApplicableDocuments() {
@@ -1470,8 +1881,21 @@ public class IndexMetricsUpdater implements Closeable {
         return this.batchDecodingTimer;
       }
 
+      public Timer getBatchSchedulingTimer() {
+        return this.batchSchedulingTimer;
+      }
+
+      public Timer getPerIndexGetMoreTimer() {
+        return this.perIndexGetMoreTimer;
+      }
+
       public void reportIdKeyFieldType(String idFieldTypeName) {
-        reportIdKeyFieldTypeGauge(this.metricsFactory, this, idFieldTypeName, this.tags);
+        this.idFieldTypeGauge.report(idFieldTypeName);
+      }
+
+      /** Resets the {@code _id} field type gauge to 0 when the index leaves steady state. */
+      public void resetIdKeyFieldType() {
+        this.idFieldTypeGauge.reset();
       }
 
       @Override
@@ -1481,14 +1905,45 @@ public class IndexMetricsUpdater implements Closeable {
     }
 
     /**
-     * Records the BSON type name of the collection's {@code _id} field as an info gauge fixed at
-     * 1.0, with the type encoded in the {@code bsonType} tag. Safe to call more than once —
-     * Micrometer returns the same gauge on repeated calls with identical tags.
+     * Tracks the BSON type of the collection's {@code _id} field for a single replication phase as
+     * an info gauge. The gauge is registered lazily on the first observed document (with the type
+     * encoded in the {@code bsonType} tag) and reads {@code 1.0} while the index is actively
+     * indexing in this phase. {@link #reset()} flips it to {@code 0.0} when the index leaves the
+     * phase (initial sync completed, resync, or teardown) so completed / discarded generations do
+     * not count.
+     *
+     * <p>Thread-safe: {@link #report(String)} runs on indexing threads while {@link #reset()} runs
+     * on the lifecycle thread.
      */
-    private static void reportIdKeyFieldTypeGauge(
-        PerIndexMetricsFactory metricsFactory, Object owner, String idFieldTypeName, Tags tags) {
-      metricsFactory.perIndexObjectValueGauge(
-          "idFieldType", owner, ignored -> 1.0, tags.and("bsonType", idFieldTypeName));
+    private static final class IdFieldTypeGauge {
+      static final String GAUGE_NAME = "idFieldType";
+      static final String BSON_TYPE_TAG_NAME = "bsonType";
+
+      private final PerIndexMetricsFactory metricsFactory;
+      private final Tags tags;
+      private final AtomicBoolean registered = new AtomicBoolean(false);
+      private final AtomicLong active = new AtomicLong(0L);
+
+      IdFieldTypeGauge(PerIndexMetricsFactory metricsFactory, Tags tags) {
+        this.metricsFactory = metricsFactory;
+        this.tags = tags;
+      }
+
+      void report(String idFieldTypeName) {
+        // Register once with the observed type; the gauge then just reads the mutable holder.
+        if (this.registered.compareAndSet(false, true)) {
+          this.metricsFactory.perIndexObjectValueGauge(
+              GAUGE_NAME,
+              this.active,
+              AtomicLong::doubleValue,
+              this.tags.and(BSON_TYPE_TAG_NAME, idFieldTypeName));
+        }
+        this.active.set(1L);
+      }
+
+      void reset() {
+        this.active.set(0L);
+      }
     }
 
     private static Tags extractTagsFromIndexDefinition(IndexDefinition indexDefinition) {
@@ -1506,22 +1961,38 @@ public class IndexMetricsUpdater implements Closeable {
     public Builder(
         IndexDefinition indexDefinition,
         PerIndexMetricsFactory metricsFactory,
-        boolean isIndexFeatureVersionFourEnabled) {
+        boolean isIndexFeatureVersionFourEnabled,
+        boolean isSearchAggregationEnabled) {
+      this(
+          indexDefinition,
+          metricsFactory,
+          getIndexTypeTag(indexDefinition),
+          isIndexFeatureVersionFourEnabled,
+          isSearchAggregationEnabled);
+    }
+
+    public Builder(
+        IndexDefinition indexDefinition,
+        PerIndexMetricsFactory metricsFactory,
+        IndexTypeData.IndexTypeTag indexTypeTag,
+        boolean isIndexFeatureVersionFourEnabled,
+        boolean isSearchAggregationEnabled) {
       this.indexDefinition = indexDefinition;
       this.metricsFactory = metricsFactory;
       this.indexingMetricsUpdater =
           new IndexingMetricsUpdater(
               metricsFactory.childMetricsFactory(IndexingMetricsUpdater.NAMESPACE),
               indexDefinition.getType(),
-              getIndexTypeTag(indexDefinition),
+              indexTypeTag,
               indexDefinition.getParsedIndexFeatureVersion(),
               isIndexFeatureVersionFourEnabled);
       this.queryingMetricsUpdater =
           new QueryingMetricsUpdater(
               metricsFactory.childMetricsFactory(QueryingMetricsUpdater.NAMESPACE),
-              getIndexTypeTag(indexDefinition),
+              indexTypeTag,
               indexDefinition.getParsedIndexFeatureVersion(),
-              isIndexFeatureVersionFourEnabled);
+              isIndexFeatureVersionFourEnabled,
+              isSearchAggregationEnabled);
       this.replicationMetricsUpdater =
           new ReplicationMetricsUpdater(
               metricsFactory.childMetricsFactory(ReplicationMetricsUpdater.NAMESPACE),

@@ -16,6 +16,7 @@ import com.xgen.mongot.embedding.mongodb.common.DefaultInternalDatabaseResolver;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
 import com.xgen.mongot.index.mongodb.MaterializedViewWriter;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
@@ -113,7 +114,8 @@ public class CommonUtilsTest {
             MeterAndFtdcRegistry.create(mocks.meterRegistry, mocks.ftdcRegistry),
             DefaultConfigManager.ReplicationMode.DISABLE,
             ReplicationStateMonitor.disabled(),
-            mocks.embeddingServiceManagerSupplier);
+            mocks.embeddingServiceManagerSupplier,
+            Optional.empty());
     var noOpReplicationManager = factory.create(Optional.of(mocks.syncSourceConfig));
     Assert.assertTrue(noOpReplicationManager instanceof MongoDbNoOpReplicationManager);
   }
@@ -134,7 +136,8 @@ public class CommonUtilsTest {
             MeterAndFtdcRegistry.create(mocks.meterRegistry, mocks.ftdcRegistry),
             DefaultConfigManager.ReplicationMode.ENABLE,
             ReplicationStateMonitor.enabled(),
-            mocks.embeddingServiceManagerSupplier);
+            mocks.embeddingServiceManagerSupplier,
+            Optional.empty());
 
     // Verify that creation of a normal replication manager is attempted but fails due to mocked
     // configs
@@ -169,7 +172,8 @@ public class CommonUtilsTest {
             MeterAndFtdcRegistry.create(mocks.meterRegistry, mocks.ftdcRegistry),
             DefaultConfigManager.ReplicationMode.DISK_UTILIZATION_BASED,
             replicationStateMonitor,
-            mocks.embeddingServiceManagerSupplier);
+            mocks.embeddingServiceManagerSupplier,
+            Optional.empty());
     var noOpReplicationManager = factory.create(Optional.of(mocks.syncSourceConfig));
     Assert.assertTrue(noOpReplicationManager instanceof MongoDbNoOpReplicationManager);
 
@@ -183,6 +187,38 @@ public class CommonUtilsTest {
     String expectedPattern = "Cannot invoke \".*\" because \".*\" is null";
     // Assert that the message matches the regex pattern
     Assert.assertTrue(Pattern.compile(expectedPattern).matcher(errorMessage).find());
+  }
+
+  @Test
+  public void testGetReplicationManager_mongodDiskBasedModeDoesNotPauseLucene() {
+    var mocks = Mocks.create();
+    var replicationStateMonitor =
+        ReplicationStateMonitor.builder()
+            .setReplicationGate(ToggleGate.closed())
+            .setInitialSyncGate(ToggleGate.opened())
+            .build();
+    var factory =
+        CommonUtils.getReplicationManagerFactory(
+            mocks.dataPath,
+            mocks.replicationConfig,
+            mocks.initialSyncConfig,
+            mocks.durabilityConfig,
+            mocks.featureFlags,
+            mocks.mongotCursorManager,
+            mocks.indexCatalog,
+            mocks.initializedIndexCatalog,
+            MeterAndFtdcRegistry.create(mocks.meterRegistry, mocks.ftdcRegistry),
+            DefaultConfigManager.ReplicationMode.MONGOD_DISK_UTILIZATION_BASED,
+            replicationStateMonitor,
+            mocks.embeddingServiceManagerSupplier,
+            Optional.empty());
+
+    Exception exception =
+        Assert.assertThrows(
+            IllegalStateException.class, () -> factory.create(Optional.of(mocks.syncSourceConfig)));
+    Assert.assertEquals(
+        "Lucene replication can not be paused in ENABLE or MONGOD_DISK_UTILIZATION_BASED mode",
+        exception.getMessage());
   }
 
   @Test
@@ -201,7 +237,8 @@ public class CommonUtilsTest {
             MeterAndFtdcRegistry.create(mocks.meterRegistry, mocks.ftdcRegistry),
             DefaultConfigManager.ReplicationMode.ENABLE,
             ReplicationStateMonitor.enabled(),
-            mocks.embeddingServiceManagerSupplier);
+            mocks.embeddingServiceManagerSupplier,
+            Optional.empty());
 
     var configWithMissingUri =
         SyncSourceConfig.builder()
@@ -230,8 +267,10 @@ public class CommonUtilsTest {
             DefaultConfigManager.ReplicationMode.ENABLE,
             Optional.of(() -> mock(EmbeddingServiceManager.class)),
             mocks.leaseManager,
+            mocks.indexCatalog,
             mocks.mvMetadataCatalog,
-            mocks.autoEmbeddingMongoClient);
+            mocks.autoEmbeddingMongoClient,
+            DynamicFeatureFlagRegistry.empty());
 
     var configWithMissingUri =
         SyncSourceConfig.builder()
@@ -263,8 +302,10 @@ public class CommonUtilsTest {
             DefaultConfigManager.ReplicationMode.ENABLE,
             Optional.of(() -> mock(EmbeddingServiceManager.class)),
             mocks.leaseManager,
+            mocks.indexCatalog,
             mocks.mvMetadataCatalog,
-            mocks.autoEmbeddingMongoClient);
+            mocks.autoEmbeddingMongoClient,
+            DynamicFeatureFlagRegistry.empty());
 
     var configWithValidUri =
         SyncSourceConfig.builder()
@@ -284,6 +325,38 @@ public class CommonUtilsTest {
   }
 
   @Test
+  public void testGetAutoEmbeddingMaterializedViewManagerFactory_closedGateDisablesReplication()
+      throws Exception {
+    var mocks = Mocks.create();
+    var factory =
+        CommonUtils.getAutoEmbeddingMaterializedViewManagerFactory(
+            this.tmpFolder.getRoot().toPath(),
+            mocks.autoEmbeddingMaterializedViewConfig,
+            mocks.initialSyncConfig,
+            mocks.featureFlags,
+            mocks.mongotCursorManager,
+            MeterAndFtdcRegistry.create(mocks.meterRegistry, mocks.ftdcRegistry),
+            DefaultConfigManager.ReplicationMode.DISK_UTILIZATION_BASED,
+            Optional.of(() -> mock(EmbeddingServiceManager.class)),
+            mocks.leaseManager,
+            mocks.indexCatalog,
+            mocks.mvMetadataCatalog,
+            mocks.autoEmbeddingMongoClient,
+            ReplicationStateMonitor.builder()
+                .setReplicationGate(ToggleGate.opened())
+                .setInitialSyncGate(ToggleGate.opened())
+                .setAutoEmbeddingReplicationGate(ToggleGate.closed())
+                .build(),
+            DynamicFeatureFlagRegistry.empty());
+
+    var manager = factory.create(Optional.of(mocks.syncSourceConfig));
+
+    Assert.assertTrue(manager.isPresent());
+    Assert.assertFalse(manager.get().isReplicationSupported());
+    manager.get().shutdown().get(10, TimeUnit.SECONDS);
+  }
+
+  @Test
   public void testGetMaterializedViewManager_disableMode() {
     var mocks = Mocks.create();
     var factory =
@@ -297,8 +370,10 @@ public class CommonUtilsTest {
             DefaultConfigManager.ReplicationMode.DISABLE,
             mocks.embeddingServiceManagerSupplier,
             mocks.leaseManager,
+            mocks.indexCatalog,
             mocks.mvMetadataCatalog,
-            mocks.autoEmbeddingMongoClient);
+            mocks.autoEmbeddingMongoClient,
+            DynamicFeatureFlagRegistry.empty());
     var noOpManager = factory.create(Optional.of(mocks.syncSourceConfig));
     Assert.assertTrue(noOpManager.isEmpty());
   }
@@ -317,8 +392,10 @@ public class CommonUtilsTest {
             DefaultConfigManager.ReplicationMode.ENABLE,
             mocks.embeddingServiceManagerSupplier,
             mocks.leaseManager,
+            mocks.indexCatalog,
             mocks.mvMetadataCatalog,
-            mocks.autoEmbeddingMongoClient);
+            mocks.autoEmbeddingMongoClient,
+            DynamicFeatureFlagRegistry.empty());
 
     // With empty embeddingServiceManagerSupplier should throw IllegalArgumentException.
     IllegalArgumentException exception =
@@ -352,6 +429,9 @@ public class CommonUtilsTest {
             Optional.empty(),
             Optional.empty(),
             Optional.of(100),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
@@ -445,6 +525,9 @@ public class CommonUtilsTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty());
 
     MongotConfigs withOverride = MongotConfigs.getDefault(dataPath, customMvConfig);
@@ -473,8 +556,10 @@ public class CommonUtilsTest {
             DefaultConfigManager.ReplicationMode.DISK_UTILIZATION_BASED,
             Optional.of(() -> mock(EmbeddingServiceManager.class)),
             mocks.leaseManager,
+            mocks.indexCatalog,
             mocks.mvMetadataCatalog,
-            mocks.autoEmbeddingMongoClient);
+            mocks.autoEmbeddingMongoClient,
+            DynamicFeatureFlagRegistry.empty());
     var noOpManager = factory.create(Optional.empty());
     Assert.assertTrue(noOpManager.isPresent());
   }
@@ -518,6 +603,9 @@ public class CommonUtilsTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty());
     Assert.assertEquals(
         "Config should have defaultMaterializedViewNameFormatVersion=0 when explicitly set",
@@ -530,6 +618,9 @@ public class CommonUtilsTest {
     AutoEmbeddingMaterializedViewConfig config =
         AutoEmbeddingMaterializedViewConfig.create(
             CommonReplicationConfig.defaultGlobalReplicationConfig(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),

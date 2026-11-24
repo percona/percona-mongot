@@ -1,16 +1,15 @@
 package com.xgen.mongot.metrics;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.CaseFormat;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.metrics.micrometer.SerializableDistributionSummary;
 import com.xgen.mongot.metrics.micrometer.SerializableTimer;
 import com.xgen.mongot.util.Check;
-import com.xgen.mongot.util.Enums;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.FunctionTimer;
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.ImmutableTag;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
@@ -28,14 +27,21 @@ import org.slf4j.LoggerFactory;
 public class ServerStatusDataExtractor {
   private static final Logger logger = LoggerFactory.getLogger(ServerStatusDataExtractor.class);
 
+  @SuppressWarnings("ImmutableEnumChecker")
   public enum Scope {
-    JVM,
-    LUCENE,
-    REPLICATION,
-    MMS;
+    JVM("jvm"),
+    LUCENE("lucene"),
+    REPLICATION("replication"),
+    MMS("mms");
+
+    private final ImmutableTag tag;
+
+    Scope(String tagValue) {
+      this.tag = new ImmutableTag("Scope", tagValue);
+    }
 
     public Tag getTag() {
-      return Tag.of("Scope", Enums.convertNameTo(CaseFormat.LOWER_CAMEL, this));
+      return this.tag;
     }
   }
 
@@ -487,6 +493,24 @@ public class ServerStatusDataExtractor {
     // Admission-control variant 2 (FIXED_POOL_BOUNDED_QUEUE): query is rejected outright.
     // A given executor only ever registers one of the two counters, so at most one is non-zero.
     public static final String REJECTED = "loadShedding.rejected";
+    // search-envoy overload-retry signal (CLOUDP-438063): a mongot load-shedding rejection that
+    // envoy may retry on another mongot. Prometheus-only (not in serverStatus); only registered
+    // while the OVERLOAD_RETRY_SIGNAL feature flag is on.
+    public static final String ENVOY_RETRY = "loadShedding.envoyRetry";
+    public static final String ENVOY_RETRY_ATTEMPT_TAG = "attempt";
+    public static final String ENVOY_RETRY_OUTCOME_TAG = "outcome";
+    // outcome=rejected: mongot rejected this attempt and envoy may retry on another host.
+    public static final String ENVOY_RETRY_REJECTED = "rejected";
+    // outcome=exhausted: envoy's retry budget is spent and the error is surfaced to the driver.
+    public static final String ENVOY_RETRY_EXHAUSTED = "exhausted";
+    // Total commands received by mongot regardless of outcome (success, rejection, error).
+    // Denominator for load-shedding / envoy-retry rates. Prometheus-only (not in serverStatus).
+    // Tagged retry=true when x-envoy-attempt-count > 1 so first attempts and envoy retries
+    // are separable without subtracting rejection counters.
+    public static final String TOTAL_REQUESTS = "command.totalRequests";
+    public static final String TOTAL_REQUESTS_RETRY_TAG = "retry";
+    public static final String TOTAL_REQUESTS_RETRY_TRUE = "true";
+    public static final String TOTAL_REQUESTS_RETRY_FALSE = "false";
 
     public final double wouldHaveRejectedTotal;
     public final double rejectedTotal;
@@ -567,7 +591,6 @@ public class ServerStatusDataExtractor {
       }
       return new MeterExtractor(meters);
     }
-
 
     /**
      * Some meters are registered twice with the same name but different tags. We group such meters

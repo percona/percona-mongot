@@ -27,6 +27,47 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
       Math.toIntExact(Duration.ofMinutes(30).toSeconds());
   private static final int DEFAULT_REQUEST_RATE_LIMIT_BACKOFF_MS = 100;
 
+  /**
+   * Default optime-lag threshold, in seconds, above which a change-stream task is considered
+   * high-priority by the {@code OptimeLagPriorityStrategy}, when priority scheduling is enabled and
+   * {@link SteadyStateSchedulingMethod#OPTIME_LAG} is selected.
+   */
+  public static final int DEFAULT_STEADY_STATE_PRIORITY_OPTIME_THRESHOLD_SECONDS = 60;
+
+  /**
+   * Default duration, in seconds (10 minutes), of change-stream inactivity after which a
+   * steady-state change-stream cursor is considered idle.
+   */
+  public static final int DEFAULT_CHANGE_STREAM_INACTIVITY_THRESHOLD_SEC = 600;
+
+  /**
+   * Default interval, in seconds (10 minutes), between keep-alive advances issued for an idle
+   * steady-state change-stream cursor.
+   */
+  public static final int DEFAULT_CHANGE_STREAM_KEEP_ALIVE_INTERVAL_SEC = 600;
+
+  /**
+   * Default number of preferred-queue tasks the {@code DualQueueExecutor} runs per regular-queue
+   * task, when priority scheduling is enabled.
+   */
+  public static final int DEFAULT_STEADY_STATE_PRIORITY_RATIO = 1;
+
+  /**
+   * Default priority strategy variant: TOP_K_WORST_LAG. Used when {@code
+   * steadyStateSchedulingMethod} is not configured at all. A separate fallback to {@code
+   * TOP_K_WORST_LAG} for an invalid value lives in {@code MmsConfig}'s {@code
+   * STEADY_STATE_SCHEDULING_METHOD} field definition. If this default has to be changed, both sites
+   * need to be updated.
+   */
+  public static final SteadyStateSchedulingMethod DEFAULT_STEADY_STATE_SCHEDULING_METHOD =
+      SteadyStateSchedulingMethod.TOP_K_WORST_LAG;
+
+  /**
+   * Default number of parallel readers per change stream, used only when {@code
+   * Feature.PARALLEL_CHANGE_STREAM_READERS} is enabled.
+   */
+  public static final int DEFAULT_NUM_PARALLEL_CHANGE_STREAM_READERS = 3;
+
   /** The number of initial syncs that are allowed to be run concurrently. */
   public final int numConcurrentInitialSyncs;
 
@@ -90,6 +131,43 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
    */
   public final int requestRateLimitBackoffMs;
 
+  /**
+   * Which priority strategy variant, if any, classifies change-stream tasks as high-priority, used
+   * only when {@code Feature.CHANGE_STREAM_PRIORITY_SCHEDULING} is enabled.
+   */
+  public final SteadyStateSchedulingMethod steadyStateSchedulingMethod;
+
+  /**
+   * The number of preferred-queue tasks the {@code DualQueueExecutor} runs per regular-queue task,
+   * used only when {@code Feature.CHANGE_STREAM_PRIORITY_SCHEDULING} is enabled.
+   */
+  public final int steadyStatePriorityRatio;
+
+  /**
+   * The optime-lag threshold, in seconds, used by the {@code OptimeLagPriorityStrategy} to classify
+   * a change-stream task as high-priority, used only when {@link #steadyStateSchedulingMethod} is
+   * {@link SteadyStateSchedulingMethod#OPTIME_LAG}.
+   */
+  public final int steadyStatePriorityOptimeThresholdSeconds;
+
+  /**
+   * The duration, in seconds, of change-stream inactivity after which a steady-state change-stream
+   * cursor is considered idle.
+   */
+  public final int changeStreamInactivityThresholdSec;
+
+  /**
+   * The interval, in seconds, between keep-alive advances issued for an idle steady-state
+   * change-stream cursor.
+   */
+  public final int changeStreamKeepAliveIntervalSec;
+
+  /**
+   * The number of parallel readers to open per change stream, used only when {@code
+   * Feature.PARALLEL_CHANGE_STREAM_READERS} is enabled.
+   */
+  public final int numParallelChangeStreamReaders;
+
   private MongoDbReplicationConfig(
       int numConcurrentInitialSyncs,
       int numConcurrentChangeStreams,
@@ -109,7 +187,13 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
       boolean matchCollectionUuidForUpdateLookup,
       boolean enableSplitLargeChangeStreamEvents,
       boolean splitLargeChangeStreamEventsForInitialSync,
-      int requestRateLimitBackoffMs) {
+      int requestRateLimitBackoffMs,
+      int steadyStatePriorityOptimeThresholdSeconds,
+      int changeStreamInactivityThresholdSec,
+      int changeStreamKeepAliveIntervalSec,
+      SteadyStateSchedulingMethod steadyStateSchedulingMethod,
+      int steadyStatePriorityRatio,
+      int numParallelChangeStreamReaders) {
     super(
         pauseAllInitialSyncs,
         pauseInitialSyncOnIndexIds,
@@ -129,6 +213,12 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
     this.maxConcurrentEmbeddingInitialSyncs = maxConcurrentEmbeddingInitialSyncs;
     this.embeddingGetMoreBatchSize = embeddingGetMoreBatchSize;
     this.requestRateLimitBackoffMs = requestRateLimitBackoffMs;
+    this.steadyStatePriorityOptimeThresholdSeconds = steadyStatePriorityOptimeThresholdSeconds;
+    this.changeStreamInactivityThresholdSec = changeStreamInactivityThresholdSec;
+    this.changeStreamKeepAliveIntervalSec = changeStreamKeepAliveIntervalSec;
+    this.steadyStateSchedulingMethod = steadyStateSchedulingMethod;
+    this.steadyStatePriorityRatio = steadyStatePriorityRatio;
+    this.numParallelChangeStreamReaders = numParallelChangeStreamReaders;
   }
 
   /**
@@ -149,7 +239,13 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
       Optional<Integer> optionalMaxInFlightEmbeddingGetMores,
       Optional<Integer> optionalMaxConcurrentEmbeddingInitialSyncs,
       Optional<Integer> embeddingGetMoreBatchSize,
-      Optional<Integer> requestRateLimitBackoffMs) {
+      Optional<Integer> requestRateLimitBackoffMs,
+      Optional<Integer> optionalSteadyStatePriorityOptimeThresholdSeconds,
+      Optional<Integer> optionalChangeStreamInactivityThresholdSec,
+      Optional<Integer> optionalChangeStreamKeepAliveIntervalSec,
+      Optional<SteadyStateSchedulingMethod> optionalSteadyStateSchedulingMethod,
+      Optional<Integer> optionalSteadyStatePriorityRatio,
+      Optional<Integer> optionalNumParallelChangeStreamReaders) {
     return create(
         Runtime.INSTANCE,
         globalReplicationConfig,
@@ -164,7 +260,13 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
         optionalMaxInFlightEmbeddingGetMores,
         optionalMaxConcurrentEmbeddingInitialSyncs,
         embeddingGetMoreBatchSize,
-        requestRateLimitBackoffMs);
+        requestRateLimitBackoffMs,
+        optionalSteadyStatePriorityOptimeThresholdSeconds,
+        optionalChangeStreamInactivityThresholdSec,
+        optionalChangeStreamKeepAliveIntervalSec,
+        optionalSteadyStateSchedulingMethod,
+        optionalSteadyStatePriorityRatio,
+        optionalNumParallelChangeStreamReaders);
   }
 
   /** Used for testing. The above create() method should be called instead. */
@@ -183,7 +285,13 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
       Optional<Integer> optionalMaxInFlightEmbeddingGetMores,
       Optional<Integer> optionalMaxConcurrentEmbeddingInitialSyncs,
       Optional<Integer> embeddingGetMoreBatchSize,
-      Optional<Integer> optionalRequestRateLimitBackoffMs) {
+      Optional<Integer> optionalRequestRateLimitBackoffMs,
+      Optional<Integer> optionalSteadyStatePriorityOptimeThresholdSeconds,
+      Optional<Integer> optionalChangeStreamInactivityThresholdSec,
+      Optional<Integer> optionalChangeStreamKeepAliveIntervalSec,
+      Optional<SteadyStateSchedulingMethod> optionalSteadyStateSchedulingMethod,
+      Optional<Integer> optionalSteadyStatePriorityRatio,
+      Optional<Integer> optionalNumParallelChangeStreamReaders) {
     int numConcurrentInitialSyncs =
         getNumConcurrentInitialSyncsWithDefault(runtime, optionalNumConcurrentInitialSyncs);
     Check.argIsPositive(numConcurrentInitialSyncs, "numConcurrentInitialSyncs");
@@ -228,6 +336,33 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
         getRequestRateLimitBackoffMsWithDefault(optionalRequestRateLimitBackoffMs);
     Check.argIsPositive(requestRateLimitBackoffMs, "requestRateLimitBackoffMs");
 
+    int steadyStatePriorityOptimeThresholdSeconds =
+        optionalSteadyStatePriorityOptimeThresholdSeconds.orElse(
+            DEFAULT_STEADY_STATE_PRIORITY_OPTIME_THRESHOLD_SECONDS);
+    Check.argIsPositive(
+        steadyStatePriorityOptimeThresholdSeconds, "steadyStatePriorityOptimeThresholdSeconds");
+
+    int changeStreamInactivityThresholdSec =
+        optionalChangeStreamInactivityThresholdSec.orElse(
+            DEFAULT_CHANGE_STREAM_INACTIVITY_THRESHOLD_SEC);
+    Check.argIsPositive(changeStreamInactivityThresholdSec, "changeStreamInactivityThresholdSec");
+
+    int changeStreamKeepAliveIntervalSec =
+        optionalChangeStreamKeepAliveIntervalSec.orElse(
+            DEFAULT_CHANGE_STREAM_KEEP_ALIVE_INTERVAL_SEC);
+    Check.argIsPositive(changeStreamKeepAliveIntervalSec, "changeStreamKeepAliveIntervalSec");
+
+    SteadyStateSchedulingMethod steadyStateSchedulingMethod =
+        optionalSteadyStateSchedulingMethod.orElse(DEFAULT_STEADY_STATE_SCHEDULING_METHOD);
+
+    int steadyStatePriorityRatio =
+        optionalSteadyStatePriorityRatio.orElse(DEFAULT_STEADY_STATE_PRIORITY_RATIO);
+    Check.argIsPositive(steadyStatePriorityRatio, "steadyStatePriorityRatio");
+
+    int numParallelChangeStreamReaders =
+        optionalNumParallelChangeStreamReaders.orElse(DEFAULT_NUM_PARALLEL_CHANGE_STREAM_READERS);
+    Check.argIsPositive(numParallelChangeStreamReaders, "numParallelChangeStreamReaders");
+
     return new MongoDbReplicationConfig(
         numConcurrentInitialSyncs,
         numConcurrentChangeStreams,
@@ -246,13 +381,25 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
         globalReplicationConfig.matchCollectionUuidForUpdateLookup(),
         globalReplicationConfig.enableSplitLargeChangeStreamEvents(),
         globalReplicationConfig.splitLargeChangeStreamEventsForInitialSync(),
-        requestRateLimitBackoffMs);
+        requestRateLimitBackoffMs,
+        steadyStatePriorityOptimeThresholdSeconds,
+        changeStreamInactivityThresholdSec,
+        changeStreamKeepAliveIntervalSec,
+        steadyStateSchedulingMethod,
+        steadyStatePriorityRatio,
+        numParallelChangeStreamReaders);
   }
 
   /** Creates a new MongoDbReplicationConfig, defaulting to empty options for everything. */
   public static MongoDbReplicationConfig getDefault() {
     return create(
         defaultGlobalReplicationConfig(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
         Optional.empty(),
         Optional.empty(),
         Optional.empty(),
@@ -391,6 +538,20 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
             Fields.SPLIT_LARGE_CHANGE_STREAM_EVENTS_FOR_INITIAL_SYNC,
             this.splitLargeChangeStreamEventsForInitialSync)
         .field(Fields.REQUEST_RATE_LIMIT_BACKOFF_MS, Optional.of(this.requestRateLimitBackoffMs))
+        .field(
+            Fields.STEADY_STATE_PRIORITY_OPTIME_THRESHOLD_SECONDS,
+            Optional.of(this.steadyStatePriorityOptimeThresholdSeconds))
+        .field(
+            Fields.CHANGE_STREAM_INACTIVITY_THRESHOLD_SEC,
+            Optional.of(this.changeStreamInactivityThresholdSec))
+        .field(
+            Fields.CHANGE_STREAM_KEEP_ALIVE_INTERVAL_SEC,
+            Optional.of(this.changeStreamKeepAliveIntervalSec))
+        .field(Fields.STEADY_STATE_SCHEDULING_METHOD, Optional.of(this.steadyStateSchedulingMethod))
+        .field(Fields.STEADY_STATE_PRIORITY_RATIO, Optional.of(this.steadyStatePriorityRatio))
+        .field(
+            Fields.NUM_PARALLEL_CHANGE_STREAM_READERS,
+            Optional.of(this.numParallelChangeStreamReaders))
         .build();
   }
 
@@ -432,6 +593,30 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
   @Override
   public Type getReplicationType() {
     return Type.DEFAULT;
+  }
+
+  public int getSteadyStatePriorityOptimeThresholdSeconds() {
+    return this.steadyStatePriorityOptimeThresholdSeconds;
+  }
+
+  public int getChangeStreamInactivityThresholdSec() {
+    return this.changeStreamInactivityThresholdSec;
+  }
+
+  public int getChangeStreamKeepAliveIntervalSec() {
+    return this.changeStreamKeepAliveIntervalSec;
+  }
+
+  public SteadyStateSchedulingMethod getSteadyStateSchedulingMethod() {
+    return this.steadyStateSchedulingMethod;
+  }
+
+  public int getSteadyStatePriorityRatio() {
+    return this.steadyStatePriorityRatio;
+  }
+
+  public int getNumParallelChangeStreamReaders() {
+    return this.numParallelChangeStreamReaders;
   }
 
   private static class Fields {
@@ -508,6 +693,49 @@ public final class MongoDbReplicationConfig extends CommonReplicationConfig
 
     private static final Field.Optional<Integer> REQUEST_RATE_LIMIT_BACKOFF_MS =
         Field.builder("requestRateLimitBackoffMs")
+            .intField()
+            .mustBePositive()
+            .optional()
+            .noDefault();
+
+    private static final Field.Optional<Integer> STEADY_STATE_PRIORITY_OPTIME_THRESHOLD_SECONDS =
+        Field.builder("steadyStatePriorityOptimeThresholdSeconds")
+            .intField()
+            .mustBePositive()
+            .optional()
+            .noDefault();
+
+    private static final Field.Optional<Integer> CHANGE_STREAM_INACTIVITY_THRESHOLD_SEC =
+        Field.builder("changeStreamInactivityThresholdSec")
+            .intField()
+            .mustBePositive()
+            .optional()
+            .noDefault();
+
+    private static final Field.Optional<Integer> CHANGE_STREAM_KEEP_ALIVE_INTERVAL_SEC =
+        Field.builder("changeStreamKeepAliveIntervalSec")
+            .intField()
+            .mustBePositive()
+            .optional()
+            .noDefault();
+
+    private static final Field.Optional<SteadyStateSchedulingMethod>
+        STEADY_STATE_SCHEDULING_METHOD =
+            Field.builder("steadyStateSchedulingMethod")
+                .enumField(SteadyStateSchedulingMethod.class)
+                .asUpperUnderscore()
+                .optional()
+                .noDefault();
+
+    private static final Field.Optional<Integer> STEADY_STATE_PRIORITY_RATIO =
+        Field.builder("steadyStatePriorityRatio")
+            .intField()
+            .mustBePositive()
+            .optional()
+            .noDefault();
+
+    private static final Field.Optional<Integer> NUM_PARALLEL_CHANGE_STREAM_READERS =
+        Field.builder("numParallelChangeStreamReaders")
             .intField()
             .mustBePositive()
             .optional()

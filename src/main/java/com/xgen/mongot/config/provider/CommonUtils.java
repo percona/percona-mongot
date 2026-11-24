@@ -16,16 +16,20 @@ import com.xgen.mongot.embedding.mongodb.leasing.StaticLeaderLeaseManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.IndexFactory;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
 import com.xgen.mongot.index.blobstore.BlobstoreSnapshotterManager;
 import com.xgen.mongot.lifecycle.DefaultLifecycleManager;
 import com.xgen.mongot.lifecycle.LifecycleConfig;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.monitor.ReplicationStateMonitor;
+import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.ReplicationManagerFactory;
 import com.xgen.mongot.replication.mongodb.DurabilityConfig;
+import com.xgen.mongot.replication.mongodb.LeaderStatusRegistrar;
 import com.xgen.mongot.replication.mongodb.MongoDbNoOpReplicationManager;
 import com.xgen.mongot.replication.mongodb.MongoDbReplicationManager;
 import com.xgen.mongot.replication.mongodb.autoembedding.AutoEmbeddingMaterializedViewManagerFactory;
@@ -38,6 +42,7 @@ import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,7 +62,8 @@ public class CommonUtils {
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       DefaultConfigManager.ReplicationMode replicationMode,
       ReplicationStateMonitor replicationStateMonitor,
-      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier) {
+      Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
+      Optional<LeaderStatusRegistrar> leaderStatusRegistrar) {
 
     return (Optional<SyncSourceConfig> syncConfig) -> {
       var pauseReplication = replicationStateMonitor.getReplicationGate().isClosed();
@@ -65,9 +71,11 @@ public class CommonUtils {
       // Create a no-op replication manager factory if replication mode is disabled or replication
       // is set to be shutdown
       Check.checkState(
-          !(replicationMode.equals(DefaultConfigManager.ReplicationMode.ENABLE)
+          !((replicationMode.equals(DefaultConfigManager.ReplicationMode.ENABLE)
+                  || replicationMode.equals(
+                      DefaultConfigManager.ReplicationMode.MONGOD_DISK_UTILIZATION_BASED))
               && pauseReplication),
-          "replication can not be paused when replication mode is set to be enabled");
+          "Lucene replication can not be paused in ENABLE or MONGOD_DISK_UTILIZATION_BASED mode");
 
       if (pauseReplication) {
         LOG.atWarn()
@@ -109,7 +117,8 @@ public class CommonUtils {
             indexCatalog,
             initializedIndexCatalog,
             featureFlags,
-            meterAndFtdcRegistry.meterRegistry());
+            meterAndFtdcRegistry.meterRegistry(),
+            meterAndFtdcRegistry.threadPoolResourceBindings());
       }
 
       return MongoDbReplicationManager.create(
@@ -124,7 +133,8 @@ public class CommonUtils {
           initializedIndexCatalog,
           meterAndFtdcRegistry,
           replicationStateMonitor.getInitialSyncGate(),
-          embeddingServiceManagerSupplier);
+          embeddingServiceManagerSupplier,
+          leaderStatusRegistrar);
     };
   }
 
@@ -138,7 +148,8 @@ public class CommonUtils {
       AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMatViewManagerFactory,
       MeterRegistry meterRegistry,
       Gate replicationGate,
-      FeatureFlags featureFlags) {
+      FeatureFlags featureFlags,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
     return new DefaultLifecycleManager(
         factory,
         syncConfig,
@@ -149,7 +160,34 @@ public class CommonUtils {
         meterRegistry,
         replicationGate,
         lifecycleConfig,
-        featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS));
+        featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS),
+        threadPoolResourceBindings);
+  }
+
+  public static DefaultLifecycleManager getLifecycleManager(
+      LifecycleConfig lifecycleConfig,
+      Optional<SyncSourceConfig> syncConfig,
+      ReplicationManagerFactory factory,
+      InitializedIndexCatalog initializedIndexCatalog,
+      IndexFactory indexFactory,
+      Optional<? extends BlobstoreSnapshotterManager> snapshotterManager,
+      AutoEmbeddingMaterializedViewManagerFactory autoEmbeddingMatViewManagerFactory,
+      MeterRegistry meterRegistry,
+      ReplicationStateMonitor replicationStateMonitor,
+      FeatureFlags featureFlags,
+      ThreadPoolResourceMetrics.Bindings threadPoolResourceBindings) {
+    return new DefaultLifecycleManager(
+        factory,
+        syncConfig,
+        initializedIndexCatalog,
+        indexFactory,
+        snapshotterManager,
+        autoEmbeddingMatViewManagerFactory,
+        meterRegistry,
+        replicationStateMonitor,
+        lifecycleConfig,
+        featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS),
+        threadPoolResourceBindings);
   }
 
   /**
@@ -167,9 +205,76 @@ public class CommonUtils {
           DefaultConfigManager.ReplicationMode replicationMode,
           Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
           LeaseManager leaseManager,
+          IndexCatalog indexCatalog,
           MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
-          AutoEmbeddingMongoClient autoEmbeddingMongoClient) {
+          AutoEmbeddingMongoClient autoEmbeddingMongoClient,
+          DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
+    return getAutoEmbeddingMaterializedViewManagerFactory(
+        dataPath,
+        autoEmbeddingMaterializedViewConfig,
+        initialSyncConfig,
+        featureFlags,
+        cursorManager,
+        meterAndFtdcRegistry,
+        replicationMode,
+        embeddingServiceManagerSupplier,
+        leaseManager,
+        indexCatalog,
+        mvMetadataCatalog,
+        autoEmbeddingMongoClient,
+        ToggleGate.opened(),
+        dynamicFeatureFlagRegistry);
+  }
 
+  public static AutoEmbeddingMaterializedViewManagerFactory
+      getAutoEmbeddingMaterializedViewManagerFactory(
+          Path dataPath,
+          AutoEmbeddingMaterializedViewConfig autoEmbeddingMaterializedViewConfig,
+          InitialSyncConfig initialSyncConfig,
+          FeatureFlags featureFlags,
+          MongotCursorManager cursorManager,
+          MeterAndFtdcRegistry meterAndFtdcRegistry,
+          DefaultConfigManager.ReplicationMode replicationMode,
+          Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
+          LeaseManager leaseManager,
+          IndexCatalog indexCatalog,
+          MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
+          AutoEmbeddingMongoClient autoEmbeddingMongoClient,
+          ReplicationStateMonitor replicationStateMonitor,
+          DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
+    return getAutoEmbeddingMaterializedViewManagerFactory(
+        dataPath,
+        autoEmbeddingMaterializedViewConfig,
+        initialSyncConfig,
+        featureFlags,
+        cursorManager,
+        meterAndFtdcRegistry,
+        replicationMode,
+        embeddingServiceManagerSupplier,
+        leaseManager,
+        indexCatalog,
+        mvMetadataCatalog,
+        autoEmbeddingMongoClient,
+        replicationStateMonitor.getAutoEmbeddingReplicationGate(),
+        dynamicFeatureFlagRegistry);
+  }
+
+  private static AutoEmbeddingMaterializedViewManagerFactory
+      getAutoEmbeddingMaterializedViewManagerFactory(
+          Path dataPath,
+          AutoEmbeddingMaterializedViewConfig autoEmbeddingMaterializedViewConfig,
+          InitialSyncConfig initialSyncConfig,
+          FeatureFlags featureFlags,
+          MongotCursorManager cursorManager,
+          MeterAndFtdcRegistry meterAndFtdcRegistry,
+          DefaultConfigManager.ReplicationMode replicationMode,
+          Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
+          LeaseManager leaseManager,
+          IndexCatalog indexCatalog,
+          MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
+          AutoEmbeddingMongoClient autoEmbeddingMongoClient,
+          Gate autoEmbeddingReplicationGate,
+          DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     return (Optional<SyncSourceConfig> syncSourceConfig) -> {
       // Create a no-op replication manager factory if replication mode is disabled.
       if (replicationMode.equals(DefaultConfigManager.ReplicationMode.DISABLE)) {
@@ -180,17 +285,7 @@ public class CommonUtils {
         return Optional.empty();
       }
 
-      if (replicationMode.equals(DefaultConfigManager.ReplicationMode.DISK_UTILIZATION_BASED)) {
-        // Note: DISK_UTILIZATION_BASED mode is treated as ENABLE for auto-embedding because
-        // auto-embedding writes to the MongoDB materialized view collection (not local disk),
-        // so local disk utilization concerns don't apply.
-        // TODO(CLOUDP-360913): Implement customized disk monitor for mat view.
-        LOG.atWarn()
-            .log(
-                "Disk utilization based replication is not supported for auto-embedding, "
-                    + "create MaterializedViewManager anyway.");
-      }
-
+      // Auto-embedding disk modes still create the manager; lifecycle gates pause work.
       var matViewManager =
           MaterializedViewManager.create(
               dataPath,
@@ -201,11 +296,14 @@ public class CommonUtils {
               embeddingServiceManagerSupplier,
               meterAndFtdcRegistry,
               leaseManager,
+              indexCatalog,
               mvMetadataCatalog,
-              autoEmbeddingMongoClient);
+              autoEmbeddingMongoClient,
+              dynamicFeatureFlagRegistry);
       syncSourceConfig.ifPresent(
           syncSource -> {
-            if (matViewManager.updateSyncSource(syncSource)) {
+            if (matViewManager.updateSyncSource(syncSource)
+                && autoEmbeddingReplicationGate.isOpen()) {
               matViewManager.setIsReplicationEnabled(true);
             }
           });
@@ -289,6 +387,8 @@ public class CommonUtils {
    * @param hostname the hostname of this mongot instance
    * @param mvMetadataCatalog the materialized view collection metadata catalog
    * @param opsCommands ops commands for lease manager
+   * @param leaseHeartbeatPartialUpdateEnabled evaluated per heartbeat tick, never cached; wires the
+   *     {@link DynamicFeatureFlags#LEASE_HEARTBEAT_PARTIAL_UPDATE} gating of the lease renewal
    * @return a DynamicLeaderLeaseManager for dynamic leader election
    */
   public static LeaseManager getDynamicLeaseManager(
@@ -297,7 +397,8 @@ public class CommonUtils {
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       String hostname,
       MaterializedViewCollectionMetadataCatalog mvMetadataCatalog,
-      LeaseManagerOpsCommands opsCommands) {
+      LeaseManagerOpsCommands opsCommands,
+      BooleanSupplier leaseHeartbeatPartialUpdateEnabled) {
     LOG.info("Creating DynamicLeaderLeaseManager for dynamic per-index leader election");
     return DynamicLeaderLeaseManager.create(
         autoEmbeddingMongoClient,
@@ -305,6 +406,7 @@ public class CommonUtils {
         hostname,
         dbResolver,
         mvMetadataCatalog,
-        opsCommands);
+        opsCommands,
+        leaseHeartbeatPartialUpdateEnabled);
   }
 }

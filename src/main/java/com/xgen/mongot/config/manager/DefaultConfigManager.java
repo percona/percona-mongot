@@ -1,5 +1,6 @@
 package com.xgen.mongot.config.manager;
 
+import static com.xgen.mongot.config.manager.IndexActions.deferInitializationUntilReady;
 import static com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory.isAutoEmbeddingResolutionFailed;
 import static com.xgen.mongot.util.Check.checkArg;
 import static com.xgen.mongot.util.Check.checkState;
@@ -14,6 +15,7 @@ import com.xgen.mongot.config.backup.ConfigJournalV1;
 import com.xgen.mongot.config.backup.DynamicFeatureFlagJournal;
 import com.xgen.mongot.config.backup.DynamicFeatureFlagJournalWriter;
 import com.xgen.mongot.config.backup.JournalWriter;
+import com.xgen.mongot.config.backup.QuarantinePolicy;
 import com.xgen.mongot.config.manager.metrics.GroupedIndexGenerationMetrics;
 import com.xgen.mongot.config.manager.metrics.IndexGenerationStateMetrics;
 import com.xgen.mongot.config.util.Invariants;
@@ -26,7 +28,9 @@ import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.index.analyzer.InvalidAnalyzerDefinitionException;
 import com.xgen.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinition;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
+import com.xgen.mongot.index.autoembedding.UnresolvedAutoEmbeddingIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGenerationProducer;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
@@ -43,7 +47,9 @@ import com.xgen.mongot.util.CollectionUtils;
 import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -54,6 +60,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import org.bson.types.ObjectId;
 import org.slf4j.Logger;
@@ -65,6 +72,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Methods here need to be synchronized because {@link DefaultConfigManager#close()} might be
  * called from a shutdown hook thread.
+ *
+ * <p>This is the only writer of the members of {@link ConfigState}, which are not thread safe.
  */
 public class DefaultConfigManager implements ConfigManager {
 
@@ -82,6 +91,8 @@ public class DefaultConfigManager implements ConfigManager {
 
   private volatile ImmutableList<IndexInformation> cachedIndexInfo;
 
+  private volatile QuarantinedIndexInfos cachedQuarantinedIndexInfos;
+
   private volatile ImmutableMap<ObjectId, List<IndexGenerationStateMetrics>>
       cachedGroupedIndexGenerationStateMetrics;
 
@@ -89,14 +100,22 @@ public class DefaultConfigManager implements ConfigManager {
 
   protected final Gate initialSyncGate;
   protected final Gate replicationGate;
+  private final Gate autoEmbeddingReplicationGate;
+
+  // Counts auto-embedding replication pause/resume transitions driven by the mongod-disk gate,
+  // tagged by transition. Paired with the autoEmbeddingReplicationPaused gauge registered in the
+  // constructor.
+  private final Counter autoEmbeddingReplicationPauseCounter;
+  private final Counter autoEmbeddingReplicationResumeCounter;
+
+  // Readiness latch: true once replication has started (all live indexes report a known status),
+  // false while still initializing.
+  private final AtomicBoolean replicationInitialized;
 
   final FeatureFlags featureFlags;
 
   @GuardedBy("this")
   private boolean closed;
-
-  @GuardedBy("this")
-  private boolean replicationInitialized;
 
   @GuardedBy("this")
   private Instant replicationStatusChangeTimestamp;
@@ -110,9 +129,27 @@ public class DefaultConfigManager implements ConfigManager {
     this.metricsFactory = new MetricsFactory("configManager", meterRegistry);
 
     this.closed = false;
-    this.replicationInitialized = false;
     this.initialSyncGate = replicationStateMonitor.getInitialSyncGate();
     this.replicationGate = replicationStateMonitor.getReplicationGate();
+    this.autoEmbeddingReplicationGate = replicationStateMonitor.getAutoEmbeddingReplicationGate();
+    // Read the gate directly so the gauge keeps reporting the paused state even while a pause has
+    // torn down the auto-embedding materialized-view replicator (1 = paused by disk pressure,
+    // 0 = running).
+    this.metricsFactory.objectValueGauge(
+        "autoEmbeddingReplicationPaused",
+        this.autoEmbeddingReplicationGate,
+        gate -> gate.isClosed() ? 1.0 : 0.0);
+    this.autoEmbeddingReplicationPauseCounter =
+        this.metricsFactory.counter(
+            "autoEmbeddingReplicationGateTransitions", Tags.of("transition", "pause"));
+    this.autoEmbeddingReplicationResumeCounter =
+        this.metricsFactory.counter(
+            "autoEmbeddingReplicationGateTransitions", Tags.of("transition", "resume"));
+    this.replicationInitialized =
+        this.metricsFactory.objectValueGauge(
+            "replicationInitialized",
+            new AtomicBoolean(),
+            initialized -> initialized.get() ? 1 : 0);
     this.featureFlags = featureFlags;
     this.replicationStatusChangeTimestamp = Instant.now();
 
@@ -142,6 +179,7 @@ public class DefaultConfigManager implements ConfigManager {
       IndexCatalog indexCatalog,
       Optional<Set<ObjectId>> desiredIndexIds,
       InitializedIndexCatalog initializedIndexCatalog,
+      IncompatibleIndexes incompatibleIndexes,
       MongotCursorManager cursorManager,
       IndexFactory indexFactory,
       Optional<MaterializedViewIndexFactory> materializedViewIndexFactory,
@@ -156,6 +194,7 @@ public class DefaultConfigManager implements ConfigManager {
         ConfigState.create(
             new StagedIndexes(),
             indexCatalog,
+            incompatibleIndexes,
             new PhasingOutIndexes(),
             initializedIndexCatalog,
             cursorManager,
@@ -188,11 +227,12 @@ public class DefaultConfigManager implements ConfigManager {
       MeterRegistry meterRegistry,
       Path dynamicFeatureFlagsJournalPath) {
 
-    Crash.because("failed to initialize from config journal")
-        .ifThrows(
-            () ->
-                initializeFromExistingJournal(
-                    configState, configJournalPath, desiredIndexIds, meterRegistry));
+    initializeFromExistingJournalOrCrash(
+        configState,
+        configJournalPath,
+        desiredIndexIds,
+        meterRegistry,
+        quarantinePolicy(featureFlags));
 
     Crash.because("failed to upgrade index format versions")
         .ifThrows(() -> IndexFormatVersionUpgrader.upgradeAndDrop(configState));
@@ -223,10 +263,16 @@ public class DefaultConfigManager implements ConfigManager {
 
     configState.indexCatalog.getIndexes().stream()
         .filter(indexGeneration -> !isAutoEmbeddingResolutionFailed(indexGeneration))
+        .filter(
+            indexGeneration ->
+                !deferInitializationUntilReady(configState.indexFactory, indexGeneration))
         .forEach(indexGeneration -> configState.getLifecycleManager().add(indexGeneration));
 
     configState.staged.getIndexes().stream()
         .filter(indexGeneration -> !isAutoEmbeddingResolutionFailed(indexGeneration))
+        .filter(
+            indexGeneration ->
+                !deferInitializationUntilReady(configState.indexFactory, indexGeneration))
         .forEach(indexGeneration -> configState.getLifecycleManager().add(indexGeneration));
   }
 
@@ -263,12 +309,48 @@ public class DefaultConfigManager implements ConfigManager {
     }
   }
 
+  /**
+   * Maps the {@link Feature#QUARANTINE_UNPARSEABLE_INDEX} feature flag onto the {@link
+   * QuarantinePolicy} used when reading the config journal. The parsing layer takes no dependency
+   * on the feature flag system, so the translation happens here.
+   */
+  protected static QuarantinePolicy quarantinePolicy(FeatureFlags featureFlags) {
+    return featureFlags.isEnabled(Feature.QUARANTINE_UNPARSEABLE_INDEX)
+        ? QuarantinePolicy.QUARANTINE
+        : QuarantinePolicy.FAIL_FAST;
+  }
+
+  /**
+   * Reads the config journal, crashing under {@link
+   * Crash.CrashCategory#CONFIG_JOURNAL_INITIALIZE_FAILURE} if it cannot be read. Shared by the
+   * community/on-prem and Atlas initialize entry points so a journal this binary cannot read is
+   * categorized the same way on both, rather than one path reporting it as {@code OTHER}.
+   */
+  protected static void initializeFromExistingJournalOrCrash(
+      ConfigState configState,
+      Path configJournalPath,
+      Optional<Set<ObjectId>> desiredIndexIds,
+      MeterRegistry meterRegistry,
+      QuarantinePolicy quarantinePolicy) {
+    Crash.because("failed to initialize from config journal")
+        .withCrashCategory(Crash.CrashCategory.CONFIG_JOURNAL_INITIALIZE_FAILURE)
+        .ifThrows(
+            () ->
+                initializeFromExistingJournal(
+                    configState,
+                    configJournalPath,
+                    desiredIndexIds,
+                    meterRegistry,
+                    quarantinePolicy));
+  }
+
   /** Initialize state with a config journal if one was written before. */
   protected static void initializeFromExistingJournal(
       ConfigState configState,
       Path configJournalPath,
       Optional<Set<ObjectId>> desiredIndexIds,
-      MeterRegistry meterRegistry)
+      MeterRegistry meterRegistry,
+      QuarantinePolicy quarantinePolicy)
       throws IOException,
           BsonParseException,
           Invariants.InvariantException,
@@ -276,7 +358,7 @@ public class DefaultConfigManager implements ConfigManager {
     LOG.info("Initializing");
 
     Optional<ConfigJournalV1> optionalConfigJournal =
-        ConfigJournalV1.fromFileIfExists(configJournalPath);
+        ConfigJournalV1.fromFileIfExists(configJournalPath, quarantinePolicy);
 
     // If no journal had been written before, there's nothing to initialize.
     if (optionalConfigJournal.isEmpty()) {
@@ -295,7 +377,8 @@ public class DefaultConfigManager implements ConfigManager {
       List<VectorIndexDefinition> vectorDefinitions,
       List<SearchIndexDefinition> searchDefinitions,
       List<OverriddenBaseAnalyzerDefinition> analyzerDefinitions,
-      Set<UUID> directMongodCollectionSet) {
+      Set<UUID> directMongodCollectionSet,
+      Set<ObjectId> unreadableDesiredIds) {
     ensureOpen("update");
 
     // no dynamic feature flag update is needed since this code path only serves community and
@@ -307,7 +390,8 @@ public class DefaultConfigManager implements ConfigManager {
                     vectorDefinitions,
                     searchDefinitions,
                     analyzerDefinitions,
-                    directMongodCollectionSet));
+                    directMongodCollectionSet,
+                    unreadableDesiredIds));
 
     // Update our cache of index information.
     updateIndexInfos();
@@ -342,11 +426,19 @@ public class DefaultConfigManager implements ConfigManager {
     }
   }
 
+  /**
+   * Reconciles this node's state with the desired index definitions.
+   *
+   * @param unreadableDesiredIds ids still desired but whose authoritative definition could not be
+   *     used. They are kept out of every destructive diff, and quarantined indexes outside this set
+   *     are dropped.
+   */
   protected final synchronized void updateCycle(
       List<VectorIndexDefinition> vectorDefinitions,
       List<SearchIndexDefinition> searchDefinitions,
       List<OverriddenBaseAnalyzerDefinition> analyzerDefinitions,
-      Set<UUID> directMongodCollectionSet)
+      Set<UUID> directMongodCollectionSet,
+      Set<ObjectId> unreadableDesiredIds)
       throws IOException, InvalidAnalyzerDefinitionException, Invariants.InvariantException {
     List<IndexDefinitionGenerationProducer> producers =
         IndexDefinitionGenerationProducer.createProducers(
@@ -360,14 +452,13 @@ public class DefaultConfigManager implements ConfigManager {
         searchDefinitions,
         analyzerDefinitions,
         producers,
+        unreadableDesiredIds,
         this.metricsFactory);
 
-    if (this.featureFlags.isEnabled(
-        Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
       // Retries failed initial sync indexes.
       IndexInitialSyncRecovery.retryFailedInitialSyncIndexes(
           this.configState, IndexActions.withReplication(this.configState));
-
     }
     // hot swaps staged indexes that reached steady state.
     StagedIndexesSwapper.swapReady(this.configState, this.featureFlags, this.metricsFactory);
@@ -376,9 +467,71 @@ public class DefaultConfigManager implements ConfigManager {
     IndexRecoveryStager.stageRecoveryAttempts(
         this.configState, directMongodCollectionSet, this.featureFlags);
 
+    // Backstop: promote indexes whose initialization prerequisites became available.
+    promoteReadyIndexes();
+
     // drops phasing out indexes that are no longer used.
     PhasingOutIndexesDropper.dropUnused(
         this.configState, IndexActions.withReplication(this.configState));
+  }
+
+  /**
+   * Enqueues custom vector engine generations whose initialization prerequisites became available.
+   * Idempotent: generations already tracked by the lifecycle manager are skipped.
+   *
+   * <p>Uses the same generation id key {@link LifecycleManager#add} stores under (the derived id
+   * for auto-embedding generations). Also invoked from {@link #updateCycle} as a backstop.
+   */
+  @Override
+  public synchronized void promoteReadyIndexes() {
+    ensureOpen("promoteReadyIndexes");
+
+    LifecycleManager lifecycleManager = this.configState.getLifecycleManager();
+    IndexFactory indexFactory = this.configState.indexFactory;
+
+    var indexGenerations =
+        CollectionUtils.concat(
+            this.configState.indexCatalog.getIndexes(), this.configState.staged.getIndexes());
+    var readyIndexGenerations =
+        indexGenerations.stream()
+            .filter(indexGeneration -> !isAutoEmbeddingResolutionFailed(indexGeneration))
+            .filter(DefaultConfigManager::isCustomVectorEngine)
+            .filter(
+                indexGeneration ->
+                    indexFactory.isReadyToInitialize(indexGeneration.getDefinitionGeneration()))
+            .filter(
+                indexGeneration ->
+                    !lifecycleManager.contains(lifecycleGenerationId(indexGeneration)))
+            .toList();
+
+    for (IndexGeneration indexGeneration : readyIndexGenerations) {
+      GenerationId generationId = indexGeneration.getGenerationId();
+      LOG.atInfo()
+          .addKeyValue("indexId", generationId.indexId)
+          .addKeyValue("generationId", generationId)
+          .log("Promoting ready custom vector engine index into lifecycle");
+      lifecycleManager.add(indexGeneration);
+    }
+
+    if (!readyIndexGenerations.isEmpty()) {
+      updateIndexInfos();
+    }
+  }
+
+  private static boolean isCustomVectorEngine(IndexGeneration indexGeneration) {
+    return indexGeneration.getDefinition() instanceof VectorIndexDefinition vectorDefinition
+        && vectorDefinition.isCustomVectorEngineIndex();
+  }
+
+  /**
+   * Generation id under which {@link LifecycleManager#add} stores {@code indexGeneration}, matching
+   * {@link com.xgen.mongot.lifecycle.DefaultLifecycleManager#add}.
+   */
+  private static GenerationId lifecycleGenerationId(IndexGeneration indexGeneration) {
+    if (indexGeneration instanceof AutoEmbeddingIndexGeneration autoEmbedding) {
+      return autoEmbedding.getDerivedIndexGeneration().getGenerationId();
+    }
+    return indexGeneration.getGenerationId();
   }
 
   @Override
@@ -405,6 +558,13 @@ public class DefaultConfigManager implements ConfigManager {
                                     indexGen.getGenerationId());
                             if (initializedIndex.isPresent()) {
                               initializedIndex.get().close();
+                            } else if (indexGen.getIndex()
+                                instanceof UnresolvedAutoEmbeddingIndex unresolved) {
+                              // An unresolved auto-embedding index that is not in the initialized
+                              // catalog (a failed generation retaining an unopened derived handle;
+                              // offline-serving ones register and are closed by the branch above)
+                              // may still hold a derived index handle, so close it here.
+                              unresolved.close();
                             } else {
                               GenerationId generationId = indexGen.getGenerationId();
                               LOG.atWarn()
@@ -430,11 +590,18 @@ public class DefaultConfigManager implements ConfigManager {
   }
 
   @Override
+  public QuarantinedIndexInfos getQuarantinedIndexInfos() {
+    return this.cachedQuarantinedIndexInfos;
+  }
+
+  @Override
   public synchronized ReplicationStatus getReplicationStatus() {
+    var lifecycleManager = this.configState.getLifecycleManager();
     return new ReplicationStatus(
         Instant.now(),
         this.replicationStatusChangeTimestamp,
-        !this.configState.getLifecycleManager().isReplicationSupported(),
+        !lifecycleManager.isReplicationSupported(),
+        !lifecycleManager.isAutoEmbeddingReplicationSupported(),
         getInitialSyncStatus());
   }
 
@@ -464,6 +631,8 @@ public class DefaultConfigManager implements ConfigManager {
     AllIndexInformations allIndexInfos = AllPresentIndexes.allIndexInfos(this.configState);
 
     this.cachedIndexInfo = ImmutableList.copyOf(allIndexInfos.indexInformations());
+    this.cachedQuarantinedIndexInfos =
+        QuarantinedIndexInfos.from(this.configState.incompatibleIndexes);
     this.cachedGroupedIndexGenerationStateMetrics =
         ImmutableMap.copyOf(allIndexInfos.allIndexGenerationsGrouped());
   }
@@ -482,10 +651,19 @@ public class DefaultConfigManager implements ConfigManager {
 
   @Override
   public synchronized boolean isReplicationInitialized() {
-    if (!this.replicationInitialized) {
-      this.replicationInitialized = this.configState.getLifecycleManager().isInitialized();
+    if (!this.replicationInitialized.get()) {
+      // Only the live indexes matter here, since other indexes don't affect query availability.
+      // We can't rely on LifecycleManager because some indexes (e.g. VectorLite) aren't fully
+      // managed by it.
+      boolean initialized =
+          this.configState.indexCatalog.getIndexes().stream()
+              .noneMatch(indexGeneration -> indexGeneration.getIndex().getStatus().isUnknown());
+      if (initialized) {
+        this.replicationInitialized.set(true);
+      }
+      return initialized;
     }
-    return this.replicationInitialized;
+    return true;
   }
 
   @GuardedBy("this")
@@ -498,15 +676,45 @@ public class DefaultConfigManager implements ConfigManager {
   }
 
   private void shutdownReplication() {
-    Crash.because("failed waiting for lifecycle manager to shut down replication")
+    shutdownReplication(REPLICATION_MANAGER_SHUTDOWN_TIMEOUT);
+  }
+
+  /**
+   * Shuts replication down, crashing if it has not finished within {@code timeout}.
+   *
+   * <p>The shutdown runs on its own thread because {@link LifecycleManager#shutdownReplication()}
+   * blocks before it returns its future (CLOUDP-447488). Waiting on that future from this thread
+   * never reaches the timeout, so a stuck shutdown holds this monitor indefinitely and blocks conf
+   * calls.
+   */
+  @VisibleForTesting
+  synchronized void shutdownReplication(Duration timeout) {
+    LifecycleManager lifecycleManager = this.configState.getLifecycleManager();
+    Thread shutdownThread =
+        new Thread(
+            () ->
+                Crash.because("failed to shut down replication manager")
+                    .withThreadDump()
+                    .ifThrowsExceptionOrError(
+                        () -> {
+                          lifecycleManager.shutdownReplication().get();
+                        }),
+            "replication-shutdown");
+
+    shutdownThread.setDaemon(true);
+    shutdownThread.start();
+
+    Crash.ifDoesNotJoin(shutdownThread, timeout, Crash.CrashCategory.EXECUTOR_SHUTDOWN);
+  }
+
+  private void shutdownAutoEmbeddingReplication() {
+    Crash.because("failed waiting for materialized view manager to shut down replication")
         .ifThrows(
             () -> {
-              // Need to reassure the compiler that we are locking prior to accessing
-              // this.configState since it cannot understand when the lambda is invoked.
               synchronized (this) {
-                Crash.because("failed to shut down replication manager")
+                Crash.because("failed to shut down materialized view replication")
                     .ifCompletesExceptionally(
-                        this.configState.getLifecycleManager().shutdownReplication())
+                        this.configState.getLifecycleManager().shutdownAutoEmbeddingReplication())
                     .get(REPLICATION_MANAGER_SHUTDOWN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
               }
             });
@@ -528,17 +736,42 @@ public class DefaultConfigManager implements ConfigManager {
 
   /** Determines whether disk usage should trigger a replication restart. */
   protected final synchronized void handleDiskBasedReplicationRestart() {
-    // Restart replication if intended pause value changes.
-    var isReplicationPaused = !this.configState.getLifecycleManager().isReplicationSupported();
-    var shouldRestartReplication = this.shouldReplicationBePaused() != isReplicationPaused;
-
     Optional<SyncSourceConfig> currentConfig =
         this.configState.getLifecycleManager().getSyncSourceConfig();
-    if (currentConfig.isPresent() && shouldRestartReplication) {
+    if (currentConfig.isEmpty()) {
+      return;
+    }
+    SyncSourceConfig syncSourceConfig = currentConfig.get();
+
+    var shouldPauseReplication = this.shouldReplicationBePaused();
+    var isReplicationPaused = !this.configState.getLifecycleManager().isReplicationSupported();
+    if (shouldPauseReplication != isReplicationPaused) {
       LOG.atInfo()
           .addKeyValue("replicationGate", this.replicationGate.toString())
           .log("Disk usage crossed pause or resume threshold, restarting replication");
-      shutdownAndRestartReplication(currentConfig.get());
+      // A full replication restart already shuts down MaterializedViewManager through
+      // shutdownReplication(); restartReplication() will also apply the auto-embedding gate.
+      shutdownAndRestartReplication(syncSourceConfig);
+      return;
+    }
+
+    var lifecycleManager = this.configState.getLifecycleManager();
+    var shouldPauseAutoEmbeddingReplication = this.shouldAutoEmbeddingReplicationBePaused();
+    var isAutoEmbeddingReplicationPaused = !lifecycleManager.isAutoEmbeddingReplicationSupported();
+    // Only reconcile when this node actually runs auto-embedding replication; otherwise there is
+    // nothing to pause or resume and a closed gate would re-trigger this every cycle.
+    if (lifecycleManager.hasAutoEmbeddingReplication()
+        && shouldPauseAutoEmbeddingReplication != isAutoEmbeddingReplicationPaused) {
+      LOG.atInfo()
+          .addKeyValue("autoEmbeddingReplicationGate", this.autoEmbeddingReplicationGate.toString())
+          .log("Disk usage crossed auto-embedding pause or resume threshold");
+      if (shouldPauseAutoEmbeddingReplication) {
+        this.autoEmbeddingReplicationPauseCounter.increment();
+        shutdownAutoEmbeddingReplication();
+      } else {
+        this.autoEmbeddingReplicationResumeCounter.increment();
+        lifecycleManager.restartAutoEmbeddingReplication(syncSourceConfig);
+      }
     }
   }
 
@@ -561,14 +794,18 @@ public class DefaultConfigManager implements ConfigManager {
     return this.replicationGate.isClosed();
   }
 
+  protected final boolean shouldAutoEmbeddingReplicationBePaused() {
+    return this.autoEmbeddingReplicationGate.isClosed();
+  }
+
   /**
-   * ReplicationMode is set by {@code DiskMonitorConfig}. Replication mode will be set to ENABLE if
-   * the config is empty or both DISABLE and DISK_UTILIZATION_BASED flags are false. DISABLE
-   * overrides DISK_UTILIZATION_BASED
+   * ENABLE leaves replication ungated. DISABLE turns it off. DISK_UTILIZATION_BASED gates Lucene
+   * and MV; MONGOD_DISK_UTILIZATION_BASED gates only MV.
    */
   public enum ReplicationMode {
     ENABLE,
     DISABLE,
-    DISK_UTILIZATION_BASED
+    DISK_UTILIZATION_BASED,
+    MONGOD_DISK_UTILIZATION_BASED
   }
 }

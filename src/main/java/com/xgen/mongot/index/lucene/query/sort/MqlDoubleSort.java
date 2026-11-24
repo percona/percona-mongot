@@ -37,20 +37,22 @@ class MqlDoubleSort extends MqlSortedNumericSortField {
   }
 
   private final boolean enablePruning;
-  private final NullEmptySortPosition nullEmptySortPosition;
+  protected final NullEmptySortPosition nullEmptySortPosition;
 
   MqlDoubleSort(
       FieldName.TypeField fieldType,
       MongotSortField sortField,
       boolean enablePruning,
       Optional<FieldPath> embeddedRoot,
-      boolean indexSorted) {
+      boolean indexSorted,
+      boolean isSortableNumberBetaV1) {
     super(
         fieldType.getLuceneFieldName(sortField.field(), embeddedRoot),
         Type.LONG, // Use LONG because we index doubles with custom encoding + LongPoint
         sortField.options().isReverse(),
         sortField.options().selector().numericSelector,
-        indexSorted);
+        indexSorted,
+        isSortableNumberBetaV1);
     this.enablePruning = enablePruning;
     this.nullEmptySortPosition =
         ((UserFieldSortOptions) sortField.options()).nullEmptySortPosition();
@@ -58,15 +60,30 @@ class MqlDoubleSort extends MqlSortedNumericSortField {
   }
 
   @Override
-  public FieldComparator<?> getComparator(int numHits, Pruning lucenePruning) {
+  protected final FieldComparator<?> createQueryTimeFieldComparator(
+      int numHits, Pruning lucenePruning) {
     // Consider both mongot & lucene pruning configuration
     Pruning configurePruning = this.enablePruning ? lucenePruning : Pruning.NONE;
 
-    // Wrap built-in comparator with an encoded Long -> BsonDouble converter
-    LongComparator comparator = (LongComparator) super.getComparator(numHits, configurePruning);
+    // Wrap the inner (encoded-long) comparator with an encoded Long -> BsonDouble converter
     return new FieldComparatorBsonWrapper<>(
-        comparator,
-        new DoubleFieldConverter((Long) super.missingValue),
+        createInnerComparator(numHits, configurePruning),
+        createConverter(),
         this.nullEmptySortPosition.getNullMissingSortValue());
+  }
+
+  /** Matches the inner comparator's representation of missing values. */
+  protected DoubleFieldConverter createConverter() {
+    return new DoubleFieldConverter((Long) super.missingValue);
+  }
+
+  /**
+   * Builds the inner comparator over the encoded-long doubles. Overridden by the embeddedDoc-scoped
+   * variant to reduce over a parent's matching children instead of reading the parent's own value.
+   * Uses {@code createPlainComparator} (not {@code super.getComparator}, which would recurse back
+   * through {@code MqlSortedNumericSortField.getComparator}) for the raw Lucene comparator.
+   */
+  protected FieldComparator<Long> createInnerComparator(int numHits, Pruning pruning) {
+    return (LongComparator) createPlainComparator(numHits, pruning);
   }
 }

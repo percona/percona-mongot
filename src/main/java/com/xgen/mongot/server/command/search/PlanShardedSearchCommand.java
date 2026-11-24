@@ -1,8 +1,10 @@
 package com.xgen.mongot.server.command.search;
 
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.SearchQuery;
+import com.xgen.mongot.index.query.SearchQueryParseOptions;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.server.command.CommandFactory;
 import com.xgen.mongot.server.command.search.definition.PlanShardedSearchCommandResponseDefinition;
@@ -44,13 +46,29 @@ public class PlanShardedSearchCommand implements Command {
           this.metadata
               .dynamicFeatureFlagRegistry()
               .evaluateClusterInvariant(DynamicFeatureFlags.ENABLE_10K_BUCKET_LIMIT);
+      boolean searchAggregationEnabled =
+          this.metadata.featureFlags().isEnabled(Feature.SEARCH_AGGREGATION);
+      boolean embeddedScopedSortEnabled =
+          this.metadata
+              .dynamicFeatureFlagRegistry()
+              .evaluateClusterInvariant(DynamicFeatureFlags.ENABLE_EMBEDDED_SCOPED_SORT);
+      boolean enforceRequestedBucketLimit =
+          this.metadata
+              .dynamicFeatureFlagRegistry()
+              .evaluateClusterInvariant(
+                  DynamicFeatureFlags.ENABLE_SEARCH_AGGREGATION_REQUESTED_BUCKET_LIMIT);
       SearchQuery queryDefinition =
           SearchQuery.fromBson(
               this.definition.queryDocument(),
               QueryOptimizationFlags.DEFAULT_OPTIONS,
-              allow10k);
+              new SearchQueryParseOptions(
+                  allow10k, searchAggregationEnabled, embeddedScopedSortEnabled));
       PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan shardedSearchPlan =
-          ShardedSearchPlanner.planSearch(queryDefinition, this.definition.searchFeatures());
+          ShardedSearchPlanner.planSearch(
+              queryDefinition,
+              this.definition.searchFeatures(),
+              this.metadata.featureFlags(),
+              enforceRequestedBucketLimit);
 
       return PlanShardedSearchCommandResponseDefinition.create(shardedSearchPlan).toBson();
     } catch (ShardedSearchPlannerException | BsonParseException e) {

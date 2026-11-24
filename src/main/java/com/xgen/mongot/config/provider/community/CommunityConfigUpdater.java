@@ -8,10 +8,10 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.mongodb.MongoNamespace;
 import com.mongodb.ServerAddress;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.config.provider.mongod.ConfigUpdaterUtils;
 import com.xgen.mongot.config.updater.ConfigUpdater;
@@ -150,11 +150,15 @@ public class CommunityConfigUpdater implements ConfigUpdater {
                 Optional.empty())
             : Set.of();
 
+    // TODO(CLOUDP-442253): pass the ids of AIC rows whose definition failed to parse. The listing
+    // does not report them yet, so on Community/EA an unreadable definition is still diffed as a
+    // deletion and its quarantined index dropped.
     this.configManager.update(
         indexesByType.vectorIndexes,
         indexesByType.searchIndexes,
         List.of(),
-        directMongodCollectionSet);
+        directMongodCollectionSet,
+        Set.of());
   }
 
   @GuardedBy("this")

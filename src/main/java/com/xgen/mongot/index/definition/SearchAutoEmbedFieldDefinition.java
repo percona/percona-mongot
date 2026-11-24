@@ -2,28 +2,23 @@ package com.xgen.mongot.index.definition;
 
 import static com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification.DEFAULT_MODALITY;
 
-import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
 import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
-import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.bson.parser.DocumentParser;
 import com.xgen.mongot.util.bson.parser.Field;
-import com.xgen.mongot.util.bson.parser.FieldPathField;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import org.bson.BsonDocument;
 
 /**
- * Represents an auto-embed vector field definition within a search index.
+ * Represents an auto-embed field definition within a search index.
  *
- * <p>This field type specifies that text from a source field should be automatically embedded using
- * the configured embedding model, then indexed for vector search.
+ * <p>This field type specifies that text at the field's mapping path should be automatically
+ * embedded using the configured embedding model, then indexed for vector search.
  */
 public final class SearchAutoEmbedFieldDefinition implements FieldTypeDefinition {
-
-  private static final VectorSimilarity DEFAULT_VECTOR_SIMILARITY = VectorSimilarity.DOT_PRODUCT;
-  private static final VectorAutoEmbedQuantization DEFAULT_VECTOR_QUANTIZATION =
-      VectorAutoEmbedQuantization.FLOAT;
 
   private static class Fields {
     static final Field.Required<String> MODEL = Field.builder("model").stringField().required();
@@ -36,29 +31,31 @@ public final class SearchAutoEmbedFieldDefinition implements FieldTypeDefinition
                         ? java.util.Optional.empty()
                         : java.util.Optional.of("must be '" + DEFAULT_MODALITY + "'"))
             .required();
-    static final Field.Required<FieldPath> SOURCE_FIELD =
-        Field.builder("sourceField")
-            .classField(FieldPathField::parse, FieldPathField::encode)
-            .required();
   }
 
-  private final FieldPath sourceField;
   private final VectorAutoEmbedFieldSpecification specification;
 
-  public SearchAutoEmbedFieldDefinition(String modelName, String modality, FieldPath sourceField) {
-    this.sourceField = sourceField;
-    this.specification =
-        new VectorAutoEmbedFieldSpecification(
-            resolveModelDimensions(modelName),
-            DEFAULT_VECTOR_SIMILARITY,
-            DEFAULT_VECTOR_QUANTIZATION,
-            new VectorIndexingAlgorithm.HnswIndexingAlgorithm(),
-            modelName,
-            modality);
+  public SearchAutoEmbedFieldDefinition(String modelName, String modality) {
+    this(resolveSpecificationFromModelConfig(modelName, modality));
   }
 
-  public SearchAutoEmbedFieldDefinition(String modelName, FieldPath sourceField) {
-    this(modelName, DEFAULT_MODALITY, sourceField);
+  public SearchAutoEmbedFieldDefinition(String modelName) {
+    this(modelName, DEFAULT_MODALITY);
+  }
+
+  /** Creates a Search auto-embed definition with an explicit, already-resolved specification. */
+  public SearchAutoEmbedFieldDefinition(VectorAutoEmbedFieldSpecification specification) {
+    this.specification = validateResolvedSpecification(specification);
+  }
+
+  private static Optional<VectorFieldSpecification.HnswOptions> hnswOptions(
+      VectorIndexingAlgorithm indexingAlgorithm) {
+    return indexingAlgorithm
+            instanceof
+            VectorIndexingAlgorithm.HnswIndexingAlgorithm(
+                VectorFieldSpecification.HnswOptions options)
+        ? Optional.of(options)
+        : Optional.empty();
   }
 
   public String modelName() {
@@ -69,40 +66,113 @@ public final class SearchAutoEmbedFieldDefinition implements FieldTypeDefinition
     return this.specification.modality();
   }
 
-  public FieldPath sourceField() {
-    return this.sourceField;
-  }
-
   public VectorAutoEmbedFieldSpecification specification() {
     return this.specification;
   }
 
   @Override
   public Type getType() {
-    return Type.AUTO_EMBED_VECTOR;
+    return Type.AUTO_EMBED;
   }
 
+  /**
+   * Serializes the resolved tuning settings, matching {@link VectorAutoEmbedFieldSpecification}, so
+   * re-parsing a persisted definition never depends on the model catalog being populated.
+   */
   @Override
   public BsonDocument fieldTypeToBson() {
     return BsonDocumentBuilder.builder()
         .field(Fields.MODEL, this.specification.modelName())
         .field(Fields.MODALITY, this.specification.modality())
-        .field(Fields.SOURCE_FIELD, this.sourceField)
+        .field(
+            VectorAutoEmbedFieldSpecification.Fields.NUM_DIMENSIONS,
+            Optional.of(this.specification.numDimensions()))
+        .field(
+            VectorAutoEmbedFieldSpecification.Fields.SIMILARITY,
+            Optional.of(this.specification.similarity()))
+        .field(
+            VectorAutoEmbedFieldSpecification.Fields.AUTO_EMBED_QUANTIZATION,
+            Optional.of(this.specification.autoEmbedQuantization()))
+        .fieldOmitDefaultValue(
+            VectorFieldSpecification.Fields.INDEXING_ALGORITHM,
+            this.specification.indexingAlgorithm().type())
+        .fieldOmitDefaultValue(
+            VectorFieldSpecification.Fields.HNSW_OPTIONS,
+            hnswOptions(this.specification.indexingAlgorithm()),
+            VectorIndexingAlgorithm.HnswIndexingAlgorithm.DEFAULT_HNSW_OPTIONS)
         .build();
   }
 
   static SearchAutoEmbedFieldDefinition fromBson(DocumentParser parser) throws BsonParseException {
-    String modelName = parser.getField(Fields.MODEL).unwrap();
-    String modality = parser.getField(Fields.MODALITY).unwrap();
-    FieldPath sourceField = parser.getField(Fields.SOURCE_FIELD).unwrap();
-    return new SearchAutoEmbedFieldDefinition(modelName, modality, sourceField);
+    String modelName = parser.getField(Fields.MODEL).unwrap().toLowerCase(Locale.ROOT);
+    String modality = parser.getField(Fields.MODALITY).unwrap().toLowerCase(Locale.ROOT);
+
+    var indexingMethod = parser.getField(VectorFieldSpecification.Fields.INDEXING_ALGORITHM);
+    Optional<VectorFieldSpecification.HnswOptions> hnswOptions =
+        parser.getField(VectorFieldSpecification.Fields.HNSW_OPTIONS).unwrap();
+    VectorIndexingAlgorithm indexingAlgorithm =
+        VectorFieldSpecification.resolveIndexingAlgorithm(
+            parser, indexingMethod.unwrap(), hnswOptions);
+
+    Optional<Integer> numDimensions =
+        parser.getField(VectorAutoEmbedFieldSpecification.Fields.NUM_DIMENSIONS).unwrap();
+    Optional<VectorSimilarity> similarity =
+        parser.getField(VectorAutoEmbedFieldSpecification.Fields.SIMILARITY).unwrap();
+    Optional<VectorAutoEmbedQuantization> quantization =
+        parser.getField(VectorAutoEmbedFieldSpecification.Fields.AUTO_EMBED_QUANTIZATION).unwrap();
+
+    VectorAutoEmbedFieldSpecification.ResolvedAutoEmbedVectorParams resolved =
+        VectorAutoEmbedFieldSpecification.resolveAutoEmbedVectorParams(
+            modelName, numDimensions, similarity, quantization);
+    VectorAutoEmbedFieldSpecification specification =
+        new VectorAutoEmbedFieldSpecification(
+            resolved.numDimensions(),
+            resolved.similarity(),
+            resolved.providerQuantization(),
+            indexingAlgorithm,
+            modelName,
+            modality);
+
+    return new SearchAutoEmbedFieldDefinition(specification);
   }
 
-  private static int resolveModelDimensions(String modelName) {
-    return EmbeddingModelCatalog.resolveModelConfigOrDefault(modelName)
-        .collectionScan()
-        .modelConfig()
-        .getOutputDimensions();
+  /** Rejects resolved settings that the vector field cannot index. */
+  private static VectorAutoEmbedFieldSpecification validateResolvedSpecification(
+      VectorAutoEmbedFieldSpecification specification) {
+    try {
+      VectorAutoEmbedFieldSpecification.validateResolvedParams(
+          specification.numDimensions(),
+          specification.similarity(),
+          specification.autoEmbedQuantization());
+    } catch (BsonParseException e) {
+      throw new IllegalArgumentException(e.getMessage(), e);
+    }
+    return specification;
+  }
+
+  /**
+   * Resolves omitted tuning settings through the same model-catalog path used by BSON parsing.
+   *
+   * <p>The programmatic constructors use the model defaults with the default HNSW algorithm.
+   */
+  private static VectorAutoEmbedFieldSpecification resolveSpecificationFromModelConfig(
+      String modelName, String modality) {
+    String canonicalModelName = modelName.toLowerCase(Locale.ROOT);
+    String canonicalModality = modality.toLowerCase(Locale.ROOT);
+    try {
+      VectorAutoEmbedFieldSpecification.ResolvedAutoEmbedVectorParams resolved =
+          VectorAutoEmbedFieldSpecification.resolveAutoEmbedVectorParams(
+              canonicalModelName, Optional.empty(), Optional.empty(), Optional.empty());
+      return new VectorAutoEmbedFieldSpecification(
+          resolved.numDimensions(),
+          resolved.similarity(),
+          resolved.providerQuantization(),
+          new VectorIndexingAlgorithm.HnswIndexingAlgorithm(),
+          canonicalModelName,
+          canonicalModality);
+    } catch (BsonParseException e) {
+      throw new IllegalArgumentException(e.getMessage(), e);
+    }
   }
 
   @Override
@@ -113,17 +183,11 @@ public final class SearchAutoEmbedFieldDefinition implements FieldTypeDefinition
     if (!(o instanceof SearchAutoEmbedFieldDefinition that)) {
       return false;
     }
-    // Intentionally excludes derived specification fields (dimensions, similarity, quantization)
-    // because these are derived from the model. This matches VectorAutoEmbedFieldDefinition
-    // .equals() behavior.
-    return Objects.equals(this.specification.modelName(), that.specification.modelName())
-        && Objects.equals(this.specification.modality(), that.specification.modality())
-        && Objects.equals(this.sourceField, that.sourceField);
+    return Objects.equals(this.specification, that.specification);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(
-        this.specification.modelName(), this.specification.modality(), this.sourceField);
+    return Objects.hash(this.specification);
   }
 }

@@ -17,15 +17,14 @@ import static org.mockito.Mockito.when;
 
 import com.mongodb.MongoException;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.schema.IndexEntry;
 import com.xgen.mongot.server.command.management.definition.DropSearchIndexCommandDefinition;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
 import com.xgen.mongot.util.mongodb.Errors;
-import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
-import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.server.command.management.definition.ManageSearchIndexCommandDefinitionBuilder;
 import java.util.List;
 import java.util.Optional;
@@ -40,17 +39,15 @@ public class AicDropSearchIndexCommandTest {
 
     // Return an existing search index.
     var indexId = new ObjectId();
-    when(mockAic.listIndexDefinitions(COLLECTION_UUID))
+    when(mockAic.listIndexes(COLLECTION_UUID))
         .thenReturn(
             List.of(
-                SearchIndexDefinitionBuilder.builder()
-                    .database(DATABASE_NAME)
-                    .collectionUuid(COLLECTION_UUID)
-                    .lastObservedCollectionName(COLLECTION_NAME)
-                    .indexId(indexId)
-                    .name(INDEX_NAME)
-                    .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
-                    .build()));
+                new IndexEntry(
+                    new AuthoritativeIndexKey(COLLECTION_UUID, INDEX_NAME),
+                    indexId,
+                    1,
+                    new BsonDocument(),
+                    Optional.empty())));
 
     var definition =
         (DropSearchIndexCommandDefinition)
@@ -79,17 +76,15 @@ public class AicDropSearchIndexCommandTest {
 
     // Return an existing search index.
     var indexId = new ObjectId();
-    when(mockAic.listIndexDefinitions(COLLECTION_UUID))
+    when(mockAic.listIndexes(COLLECTION_UUID))
         .thenReturn(
             List.of(
-                SearchIndexDefinitionBuilder.builder()
-                    .database(DATABASE_NAME)
-                    .collectionUuid(COLLECTION_UUID)
-                    .lastObservedCollectionName(COLLECTION_NAME)
-                    .indexId(indexId)
-                    .name(INDEX_NAME)
-                    .mappings(DocumentFieldDefinitionBuilder.builder().dynamic(true).build())
-                    .build()));
+                new IndexEntry(
+                    new AuthoritativeIndexKey(COLLECTION_UUID, INDEX_NAME),
+                    indexId,
+                    1,
+                    new BsonDocument(),
+                    Optional.empty())));
 
     var definition =
         (DropSearchIndexCommandDefinition)
@@ -113,9 +108,47 @@ public class AicDropSearchIndexCommandTest {
   }
 
   @Test
+  public void testDropSearchIndexSucceedsWhenDefinitionUnparsable()
+      throws MetadataServiceException {
+    var mockAic = mock(AuthoritativeIndexCatalog.class);
+
+    // Return an index whose definitionBson cannot be parsed as an IndexDefinition.
+    // Drop should succeed by matching on the top-level indexKey/indexId fields directly.
+    when(mockAic.listIndexes(COLLECTION_UUID))
+        .thenReturn(
+            List.of(
+                new IndexEntry(
+                    new AuthoritativeIndexKey(COLLECTION_UUID, INDEX_NAME),
+                    new ObjectId(),
+                    1,
+                    new BsonDocument(),
+                    Optional.empty())));
+
+    var definition =
+        (DropSearchIndexCommandDefinition)
+            ManageSearchIndexCommandDefinitionBuilder.dropIndex()
+                .withIndexName(INDEX_NAME)
+                .buildSearchIndexCommand();
+    AicDropSearchIndexCommand command =
+        new AicDropSearchIndexCommand(
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.of(VIEW),
+            definition);
+
+    BsonDocument response = command.run();
+
+    assertEquals(1, response.getInt32("ok").getValue());
+    verify(mockAic).deleteIndex(new AuthoritativeIndexKey(COLLECTION_UUID, INDEX_NAME));
+  }
+
+  @Test
   public void testDropMissingSearchIndex() throws MetadataServiceException {
     var mockAic = mock(AuthoritativeIndexCatalog.class);
-    when(mockAic.listIndexDefinitions(any())).thenReturn(List.of());
+    when(mockAic.listIndexes(any())).thenReturn(List.of());
 
     var definition =
         (DropSearchIndexCommandDefinition)
@@ -148,8 +181,13 @@ public class AicDropSearchIndexCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicDropSearchIndexCommand(
-            mockAic, mock(CatalogAccessGuard.class), DATABASE_NAME, COLLECTION_UUID,
-            COLLECTION_NAME, Optional.of(VIEW), definition);
+            mockAic,
+            mock(CatalogAccessGuard.class),
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.of(VIEW),
+            definition);
     assertFalse(command.maybeLoadShed());
   }
 
@@ -168,8 +206,13 @@ public class AicDropSearchIndexCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicDropSearchIndexCommand(
-            mockAic, mockGuard, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME,
-            Optional.of(VIEW), definition);
+            mockAic,
+            mockGuard,
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.of(VIEW),
+            definition);
     var response = command.run();
 
     assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());
@@ -193,8 +236,13 @@ public class AicDropSearchIndexCommandTest {
                 .buildSearchIndexCommand();
     var command =
         new AicDropSearchIndexCommand(
-            mockAic, mockGuard, DATABASE_NAME, COLLECTION_UUID, COLLECTION_NAME,
-            Optional.of(VIEW), definition);
+            mockAic,
+            mockGuard,
+            DATABASE_NAME,
+            COLLECTION_UUID,
+            COLLECTION_NAME,
+            Optional.of(VIEW),
+            definition);
     var response = command.run();
 
     assertEquals(Errors.COMMAND_FAILED.code, response.getInt32("code").getValue());

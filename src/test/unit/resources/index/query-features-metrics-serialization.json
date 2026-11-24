@@ -19,6 +19,8 @@
         "sortCount": 3.0,
         "trackingCount": 11.0,
         "returnScopeCount": 12.0,
+        "embeddedScopedFacetCount": 0.0,
+        "embeddedScopedSortCount": 0.0,
         "facetDrillSidewaysOptimizableCount": 0.0,
         "facetDrillSidewaysGenericCount": 0.0,
         "operatorTypeCount": {
@@ -67,7 +69,8 @@
           "embedded": 0.0
         },
         "collectorTypeCount": {
-          "facet": 0.0
+          "facet": 0.0,
+          "aggregation": 0.0
         },
         "vectorQueryTypeCount": {
           "exact": 0.0,
@@ -155,7 +158,26 @@
           "text": 0.0,
           "vectorSearch": 0.0,
           "wildcard": 0.0
-        }
+        },
+        "vectorSearchFilterOperatorCategoryCount": {
+          "lowerBound": 0.0,
+          "upperBound": 0.0,
+          "closedRange": 0.0,
+          "exists": 0.0,
+          "eq": 2.0,
+          "ne": 0.0,
+          "in": 0.0,
+          "nin": 0.0,
+          "not": 0.0
+        },
+        "vectorSearchQueryVectorEncodingCount": {
+          "array": 0.0,
+          "binDataFloat32": 3.0,
+          "binDataFloat16": 0.0,
+          "binDataInt8": 0.0,
+          "binDataBit": 0.0
+        },
+        "vectorSearchFilterCount": 4.0
       }
     }
   ]

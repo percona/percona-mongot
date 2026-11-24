@@ -2,6 +2,7 @@ package com.xgen.mongot.index;
 
 import com.xgen.mongot.index.lucene.field.FieldName.TypeField;
 import com.xgen.mongot.index.status.IndexStatus;
+import java.io.IOException;
 import java.util.Map;
 
 /**
@@ -21,9 +22,15 @@ public interface IndexMetricValuesSupplier {
     public static final String REQUIRED_MEMORY = "requiredMemoryBytes";
     public static final String NUM_LUCENE_FIELDS = "numLuceneFields";
     public static final String NUM_LUCENE_DOCS = "numLuceneDocs";
+    public static final String NUM_VECTORS = "numVectors";
     public static final String NUM_LUCENE_MAX_DOCS = "numLuceneMaxDocs";
     public static final String INDEX_STATUS_CODE = "indexStatusCode";
     public static final String MAX_STRING_FACET_CARDINALITY = "maxStringFacetCardinality";
+    public static final String TOKEN_FACETS_STATE_HEAP_BYTES = "tokenFacetsStateHeapBytes";
+    public static final String TOKEN_FACETS_STATE_ENTRIES = "tokenFacetsStateEntries";
+    public static final String TOKEN_FACETS_STATE_HITS = "tokenFacetsStateHits";
+    public static final String TOKEN_FACETS_STATE_MISSES = "tokenFacetsStateMisses";
+    public static final String TOKEN_FACETS_STATE_EVICTIONS = "tokenFacetsStateEvictions";
   }
 
   /**
@@ -37,6 +44,22 @@ public interface IndexMetricValuesSupplier {
    */
   long getCachedIndexSize();
 
+  /**
+   * Recomputes the index size in bytes, refreshing the value {@link #getCachedIndexSize()} reports.
+   */
+  default long refreshAndGetIndexSize() throws IOException {
+    return getCachedIndexSize();
+  }
+
+  /**
+   * Refreshes cached metric values so that subsequent getters observe a single, current snapshot
+   * and any expensive native read happens at most once per call.
+   *
+   * <p>Callers should invoke this before reading several values from the same supplier. The default
+   * is a no-op for suppliers that compute their values on demand.
+   */
+  default void refreshMetrics() {}
+
   int getNumFields();
 
   /** Returns a mapping of the number of fields present in an index per {@link TypeField}. */
@@ -49,9 +72,21 @@ public interface IndexMetricValuesSupplier {
   void close();
 
   /**
-   * Calls getRequiredMemoryForVectorData on the associated IndexReader object.
+   * Returns the estimated bytes of memory required to hold vector data for this index.
    *
-   * @return long value representing the required memory of a vector index in bytes
+   * <p>Computed from on-disk vector file sizes (.vex, .veq, .vec). Returns 0 for non-vector or
+   * non-Lucene indexes.
    */
-  long getRequiredMemoryForVectorData();
+  default long getRequiredMemoryForVectorData() {
+    return 0L;
+  }
+
+  /**
+   * Returns the Vectorlite engine metrics for this index.
+   *
+   * <p>Returns {@link VectorliteIndexMetrics#ZERO} for indexes without Vectorlite metrics.
+   */
+  default VectorliteIndexMetrics getVectorliteIndexMetrics() {
+    return VectorliteIndexMetrics.ZERO;
+  }
 }

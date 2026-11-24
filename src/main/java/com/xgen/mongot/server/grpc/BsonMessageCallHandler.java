@@ -1,7 +1,6 @@
 package com.xgen.mongot.server.grpc;
 
 import com.xgen.mongot.cursor.MongotCursorManager;
-import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.ParsedCommand;
 import com.xgen.mongot.server.command.registry.CommandRegistry;
@@ -22,7 +21,9 @@ public class BsonMessageCallHandler extends ServerCallHandler<RawBsonDocument> {
       MongotCursorManager cursorManager,
       SearchEnvoyMetadata searchEnvoyMetadata,
       int envoyAttemptCount,
-      FeatureFlags featureFlags,
+      int envoyMaxAttemptCount,
+      boolean isShadow,
+      boolean envoyInRequestPath,
       StreamObserver<RawBsonDocument> responseObserver) {
     super(
         commandRegistry,
@@ -30,7 +31,9 @@ public class BsonMessageCallHandler extends ServerCallHandler<RawBsonDocument> {
         cursorManager,
         searchEnvoyMetadata,
         envoyAttemptCount,
-        featureFlags,
+        envoyMaxAttemptCount,
+        isShadow,
+        envoyInRequestPath,
         responseObserver);
   }
 

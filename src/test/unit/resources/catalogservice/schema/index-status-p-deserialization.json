@@ -1,0 +1,80 @@
+{
+  "valid": [
+    {
+      "description": "simple",
+      "value": {
+        "statusCode": "INITIAL_SYNC"
+      }
+    },
+    {
+      "description": "initial sync with message",
+      "value": {
+        "statusCode": "INITIAL_SYNC",
+        "message": "foo-bar"
+      }
+    },
+    {
+      "description": "stale index",
+      "value": {
+        "statusCode": "STALE",
+        "message": "foo-bar",
+        "optime": {
+          "$timestamp": {
+            "t": 0,
+            "i": 1000
+          }
+        }
+      }
+    },
+    {
+      "description": "recovering non transient",
+      "value": {
+        "statusCode": "RECOVERING_NON_TRANSIENT",
+        "message": "Recovering: The index has encountered an issue and is attempting automatic recovery.",
+        "optime": {
+          "$timestamp": {
+            "t": 0,
+            "i": 1000
+          }
+        }
+      }
+    },
+    {
+      "description": "recovering transient",
+      "value": {
+        "statusCode": "RECOVERING_TRANSIENT",
+        "message": "recovering"
+      }
+    },
+    {
+      "description": "failed",
+      "value": {
+        "statusCode": "FAILED",
+        "message": "recovering",
+        "reason": "INITIAL_SYNC_REPLICATION_FAILED"
+      }
+    },
+    {
+      "description": "status code doesn't match reason",
+      "value": {
+        "statusCode": "UNKNOWN",
+        "reason": "INITIAL_SYNC_REPLICATION_FAILED"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "description": "status code does not exist",
+      "value": {
+        "statusCode": "FOOBAR"
+      }
+    },
+    {
+      "description": "Reason does not exist",
+      "value": {
+        "statusCode": "FAILED",
+        "reason": "FOOBAR"
+      }
+    }
+  ]
+}

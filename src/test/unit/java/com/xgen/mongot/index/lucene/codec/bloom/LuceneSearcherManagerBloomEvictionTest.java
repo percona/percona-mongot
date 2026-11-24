@@ -4,6 +4,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.definition.IndexDefinition;
@@ -15,6 +16,7 @@ import com.xgen.mongot.index.lucene.searcher.LuceneSearcherFactory;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
@@ -24,7 +26,6 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.apache.lucene.codecs.FieldsProducer;
-import org.apache.lucene.codecs.bloom.FuzzySet;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
@@ -34,6 +35,9 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FilterDirectory;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 /**
@@ -42,6 +46,18 @@ import org.junit.Test;
  * Directory} stay open.
  */
 public class LuceneSearcherManagerBloomEvictionTest {
+
+  // Eviction is asserted against the input read path, so pin the storage mode rather than
+  // inheriting whatever Feature.BLOOM_FILTER_ON_HEAP resolves to.
+  @Before
+  public void forceOffHeapBloom() {
+    BloomStoragePolicy.setStorageModeForTest(MongotFuzzySet.StorageMode.INPUT);
+  }
+
+  @After
+  public void restoreBloomStorageMode() {
+    BloomStoragePolicy.setStorageModeForTest(null);
+  }
 
   private static final String ID_FIELD = FieldName.MetaField.ID.getLuceneFieldName();
   private static final boolean BLOOM_DISABLED_IN_STEADY_STATE = false;
@@ -291,6 +307,180 @@ public class LuceneSearcherManagerBloomEvictionTest {
     }
   }
 
+  @Test
+  public void initialSync_reportsBloomHeapGauges() throws IOException {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
+      // Bloom fast-fail is wired up during initial sync, so the loaded-segments gauge reflects the
+      // live segment. The heap-bytes gauge is zero: bloom bitsets are read through the input
+      // (OS page cache), not on the JVM heap. The mapped-bytes gauge carries the real footprint.
+      assertThat(gauge(harness.metrics, LuceneSearcherManager.BLOOM_HEAP_LOADED_SEGMENTS_METRIC))
+          .isAtLeast(1.0);
+      assertThat(gauge(harness.metrics, LuceneSearcherManager.BLOOM_HEAP_BYTES_METRIC))
+          .isEqualTo(0.0);
+      assertThat(gauge(harness.metrics, LuceneSearcherManager.BLOOM_MAPPED_BYTES_METRIC))
+          .isGreaterThan(0.0);
+    }
+  }
+
+  /**
+   * Production regression: during INITIAL_SYNC the periodic refresher does not refresh the searcher
+   * (it gates on steady state), so the manager's {@code current} reader stays the empty reader
+   * opened at construction and never opens the bloom segments written during the sync. A reader
+   * walk would therefore report zero. The process-wide registry stats that back the heap gauges
+   * must instead reflect bloom held on heap by <em>any</em> reader (here a reader opened separately
+   * from the searcher manager), and must drop back to zero once that reader closes.
+   */
+  @Test
+  public void bloomStats_reflectResidentBloomFromAnyReader() throws IOException {
+    try (Directory directory = new ByteBuffersDirectory()) {
+      IndexWriterConfig config =
+          new IndexWriterConfig()
+              .setCodec(
+                  LuceneCodec.Factory.forIndexWithBloomFilter(
+                      Map.of(), () -> true, Optional.empty(), FeatureFlags.getDefault()))
+              .setUseCompoundFile(true);
+      IndexWriter writer = new IndexWriter(directory, config);
+      try {
+        // No reader has opened bloom segments yet.
+        assertThat(MongotBloomFieldsProducerRegistry.bloomStats().loadedSegments()).isEqualTo(0);
+
+        Document doc = new Document();
+        doc.add(new StringField(ID_FIELD, "doc1", Field.Store.YES));
+        writer.addDocument(doc);
+        writer.commit();
+
+        // Initial-sync policy is active; a reader other than any searcher manager opens the segment
+        // and loads bloom on heap, registering it in the process-wide registry.
+        MongotBloomReadPolicy.setLoadBloomOnRead(writer.getDirectory(), true);
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+          MongotBloomEvictor.BloomStats stats = MongotBloomFieldsProducerRegistry.bloomStats();
+          assertThat(stats.loadedSegments()).isAtLeast(1);
+          // Bloom bitsets are read through the input: nothing on the JVM heap; the
+          // footprint is in page cache.
+          assertThat(stats.heapBytes()).isEqualTo(0L);
+          assertThat(stats.mappedBytes()).isGreaterThan(0L);
+        }
+      } finally {
+        // Closing the writer closes its pooled segment readers, unregistering their producers.
+        writer.close();
+        MongotBloomReadPolicy.setLoadBloomOnRead(directory, false);
+      }
+
+      // With every reader (including the writer's pool) closed, the registry reports zero again.
+      assertThat(MongotBloomFieldsProducerRegistry.bloomStats().loadedSegments()).isEqualTo(0);
+    }
+  }
+
+  @Test
+  public void steadyStateTransition_recordsHeapEvictions() throws IOException {
+    try (Harness harness = newHarness(BLOOM_DISABLED_IN_STEADY_STATE)) {
+      assertThat(counter(harness.metrics, LuceneSearcherManager.BLOOM_HEAP_EVICTIONS_METRIC))
+          .isEqualTo(0.0);
+
+      harness.indexStatus.set(IndexStatus.steady());
+      harness.manager.maybeRefreshBlocking();
+
+      assertThat(counter(harness.metrics, LuceneSearcherManager.BLOOM_HEAP_EVICTIONS_METRIC))
+          .isAtLeast(1.0);
+    }
+  }
+
+  /**
+   * Validates the directory-identity contract that the bloom heap path (and the {@code
+   * bloomFilterHeapBytes}/{@code bloomFilterHeapLoadedSegments} gauges) depend on, against a
+   * production-style {@link FilterDirectory}-wrapped index.
+   *
+   * <p>{@link LuceneSearcherManager} registers the read policy with {@code writer.getDirectory()}
+   * (see {@code refreshIfNeeded}); the codec resolves it from {@code SegmentInfo#dir} (see {@code
+   * MongotBloomFilteringPostingsFormat#fieldsProducer}). If those two handles did not resolve to
+   * the same storage directory after unwrapping, the heap-loading producer would never be
+   * constructed and both heap gauges would read zero even during initial sync. This test fails if
+   * that bug is present and passes (gauges non-zero) if the contract holds.
+   */
+  @Test
+  public void wrappedDirectory_policyRegisteredViaWriterDirectory_engagesHeapBloomOnRead()
+      throws IOException {
+    try (Directory base = new ByteBuffersDirectory();
+        Directory wrapped = new FilterDirectory(base) {}) {
+      IndexWriterConfig config =
+          new IndexWriterConfig()
+              .setCodec(
+                  LuceneCodec.Factory.forIndexWithBloomFilter(
+                      Map.of(), () -> true, Optional.empty(), FeatureFlags.getDefault()))
+              .setUseCompoundFile(true);
+      try (IndexWriter writer = new IndexWriter(wrapped, config)) {
+        Document doc = new Document();
+        doc.add(new StringField(ID_FIELD, "doc1", Field.Store.YES));
+        writer.addDocument(doc);
+        writer.commit();
+
+        // Initial-sync registration uses the writer's directory handle.
+        MongotBloomReadPolicy.setLoadBloomOnRead(writer.getDirectory(), true);
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+          SegmentReader segment = (SegmentReader) reader.leaves().get(0).reader();
+
+          // Core invariant: the read-side handle resolves to the same registration.
+          assertThat(MongotBloomReadPolicy.shouldLoadBloomOnRead(segment.getSegmentInfo().info.dir))
+              .isTrue();
+
+          MongotBloomEvictor.BloomStats stats = MongotBloomEvictor.bloomStats(reader);
+          assertThat(stats.loadedSegments()).isAtLeast(1);
+          // Bloom bitsets are read through the input: nothing on the JVM heap; the
+          // footprint is in page cache.
+          assertThat(stats.heapBytes()).isEqualTo(0L);
+          assertThat(stats.mappedBytes()).isGreaterThan(0L);
+        }
+      } finally {
+        MongotBloomReadPolicy.setLoadBloomOnRead(base, false);
+      }
+    }
+  }
+
+  /**
+   * Negative control documenting the <em>expected</em> zero case: with the steady-state policy (no
+   * heap loading), the same wrapped index reports zero heap bloom. This distinguishes "designed
+   * zero in steady state" from "always zero due to a directory-identity bug" (the test above).
+   */
+  @Test
+  public void wrappedDirectory_steadyStatePolicy_reportsZeroHeapBloom() throws IOException {
+    try (Directory base = new ByteBuffersDirectory();
+        Directory wrapped = new FilterDirectory(base) {}) {
+      IndexWriterConfig config =
+          new IndexWriterConfig()
+              .setCodec(
+                  LuceneCodec.Factory.forIndexWithBloomFilter(
+                      Map.of(), () -> true, Optional.empty(), FeatureFlags.getDefault()))
+              .setUseCompoundFile(true);
+      try (IndexWriter writer = new IndexWriter(wrapped, config)) {
+        Document doc = new Document();
+        doc.add(new StringField(ID_FIELD, "doc1", Field.Store.YES));
+        writer.addDocument(doc);
+        writer.commit();
+
+        // Steady state: policy not enabled, so segments open via the delegate without heap bloom.
+        MongotBloomReadPolicy.setLoadBloomOnRead(writer.getDirectory(), false);
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+          SegmentReader segment = (SegmentReader) reader.leaves().get(0).reader();
+          assertThat(MongotBloomReadPolicy.shouldLoadBloomOnRead(segment.getSegmentInfo().info.dir))
+              .isFalse();
+
+          MongotBloomEvictor.BloomStats stats = MongotBloomEvictor.bloomStats(reader);
+          assertThat(stats.loadedSegments()).isEqualTo(0);
+          assertThat(stats.heapBytes()).isEqualTo(0L);
+          assertThat(stats.mappedBytes()).isEqualTo(0L);
+        }
+      }
+    }
+  }
+
+  private static double gauge(PerIndexMetricsFactory metrics, String name) {
+    return metrics.get(name).gauge().value();
+  }
+
+  private static double counter(PerIndexMetricsFactory metrics, String name) {
+    return metrics.get(name).counter().count();
+  }
+
   private static Harness newHarness(boolean bloomFilterInSteadyState) throws IOException {
     DynamicFeatureFlagRegistry registry = mock(DynamicFeatureFlagRegistry.class);
     when(registry.evaluateClusterInvariant(DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD))
@@ -304,7 +494,8 @@ public class LuceneSearcherManagerBloomEvictionTest {
     IndexWriterConfig config =
         new IndexWriterConfig()
             .setCodec(
-                LuceneCodec.Factory.forIndexWithBloomFilter(Map.of(), () -> true, Optional.empty()))
+                LuceneCodec.Factory.forIndexWithBloomFilter(
+                    Map.of(), () -> true, Optional.empty(), FeatureFlags.getDefault()))
             .setUseCompoundFile(true);
     IndexWriter writer = new IndexWriter(directory, config);
     Document doc = new Document();
@@ -315,6 +506,7 @@ public class LuceneSearcherManagerBloomEvictionTest {
     BooleanSupplier useIdBloomFilter =
         BloomCodecPolicy.getBloomFilterEnabledForIdField(
             registry, true, indexDefinition, indexStatus::get);
+    PerIndexMetricsFactory metrics = SearchIndex.mockMetricsFactory();
     LuceneSearcherManager manager =
         LuceneSearcherManager.create(
             writer,
@@ -324,10 +516,10 @@ public class LuceneSearcherManagerBloomEvictionTest {
                 new QueryCacheProvider.DefaultQueryCacheProvider(),
                 Optional.empty(),
                 SearchIndex.mockQueryMetricsUpdater(IndexDefinition.Type.SEARCH)),
-            SearchIndex.mockMetricsFactory(),
+            metrics,
             useIdBloomFilter);
 
-    return new Harness(directory, writer, manager, indexStatus);
+    return new Harness(directory, writer, manager, indexStatus, metrics);
   }
 
   private static final class Harness implements AutoCloseable {
@@ -335,16 +527,19 @@ public class LuceneSearcherManagerBloomEvictionTest {
     final IndexWriter writer;
     final LuceneSearcherManager manager;
     final AtomicReference<IndexStatus> indexStatus;
+    final PerIndexMetricsFactory metrics;
 
     Harness(
         Directory directory,
         IndexWriter writer,
         LuceneSearcherManager manager,
-        AtomicReference<IndexStatus> indexStatus) {
+        AtomicReference<IndexStatus> indexStatus,
+        PerIndexMetricsFactory metrics) {
       this.directory = directory;
       this.writer = writer;
       this.manager = manager;
       this.indexStatus = indexStatus;
+      this.metrics = metrics;
     }
 
     @Override
@@ -355,10 +550,10 @@ public class LuceneSearcherManagerBloomEvictionTest {
     }
   }
 
-  private static Optional<FuzzySet> heapLoadedBloomForIdField(DirectoryReader reader) {
+  private static Optional<MongotFuzzySet> heapLoadedBloomForIdField(DirectoryReader reader) {
     SegmentReader segment = (SegmentReader) reader.leaves().get(0).reader();
     return unwrapBloomFieldsProducer(segment, ID_FIELD)
-        .map(producer -> producer.getHeapLoadedBloomForField(ID_FIELD));
+        .map(producer -> producer.getLoadedBloomForField(ID_FIELD));
   }
 
   private static Optional<MongotBloomFilteringPostingsFormat.MongotBloomFilteredFieldsProducer>

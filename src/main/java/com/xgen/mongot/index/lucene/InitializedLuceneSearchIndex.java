@@ -15,6 +15,7 @@ import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexTypeData;
+import com.xgen.mongot.index.IndexTypeData.IndexTypeTag;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.IndexWriter;
 import com.xgen.mongot.index.InitializedSearchIndex;
@@ -45,6 +46,7 @@ import java.util.function.BooleanSupplier;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.util.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,6 +62,13 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
   final ImmutableList<ReferenceManager<?>> searcherManagers;
   final IndexMetricsUpdater indexMetricsUpdater;
   final GenerationId generationId;
+  // This must be tracked independently of index.isClosed() because initialization and drop can
+  // race. A possible race is:
+  // (1) create() starts opening Lucene resources
+  // (2) The concurrent drop path closes the underlying index before this wrapper is cataloged
+  // (3) create() finishes and returns resources such as Directories and an IndexWriter
+  // (4) close() must still release those resources even though the underlying index is closed
+  private boolean initializedResourcesClosed;
 
   @VisibleForTesting
   InitializedLuceneSearchIndex(
@@ -79,6 +88,30 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
     this.refresher = refresher;
     this.searcherManagers = searcherManagers;
     this.indexMetricsUpdater = indexMetricsUpdater;
+    this.initializedResourcesClosed = false;
+  }
+
+  @VisibleForTesting
+  static InitializedLuceneSearchIndex create(
+      LuceneSearchIndex index,
+      GenerationId generationId,
+      IndexDirectoryFactory directoryFactory,
+      IndexDirectoryHelper indexDirectoryHelper,
+      Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
+      FeatureFlags featureFlags,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      BooleanSupplier useIdBloomFilter)
+      throws IOException {
+    return create(
+        index,
+        generationId,
+        directoryFactory,
+        indexDirectoryHelper,
+        luceneIndexSnapshotter,
+        featureFlags,
+        dynamicFeatureFlagRegistry,
+        useIdBloomFilter,
+        IndexTypeData.getIndexTypeTag(index.getDefinition()));
   }
 
   static InitializedLuceneSearchIndex create(
@@ -89,7 +122,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
-      BooleanSupplier useIdBloomFilter)
+      BooleanSupplier useIdBloomFilter,
+      IndexTypeTag indexTypeTag)
       throws IOException {
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
@@ -105,7 +139,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
               luceneIndexSnapshotter,
               featureFlags,
               dynamicFeatureFlagRegistry,
-              useIdBloomFilter);
+              useIdBloomFilter,
+              indexTypeTag);
       LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
           .addKeyValue("generationId", generationId)
@@ -130,7 +165,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
             luceneIndexSnapshotter,
             featureFlags,
             dynamicFeatureFlagRegistry,
-            useIdBloomFilter);
+            useIdBloomFilter,
+            indexTypeTag);
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
         .addKeyValue("generationId", generationId)
@@ -145,7 +181,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       Optional<LuceneIndexSnapshotter> luceneIndexSnapshotter,
       FeatureFlags featureFlags,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
-      BooleanSupplier useIdBloomFilter)
+      BooleanSupplier useIdBloomFilter,
+      IndexTypeTag indexTypeTag)
       throws IOException {
     var definition = index.getDefinition();
     var searchIndexProperties = index.getSearchIndexProperties();
@@ -153,7 +190,9 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
         new IndexMetricsUpdater.Builder(
             index.getDefinition(),
             searchIndexProperties.metricsFactory,
-            featureFlags.isEnabled(Feature.INDEX_FEATURE_VERSION_FOUR));
+            indexTypeTag,
+            featureFlags.isEnabled(Feature.INDEX_FEATURE_VERSION_FOUR),
+            featureFlags.isEnabled(Feature.SEARCH_AGGREGATION));
     Analyzer indexAnalyzer =
         LuceneAnalyzer.indexAnalyzer(definition, searchIndexProperties.analyzerRegistry);
     LuceneSearcherFactory searcherFactory =
@@ -162,7 +201,8 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
             searchIndexProperties.enableFacetingOverTokenFields,
             searchIndexProperties.queryCacheProvider,
             searchIndexProperties.tokenFacetingCardinalityLimit,
-            indexMetricsUpdaterBuilder.getQueryingMetricsUpdater());
+            indexMetricsUpdaterBuilder.getQueryingMetricsUpdater(),
+            dynamicFeatureFlagRegistry);
     // TODO(CLOUDP-250488): Handle subindexes for blobstore upload.
 
     var indexResources =
@@ -178,7 +218,7 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                         definition.getNumPartitions(),
                         featureFlags.isEnabled(Feature.CANCEL_MERGE),
                         useIdBloomFilter,
-                        IndexTypeData.getIndexTypeTag(definition).tagValue,
+                        indexTypeTag.tagValue,
                         directory),
                     searchIndexProperties.mergePolicy,
                     searchIndexProperties.ramBufferSizeMb,
@@ -199,6 +239,11 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
                     searchIndexProperties.metricsFactory,
                     useIdBloomFilter));
 
+    indexMetricsUpdaterBuilder
+        .getIndexingMetricsUpdater()
+        .getReplicationOpTimeInfo()
+        .registerRefreshListeners(indexResources.luceneSearcherManagers);
+
     List<LuceneSearchIndexReader> searchIndexReaders =
         new ArrayList<>(indexResources.luceneSearcherManagers.size());
     for (int i = 0; i < indexResources.luceneSearcherManagers.size(); i++) {
@@ -214,6 +259,7 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
               searchIndexProperties.concurrentSearchExecutor,
               searchIndexProperties.concurrentVectorRescoringExecutor,
               searchIndexProperties.enableTextOperatorNewSynonymsSyntax,
+              searchIndexProperties.aggregationMaxBuckets,
               i,
               featureFlags,
               dynamicFeatureFlagRegistry));
@@ -243,6 +289,7 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
             searchIndexProperties.metricsFactory,
             definition.getParsedIndexFeatureVersion(),
             featureFlags.isEnabled(Feature.INDEX_FEATURE_VERSION_FOUR),
+            indexTypeTag,
             dynamicFeatureFlagRegistry,
             searchIndexProperties.metricRefreshExecutor);
 
@@ -366,12 +413,14 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
 
   @Override
   public synchronized void close() throws IOException {
-    if (this.index.isClosed()) {
+    if (this.initializedResourcesClosed) {
       return;
     }
     LOG.info("Closing initialized index: {}", this.generationId);
     Stopwatch closeIndexTime = Stopwatch.createStarted();
-    this.index.close();
+    if (!this.index.isClosed()) {
+      this.index.close();
+    }
     this.indexMetricsUpdater.close();
 
     // The LuceneIndexRefresher and IndexReader both use the SearcherManager, so close them
@@ -385,11 +434,13 @@ class InitializedLuceneSearchIndex implements InitializedSearchIndex {
       searcherManager.close();
     }
 
-    // The LuceneIndexWriter uses the Directory, so close it before closing the Directory.
-    this.writer.close();
-    for (Directory directory : this.directories) {
-      directory.close();
-    }
+    // The LuceneIndexWriter uses the Directory, so close it before closing the Directory. Every
+    // close is attempted; the writer's exception propagates with later ones suppressed.
+    List<Closeable> resources = new ArrayList<>();
+    resources.add(this.writer);
+    resources.addAll(this.directories);
+    IOUtils.close(resources);
+    this.initializedResourcesClosed = true;
     LOG.info("closed index {} in {}", getDefinition().getIndexId(), closeIndexTime);
   }
 

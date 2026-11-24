@@ -1,15 +1,20 @@
 package com.xgen.mongot.replication.mongodb.initialsync;
 
+import static com.xgen.mongot.index.IndexTypeData.INDEX_TYPE_TAG_NAME;
+import static com.xgen.mongot.index.IndexTypeData.getIndexTypeTag;
 import static com.xgen.mongot.replication.mongodb.common.ChangeStreamDocumentUtils.opTimeFromBatch;
 import static com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector.ChangeStreamMode;
 import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Stopwatch;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.errorprone.annotations.Var;
 import com.mongodb.MongoNamespace;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import com.mongodb.client.model.changestream.UpdateDescription;
+import com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGeneration;
 import com.xgen.mongot.logging.DefaultKeyValueLogger;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor;
@@ -23,7 +28,10 @@ import com.xgen.mongot.replication.mongodb.common.ChangeStreams;
 import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncException;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.PartialEmbedMetricCounters;
 import com.xgen.mongot.replication.mongodb.common.SchedulerQueue;
+import com.xgen.mongot.replication.mongodb.common.ViewFieldDependencies;
+import com.xgen.mongot.replication.mongodb.common.ViewFieldDependenciesMetricCounters;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FutureUtils;
@@ -39,6 +47,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.bson.BsonTimestamp;
 import org.bson.BsonValue;
 import org.bson.RawBsonDocument;
@@ -62,6 +71,9 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
   private final DefaultKeyValueLogger logger;
   private final Clock clock;
   private final InitialSyncContext context;
+  // View-pipeline field dependencies are a pure function of the immutable index definition, so
+  // they are derived once and reused across change-stream batches.
+  private final Supplier<Optional<ViewFieldDependencies>> viewFieldDependencies;
   private final InitialSyncMongoClient mongoClient;
   private final ServerClusterTimeProvider clusterTimeProvider;
   private final MongoNamespace namespace;
@@ -69,6 +81,11 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
   private final Counter applicableUpdatesCounter;
   private final Counter witnessedUpdatesCounter;
   private final Counter skippedDocumentsWithoutMetadataNamespaceCounter;
+  private final Optional<PartialEmbedMetricCounters> partialEmbedMetricCounters;
+  private final Optional<ViewFieldDependenciesMetricCounters> viewFieldDependenciesMetricCounters;
+
+  /* Ensures the derivation-fallback metric is emitted only on the first batch for this index. */
+  private final AtomicBoolean derivationFallbackReported = new AtomicBoolean(false);
 
   /* Tracks duration of preprocessing a batch */
   private final Timer preprocessingBatchTimer;
@@ -81,8 +98,22 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
 
   private volatile boolean shutdown;
 
+  /**
+   * Whether this applier has already cancelled its scheduled indexing work. A failed batch leaves
+   * its index's entry in the scheduler queue until the work is cancelled, and a later sync for the
+   * same generation would otherwise queue behind that entry and never run. A shutdown signal alone
+   * does not cancel anything: a batch that fails before the applier reaches handleShutdown() must
+   * still cancel.
+   */
+  private boolean processingCancelled;
+
   private final boolean avoidNaturalOrderScanSyncSourceChangeResync;
   private final boolean splitLargeChangeStreamEvents;
+
+  // Present only alongside a parallel collection scan. That run assembles its resume position at
+  // commit time from live state, so batches are scheduled without a staged blob and the high water
+  // mark is handed to the run state instead of being written into one.
+  private final Optional<ParallelCollectionScanResumeState> parallelResumeState;
 
   // If true, this is a fresh initial sync (not resuming from a crash). The change stream will
   // start at highWaterMark + 1 since the collection scan already captured everything at
@@ -111,7 +142,8 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
       BsonTimestamp highWaterMark,
       MetricsFactory metricsFactory,
       boolean avoidNaturalOrderScanSyncSourceChangeResync,
-      boolean isFreshStart) {
+      boolean isFreshStart,
+      Optional<ParallelCollectionScanResumeState> parallelResumeState) {
     HashMap<String, Object> defaultKeyValues = new HashMap<>();
     defaultKeyValues.put("indexId", context.getIndexId());
     defaultKeyValues.put("generationId", context.getGenerationId());
@@ -125,6 +157,11 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
     this.matchCollectionUuidForUpdateLookup = matchCollectionUuidForUpdateLookup;
     this.splitLargeChangeStreamEvents = splitLargeChangeStreamEvents;
     this.context = context;
+    this.viewFieldDependencies =
+        Suppliers.memoize(
+            () ->
+                ChangeStreamDocumentUtils.deriveViewFieldDependencies(
+                    context.getIndexDefinition()));
     this.mongoClient = mongoClient;
     this.clusterTimeProvider = mongoClient::getMaxValidMajorityReadOptime;
     this.namespace = namespace;
@@ -134,7 +171,9 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
     this.resumeInfo = Optional.empty();
 
     this.shutdown = false;
+    this.processingCancelled = false;
     this.isFreshStart = isFreshStart;
+    this.parallelResumeState = parallelResumeState;
 
     Tags replicationTag = Tags.of(ServerStatusDataExtractor.Scope.REPLICATION.getTag());
     this.witnessedUpdatesCounter =
@@ -147,7 +186,20 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
             replicationTag);
     this.skippedDocumentsWithoutMetadataNamespaceCounter =
         metricsFactory.counter(SKIPPED_DOCUMENTS_WITHOUT_METADATA_NAMESPACE);
-    this.preprocessingBatchTimer = metricsFactory.timer(PREPROCESSING_BATCH_DURATIONS);
+    if (MaterializedViewIndexDefinitionGeneration.isMaterializedViewBasedIndex(
+        context.getIndexDefinition())) {
+      Tags autoEmbeddingTags =
+          replicationTag.and(
+              INDEX_TYPE_TAG_NAME, getIndexTypeTag(context.getIndexDefinition()).tagValue);
+      this.partialEmbedMetricCounters =
+          Optional.of(new PartialEmbedMetricCounters(metricsFactory, autoEmbeddingTags));
+      this.viewFieldDependenciesMetricCounters =
+          Optional.of(new ViewFieldDependenciesMetricCounters(metricsFactory, autoEmbeddingTags));
+    } else {
+      this.partialEmbedMetricCounters = Optional.empty();
+      this.viewFieldDependenciesMetricCounters = Optional.empty();
+    }
+    this.preprocessingBatchTimer = metricsFactory.timerSec(PREPROCESSING_BATCH_DURATIONS);
     this.totalDocumentsCounter = metricsFactory.counter("changeStreamTotalDocuments");
     this.avoidNaturalOrderScanSyncSourceChangeResync = avoidNaturalOrderScanSyncSourceChangeResync;
   }
@@ -343,12 +395,25 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
         indexingFuture, InitialSyncException.Phase.CHANGE_STREAM);
 
     // When previous indexing finishes, schedule the current batch.
+    if (this.parallelResumeState.isEmpty()) {
+      return this.context
+          .schedule(
+              batch.finalChangeEvents,
+              SchedulerQueue.Priority.INITIAL_SYNC_CHANGE_STREAM,
+              getCommitUserData(lastScannedToken))
+          .thenRun(() -> updateBatchCounters(batch));
+    }
+
+    ParallelCollectionScanResumeState resumeState = this.parallelResumeState.get();
+    BsonTimestamp batchHighWaterMark = this.highWaterMark;
     return this.context
-        .schedule(
-            batch.finalChangeEvents,
-            SchedulerQueue.Priority.INITIAL_SYNC_CHANGE_STREAM,
-            getCommitUserData(lastScannedToken))
-        .thenRun(() -> updateBatchCounters(batch));
+        .scheduleWithoutCommitUserData(
+            batch.finalChangeEvents, SchedulerQueue.Priority.INITIAL_SYNC_CHANGE_STREAM)
+        .thenRun(
+            () -> {
+              resumeState.advanceHighWaterMark(batchHighWaterMark);
+              updateBatchCounters(batch);
+            });
   }
 
   /**
@@ -378,7 +443,10 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
             this.context
                 .getIndexDefinition()
                 .createFieldDefinitionResolver(this.context.getIndexFormatVersion()),
-            true /* areUpdateEventsPrefiltered */);
+            true /* areUpdateEventsPrefiltered */,
+            this.viewFieldDependencies.get(),
+            this.context.getAutoEmbeddingMaterializedViewConfig(),
+            this.derivationFallbackReported.compareAndSet(false, true));
 
     this.totalDocumentsCounter.increment(batch.getRawEvents().size());
     this.preprocessingBatchTimer.record(preprocessingBatchTimer.stop().elapsed());
@@ -391,6 +459,9 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
     this.witnessedUpdatesCounter.increment(documentEventBatch.updatesWitnessed);
     this.skippedDocumentsWithoutMetadataNamespaceCounter.increment(
         documentEventBatch.skippedDocumentsWithoutMetadataNamespace);
+    this.partialEmbedMetricCounters.ifPresent(counters -> counters.recordBatch(documentEventBatch));
+    this.viewFieldDependenciesMetricCounters.ifPresent(
+        counters -> counters.recordBatch(documentEventBatch));
 
     if (documentEventBatch.applicableDocumentsTotal > 0) {
       this.context
@@ -410,8 +481,8 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
     }
   }
 
-  private List<ChangeStreamDocument<RawBsonDocument>> processBatch(
-      ChangeStreamBatch batch) throws InitialSyncException {
+  private List<ChangeStreamDocument<RawBsonDocument>> processBatch(ChangeStreamBatch batch)
+      throws InitialSyncException {
     List<ChangeStreamDocument<RawBsonDocument>> documentEventsToApply = new ArrayList<>();
 
     for (ChangeStreamDocument<RawBsonDocument> event :
@@ -423,6 +494,7 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
           Check.argNotNull(updateDescription, "updateDescription");
           if (!ChangeStreams.updateDescriptionAppliesToIndex(
               updateDescription,
+              this.context.getIndexDefinition(),
               this.context
                   .getIndexDefinition()
                   .createFieldDefinitionResolver(this.context.getIndexFormatVersion()),
@@ -505,7 +577,7 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
 
   private IndexCommitUserData getCommitUserData(BsonValue lastScannedToken) {
     return IndexCommitUserData.createInitialSyncResume(
-        this.context.getIndexFormatVersion(),
+        this.context.getGenerationId().generation.formatVersion.versionNumber(),
         InitialSyncResumeInfo.create(
             this.context.useNaturalOrderScan(),
             this.highWaterMark,
@@ -520,11 +592,16 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
    * same in the case of an unexpected error during processing.
    */
   private void cancelIndexing(Exception e) {
-    if (!this.shutdown) {
+    if (!this.processingCancelled) {
       FutureUtils.getAndSwallow(
-          this.context.cancel(e),
+          cancelProcessing(e),
           error -> this.logger.error("Failure during indexing cancellation", error));
     }
+  }
+
+  private CompletableFuture<Void> cancelProcessing(Throwable reason) {
+    this.processingCancelled = true;
+    return this.context.cancel(reason);
   }
 
   /**
@@ -534,7 +611,7 @@ public class BufferlessChangeStreamApplier implements AutoCloseable {
   private void handleShutdown() throws InitialSyncException {
     InitialSyncException shutdownException = InitialSyncException.createShutDown();
     // Cancel processing for this index, to remove any work in the scheduler's queue.
-    CompletableFuture<Void> cancelFuture = this.context.cancel(shutdownException);
+    CompletableFuture<Void> cancelFuture = cancelProcessing(shutdownException);
     // Wait for all work to be finished.
     InitialSyncException.getOrWrapThrowable(cancelFuture, InitialSyncException.Phase.CHANGE_STREAM);
 

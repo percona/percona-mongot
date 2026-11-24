@@ -16,6 +16,7 @@ import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.FutureUtils;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Timer;
+import java.nio.file.NoSuchFileException;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -66,6 +67,7 @@ public class IndexLifecycleManager {
 
   private final InitializedIndexCatalog initializedIndexCatalog;
   private final Metrics metrics;
+
   @GuardedBy("this")
   private CompletableFuture<Void> initFuture;
 
@@ -103,7 +105,7 @@ public class IndexLifecycleManager {
           metricsFactory.counter("failedInitializationIndexes"),
           metricsFactory.counter("failedDropIndexes"),
           metricsFactory.counter("failedDownloadIndexes"),
-          metricsFactory.timer("indexInitializationDuration"));
+          metricsFactory.timerSec("indexInitializationDuration"));
     }
   }
 
@@ -197,7 +199,9 @@ public class IndexLifecycleManager {
 
       var initializedIndex =
           this.indexFactory.getInitializedIndex(
-              this.indexGeneration.getIndex(), this.indexGeneration.getDefinitionGeneration());
+              this.indexGeneration.getIndex(),
+              this.indexGeneration.getDefinitionGeneration(),
+              this.indexGeneration.getMetricsIndexTypeTag());
       long elapsed = timer.stop(this.metrics.indexInitializationDurations);
       LOG.atInfo()
           .addKeyValue("indexId", generationId.indexId)
@@ -212,6 +216,13 @@ public class IndexLifecycleManager {
           try {
             initializedIndex.close();
             initializedIndex.drop();
+          } catch (NoSuchFileException e) {
+            // The concurrent drop already deleted the index directory.
+            LOG.atWarn()
+                .addKeyValue("indexId", generationId.indexId)
+                .addKeyValue("generationId", generationId)
+                .setCause(e)
+                .log("Index directory already deleted by concurrent drop");
           } catch (Exception e) {
             LOG.atError()
                 .addKeyValue("indexId", generationId.indexId)

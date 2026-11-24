@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import com.xgen.mongot.catalogservice.schema.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.schema.IndexStatusP;
 import com.xgen.mongot.index.AggregatedIndexMetrics;
 import com.xgen.mongot.index.IndexDetailedStatus;
 import com.xgen.mongot.index.IndexInformation;
@@ -16,6 +18,7 @@ import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -53,16 +56,17 @@ public class IndexStatsEntryMapperTest {
         new IndexDetailedStatus.Search(
             synonymStatusMap,
             searchDef,
+            List.of(),
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Generation.CURRENT.generationId(INDEX_ID),
-            Optional.of(new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L)));
+            Optional.of(new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L, 0L)));
 
     var indexInfo =
         new IndexInformation.Search(
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L),
+            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L, 0L),
             Optional.of(mainIndexStatus),
             Optional.empty(),
             Map.of("synonym1", SynonymStatus.READY, "synonym2", SynonymStatus.INITIAL_SYNC));
@@ -73,7 +77,7 @@ public class IndexStatsEntryMapperTest {
     assertEquals(INDEX_ID, result.key().indexId());
     assertEquals(IndexDefinition.Type.SEARCH, result.type());
     assertTrue(result.mainIndex().isPresent());
-    assertEquals(IndexStatus.StatusCode.STEADY, result.mainIndex().get().status().getStatusCode());
+    assertEquals(IndexStatusP.StatusCode.STEADY, result.mainIndex().get().status().statusCode());
     assertEquals(searchDef, result.mainIndex().get().definition());
     assertTrue(result.mainIndex().get().synonymDetailedStatusMap().isPresent());
     assertEquals(synonymStatusMap, result.mainIndex().get().synonymDetailedStatusMap().get());
@@ -104,6 +108,7 @@ public class IndexStatsEntryMapperTest {
         new IndexDetailedStatus.Search(
             mainSynonymStatusMap,
             searchDef,
+            List.of(),
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Generation.CURRENT.generationId(INDEX_ID),
             Optional.empty());
@@ -112,6 +117,7 @@ public class IndexStatsEntryMapperTest {
         new IndexDetailedStatus.Search(
             stagedSynonymStatusMap,
             searchDef,
+            List.of(),
             new IndexStatus(IndexStatus.StatusCode.INITIAL_SYNC),
             Generation.CURRENT.generationId(INDEX_ID),
             Optional.empty());
@@ -121,7 +127,7 @@ public class IndexStatsEntryMapperTest {
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L),
+            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L, 0L),
             Optional.of(mainIndexStatus),
             Optional.of(stagedIndexStatus),
             Map.of("synonym1", SynonymStatus.READY));
@@ -132,12 +138,12 @@ public class IndexStatsEntryMapperTest {
     assertEquals(INDEX_ID, result.key().indexId());
     assertEquals(IndexDefinition.Type.SEARCH, result.type());
     assertTrue(result.mainIndex().isPresent());
-    assertEquals(IndexStatus.StatusCode.STEADY, result.mainIndex().get().status().getStatusCode());
+    assertEquals(IndexStatusP.StatusCode.STEADY, result.mainIndex().get().status().statusCode());
     assertTrue(result.mainIndex().get().synonymDetailedStatusMap().isPresent());
     assertEquals(mainSynonymStatusMap, result.mainIndex().get().synonymDetailedStatusMap().get());
     assertTrue(result.stagedIndex().isPresent());
     assertEquals(
-        IndexStatus.StatusCode.INITIAL_SYNC, result.stagedIndex().get().status().getStatusCode());
+        IndexStatusP.StatusCode.INITIAL_SYNC, result.stagedIndex().get().status().statusCode());
     assertTrue(result.stagedIndex().get().synonymDetailedStatusMap().isPresent());
     assertEquals(
         stagedSynonymStatusMap, result.stagedIndex().get().synonymDetailedStatusMap().get());
@@ -159,6 +165,7 @@ public class IndexStatsEntryMapperTest {
         new IndexDetailedStatus.Search(
             Collections.emptyMap(),
             searchDef,
+            List.of(),
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Generation.CURRENT.generationId(INDEX_ID),
             Optional.empty());
@@ -168,7 +175,7 @@ public class IndexStatsEntryMapperTest {
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L),
+            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L, 0L),
             Optional.of(mainIndexStatus),
             Optional.empty(),
             Collections.emptyMap());
@@ -201,14 +208,14 @@ public class IndexStatsEntryMapperTest {
             vectorDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Generation.CURRENT.generationId(INDEX_ID),
-            Optional.of(new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L)));
+            Optional.of(new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L, 0L)));
 
     var indexInfo =
         new IndexInformation.Vector(
             vectorDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L),
+            new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L, 0L),
             Optional.of(mainIndexStatus),
             Optional.empty());
 
@@ -218,7 +225,7 @@ public class IndexStatsEntryMapperTest {
     assertEquals(INDEX_ID, result.key().indexId());
     assertEquals(IndexDefinition.Type.VECTOR_SEARCH, result.type());
     assertTrue(result.mainIndex().isPresent());
-    assertEquals(IndexStatus.StatusCode.STEADY, result.mainIndex().get().status().getStatusCode());
+    assertEquals(IndexStatusP.StatusCode.STEADY, result.mainIndex().get().status().statusCode());
     assertEquals(vectorDef, result.mainIndex().get().definition());
     assertFalse(result.mainIndex().get().synonymDetailedStatusMap().isPresent());
     assertFalse(result.stagedIndex().isPresent());
@@ -255,7 +262,7 @@ public class IndexStatsEntryMapperTest {
             vectorDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L),
+            new AggregatedIndexMetrics(500L, 1000L, new BsonTimestamp(2L), 100L, 0L),
             Optional.of(mainIndexStatus),
             Optional.of(stagedIndexStatus));
 
@@ -265,11 +272,11 @@ public class IndexStatsEntryMapperTest {
     assertEquals(INDEX_ID, result.key().indexId());
     assertEquals(IndexDefinition.Type.VECTOR_SEARCH, result.type());
     assertTrue(result.mainIndex().isPresent());
-    assertEquals(IndexStatus.StatusCode.STEADY, result.mainIndex().get().status().getStatusCode());
+    assertEquals(IndexStatusP.StatusCode.STEADY, result.mainIndex().get().status().statusCode());
     assertFalse(result.mainIndex().get().synonymDetailedStatusMap().isPresent());
     assertTrue(result.stagedIndex().isPresent());
     assertEquals(
-        IndexStatus.StatusCode.INITIAL_SYNC, result.stagedIndex().get().status().getStatusCode());
+        IndexStatusP.StatusCode.INITIAL_SYNC, result.stagedIndex().get().status().statusCode());
     assertFalse(result.stagedIndex().get().synonymDetailedStatusMap().isPresent());
   }
 
@@ -290,7 +297,7 @@ public class IndexStatsEntryMapperTest {
             searchDef,
             new IndexStatus(IndexStatus.StatusCode.STEADY),
             Collections.emptyList(),
-            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L),
+            new AggregatedIndexMetrics(100L, 200L, new BsonTimestamp(1L), 50L, 0L),
             Optional.empty(), // Empty main index
             Optional.empty(),
             Collections.emptyMap());

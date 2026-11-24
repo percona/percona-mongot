@@ -54,11 +54,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonInt64;
+import org.bson.BsonNull;
 import org.bson.BsonObjectId;
 import org.bson.BsonString;
 import org.bson.BsonTimestamp;
 import org.bson.BsonValue;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -117,6 +119,8 @@ public class BufferlessCollectionScannerTest {
                       Optional.empty(),
                       false,
                       enableNaturalOrderScan,
+                      false,
+                      1,
                       initialSyncGate)
                   .withProgress(START_OPTIME));
 
@@ -408,6 +412,52 @@ public class BufferlessCollectionScannerTest {
   }
 
   @Test
+  public void testEndOfScanNullRecordIdKeepsPreviousToken() throws Exception {
+    // Only the natural-order scan carries post-batch resume tokens; the _id scan tracks the last
+    // document id and never sees a null $recordId.
+    Assume.assumeTrue(enableNaturalOrderScan);
+
+    Mocks mocks = Mocks.createMocks(MOCK_INDEX_DEFINITION_GENERATION);
+
+    // Two batches: the first ends on a resumable $recordId, the second finishes the scan and comes
+    // back with a null $recordId (mongod 8.2.1+), which mongod refuses to resume from.
+    when(mocks.findCommandMongoClient.hasNext())
+        .thenReturn(true)
+        .thenReturn(true)
+        .thenReturn(false);
+    when(mocks.findCommandMongoClient.getNext())
+        .thenReturn(
+            List.of(
+                BsonUtils.documentToRaw(
+                    new BsonDocument("_id", new BsonInt32(1))
+                        .append(
+                            MOCK_INDEX_DEFINITION_GENERATION.getIndexId().toString(),
+                            new BsonDocument("_id", new BsonInt32(1))))))
+        .thenReturn(
+            List.of(
+                BsonUtils.documentToRaw(
+                    new BsonDocument("_id", new BsonInt32(2))
+                        .append(
+                            MOCK_INDEX_DEFINITION_GENERATION.getIndexId().toString(),
+                            new BsonDocument("_id", new BsonInt32(2))))));
+
+    BsonDocument resumableToken = new BsonDocument().append("$recordId", new BsonInt64(1));
+    BsonDocument endOfScanToken = new BsonDocument().append("$recordId", BsonNull.VALUE);
+    when(mocks.findCommandMongoClient.getPostBatchResumeToken())
+        .thenReturn(Optional.of(resumableToken))
+        .thenReturn(Optional.of(endOfScanToken));
+
+    BufferlessCollectionScanner.Result result =
+        mocks.collectionScanner.scanWithTimeLimit(DEFAULT_SCAN_TIME);
+
+    verify(mocks.documentIndexer, times(2)).indexDocumentEvent(any());
+    // The scan finished, but the last resumable position is kept instead of the unresumable
+    // null-$recordId token, so a restart in the end-of-scan window rescans rather than resyncs.
+    Assert.assertEquals(resumableToken, result.getLastScannedToken());
+    Assert.assertFalse(result.getContinueSync());
+  }
+
+  @Test
   public void testDocumentIsSkippedWhenMetadataIsEmptyAndIndexIsCreatedOnView() throws Exception {
 
     SearchIndexDefinition indexDefinition =
@@ -665,6 +715,23 @@ public class BufferlessCollectionScannerTest {
   }
 
   @Test
+  public void testScanCancelsIndexSchedulingWhenBatchFailsWithShutdownException() throws Exception {
+    // A batch rejected because its generator's lease tenure ended fails with a shutdown exception,
+    // even though the scanner itself was never signalled to shut down.
+    Mocks mocks =
+        Mocks.indexingWorkSchedulerCompletesExceptionally(InitialSyncException.createShutDown());
+
+    InitialSyncException e =
+        Assert.assertThrows(
+            InitialSyncException.class,
+            () -> mocks.collectionScanner.scanWithTimeLimit(DEFAULT_SCAN_TIME));
+    Assert.assertTrue(e.isShutdown());
+
+    verify(mocks.indexingWorkScheduler, times(1))
+        .cancel(eq(mocks.indexDefinitionGeneration.getGenerationId()), any(), any());
+  }
+
+  @Test
   public void testScanNeverCancelsIndexSchedulingOnSuccessfulRun() throws Exception {
     Mocks mocks = Mocks.threeDocuments();
     mocks.collectionScanner.scanWithTimeLimit(DEFAULT_SCAN_TIME);
@@ -688,7 +755,8 @@ public class BufferlessCollectionScannerTest {
     verify(mocks.documentIndexer)
         .updateCommitUserData(
             IndexCommitUserData.createInitialSyncResume(
-                mocks.context.getIndexFormatVersion(), resumeInfo));
+                mocks.context.getGenerationId().generation.formatVersion.versionNumber(),
+                resumeInfo));
     BsonValue expected = enableNaturalOrderScan ? POST_BATCH_RESUME_TOKEN : new BsonInt32(3);
     verify(mocks.indexingWorkScheduler).schedule(any(), any(), any(), any(), any(), any(), any());
     Assert.assertEquals(expected, result.getLastScannedToken());
@@ -722,10 +790,10 @@ public class BufferlessCollectionScannerTest {
 
     Assert.assertTrue(
         indexMetricsUpdater
-            .getReplicationMetricsUpdater()
-            .getInitialSyncMetrics()
-            .getTotalApplicableBytes()
-            .count()
+                .getReplicationMetricsUpdater()
+                .getInitialSyncMetrics()
+                .getTotalApplicableBytes()
+                .count()
             > 0);
   }
 }

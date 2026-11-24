@@ -19,12 +19,15 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 import com.xgen.mongot.config.backup.ConfigJournalV1;
+import com.xgen.mongot.config.backup.JournalEntryIdentity;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinition;
 import com.xgen.mongot.index.definition.AnalyzerBoundSearchIndexDefinition;
+import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.definition.IndexDefinitionGenerationProducer;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
@@ -34,6 +37,7 @@ import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.index.version.UserIndexVersion;
+import com.xgen.mongot.index.version.VectorliteFormatVersion;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.testing.mongot.config.backup.ConfigJournalV1Builder;
 import com.xgen.testing.mongot.config.manager.ConfigStateMocks;
@@ -49,6 +53,10 @@ import com.xgen.testing.mongot.mock.index.VectorIndex;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import org.bson.BsonBoolean;
+import org.bson.BsonDocument;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
@@ -56,10 +64,27 @@ import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 public class DesiredConfigStateUpdaterTest {
+  private static final ObjectId QUARANTINED_INDEX_ID = new ObjectId("012345678901234567890123");
+
   private static final SearchIndexDefinition MOCK_INDEX_DEFINITION_CHANGED =
       SearchIndexDefinitionBuilder.from(MOCK_INDEX_DEFINITION).analyzerName("lucene.cjk").build();
   private static final VectorIndexDefinition MOCK_VECTOR_DEFINITION_CHANGED =
       VectorIndexDefinitionBuilder.from(MOCK_VECTOR_DEFINITION).withFilterPath("new.path").build();
+
+  private static final ObjectId VECTORLITE_INDEX_ID = new ObjectId("0123456789012345678901ab");
+  private static final VectorIndexDefinition MOCK_VECTORLITE_DEFINITION =
+      VectorIndexDefinitionBuilder.builder()
+          .indexId(VECTORLITE_INDEX_ID)
+          .withCustomEngineVectorField("vector", 3)
+          .build();
+  // Built directly rather than via from(): the builder's from() re-adds vector fields with default
+  // options and drops the custom engine, which would turn this into a Lucene vector index.
+  private static final VectorIndexDefinition MOCK_VECTORLITE_DEFINITION_CHANGED =
+      VectorIndexDefinitionBuilder.builder()
+          .indexId(VECTORLITE_INDEX_ID)
+          .withCustomEngineVectorField("vector", 3)
+          .withFilterPath("new.path")
+          .build();
 
   @Test
   public void testEmptyUpdatedToEmptyDoesNothing() throws Exception {
@@ -298,6 +323,61 @@ public class DesiredConfigStateUpdaterTest {
                             == MOCK_VECTOR_DEFINITION_CHANGED));
     inOrder.verify(mocks.indexFactory).getIndex(any());
     inOrder.verify(mocks.staged).addIndex(newIndex);
+  }
+
+  /** The conf-call path that mints every production vectorlite generation. */
+  @Test
+  public void testEmptyUpdatedToVectorliteIndexStartsAtTheVectorliteVersion() throws Exception {
+    ConfigStateMocks mocks = vectorliteReadyMocks();
+    swapUpdate(mocks, List.of(MOCK_VECTORLITE_DEFINITION), List.of());
+
+    mocks.assertOneIndexCreated();
+    mocks.assertOneIndexCatalogedAndReplicated();
+
+    var expectedGeneration =
+        new VectorIndexDefinitionGeneration(
+            MOCK_VECTORLITE_DEFINITION,
+            new Generation(UserIndexVersion.FIRST, VectorliteFormatVersion.CURRENT));
+    mocks.assertPersistedJournalEquals(
+        ConfigJournalV1Builder.builder().liveIndex(expectedGeneration).build());
+    Assert.assertEquals(
+        expectedGeneration,
+        mocks
+            .indexCatalog
+            .getIndexById(VECTORLITE_INDEX_ID)
+            .orElseThrow()
+            .getDefinitionGeneration());
+  }
+
+  /** A vectorlite index on a Lucene generation is not current; a modification restages it. */
+  @Test
+  public void testVectorliteIndexOnLuceneGenerationModifiedRestagesAsVectorlite() throws Exception {
+    ConfigStateMocks mocks = vectorliteReadyMocks();
+    var preSplit =
+        new VectorIndexDefinitionGeneration(
+            MOCK_VECTORLITE_DEFINITION,
+            new Generation(UserIndexVersion.FIRST, IndexFormatVersion.CURRENT));
+    var oldIndex = mocks.addIndex(preSplit, ConfigStateMocks.State.LIVE);
+    mocks.clearInvocations();
+
+    swapUpdate(mocks, List.of(MOCK_VECTORLITE_DEFINITION_CHANGED), List.of());
+
+    mocks.assertOneIndexCreated();
+    mocks.assertAtLeastOneIndexStagedAndReplicated();
+    mocks.assertLiveIndexesAre(oldIndex);
+    var newIndex = mocks.staged.getIndex(VECTORLITE_INDEX_ID).orElseThrow();
+    mocks.assertStagedIndexesAre(newIndex);
+    Assert.assertEquals(MOCK_VECTORLITE_DEFINITION_CHANGED, newIndex.getDefinition());
+    Assert.assertEquals(
+        VectorliteFormatVersion.CURRENT,
+        newIndex.getDefinitionGeneration().generation().formatVersion.asVectorlite());
+  }
+
+  /** The mock factory defers custom engine indexes until ready; report them ready. */
+  private ConfigStateMocks vectorliteReadyMocks() throws Exception {
+    var mocks = getEmptyMocks();
+    when(mocks.indexFactory.isReadyToInitialize(any())).thenReturn(true);
+    return mocks;
   }
 
   @Test
@@ -1223,6 +1303,167 @@ public class DesiredConfigStateUpdaterTest {
         1, meterRegistry.get("test.reindex").tag("reason", "MULTIPLE").counter().count(), 0);
   }
 
+  /**
+   * A quarantined index that is desired in no form at all - the user deleted it - is dropped from
+   * the journal and from disk.
+   */
+  @Test
+  public void undesiredQuarantinedLiveIndex_isDroppedFromJournalAndDisk() throws Exception {
+    ConfigStateMocks mocks = getEmptyMocks();
+    QuarantinedIndex quarantined = quarantinedIndex(QUARANTINED_INDEX_ID, "quarantined");
+    mocks.configState.incompatibleIndexes.addLiveIndex(quarantined);
+
+    swapUpdate(mocks, List.of(), List.of(), Set.of());
+
+    verify(mocks.indexFactory).deleteGenerationData(quarantined.generationId());
+    Assert.assertTrue(mocks.configState.incompatibleIndexes.isEmpty());
+    mocks.assertPersistedJournalEmpty();
+  }
+
+  @Test
+  public void undesiredQuarantinedStagedIndex_isDroppedFromJournalAndDisk() throws Exception {
+    ConfigStateMocks mocks = getEmptyMocks();
+    QuarantinedIndex quarantined = quarantinedIndex(QUARANTINED_INDEX_ID, "quarantined");
+    mocks.configState.incompatibleIndexes.addStagedIndex(quarantined);
+
+    swapUpdate(mocks, List.of(), List.of(), Set.of());
+
+    verify(mocks.indexFactory).deleteGenerationData(quarantined.generationId());
+    Assert.assertTrue(mocks.configState.incompatibleIndexes.isEmpty());
+    mocks.assertPersistedJournalEmpty();
+  }
+
+  /** An index can be quarantined live and staged at once, and then both generations go. */
+  @Test
+  public void undesiredQuarantinedIndex_dropsBothItsGenerations() throws Exception {
+    ConfigStateMocks mocks = getEmptyMocks();
+    QuarantinedIndex live = quarantinedIndex(QUARANTINED_INDEX_ID, "quarantined", 1);
+    QuarantinedIndex staged = quarantinedIndex(QUARANTINED_INDEX_ID, "quarantined", 2);
+    mocks.configState.incompatibleIndexes.addLiveIndex(live);
+    mocks.configState.incompatibleIndexes.addStagedIndex(staged);
+
+    swapUpdate(mocks, List.of(), List.of(), Set.of());
+
+    verify(mocks.indexFactory).deleteGenerationData(live.generationId());
+    verify(mocks.indexFactory).deleteGenerationData(staged.generationId());
+    Assert.assertTrue(mocks.configState.incompatibleIndexes.isEmpty());
+    mocks.assertPersistedJournalEmpty();
+  }
+
+  /**
+   * The whole point of quarantine: an index this binary cannot read but the control plane still
+   * wants keeps its data and its journal entry, verbatim.
+   */
+  @Test
+  public void desiredButStillUnreadableQuarantinedIndex_isLeftAlone() throws Exception {
+    ConfigStateMocks mocks = getEmptyMocks();
+    QuarantinedIndex quarantined = quarantinedIndex(QUARANTINED_INDEX_ID, "quarantined");
+    mocks.configState.incompatibleIndexes.addLiveIndex(quarantined);
+
+    swapUpdate(mocks, List.of(), List.of(), Set.of(QUARANTINED_INDEX_ID));
+
+    verify(mocks.indexFactory, never()).deleteGenerationData(any());
+    Assert.assertEquals(
+        List.of(quarantined), List.copyOf(mocks.configState.incompatibleIndexes.getLiveIndexes()));
+    Assert.assertEquals(
+        List.of(quarantined.asJournalEntry()), mocks.configState.currentJournal().getLiveEntries());
+  }
+
+  /**
+   * The escape hatch: the index was updated to a definition this binary can parse, so the
+   * quarantined generation is superseded and the replacement is built fresh.
+   */
+  @Test
+  public void quarantinedIndexSupersededByReadableDefinition_isDroppedAndRebuilt()
+      throws Exception {
+    ConfigStateMocks mocks = getEmptyMocks();
+    QuarantinedIndex quarantined = quarantinedIndex(MOCK_INDEX_ID, "quarantined");
+    mocks.configState.incompatibleIndexes.addLiveIndex(quarantined);
+
+    // A readable definition arrived, so the control plane no longer reports the id as unreadable.
+    swapUpdate(mocks, List.of(), List.of(MOCK_INDEX_DEFINITION), Set.of());
+
+    verify(mocks.indexFactory).deleteGenerationData(quarantined.generationId());
+    Assert.assertTrue(mocks.configState.incompatibleIndexes.isEmpty());
+    mocks.assertOneIndexCreated();
+    mocks.assertIndexCatalogSize(1);
+  }
+
+  /** A quarantined staged generation goes without disturbing the live index serving queries. */
+  @Test
+  public void quarantinedStagedGeneration_isDroppedWhileLiveIndexIsPreserved() throws Exception {
+    ConfigStateMocks mocks = ConfigStateMocks.create();
+    mocks.addIndex(MOCK_INDEX_DEFINITION_GENERATION_CURRENT, ConfigStateMocks.State.LIVE);
+    mocks.configState.postInitializationFromConfigJournal();
+    QuarantinedIndex quarantined = quarantinedIndex(MOCK_INDEX_ID, "quarantined", 2);
+    mocks.configState.incompatibleIndexes.addStagedIndex(quarantined);
+
+    swapUpdate(mocks, List.of(), List.of(MOCK_INDEX_DEFINITION), Set.of());
+
+    verify(mocks.indexFactory).deleteGenerationData(quarantined.generationId());
+    Assert.assertTrue(mocks.configState.incompatibleIndexes.isEmpty());
+    mocks.assertIndexCatalogSize(1);
+    mocks.assertPersistedJournalEquals(
+        ConfigJournalV1Builder.builder()
+            .liveIndex(MOCK_INDEX_DEFINITION_GENERATION_CURRENT)
+            .build());
+  }
+
+  /**
+   * The index has a parseable live generation and a quarantined staged one. MMS reports its
+   * authoritative definition as unreadable, and {@code MmsConfigUpdater} sends the live definition
+   * in its place - so this update carries both a readable definition and the id, as unreadable. The
+   * staged generation stays quarantined: the definition says nothing about whether the generation
+   * we could not parse is the one MMS wants.
+   */
+  @Test
+  public void quarantinedStagedGeneration_survivesASubstitutedLiveDefinition() throws Exception {
+    ConfigStateMocks mocks = ConfigStateMocks.create();
+    mocks.addIndex(MOCK_INDEX_DEFINITION_GENERATION_CURRENT, ConfigStateMocks.State.LIVE);
+    mocks.configState.postInitializationFromConfigJournal();
+    QuarantinedIndex quarantined = quarantinedIndex(MOCK_INDEX_ID, "quarantined", 2);
+    mocks.configState.incompatibleIndexes.addStagedIndex(quarantined);
+
+    swapUpdate(mocks, List.of(), List.of(MOCK_INDEX_DEFINITION), Set.of(MOCK_INDEX_ID));
+
+    verify(mocks.indexFactory, never()).deleteGenerationData(any());
+    Assert.assertEquals(
+        List.of(quarantined),
+        List.copyOf(mocks.configState.incompatibleIndexes.getStagedIndexes()));
+    mocks.assertIndexCatalogSize(1);
+  }
+
+  /** Nodes with nothing quarantined - every node, normally - do no extra work. */
+  @Test
+  public void withoutQuarantinedIndexes_nothingIsDeleted() throws Exception {
+    ConfigStateMocks mocks = getEmptyMocks();
+
+    swapUpdate(mocks, List.of(), List.of(MOCK_INDEX_DEFINITION), Set.of());
+
+    verify(mocks.indexFactory, never()).deleteGenerationData(any());
+  }
+
+  private static QuarantinedIndex quarantinedIndex(ObjectId indexId, String name) {
+    return quarantinedIndex(indexId, name, 1);
+  }
+
+  private static QuarantinedIndex quarantinedIndex(
+      ObjectId indexId, String name, int userIndexVersion) {
+    var identity =
+        new JournalEntryIdentity(
+            indexId,
+            "db",
+            UUID.fromString("00000000-1111-2222-3333-444444444444"),
+            name,
+            new Generation(new UserIndexVersion(userIndexVersion), IndexFormatVersion.CURRENT));
+
+    return new QuarantinedIndex(
+        identity,
+        IndexDefinitionGeneration.Type.SEARCH,
+        "field is required",
+        new BsonDocument("fieldFromTheFuture", new BsonBoolean(true)));
+  }
+
   private ConfigJournalV1 emptyConfigJournal() {
     return ConfigJournalV1Builder.builder().build();
   }
@@ -1248,6 +1489,30 @@ public class DesiredConfigStateUpdaterTest {
       List<SearchIndexDefinition> searchIndexes,
       MetricsFactory metricsFactory)
       throws Exception {
+    swapUpdate(mocks, vectorIndexes, searchIndexes, Set.of(), metricsFactory);
+  }
+
+  private void swapUpdate(
+      ConfigStateMocks mocks,
+      List<VectorIndexDefinition> vectorIndexes,
+      List<SearchIndexDefinition> searchIndexes,
+      Set<ObjectId> unreadableDesiredIds)
+      throws Exception {
+    swapUpdate(
+        mocks,
+        vectorIndexes,
+        searchIndexes,
+        unreadableDesiredIds,
+        new MetricsFactory("test", new SimpleMeterRegistry()));
+  }
+
+  private void swapUpdate(
+      ConfigStateMocks mocks,
+      List<VectorIndexDefinition> vectorIndexes,
+      List<SearchIndexDefinition> searchIndexes,
+      Set<ObjectId> unreadableDesiredIds,
+      MetricsFactory metricsFactory)
+      throws Exception {
     List<IndexDefinitionGenerationProducer> producers =
         IndexDefinitionGenerationProducer.createProducers(
             vectorIndexes,
@@ -1260,6 +1525,7 @@ public class DesiredConfigStateUpdaterTest {
         searchIndexes,
         Collections.emptyList(),
         producers,
+        unreadableDesiredIds,
         metricsFactory);
   }
 }

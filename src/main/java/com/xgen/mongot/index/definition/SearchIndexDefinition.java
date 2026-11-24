@@ -3,11 +3,13 @@ package com.xgen.mongot.index.definition;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.xgen.mongot.index.analyzer.definition.CustomAnalyzerDefinition;
 import com.xgen.mongot.index.analyzer.definition.StockAnalyzerNames;
 import com.xgen.mongot.index.analyzer.definition.StockNormalizerName;
 import com.xgen.mongot.index.query.sort.Sort;
+import com.xgen.mongot.index.version.IndexEngine;
 import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.CollectionUtils;
@@ -22,6 +24,7 @@ import com.xgen.mongot.util.bson.parser.Value;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -118,6 +121,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
   private final Optional<String> analyzerName;
   private final Optional<String> searchAnalyzerName;
   private final DocumentFieldDefinition mappings;
+  private final AutoEmbedFieldSet autoEmbedFields;
   private final Optional<List<CustomAnalyzerDefinition>> analyzers;
   private final int indexFeatureVersion;
   private final Optional<List<SynonymMappingDefinition>> synonyms;
@@ -127,6 +131,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
   private final Map<String, TypeSetDefinition> typeSetsMap;
   private final Optional<Long> definitionVersion;
   private final Optional<Instant> definitionVersionCreatedAt;
+  private final Optional<ObjectId> definitionVersionId;
   private final boolean isAutoEmbeddingIndex;
   private final ImmutableMap<FieldPath, String> modelNamePerPath;
   private final Optional<Long> autoEmbeddingDefinitionVersion;
@@ -150,6 +155,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
       Optional<ViewDefinition> view,
       int numPartitions,
       DocumentFieldDefinition mappings,
+      AutoEmbedFieldSet autoEmbedFields,
       Optional<String> analyzerName,
       Optional<String> searchAnalyzerName,
       UnmodifiableTrie<String, FieldDefinition> staticFieldDefinitions,
@@ -162,6 +168,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
       Optional<Sort> sort,
       Optional<Long> definitionVersion,
       Optional<Instant> definitionVersionCreatedAt,
+      Optional<ObjectId> definitionVersionId,
       Optional<ObjectId> indexIdAtCreationTime,
       Optional<Long> autoEmbeddingDefinitionVersion,
       Optional<Long> materializedViewNameFormatVersion) {
@@ -175,6 +182,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
     this.analyzerName = analyzerName;
     this.searchAnalyzerName = searchAnalyzerName;
     this.mappings = mappings;
+    this.autoEmbedFields = autoEmbedFields;
     this.staticFieldDefinitions = staticFieldDefinitions;
     this.nonStockAnalyzerNames = nonStockAnalyzerNames;
     this.analyzers = analyzers;
@@ -194,8 +202,9 @@ public final class SearchIndexDefinition implements IndexDefinition {
             .orElse(Collections.emptyMap());
     this.definitionVersion = definitionVersion;
     this.definitionVersionCreatedAt = definitionVersionCreatedAt;
-    this.isAutoEmbeddingIndex = calculateIsAutoEmbeddingIndex(mappings);
-    this.modelNamePerPath = calculateModelNamePerPath(mappings);
+    this.definitionVersionId = definitionVersionId;
+    this.isAutoEmbeddingIndex = !autoEmbedFields.isEmpty();
+    this.modelNamePerPath = autoEmbedFields.modelNamePerPath();
     this.indexIdAtCreationTime = indexIdAtCreationTime;
     this.autoEmbeddingDefinitionVersion = autoEmbeddingDefinitionVersion;
     this.materializedViewNameFormatVersion = materializedViewNameFormatVersion;
@@ -220,9 +229,11 @@ public final class SearchIndexDefinition implements IndexDefinition {
       Optional<Sort> sort,
       Optional<Long> definitionVersion,
       Optional<Instant> definitionVersionCreatedAt,
+      Optional<ObjectId> definitionVersionId,
       Optional<ObjectId> indexIdAtCreationTime,
       Optional<Long> autoEmbeddingDefinitionVersion,
       Optional<Long> materializedViewNameFormatVersion) {
+    AutoEmbedFieldSet autoEmbedFields = AutoEmbedFieldSet.create(mappings);
     Trie<String, FieldDefinition> staticFields = new PatriciaTrie<>();
     registerFields(staticFields, Optional.empty(), mappings);
     UnmodifiableTrie<String, FieldDefinition> unmodifiableStaticFields =
@@ -249,6 +260,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         view,
         numPartitions,
         mappings,
+        autoEmbedFields,
         analyzerName,
         searchAnalyzerName,
         unmodifiableStaticFields,
@@ -261,6 +273,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         sort,
         definitionVersion,
         definitionVersionCreatedAt,
+        definitionVersionId,
         indexIdAtCreationTime,
         autoEmbeddingDefinitionVersion,
         materializedViewNameFormatVersion);
@@ -282,6 +295,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         Optional.of(updatedViewDefinition),
         this.numPartitions,
         this.mappings,
+        this.autoEmbedFields,
         this.analyzerName,
         this.searchAnalyzerName,
         this.staticFieldDefinitions,
@@ -294,6 +308,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         this.sort,
         this.definitionVersion,
         this.definitionVersionCreatedAt,
+        this.definitionVersionId,
         this.indexIdAtCreationTime,
         this.autoEmbeddingDefinitionVersion,
         this.materializedViewNameFormatVersion);
@@ -324,6 +339,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
     validateTypeSetReferences(typeSets, mappings);
     Optional<Sort> sort = parser.getField(Fields.SORT).unwrap();
     IndexSortValidator.validateSort(sort, mappings);
+    validateAutoEmbedPathsDoNotOverlapMappings(mappings);
 
     return create(
         indexId,
@@ -346,6 +362,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         parser.getField(IndexDefinition.Fields.DEFINITION_VERSION).unwrap(),
         DateUtil.parseInstantFromString(
             parser, DATE_FORMAT, IndexDefinition.Fields.DEFINITION_VERSION_CREATED_AT),
+        parser.getField(IndexDefinition.Fields.DEFINITION_VERSION_ID).unwrap(),
         parser.getField(IndexDefinition.Fields.INDEX_ID_AT_CREATION_TIME).unwrap(),
         parser.getField(IndexDefinition.Fields.AUTO_EMBEDDING_DEFINITION_VERSION).unwrap(),
         parser.getField(IndexDefinition.Fields.MATERIALIZED_VIEW_NAME_FORMAT_VERSION).unwrap());
@@ -375,6 +392,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         .field(
             IndexDefinition.Fields.DEFINITION_VERSION_CREATED_AT,
             this.definitionVersionCreatedAt.map(DATE_FORMAT::format))
+        .field(IndexDefinition.Fields.DEFINITION_VERSION_ID, this.definitionVersionId)
         .fieldOmitDefaultValue(
             IndexDefinition.Fields.INDEX_ID_AT_CREATION_TIME,
             this.indexIdAtCreationTime,
@@ -495,6 +513,11 @@ public final class SearchIndexDefinition implements IndexDefinition {
   }
 
   @Override
+  public Optional<ObjectId> getDefinitionVersionId() {
+    return this.definitionVersionId;
+  }
+
+  @Override
   public int getParsedIndexFeatureVersion() {
     return this.indexFeatureVersion;
   }
@@ -560,6 +583,22 @@ public final class SearchIndexDefinition implements IndexDefinition {
   }
 
   /**
+   * Validates the sort configuration the same way {@link #fromBson} does. Definitions built through
+   * the management-command path never go through {@link #fromBson}, so without this check a sort
+   * that only fails at parse time would be accepted by the command and then reject the definition
+   * on every catalog read. See CLOUDP-459819.
+   *
+   * @throws InvalidIndexDefinitionException if the sort configuration is invalid
+   */
+  public void validateSortDefinition() throws InvalidIndexDefinitionException {
+    try {
+      IndexSortValidator.validateSortFields(this.sort, this.staticFieldDefinitions);
+    } catch (BsonParseException e) {
+      throw new InvalidIndexDefinitionException(e.getMessage());
+    }
+  }
+
+  /**
    * Returns true if this index definition has an {@link EmbeddedDocumentsFieldDefinition} defined.
    */
   public boolean hasEmbeddedFields() {
@@ -599,6 +638,11 @@ public final class SearchIndexDefinition implements IndexDefinition {
   }
 
   @Override
+  public IndexEngine engine() {
+    return IndexEngine.LUCENE;
+  }
+
+  @Override
   public boolean isAutoEmbeddingIndex() {
     return this.isAutoEmbeddingIndex;
   }
@@ -607,29 +651,18 @@ public final class SearchIndexDefinition implements IndexDefinition {
    * Returns the auto-embedding feature version for this search index. Returns 2 (materialized view
    * based) if auto-embed fields are present, 0 otherwise.
    */
+  @Override
   public int getParsedAutoEmbeddingFeatureVersion() {
     return this.isAutoEmbeddingIndex ? 2 : 0;
   }
 
+  @Override
   public ImmutableMap<FieldPath, String> getModelNamePerPath() {
     return this.modelNamePerPath;
   }
 
-  private static boolean calculateIsAutoEmbeddingIndex(DocumentFieldDefinition mappings) {
-    return mappings.fields().values().stream()
-        .anyMatch(fd -> fd.searchAutoEmbedFieldDefinition().isPresent());
-  }
-
-  private static ImmutableMap<FieldPath, String> calculateModelNamePerPath(
-      DocumentFieldDefinition mappings) {
-    ImmutableMap.Builder<FieldPath, String> builder = ImmutableMap.builder();
-    for (FieldDefinition fieldDefinition : mappings.fields().values()) {
-      fieldDefinition
-          .searchAutoEmbedFieldDefinition()
-          .ifPresent(
-              autoEmbed -> builder.put(autoEmbed.sourceField(), autoEmbed.modelName()));
-    }
-    return builder.build();
+  public AutoEmbedFieldSet getAutoEmbedFields() {
+    return this.autoEmbedFields;
   }
 
   @Override
@@ -676,6 +709,7 @@ public final class SearchIndexDefinition implements IndexDefinition {
         && Objects.equal(
             this.definitionVersionCreatedAt.map(Instant::getEpochSecond),
             that.definitionVersionCreatedAt.map(Instant::getEpochSecond))
+        && Objects.equal(this.definitionVersionId, that.definitionVersionId)
         && Objects.equal(this.staticFieldDefinitions, that.staticFieldDefinitions)
         && Objects.equal(this.nonStockAnalyzerNames, that.nonStockAnalyzerNames)
         && Objects.equal(
@@ -707,11 +741,28 @@ public final class SearchIndexDefinition implements IndexDefinition {
         this.sort,
         this.definitionVersion,
         this.definitionVersionCreatedAt.map(Instant::getEpochSecond),
+        this.definitionVersionId,
         this.staticFieldDefinitions,
         this.nonStockAnalyzerNames,
         this.indexIdAtCreationTime.orElse(this.indexId),
         this.autoEmbeddingDefinitionVersion,
         this.materializedViewNameFormatVersion);
+  }
+
+  /**
+   * True when {@code other} differs from this definition at most by definitionVersion, its
+   * createdAt stamp, and its definitionVersionId.
+   */
+  public boolean equalsIgnoringDefinitionVersion(SearchIndexDefinition other) {
+    BsonDocument thisBson = toBson();
+    BsonDocument otherBson = other.toBson();
+    thisBson.remove(IndexDefinition.Fields.DEFINITION_VERSION.getName());
+    otherBson.remove(IndexDefinition.Fields.DEFINITION_VERSION.getName());
+    thisBson.remove(IndexDefinition.Fields.DEFINITION_VERSION_CREATED_AT.getName());
+    otherBson.remove(IndexDefinition.Fields.DEFINITION_VERSION_CREATED_AT.getName());
+    thisBson.remove(IndexDefinition.Fields.DEFINITION_VERSION_ID.getName());
+    otherBson.remove(IndexDefinition.Fields.DEFINITION_VERSION_ID.getName());
+    return thisBson.equals(otherBson);
   }
 
   @Override
@@ -727,6 +778,80 @@ public final class SearchIndexDefinition implements IndexDefinition {
     return String.format(
         "%s (index %s %s (%s) in database %s)",
         this.indexId, this.name, collection, this.collectionUuid, this.database);
+  }
+
+  /**
+   * Returns auto-embed {@code path}s that conflict with a document-shaped mapping: a {@code geo}
+   * field path (GeoJSON values cannot be copied alongside a generated vector), or a field that also
+   * declares {@code document} or {@code embeddedDocuments}.
+   */
+  public static ImmutableSet<FieldPath> autoEmbedPathMappingConflicts(
+      DocumentFieldDefinition mappings) {
+    Set<FieldPath> conflictingPaths = new HashSet<>();
+    Set<FieldPath> autoEmbedPaths = new LinkedHashSet<>();
+    collectDeclaredPathsAndAutoEmbedPaths(
+        mappings.fields(), Optional.empty(), conflictingPaths, autoEmbedPaths);
+    return autoEmbedPaths.stream()
+        .filter(conflictingPaths::contains)
+        .collect(ImmutableSet.toImmutableSet());
+  }
+
+  @VisibleForTesting
+  static void collectDeclaredPathsAndAutoEmbedPaths(
+      Map<String, FieldDefinition> fields,
+      Optional<FieldPath> prefix,
+      Set<FieldPath> conflictingPaths,
+      Set<FieldPath> autoEmbedPaths) {
+    for (Map.Entry<String, FieldDefinition> entry : fields.entrySet()) {
+      FieldPath path =
+          prefix
+              .map(p -> p.newChild(entry.getKey()))
+              .orElseGet(() -> FieldPath.newRoot(entry.getKey()));
+      FieldDefinition fieldDefinition = entry.getValue();
+      Optional<SearchAutoEmbedFieldDefinition> autoEmbed =
+          fieldDefinition.searchAutoEmbedFieldDefinition();
+      if (autoEmbed.isPresent()) {
+        autoEmbedPaths.add(path);
+      }
+      // Geo values are GeoJSON documents with no declared children to enumerate, so they cannot
+      // be copied into the materialized view alongside a generated vector at the same path.
+      fieldDefinition.geoFieldDefinition().ifPresent(geo -> conflictingPaths.add(path));
+      // A document or embeddedDocuments alternative cannot share its field with autoEmbed: the
+      // raw document value and the generated vector cannot both live at the source path. Scalar
+      // alternatives are fine (dual role).
+      if (autoEmbed.isPresent()
+          && (fieldDefinition.documentFieldDefinition().isPresent()
+              || fieldDefinition.embeddedDocumentsFieldDefinition().isPresent())) {
+        conflictingPaths.add(path);
+      }
+      fieldDefinition
+          .documentFieldDefinition()
+          .ifPresent(
+              document ->
+                  collectDeclaredPathsAndAutoEmbedPaths(
+                      document.fields(), Optional.of(path), conflictingPaths, autoEmbedPaths));
+      // No autoEmbed check is needed beneath embeddedDocuments: EmbeddedDocumentsFieldDefinition
+      // rejects AUTO_EMBED anywhere in its subtree before this validation runs.
+      fieldDefinition
+          .embeddedDocumentsFieldDefinition()
+          .ifPresent(
+              embedded ->
+                  collectDeclaredPathsAndAutoEmbedPaths(
+                      embedded.fields(), Optional.of(path), conflictingPaths, autoEmbedPaths));
+    }
+  }
+
+  private static void validateAutoEmbedPathsDoNotOverlapMappings(DocumentFieldDefinition mappings)
+      throws BsonParseException {
+    ImmutableSet<FieldPath> conflicts = autoEmbedPathMappingConflicts(mappings);
+    if (!conflicts.isEmpty()) {
+      throw new BsonParseException(
+          String.format(
+              "autoEmbed path(s) %s conflict with a document-shaped mapping: document,"
+                  + " embeddedDocuments, and geo fields cannot be autoEmbed sources",
+              conflicts),
+          Optional.empty());
+    }
   }
 
   private static void validateTypeSetReferences(

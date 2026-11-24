@@ -5,6 +5,8 @@ import static com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig.Scope
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.flogger.FluentLogger;
+import com.google.errorprone.annotations.RestrictedApi;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.xgen.mongot.index.DynamicFeatureFlagsMetricsRecorder;
 import com.xgen.mongot.index.lucene.explain.explainers.DynamicFeatureFlagFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.information.FeatureFlagEvaluationSpec;
@@ -34,6 +36,15 @@ import org.bson.types.ObjectId;
  */
 public class DynamicFeatureFlagRegistry {
   private static final FluentLogger FLOGGER = FluentLogger.forEnclosingClass();
+
+  /**
+   * Process-wide {@link DynamicFeatureFlagRegistry} for non-DI code paths. Set exactly once by
+   * {@link #initializeProcessInstance(DynamicFeatureFlagRegistry)} at bootstrap, read via {@link
+   * #getStatic}; all access guarded by the {@code DynamicFeatureFlagRegistry.class} monitor.
+   */
+  @GuardedBy("DynamicFeatureFlagRegistry.class")
+  private static Optional<DynamicFeatureFlagRegistry> globalDynamicFeatureFlagRegistry =
+      Optional.empty();
 
   private volatile Map<String, DynamicFeatureFlagConfig> registeredDynamicFeatureFlagConfigs =
       new ConcurrentHashMap<>();
@@ -113,6 +124,13 @@ public class DynamicFeatureFlagRegistry {
   }
 
   /**
+   * Synthetic cluster id for {@link #communityDefault()}. Supplying this id caches the {@code true}
+   * result and ensure the evaluation returns true. The synthetic value are irrelevant (ENABLED
+   * short-circuits the rollout hash); all-zero is a deterministic synthetic value.
+   */
+  static final ObjectId ONPREM_SENTINEL_CLUSTER_ID = new ObjectId(new byte[12]);
+
+  /**
    * Registry with no flags configured; {@link #evaluateClusterInvariant(DynamicFeatureFlags)}
    * returns each flag's defined fallback.
    */
@@ -122,8 +140,56 @@ public class DynamicFeatureFlagRegistry {
   }
 
   /**
-   * Evaluates a dynamic feature flag for a cluster-invariant scope (org, group, or mongot
-   * cluster), using the flag's name and default fallback when the flag is absent.
+   * Community has no DFF, so this factory seeds the flags that should default on for community /
+   * on-prem — {@link DynamicFeatureFlags#BLOOM_FILTER_FOR_ID_FIELD}, {@link
+   * DynamicFeatureFlags#MV_GC_ENABLED} and {@link DynamicFeatureFlags#MV_GC_DELETION_ENABLED} — as
+   * {@code ENABLED}, while leaving every other flag unregistered (falling through to its declared
+   * fallback, identical to {@link #empty()}).
+   *
+   * <p>A synthetic cluster id ({@link #ONPREM_SENTINEL_CLUSTER_ID}) is supplied so these flags'
+   * evaluations are eagerly cached by {@code buildInternalConfig}. Without a cluster id a {@code
+   * MONGOT_CLUSTER}-scoped flag would not be cached and {@code evaluateClusterInvariant} would fall
+   * back to its declared {@code false} default. The scope here is only the synthetic caching key;
+   * in Atlas these flags are scoped by the control plane (e.g. {@code MV_GC_ENABLED} rolls out per
+   * group), independently of this default.
+   */
+  public static DynamicFeatureFlagRegistry communityDefault() {
+    return new DynamicFeatureFlagRegistry(
+        Optional.of(
+            List.of(
+                communityEnabled(DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD),
+                communityEnabled(DynamicFeatureFlags.MV_GC_ENABLED),
+                communityEnabled(DynamicFeatureFlags.MV_GC_DELETION_ENABLED),
+                communityEnabled(DynamicFeatureFlags.AUTO_EMBEDDING_MATERIALIZE_VECTOR_SEARCH))),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of(ONPREM_SENTINEL_CLUSTER_ID));
+  }
+
+  /**
+   * Enterprise counterpart of {@link #communityDefault()}; seeds the same on-prem default flags.
+   */
+  public static DynamicFeatureFlagRegistry enterpriseDefault() {
+    return new DynamicFeatureFlagRegistry(
+        Optional.of(
+            List.of(
+                communityEnabled(DynamicFeatureFlags.BLOOM_FILTER_FOR_ID_FIELD),
+                communityEnabled(DynamicFeatureFlags.MV_GC_ENABLED),
+                communityEnabled(DynamicFeatureFlags.MV_GC_DELETION_ENABLED),
+                communityEnabled(DynamicFeatureFlags.AUTO_EMBEDDING_MATERIALIZE_VECTOR_SEARCH))),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of(ONPREM_SENTINEL_CLUSTER_ID));
+  }
+
+  private static DynamicFeatureFlagConfig communityEnabled(DynamicFeatureFlags flag) {
+    return new DynamicFeatureFlagConfig(
+        flag.getName(), Phase.ENABLED, List.of(), List.of(), 100, Scope.MONGOT_CLUSTER);
+  }
+
+  /**
+   * Evaluates a dynamic feature flag for a cluster-invariant scope (org, group, or mongot cluster),
+   * using the flag's name and default fallback when the flag is absent.
    */
   public boolean evaluateClusterInvariant(DynamicFeatureFlags featureFlag) {
     return evaluateClusterInvariant(featureFlag.getName(), featureFlag.getFallback());
@@ -155,8 +221,9 @@ public class DynamicFeatureFlagRegistry {
       case Scope.MONGOT_QUERY, Scope.MONGOT_INDEX, Scope.UNSPECIFIED -> {
         FLOGGER.atWarning().atMostEvery(5, TimeUnit.MINUTES).log(
             """
-                Evaluating Cluster variant DFFs with evaluateClusterInvariant. \
-                Check feature flag definitions.""");
+            Evaluating Cluster variant DFFs with evaluateClusterInvariant. \
+            Check feature flag definitions.\
+            """);
         yield recordAndReturnFallback(featureFlagName, fallback);
       }
       // Cluster-invariant scope but entity ID was Optional.empty(), so not cached
@@ -238,18 +305,15 @@ public class DynamicFeatureFlagRegistry {
   private CachedEvaluation computeEvaluation(
       InternalDynamicFeatureFlagConfig config, ObjectId entityId) {
     return switch (config.phase()) {
-      case ENABLED ->
-          new CachedEvaluation(true, FeatureFlagEvaluationSpec.DecisiveField.PHASE);
+      case ENABLED -> new CachedEvaluation(true, FeatureFlagEvaluationSpec.DecisiveField.PHASE);
       case DISABLED, UNSPECIFIED ->
           new CachedEvaluation(false, FeatureFlagEvaluationSpec.DecisiveField.PHASE);
       case CONTROLLED -> {
         if (config.entityIdBlockList().contains(entityId)) {
-          yield new CachedEvaluation(
-              false, FeatureFlagEvaluationSpec.DecisiveField.BLOCK_LIST);
+          yield new CachedEvaluation(false, FeatureFlagEvaluationSpec.DecisiveField.BLOCK_LIST);
         }
         if (config.entityIdAllowList().contains(entityId)) {
-          yield new CachedEvaluation(
-              true, FeatureFlagEvaluationSpec.DecisiveField.ALLOW_LIST);
+          yield new CachedEvaluation(true, FeatureFlagEvaluationSpec.DecisiveField.ALLOW_LIST);
         }
         if (config.rolloutPercentage() == 0) {
           yield new CachedEvaluation(
@@ -366,8 +430,8 @@ public class DynamicFeatureFlagRegistry {
 
   /**
    * Converts a DTO into an optimized internal config with an eagerly cached evaluation result for
-   * cluster-invariant scopes (ORG, GROUP, MONGOT_CLUSTER). Non-cluster-invariant scopes get
-   * {@code Optional.empty()} for the cached result.
+   * cluster-invariant scopes (ORG, GROUP, MONGOT_CLUSTER). Non-cluster-invariant scopes get {@code
+   * Optional.empty()} for the cached result.
    */
   private InternalDynamicFeatureFlagConfig buildInternalConfig(DynamicFeatureFlagConfig dto) {
     InternalDynamicFeatureFlagConfig base = convertToInternalConfig(dto);
@@ -380,8 +444,7 @@ public class DynamicFeatureFlagRegistry {
           default -> Optional.empty();
         };
 
-    Optional<CachedEvaluation> cached =
-        entityId.map(id -> computeEvaluation(base, id));
+    Optional<CachedEvaluation> cached = entityId.map(id -> computeEvaluation(base, id));
 
     return new InternalDynamicFeatureFlagConfig(
         base.phase(),
@@ -510,5 +573,79 @@ public class DynamicFeatureFlagRegistry {
     return this.registeredDynamicFeatureFlagConfigs.values().stream()
         .sorted(DynamicFeatureFlagConfig.FEATURE_FLAG_SORTER)
         .toList();
+  }
+
+  /**
+   * Installs the process-wide {@link DynamicFeatureFlagRegistry} for code that cannot receive it
+   * via dependency injection (the Lucene SPI/codec layer).
+   *
+   * <p><b>Lifecycle contract:</b> mongot's bootstrapper calls this exactly once, early in process
+   * startup, before any code path that calls {@link #getStatic()} runs. Once this method returns,
+   * every subsequent {@link #getStatic()} call is guaranteed to return the populated instance
+   * supplied here for the remainder of the process's lifetime. It must never be called more than
+   * once per process.
+   *
+   * @param dynamicFeatureFlagRegistry the instance to publish as the process-wide static
+   *     configuration
+   * @throws IllegalStateException if the process instance has already been initialized; mongot
+   *     processes must never initialize the global configuration twice
+   * @see #getStatic()
+   */
+  public static synchronized void initializeProcessInstance(
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
+    if (globalDynamicFeatureFlagRegistry.isPresent()) {
+      throw new IllegalStateException("global DynamicFeatureFlagRegistry already initialized");
+    }
+    globalDynamicFeatureFlagRegistry = Optional.of(dynamicFeatureFlagRegistry);
+  }
+
+  /**
+   * Returns the globally configured {@link DynamicFeatureFlagRegistry} installed by {@link
+   * #initializeProcessInstance}.
+   *
+   * <p><b>Contract:</b> once the bootstrapper has called {@link #initializeProcessInstance} during
+   * startup, this method is guaranteed to return a non-null, populated instance for the rest of the
+   * process's lifetime. It throws only when that precondition is unmet — i.e. it is called before
+   * initialization (ordering bug) or after {@link #resetForTest()} (which happens only in tests).
+   *
+   * <p>Use only from code that cannot receive {@link DynamicFeatureFlagRegistry} via dependency
+   * injection (the Lucene SPI/codec layer); prefer injection everywhere else. Tests relying on the
+   * global instance can be order-sensitive because its scope is process-wide. Injection avoids this
+   * by scoping the configuration to the individual test.
+   *
+   * @return the globally configured {@link DynamicFeatureFlagRegistry} instance
+   * @throws IllegalStateException if called before {@link #initializeProcessInstance} or after
+   *     {@link #resetForTest()}
+   * @see #initializeProcessInstance(DynamicFeatureFlagRegistry)
+   */
+  @RestrictedApi(
+      explanation =
+          "DynamicFeatureFlagRegistry.getStatic() should only be used in the Lucene"
+              + " codec/quantization/vector layer or in DynamicFeatureFlagRegistryTest.java."
+              + " If you're in the Lucene SPI/codec layer where"
+              + " injection is impossible add the path to allowedOnPath"
+              + " in the @RestrictedApi annotation of DynamicFeatureFlagRegistry.getStatic().",
+      link = "https://jira.mongodb.org/browse/CLOUDP-412425",
+      allowedOnPath =
+          ".*/index/lucene/(codec|quantization|vector)/.*|.*DynamicFeatureFlagRegistryTest\\.java")
+  public static synchronized DynamicFeatureFlagRegistry getStatic() {
+    return globalDynamicFeatureFlagRegistry.orElseThrow(
+        () ->
+            new IllegalStateException(
+                "global DynamicFeatureFlagRegistry not initialized or has been reset"));
+  }
+
+  @RestrictedApi(
+      explanation =
+          "DynamicFeatureFlagRegistry.resetForTest() must only be called from test code -- it"
+              + " clears the process-global registry and could silently change feature-flag"
+              + " evaluation mid-process if called from production code paths.",
+      link = "https://jira.mongodb.org/browse/CLOUDP-415881",
+      allowedOnPath =
+          ".*/index/lucene/(vector|codec/flat)/.*Test\\.java"
+              + "|.*DynamicFeatureFlagRegistryTest\\.java")
+  @VisibleForTesting
+  public static synchronized void resetForTest() {
+    globalDynamicFeatureFlagRegistry = Optional.empty();
   }
 }

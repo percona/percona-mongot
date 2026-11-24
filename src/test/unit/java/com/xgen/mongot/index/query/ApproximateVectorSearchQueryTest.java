@@ -17,6 +17,7 @@ import com.xgen.testing.mongot.index.query.operators.mql.MqlFilterOperatorBuilde
 import com.xgen.testing.mongot.index.query.operators.mql.ValueBuilder;
 import java.util.List;
 import java.util.Optional;
+import org.bson.BsonString;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -62,10 +63,28 @@ public class ApproximateVectorSearchQueryTest {
           filterAndParentFilter(),
           bsonFloatVectorQuery(),
           bsonByteVectorQuery(),
+          autoNumCandidates(),
           simpleAutoEmbeddingQuery(),
           simpleAutoEmbeddingQueryWithMultiModalFormat(),
           withSearchNodePreference(),
-          autoEmbeddingQueryWithModel());
+          autoEmbeddingQueryWithModel(),
+          indexNamespace());
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<VectorSearchQuery> indexNamespace() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "with-indexNamespace",
+          VectorQueryBuilder.builder()
+              .index("myVectorIndex")
+              .indexNamespace("tenantId", new BsonString("acme"))
+              .criteria(
+                  ApproximateVectorQueryCriteriaBuilder.builder()
+                      .limit(5)
+                      .numCandidates(10)
+                      .queryVector(Vector.fromFloats(new float[] {2f, 2f, 2f}, NATIVE))
+                      .path(FieldPath.newRoot("description"))
+                      .build())
+              .build());
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<VectorSearchQuery> simple() {
@@ -154,8 +173,8 @@ public class ApproximateVectorSearchQueryTest {
               .build());
     }
 
-    private static BsonDeserializationTestSuite.ValidSpec<VectorSearchQuery>
-        filterAndParentFilter() throws BsonParseException {
+    private static BsonDeserializationTestSuite.ValidSpec<VectorSearchQuery> filterAndParentFilter()
+        throws BsonParseException {
       return BsonDeserializationTestSuite.TestSpec.valid(
           "with-filter-and-parentFilter",
           VectorQueryBuilder.builder()
@@ -217,6 +236,20 @@ public class ApproximateVectorSearchQueryTest {
                       .numCandidates(10)
                       .queryVector(
                           Vector.fromBytes(new byte[] {(byte) 0x02, (byte) 0x02, (byte) 0x02}))
+                      .path(FieldPath.newRoot("description"))
+                      .build())
+              .build());
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<VectorSearchQuery> autoNumCandidates() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "auto-numCandidates",
+          VectorQueryBuilder.builder()
+              .index("myVectorIndex")
+              .criteria(
+                  ApproximateVectorQueryCriteriaBuilder.builder()
+                      .limit(10)
+                      .queryVector(Vector.fromFloats(new float[] {2f, 2f, 2f}, NATIVE))
                       .path(FieldPath.newRoot("description"))
                       .build())
               .build());
@@ -314,7 +347,24 @@ public class ApproximateVectorSearchQueryTest {
           simpleAutoEmbeddingQuery(),
           simpleAutoEmbeddingQueryWithMultiModalFormat(),
           emptyIndex(),
-          autoEmbeddingQueryWithModel());
+          autoEmbeddingQueryWithModel(),
+          indexNamespace());
+    }
+
+    private static BsonSerializationTestSuite.TestSpec<VectorSearchQuery> indexNamespace() {
+      return BsonSerializationTestSuite.TestSpec.create(
+          "with-indexNamespace",
+          VectorQueryBuilder.builder()
+              .index("myVectorIndex")
+              .indexNamespace("tenantId", new BsonString("acme"))
+              .criteria(
+                  ApproximateVectorQueryCriteriaBuilder.builder()
+                      .path(FieldPath.newRoot("description"))
+                      .queryVector(Vector.fromFloats(new float[] {2f, 2f, 2f}, NATIVE))
+                      .numCandidates(10)
+                      .limit(5)
+                      .build())
+              .build());
     }
 
     @Test
@@ -407,8 +457,8 @@ public class ApproximateVectorSearchQueryTest {
               .build());
     }
 
-    private static BsonSerializationTestSuite.TestSpec<VectorSearchQuery>
-        filterAndParentFilter() throws BsonParseException {
+    private static BsonSerializationTestSuite.TestSpec<VectorSearchQuery> filterAndParentFilter()
+        throws BsonParseException {
       return BsonSerializationTestSuite.TestSpec.create(
           "with-filter-and-parentFilter",
           VectorQueryBuilder.builder()

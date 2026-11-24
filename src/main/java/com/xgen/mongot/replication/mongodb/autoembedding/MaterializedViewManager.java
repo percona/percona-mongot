@@ -4,9 +4,6 @@ import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadat
 import static com.xgen.mongot.replication.mongodb.IndexManager.State.FAILED;
 import static com.xgen.mongot.replication.mongodb.IndexManager.State.FAILED_EXCEEDED;
 import static com.xgen.mongot.replication.mongodb.IndexManager.State.SHUT_DOWN;
-import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getClientSessionRecords;
-import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getSyncBatchMongoClient;
-import static com.xgen.mongot.replication.mongodb.MongoDbReplicationManager.getSyncSourceHost;
 import static com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig.Type.AUTO_EMBEDDING;
 import static com.xgen.mongot.util.Check.checkState;
 import static com.xgen.mongot.util.FutureUtils.COMPLETED_FUTURE;
@@ -14,7 +11,11 @@ import static com.xgen.mongot.util.FutureUtils.COMPLETED_FUTURE;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.mongodb.MongoNamespace;
+import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.cursor.MongotCursorManager;
+import com.xgen.mongot.embedding.cache.EmbeddingRetryCache;
+import com.xgen.mongot.embedding.cache.EmbeddingRetryCache.ReleaseTrigger;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
@@ -24,11 +25,14 @@ import com.xgen.mongot.embedding.mongodb.leasing.Lease;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.embedding.mongodb.leasing.StaticLeaderLeaseManager;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
+import com.xgen.mongot.embedding.utils.MongoClientOperationExecutor;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.ReplicationOpTimeInfo;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
-import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexGeneration;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexGenerationUtil;
 import com.xgen.mongot.index.version.GenerationId;
@@ -36,21 +40,14 @@ import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
-import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.ReplicationManager;
 import com.xgen.mongot.replication.mongodb.IndexManager;
 import com.xgen.mongot.replication.mongodb.ReplicationIndexManager;
 import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
-import com.xgen.mongot.replication.mongodb.common.ClientSessionRecord;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
-import com.xgen.mongot.replication.mongodb.common.DefaultDocumentIndexer;
-import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
+import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
-import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
-import com.xgen.mongot.replication.mongodb.initialsync.InitialSyncQueue;
 import com.xgen.mongot.replication.mongodb.initialsync.config.InitialSyncConfig;
-import com.xgen.mongot.replication.mongodb.steadystate.SteadyStateManager;
-import com.xgen.mongot.replication.mongodb.steadystate.changestream.SteadyStateReplicationConfig;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.Runtime;
@@ -58,31 +55,33 @@ import com.xgen.mongot.util.VerboseRunnable;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
-import com.xgen.mongot.util.mongodb.BatchMongoClient;
-import com.xgen.mongot.util.mongodb.MongoDbReplSetStatus;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LongSummaryStatistics;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
+import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 import org.bson.types.ObjectId;
-import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -102,15 +101,49 @@ public class MaterializedViewManager implements ReplicationManager {
 
   public static final String MAT_VIEW_MANAGER_STATE = "matViewGeneratorState";
 
-  public static final String OPTIME_UPDATER_ERROR_COUNTER_NAME = "matViewOptimeUpdaterError";
-
   public static final String GENERATOR_SHUTDOWN_FAILURE_COUNTER_NAME =
       "matViewGeneratorShutdownFailures";
 
   public static final String GENERATOR_CREATION_FAILURE_COUNTER_NAME =
       "matViewGeneratorCreationFailures";
 
+  public static final String GENERATOR_CREATION_RETRY_COUNTER_NAME =
+      "matViewGeneratorCreationRetries";
+
+  /** Counts lease reacquisitions granted while the prior local generator still leads. */
+  public static final String UNSAFE_LEADERSHIP_REACQUISITION_COUNTER_NAME =
+      "matViewUnsafeLeadershipReacquisitions";
+
+  /**
+   * Epoch-seconds timestamp of the most recent unsafe leadership reacquisition, alongside {@link
+   * #UNSAFE_LEADERSHIP_REACQUISITION_COUNTER_NAME}. An absolute timestamp lets alerting detect a
+   * new event with a single time() comparison, unaffected by scrape gaps or process restarts; an
+   * increase over the counter's window cannot distinguish a new event from an old value replayed
+   * after a reporting gap (CLOUDP-451834).
+   */
+  public static final String UNSAFE_LEADERSHIP_REACQUISITION_LAST_EVENT_GAUGE_NAME =
+      "matViewUnsafeLeadershipReacquisitionsLastEventEpochSeconds";
+
+  /** Counts generations retired because their materialized-view collection is missing. */
+  public static final String RETIRED_GENERATION_COUNTER_NAME = "matViewRetiredGenerations";
+
   public static final String STATE_LABEL = "state";
+
+  public static final String MAT_VIEW_GC_SCANNER_ALIVE_GAUGE = "matViewGcScannerAlive";
+
+  // Per-host materialized-view replication lag (ms).
+  // Process-level gauge intended for MaaS/Atlas export.
+  public static final String MAT_VIEW_REPLICATION_LAG_MS_GAUGE = "materializedViewReplicationLagMs";
+  public static final String STAT_LABEL = "stat";
+  public static final String STAT_MAX = "max";
+  public static final String STAT_AVG = "avg";
+  public static final String MAT_VIEW_COLLECTION_DROP_COUNTER_NAME = "matViewCollectionDrop";
+
+  public static final String DROP_SCENARIO_TAG = "scenario";
+  public static final String DROP_OUTCOME_TAG = "outcome";
+  public static final String DROP_SCENARIO_GC = "gc";
+  public static final String DROP_SCENARIO_INDEX_DELETION = "indexDeletion";
+  public static final String DROP_SCENARIO_SOURCE_COLLECTION_DROP = "sourceCollectionDrop";
 
   // Sticky terminal states that disqualify a generator from holding a matview lease. Shared
   // by emitHeartbeat (release these leases), refreshStatus (skip acquisition for these), and
@@ -118,8 +151,7 @@ public class MaterializedViewManager implements ReplicationManager {
   // STEADY_STATE_SHUT_DOWN is intentionally excluded — it is a transient pre-classification
   // state in handleSteadyStateException and the classifier can transition back to non-terminal
   // for recoverable cases (transient errors, renames, invalidates, resyncs).
-  static final Set<IndexManager.State> TERMINAL_STATES =
-      Set.of(SHUT_DOWN, FAILED, FAILED_EXCEEDED);
+  static final Set<IndexManager.State> TERMINAL_STATES = Set.of(SHUT_DOWN, FAILED, FAILED_EXCEEDED);
 
   // ==================== Common Fields ====================
 
@@ -131,11 +163,16 @@ public class MaterializedViewManager implements ReplicationManager {
 
   private final MeterRegistry meterRegistry;
 
+  /** State for {@link #UNSAFE_LEADERSHIP_REACQUISITION_LAST_EVENT_GAUGE_NAME}; set on event. */
+  private final AtomicLong unsafeLeadershipReacquisitionLastEventEpochSeconds;
+
   /** A mapping of materialized view collections to active GenerationIds. */
   @GuardedBy("this")
-  private final ActiveGenerationIdCatalog activeGenerationIdCatalog;
+  @VisibleForTesting
+  final ActiveGenerationIdCatalog activeGenerationIdCatalog;
 
   private final MetricsFactory metricsFactory;
+  private final MongoClientOperationExecutor matViewWriterOperationExecutor;
 
   @GuardedBy("this")
   private boolean shutdown;
@@ -150,10 +187,22 @@ public class MaterializedViewManager implements ReplicationManager {
   /** The LeaseManager for status polling (follower) and lease management (leader). */
   private final LeaseManager leaseManager;
 
+  /**
+   * The live index config, consulted by the GC sweep: an index absent from the catalog has been
+   * deleted, so none of its leases is a current version worth protecting.
+   */
+  private final IndexCatalog indexCatalog;
+
   /** Factory for creating MaterializedViewGenerator instances. */
   private final MaterializedViewGeneratorFactory matViewGeneratorFactory;
 
   private final MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog;
+
+  /**
+   * Same instance wired into the embedding scheduler. Held here so the drop path can release a
+   * dropped generation's claims, evicting its retained embeddings.
+   */
+  private final EmbeddingRetryCache embeddingRetryCache;
 
   // ==================== Index Leader Fields ====================
 
@@ -165,7 +214,7 @@ public class MaterializedViewManager implements ReplicationManager {
    */
   private final NamedExecutorService lifecycleExecutor;
 
-  /** Executor for periodic optime updates. Used when acting as leader. */
+  /** Executor for periodic max optime updates. */
   private final NamedScheduledExecutorService optimeUpdaterExecutor;
 
   private final ScheduledFuture<?> optimeUpdaterFuture;
@@ -177,37 +226,33 @@ public class MaterializedViewManager implements ReplicationManager {
 
   // ==================== Status Refresh Fields ====================
 
-  /** Executor for periodic status refresh. Leader updates optime; follower polls status. */
+  /** Executor for periodic follower status and replication optime refresh. */
   private final NamedScheduledExecutorService statusRefreshExecutor;
 
   private final ScheduledFuture<?> statusRefreshFuture;
 
   // ==================== Stale-lease GC scanner fields ====================
 
-  /**
-   * Mark a lease eligible for cleanup once it has lapsed by this much — far past the lease TTL
-   * ({@link Lease#LEASE_EXPIRATION_MS}), so a lapse means every mongot has flipped off the MV.
-   * TODO(CLOUDP-409036): make configurable, alongside the cleaner's (longer) delete grace.
-   */
-  private static final Duration STALE_LEASE_MARK_GRACE_PERIOD = Duration.ofMinutes(30);
-
-  /** How often the stale-lease scanner sweeps. Well under the grace period so marks are timely. */
-  private static final long STALE_LEASE_SCAN_INTERVAL_MS = Duration.ofMinutes(5).toMillis();
-
-  /**
-   * Whether to create the periodic stale-lease GC scanner thread. Hardcoded off until the GC stack
-   * (scanner + cleaner + safeguards) is complete: while off, the scan task is never scheduled, so
-   * no background thread is created and merging this is not a behavior change.
-   * TODO(CLOUDP-409036): replace with a feature flag.
-   */
-  private static final boolean STALE_LEASE_SCAN_ENABLED = false;
+  // The scan interval and the mark/delete grace periods are configurable via
+  // AutoEmbeddingMaterializedViewConfig (staleLeaseScanIntervalMs / staleLeaseMarkGracePeriodMs /
+  // staleLeaseDeleteGracePeriodMs), set per cluster through the conf call.
 
   /** Executor for the periodic stale-lease GC scan. Separate from heartbeat and status refresh. */
   private final NamedScheduledExecutorService staleLeaseScannerExecutor;
 
-  @Nullable private final ScheduledFuture<?> staleLeaseScannerFuture;
+  private final ScheduledFuture<?> staleLeaseScannerFuture;
+
+  private final StaleLeaseGarbageCollector staleLeaseGarbageCollector;
+  private final MaterializedViewStatusUpdater statusUpdater;
 
   private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
+
+  /**
+   * Gates the stale-lease GC sweep at runtime. The scanner thread is always scheduled; each tick
+   * evaluates {@link DynamicFeatureFlags#MV_GC_ENABLED} (cluster-invariant) and does nothing while
+   * the flag is off, so cleanup can be enabled or disabled per cluster without a restart.
+   */
+  private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
 
   /**
    * Tracks generators with a pending async shutdown from {@link #transitionToFollower}. {@link
@@ -219,6 +264,14 @@ public class MaterializedViewManager implements ReplicationManager {
   @VisibleForTesting
   final Map<MaterializedViewGenerationId, CompletableFuture<Void>> pendingShutdowns =
       new ConcurrentHashMap<>();
+
+  /**
+   * Generations that can never make progress on this shard because their materialized-view
+   * collection is missing, so they must be neither recreated nor re-elected (CLOUDP-437172).
+   * Lock-free: read and written both inside and outside the manager monitor.
+   */
+  @VisibleForTesting
+  final Set<MaterializedViewGenerationId> retiredGenerations = ConcurrentHashMap.newKeySet();
 
   /**
    * Package-private constructor for testing - registers gauges and starts periodic tasks. This
@@ -238,8 +291,11 @@ public class MaterializedViewManager implements ReplicationManager {
       NamedScheduledExecutorService staleLeaseScannerExecutor,
       MeterRegistry meterRegistry,
       LeaseManager leaseManager,
+      IndexCatalog indexCatalog,
       MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog,
-      AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
+      AutoEmbeddingMaterializedViewConfig materializedViewConfig,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      EmbeddingRetryCache embeddingRetryCache) {
     this(
         lifecycleExecutor,
         indexingWorkSchedulerFactory,
@@ -252,8 +308,11 @@ public class MaterializedViewManager implements ReplicationManager {
         staleLeaseScannerExecutor,
         meterRegistry,
         leaseManager,
+        indexCatalog,
         matViewMetadataCatalog,
         materializedViewConfig,
+        dynamicFeatureFlagRegistry,
+        embeddingRetryCache,
         true); // registerGauges = true for backward compatibility
   }
 
@@ -273,27 +332,68 @@ public class MaterializedViewManager implements ReplicationManager {
       NamedScheduledExecutorService staleLeaseScannerExecutor,
       MeterRegistry meterRegistry,
       LeaseManager leaseManager,
+      IndexCatalog indexCatalog,
       MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog,
       AutoEmbeddingMaterializedViewConfig materializedViewConfig,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
+      EmbeddingRetryCache embeddingRetryCache,
       boolean registerGauges) {
     this.lifecycleExecutor = lifecycleExecutor;
     this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
     this.decodingWorkScheduler = decodingWorkScheduler;
     this.matViewGeneratorFactory = matViewGeneratorFactory;
+    matViewGeneratorFactory.setOnSourceCollectionDropped(
+        this::cleanUpMatViewResourcesForDroppedSourceCollection);
     this.meterRegistry = meterRegistry;
+    this.unsafeLeadershipReacquisitionLastEventEpochSeconds = new AtomicLong();
+    // Registered against the raw registry (like its counter) rather than this.metricsFactory, so
+    // the exported name sits beside mongot_matViewUnsafeLeadershipReacquisitions_total instead of
+    // under the replication.mongodb namespace.
+    Gauge.builder(
+            UNSAFE_LEADERSHIP_REACQUISITION_LAST_EVENT_GAUGE_NAME,
+            this.unsafeLeadershipReacquisitionLastEventEpochSeconds,
+            Number::doubleValue)
+        // strong reference so the state object is not garbage collected
+        .strongReference(true)
+        .register(this.meterRegistry);
     this.managedMaterializedViewGenerators = new ConcurrentHashMap<>();
     this.activeGenerationIdCatalog = new ActiveGenerationIdCatalog(matViewMetadataCatalog);
     this.heartbeatExecutor = heartbeatExecutor;
     this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;
     this.shutdown = false;
     this.metricsFactory = new MetricsFactory("replication.mongodb", this.meterRegistry);
+    this.matViewWriterOperationExecutor =
+        new MongoClientOperationExecutor(this.metricsFactory, "matViewCollection");
     this.statusRefreshExecutor = statusRefreshExecutor;
     this.optimeUpdaterExecutor = optimeUpdaterExecutor;
     this.staleLeaseScannerExecutor = staleLeaseScannerExecutor;
     this.leaseManager = leaseManager;
+    this.indexCatalog = indexCatalog;
     this.matViewMetadataCatalog = matViewMetadataCatalog;
+    this.embeddingRetryCache = embeddingRetryCache;
     this.isReplicationEnabled = false;
     this.materializedViewConfig = materializedViewConfig;
+    this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+    this.statusUpdater =
+        new MaterializedViewStatusUpdater(
+            autoEmbeddingMongoClient,
+            this.meterRegistry,
+            this::getMatViewGenerators,
+            this::publishIfCurrentGenerator,
+            this::isRetired,
+            () -> !isShutdown() && isReplicationSupported());
+    this.staleLeaseGarbageCollector =
+        new StaleLeaseGarbageCollector(
+            leaseManager,
+            materializedViewConfig,
+            dynamicFeatureFlagRegistry,
+            indexCatalog,
+            this.meterRegistry,
+            this.metricsFactory,
+            () -> !isShutdown() && isReplicationSupported(),
+            this::hasConfiguredAutoEmbeddingIndex,
+            this::usedByLocalGeneration,
+            (leaseKey, namespace) -> dropMatViewCollection(leaseKey, namespace, DROP_SCENARIO_GC));
 
     // Always start heartbeat - it emits heartbeat only for indexes where this instance is leader
     LOG.atInfo()
@@ -316,7 +416,7 @@ public class MaterializedViewManager implements ReplicationManager {
             this.materializedViewConfig.leaseManagerHeartbeatIntervalMs,
             TimeUnit.MILLISECONDS);
 
-    // Periodic status refresh for all indexes (leader updates optime, follower polls status)
+    // Periodic status and replication optime refresh for followers.
     this.statusRefreshFuture =
         statusRefreshExecutor.scheduleWithFixedDelay(
             new VerboseRunnable() {
@@ -334,14 +434,13 @@ public class MaterializedViewManager implements ReplicationManager {
             this.materializedViewConfig.materializedViewStatusRefreshIntervalMs,
             TimeUnit.MILLISECONDS);
 
-    // Periodic optime updates for materialized view indexes.
-    // Always scheduled - the method checks each generator's leader status.
+    // Periodic replication optime cleanup and max optime updates for materialized view indexes.
     this.optimeUpdaterFuture =
         optimeUpdaterExecutor.scheduleWithFixedDelay(
             new VerboseRunnable() {
               @Override
               public void verboseRun() {
-                updateMaxReplicationOpTime();
+                MaterializedViewManager.this.statusUpdater.updateMaxReplicationOpTime();
               }
 
               @Override
@@ -353,35 +452,31 @@ public class MaterializedViewManager implements ReplicationManager {
             this.materializedViewConfig.materializedViewOptimeUpdateIntervalMs,
             TimeUnit.MILLISECONDS);
 
-    // Periodic stale-lease GC scan. The background thread is created only when
-    // STALE_LEASE_SCAN_ENABLED is on; while off (until the GC stack lands) the task is never
-    // scheduled. TODO(CLOUDP-409036): replace the constant with a feature flag. First run is
-    // deferred by one interval.
+    // Periodic stale-lease GC scan. Always scheduled; each tick is a no-op unless the
+    // MV_GC_ENABLED dynamic feature flag is on, so cleanup toggles at runtime without a restart.
+    // The first run is deferred by StaleLeaseGarbageCollector.firstScanDelayMs (see its javadoc).
     this.staleLeaseScannerFuture =
-        STALE_LEASE_SCAN_ENABLED
-            ? staleLeaseScannerExecutor.scheduleWithFixedDelay(
-                new VerboseRunnable() {
-                  @Override
-                  public void verboseRun() {
-                    scanStaleLeasesForCleanup();
-                  }
+        staleLeaseScannerExecutor.scheduleWithFixedDelay(
+            new VerboseRunnable() {
+              @Override
+              public void verboseRun() {
+                MaterializedViewManager.this.staleLeaseGarbageCollector.scanStaleLeasesForCleanup();
+              }
 
-                  @Override
-                  public Logger getLogger() {
-                    return LOG;
-                  }
-                },
-                STALE_LEASE_SCAN_INTERVAL_MS,
-                STALE_LEASE_SCAN_INTERVAL_MS,
-                TimeUnit.MILLISECONDS)
-            : null;
+              @Override
+              public Logger getLogger() {
+                return LOG;
+              }
+            },
+            StaleLeaseGarbageCollector.firstScanDelayMs(this.materializedViewConfig),
+            this.materializedViewConfig.staleLeaseScanIntervalMs,
+            TimeUnit.MILLISECONDS);
 
     if (registerGauges) {
       createStateGauges(this, this.metricsFactory);
     }
   }
 
-  // TODO(CLOUDP-360913): Investigate whether we need customized disk monitor
   /** Creates a new MaterializedViewManager. */
   @VisibleForTesting
   public static MaterializedViewManager create(
@@ -393,8 +488,10 @@ public class MaterializedViewManager implements ReplicationManager {
       Optional<Supplier<EmbeddingServiceManager>> embeddingServiceManagerSupplier,
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       LeaseManager leaseManager,
+      IndexCatalog indexCatalog,
       MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog,
-      AutoEmbeddingMongoClient autoEmbeddingMongoClient) {
+      AutoEmbeddingMongoClient autoEmbeddingMongoClient,
+      DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     if (embeddingServiceManagerSupplier.isEmpty()) {
       throw new IllegalArgumentException("EmbeddingServiceManagerSupplier must be provided");
     }
@@ -403,15 +500,39 @@ public class MaterializedViewManager implements ReplicationManager {
     meterRegistry.gauge("materializedView.replication.manager", 1);
     boolean enableLifecycleAttributionMetrics =
         featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS);
+    Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings =
+        enableLifecycleAttributionMetrics
+            ? Optional.of(meterAndFtdcRegistry.threadPoolResourceBindings())
+            : Optional.empty();
 
     var lifecycleExecutor =
         Executors.fixedSizeThreadPool(
             "materialized-view-lifecycle",
             Math.max(1, Runtime.INSTANCE.getNumCpus() / 4),
             meterRegistry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("autoembedding").register(lifecycleExecutor, meterRegistry);
-    }
+    attributionBindings.ifPresent(
+        bindings ->
+            bindings.forSubsystem("autoembedding").register(lifecycleExecutor, meterRegistry));
+
+    // Constructed here, not in the factory, so the drop path below can release claims on the same
+    // instance the scheduler caches into. The cache is always created, but the scheduler only
+    // consults it when the EMBEDDING_RETRY_CACHE flag is enabled — evaluated per batch (not once
+    // here) so the flag toggles at runtime without recreating the manager. Disabled (default)
+    // leaves
+    // master behavior unchanged: nothing is cached or claimed.
+    var embeddingRetryCache = EmbeddingRetryCache.create(meterRegistry);
+    BooleanSupplier embeddingRetryCacheEnabled =
+        () ->
+            dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+                DynamicFeatureFlags.EMBEDDING_RETRY_CACHE);
+    // Evaluated per index (not once here) so the flag toggles at runtime without recreating the
+    // manager, and per-index scoping lets a customer opt individual indexes into SKIP.
+    Predicate<ObjectId> skipInvalidRequestEnabledForIndex =
+        indexId ->
+            dynamicFeatureFlagRegistry.evaluate(
+                DynamicFeatureFlags.AUTO_EMBEDDING_400_SKIP.getName(),
+                indexId,
+                DynamicFeatureFlags.AUTO_EMBEDDING_400_SKIP.getFallback());
 
     var indexingWorkSchedulerFactory =
         IndexingWorkSchedulerFactory.createEmbeddingIndexingSchedulerOnly(
@@ -421,14 +542,20 @@ public class MaterializedViewManager implements ReplicationManager {
             meterRegistry,
             materializedViewConfig.globalMemoryBudgetHeapPercent,
             materializedViewConfig.perBatchMemoryBudgetHeapPercent,
-            enableLifecycleAttributionMetrics);
+            attributionBindings,
+            embeddingRetryCache,
+            embeddingRetryCacheEnabled,
+            skipInvalidRequestEnabledForIndex,
+            generationId ->
+                LeaseManager.isUsableLeaseVersion(
+                    leaseManager.getOwnedTenure(generationId).leaseVersion()));
 
     var decodingWorkScheduler =
         DecodingWorkScheduler.create(
             materializedViewConfig.numChangeStreamDecodingThreads,
             AUTO_EMBEDDING,
             meterRegistry,
-            enableLifecycleAttributionMetrics);
+            attributionBindings);
 
     var materializedViewGeneratorFactory =
         new MaterializedViewGeneratorFactory(
@@ -441,7 +568,8 @@ public class MaterializedViewManager implements ReplicationManager {
             indexingWorkSchedulerFactory,
             decodingWorkScheduler,
             matViewMetadataCatalog,
-            materializedViewConfig);
+            materializedViewConfig,
+            leaseManager);
 
     var heartbeatExecutor =
         Executors.singleThreadScheduledExecutor("mat-view-leader-heartbeat", meterRegistry);
@@ -468,8 +596,11 @@ public class MaterializedViewManager implements ReplicationManager {
             staleLeaseScannerExecutor,
             meterRegistry,
             leaseManager,
+            indexCatalog,
             matViewMetadataCatalog,
             materializedViewConfig,
+            dynamicFeatureFlagRegistry,
+            embeddingRetryCache,
             false); // Don't register gauges/tasks in constructor to avoid this-escape
 
     // Register gauges after construction is complete
@@ -489,12 +620,80 @@ public class MaterializedViewManager implements ReplicationManager {
                     autoEmbeddingMatViewManager,
                     manager -> manager.gaugeViewGenerators(state),
                     Tags.of(STATE_LABEL, state.name())));
+    // matViewGcScannerAlive: 1 while GC is actually running for this cluster — scanner scheduled &
+    // alive AND MV_GC_ENABLED on — 0 otherwise. Bound gauge re-evaluated on scrape, so it tracks
+    // the dynamic flag with no restart. Registered here (post-construction) because it binds
+    // `this`.
+    metricsFactory.objectValueGauge(
+        MAT_VIEW_GC_SCANNER_ALIVE_GAUGE,
+        autoEmbeddingMatViewManager,
+        MaterializedViewManager::gcScannerAliveValue);
+    // Per-host max/avg replication lag across queryable materialized views, re-evaluated on scrape.
+    // Registered here (post-construction) because it binds `this`.
+    metricsFactory.objectValueGauge(
+        MAT_VIEW_REPLICATION_LAG_MS_GAUGE,
+        autoEmbeddingMatViewManager,
+        manager -> manager.replicationLagMs(stats -> (double) stats.getMax()),
+        Tags.of(STAT_LABEL, STAT_MAX));
+    metricsFactory.objectValueGauge(
+        MAT_VIEW_REPLICATION_LAG_MS_GAUGE,
+        autoEmbeddingMatViewManager,
+        manager -> manager.replicationLagMs(LongSummaryStatistics::getAverage),
+        Tags.of(STAT_LABEL, STAT_AVG));
+  }
+
+  /**
+   * Aggregates replication lag (ms) across all materialized views that can currently service
+   * queries, applying {@code selector} (max or average) to the resulting summary. Returns {@link
+   * Double#NaN} when no such MV has reported an optime snapshot yet, so an idle host emits nothing.
+   * Never throws: a transient index-lifecycle race during a scrape degrades to NaN.
+   */
+  private double replicationLagMs(ToDoubleFunction<LongSummaryStatistics> selector) {
+    try {
+      return summarizeReplicationLagMs(queryableMaterializedViewLagsMs(), selector);
+    } catch (RuntimeException e) {
+      return Double.NaN;
+    }
+  }
+
+  @VisibleForTesting
+  LongStream queryableMaterializedViewLagsMs() {
+    Set<MaterializedViewGenerationId> followerIds = this.leaseManager.getFollowerGenerationIds();
+    return this.getMatViewGenerators().values().stream()
+        // A generator that is shut down, or whose generation the lease manager no longer tracks,
+        // has stopped advancing its replication optime; counting its frozen snapshot would report
+        // lag that grows with wall-clock time until restart.
+        .filter(generator -> !TERMINAL_STATES.contains(generator.getState()))
+        .filter(
+            generator -> {
+              MaterializedViewGenerationId generationId =
+                  generator.getIndexGeneration().getGenerationId();
+              return this.leaseManager.isLeader(generationId) || followerIds.contains(generationId);
+            })
+        .map(generator -> generator.getIndexGeneration().getIndex())
+        .filter(matViewIndex -> !matViewIndex.isClosed())
+        .filter(matViewIndex -> matViewIndex.getStatus().canServiceQueries())
+        .map(
+            matViewIndex ->
+                matViewIndex
+                    .getMetricsUpdater()
+                    .getIndexingMetricsUpdater()
+                    .getReplicationOpTimeInfo()
+                    .snapshot())
+        .flatMap(Optional::stream)
+        .mapToLong(ReplicationOpTimeInfo.Snapshot::replicationLagMs);
+  }
+
+  static double summarizeReplicationLagMs(
+      LongStream lagsMs, ToDoubleFunction<LongSummaryStatistics> selector) {
+    LongSummaryStatistics stats = lagsMs.summaryStatistics();
+    return stats.getCount() == 0 ? Double.NaN : selector.applyAsDouble(stats);
   }
 
   /** helper function similar to MongoDbReplicationManager::gaugeReplicationManagers */
   private double gaugeViewGenerators(IndexManager.State state) {
     return this.getMatViewGenerators().entrySet().stream()
-        .filter(m -> m.getValue().getState() == state)
+        .filter(m -> m.getValue().getStateWithoutLock() == state)
         .count();
   }
 
@@ -529,8 +728,16 @@ public class MaterializedViewManager implements ReplicationManager {
         Check.instanceOf(indexGeneration, AutoEmbeddingIndexGeneration.class);
     MaterializedViewIndexGeneration matViewIndexGeneration =
         autoEmbeddingIndexGeneration.getMaterializedViewIndexGeneration();
-    this.activeGenerationIdCatalog.add(autoEmbeddingIndexGeneration);
+    Optional<UUID> staleUuid = this.activeGenerationIdCatalog.add(autoEmbeddingIndexGeneration);
+    // A generator keyed by a stale UUID would never be found again by drop or status refresh.
+    // Take it out so it can be handed over under the current UUID below.
+    Optional<MaterializedViewGenerator> displaced =
+        staleUuid.isPresent()
+            ? Optional.ofNullable(this.managedMaterializedViewGenerators.remove(staleUuid.get()))
+            : Optional.empty();
     if (!this.isReplicationEnabled) {
+      // No generator will be installed, so nothing inherits the displaced one; stop it here.
+      displaced.ifPresent(this::shutDownDisplacedGenerator);
       LOG.atInfo().log(
           "Skipping creating materialized view generator because replication is disabled.");
       return;
@@ -539,22 +746,66 @@ public class MaterializedViewManager implements ReplicationManager {
     // Always create generators for both leader and follower modes.
     // Leader mode: generator runs replication loop and writes to materialized view.
     // Follower mode: generator is passive, status is polled from LeaseManager.
-    this.managedMaterializedViewGenerators.compute(
-        getCollectionUuid(matViewIndexGeneration.getGenerationId()),
-        (ignored, existingGenerator) ->
-            computeGenerator(existingGenerator, matViewIndexGeneration));
+    UUID uuid = getCollectionUuid(matViewIndexGeneration.getGenerationId());
+    try {
+      this.managedMaterializedViewGenerators.compute(
+          uuid,
+          (ignored, existingGenerator) -> {
+            // Nothing under the current UUID yet: replace the displaced generator through the
+            // normal path, which shuts it down once its successor exists.
+            if (existingGenerator == null && displaced.isPresent()) {
+              return computeGenerator(displaced.get(), matViewIndexGeneration);
+            }
+            // A generator already lives under the current UUID; the displaced one is redundant.
+            displaced.ifPresent(this::shutDownDisplacedGenerator);
+            return computeGenerator(existingGenerator, matViewIndexGeneration);
+          });
+    } catch (RuntimeException e) {
+      // A failed replacement leaves the displaced generator running. Stop it rather than keep it,
+      // so the current UUID's slot stays empty and the status refresh retries the replacement.
+      displaced.ifPresent(this::shutDownDisplacedGenerator);
+      throw e;
+    }
   }
 
+  private void shutDownDisplacedGenerator(MaterializedViewGenerator generator) {
+    LOG.atInfo()
+        .addKeyValue("generationId", generator.getIndexGeneration().getGenerationId())
+        .log("Shutting down generator displaced by an MV collection UUID change");
+    generator
+        .shutdown()
+        .exceptionally(
+            throwable -> {
+              LOG.atWarn()
+                  .addKeyValue("generationId", generator.getIndexGeneration().getGenerationId())
+                  .setCause(throwable)
+                  .log("Failed to shut down displaced generator");
+              return null;
+            });
+  }
+
+  /**
+   * Stops materialized-view replication without stopping the manager's periodic tasks.
+   *
+   * <p>This follows the regular replication shutdown convention: signal generators to stop, abort
+   * their clients to unblock in-flight reads, and only then wait for shutdown futures.
+   */
   public synchronized CompletableFuture<Void> shutdownReplication() {
     prepareForShutdown();
 
-    // Shutdown all generators. Each generator handles its own role-specific cleanup.
+    // Shutdown all generators first. Each generator handles its own role-specific cleanup and
+    // synchronously transitions to SHUT_DOWN, so later read failures are treated as shutdown noise.
     // For follower mode, the map is empty, so this completes immediately.
     List<CompletableFuture<?>> futures =
         this.managedMaterializedViewGenerators.values().stream()
             .map(MaterializedViewGenerator::shutdown)
             .collect(Collectors.toList());
     this.managedMaterializedViewGenerators.clear();
+
+    // Mirror MongoDbReplicationManager.abortReplicationMongoClients(): close the clients after
+    // signaling shutdown but before waiting on the generator futures, so a blocked synchronous
+    // driver read can unwind.
+    this.matViewGeneratorFactory.abortClients();
 
     // Need to create a separate executor to run the shutdown tasks, otherwise it may end up running
     // on the indexing executor. As one of the shutdown tasks is shutting down that executor, this
@@ -585,6 +836,17 @@ public class MaterializedViewManager implements ReplicationManager {
   private MaterializedViewGenerator computeGenerator(
       MaterializedViewGenerator existingGenerator,
       MaterializedViewIndexGeneration matViewIndexGeneration) {
+    // A recovery attempt bumps the search attempt but keeps this MV generation id, so it arrives
+    // here and would hand the retained lease to a fresh generator, restarting the flap.
+    if (isRetired(matViewIndexGeneration.getGenerationId())) {
+      LOG.atInfo()
+          .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
+          .log(
+              "Skipping generator for retired generation, its materialized view collection is "
+                  + "missing");
+      return existingGenerator;
+    }
+
     if (existingGenerator == null) {
       LOG.atInfo()
           .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
@@ -618,9 +880,9 @@ public class MaterializedViewManager implements ReplicationManager {
     this.leaseManager.add(matViewIndexGeneration, false);
     MaterializedViewGenerator generator;
     try {
-      generator = this.matViewGeneratorFactory.create(matViewIndexGeneration);
+      generator = createManagedGenerator(matViewIndexGeneration);
     } catch (RuntimeException e) {
-      // TODO(CLOUDP-398177): add retry mechanism for generator creation failure.
+      // Transient failures are retried by refreshStatus's periodic reconciliation.
       recordGeneratorCreationFailure(
           matViewIndexGeneration.getGenerationId(), e, "CREATE_NEW_GENERATOR");
       throw e;
@@ -640,7 +902,7 @@ public class MaterializedViewManager implements ReplicationManager {
       LOG.atInfo()
           .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
           .log("Activating leadership for generator - we own the existing lease after restart");
-      generator.becomeLeader();
+      becomeLeaderSafely(generator, matViewIndexGeneration.getGenerationId());
     }
     return generator;
   }
@@ -735,14 +997,13 @@ public class MaterializedViewManager implements ReplicationManager {
     // This prevents the same race as CLOUDP-393734: if shutdown() completes synchronously
     // (e.g., cancel() returns COMPLETED_FUTURE for QUEUED entries), the old generator's
     // InitialSyncQueue entry may still be present when the new generator tries to enqueue.
-    boolean wasLeader = this.leaseManager.isLeader(oldGenerationId);
     this.pendingShutdowns.put(newGenerationId, new CompletableFuture<>());
     try {
       MaterializedViewGenerator newGenerator;
       try {
-        newGenerator = this.matViewGeneratorFactory.create(matViewIndexGeneration);
+        newGenerator = createManagedGenerator(matViewIndexGeneration);
       } catch (RuntimeException e) {
-        // TODO(CLOUDP-398177): add retry mechanism for generator creation failure.
+        // Existing generator is left in place (still replicating the prior definition).
         recordGeneratorCreationFailure(
             matViewIndexGeneration.getGenerationId(), e, "REPLACE_GENERATOR");
         throw e;
@@ -750,6 +1011,16 @@ public class MaterializedViewManager implements ReplicationManager {
       CompletableFuture<Void> shutdownFuture =
           existingGenerator
               .shutdown()
+              // Swap the lease even when the old generator's drain fails: skipping it leaves the
+              // old generation leader forever while the new one is never registered.
+              .exceptionally(
+                  throwable -> {
+                    LOG.atWarn()
+                        .addKeyValue("oldGenerationId", oldGenerationId)
+                        .setCause(throwable)
+                        .log("Replaced generator failed to shut down; swapping the lease anyway");
+                    return null;
+                  })
               .thenRun(
                   () -> {
                     if (oldGenerationId.equals(newGenerationId)) {
@@ -772,12 +1043,13 @@ public class MaterializedViewManager implements ReplicationManager {
                       if (this.leaseManager instanceof StaticLeaderLeaseManager) {
                         activateStaticLeadership(
                             newGenerator, matViewIndexGeneration.getGenerationId());
-                      } else if (wasLeader) {
+                      } else if (this.leaseManager.isLeader(newGenerationId)) {
                         LOG.atInfo()
                             .addKeyValue("oldGenerationId", oldGenerationId)
                             .addKeyValue("newGenerationId", newGenerationId)
-                            .log("Activating leadership for new generator");
-                        newGenerator.becomeLeader();
+                            .log(
+                                "Activating leadership for new generator after lease registration");
+                        becomeLeaderSafely(newGenerator, newGenerationId);
                       }
                       // Unregister metrics for the now-replaced generation so the registry
                       // doesn't retain a stale series for a defunct materialized view.
@@ -799,9 +1071,6 @@ public class MaterializedViewManager implements ReplicationManager {
     }
   }
 
-  // TODO(CLOUDP-408738): holds the manager monitor across existingGenerator.shutdown(), which
-  // can be slow for STEADY_STATE generators and blocks refreshStatus. Defer the shutdown
-  // future outside the monitor and track it via pendingShutdowns.
   /**
    * Transitions a generator from leader to follower mode by shutting down the old generator and
    * replacing it with a new follower generator. This is called when leadership is lost (e.g., due
@@ -812,6 +1081,18 @@ public class MaterializedViewManager implements ReplicationManager {
    *
    * <p>Note: Unlike {@link #replaceGenerator}, this does not call leaseManager.add() since the
    * lease already exists, and does not activate leadership since we just lost it.
+   *
+   * <p>{@code existingGenerator.shutdown()} runs before the slow {@code factory.create()} rather
+   * than after it (CLOUDP-434413). {@link ReplicationIndexManager#shutdown()} transitions the
+   * generator to {@code SHUT_DOWN} and ends its tenure synchronously, returning a future for the
+   * asynchronous drain, so calling it first costs nothing but ends the demoted generator's tenure
+   * immediately instead of leaving it able to commit under its now-obsolete fencing token for the
+   * duration of the factory call. It must be {@code shutdown()} that ends the tenure and not a
+   * separate "end tenure now" step: every guard in {@link ReplicationIndexManager} that stops work
+   * from being scheduled is keyed on {@code isShutDown()}, so a generator left live but tenure-less
+   * would still enter paths like {@code clearIndex()}, whose {@code
+   * TenureFencedMaterializedViewDocumentIndexer} call would then throw inside a {@code
+   * Crash.ifThrows} wrapper and halt the JVM.
    *
    * @param uuid the UUID of the materialized view collection
    * @param existingGenerator the existing leader generator to replace
@@ -829,22 +1110,22 @@ public class MaterializedViewManager implements ReplicationManager {
           .log("Shutdown already pending, skipping duplicate transitionToFollower");
       return;
     }
+    // Third path that builds a generator, alongside computeGenerator and createAndStoreGenerator.
+    // Heartbeat pass 2 already excludes terminal generators, so a retired one should never reach
+    // here; the check keeps that from depending on pass 2's guard.
+    if (isRetired(generationId)) {
+      LOG.atInfo()
+          .addKeyValue("generationId", generationId)
+          .log("Skipping follower transition for retired generation");
+      return;
+    }
     // Block leadership acquisition early, before the slow factory.create() call.
     this.pendingShutdowns.put(generationId, new CompletableFuture<>());
+    // Shut down the existing generator first: this ends its tenure synchronously (see javadoc), so
+    // it stops committing under its obsolete fencing token before the slow create() below rather
+    // than after it. Has to happen whether or not the new generator is created.
     try {
-      MaterializedViewGenerator newGenerator =
-          this.matViewGeneratorFactory.create(matViewIndexGeneration);
-      // Replace in the map immediately so subsequent operations use the new follower generator.
-      this.managedMaterializedViewGenerators.put(uuid, newGenerator);
-    } catch (Throwable e) {
-      // Do not rethrow: this runs on the leader heartbeat thread, which must keep scheduling.
-      // TODO(CLOUDP-398177): add retry mechanism for generator creation failure.
-      recordGeneratorCreationFailure(generationId, e, "FACTORY_CREATE_AFTER_LEADERSHIP_LOSS");
-    }
-    // Have to shut down the existing generator no matter new generator is created or not
-    CompletableFuture<Void> shutdownFuture;
-    try {
-      shutdownFuture = existingGenerator.shutdown();
+      CompletableFuture<Void> shutdownFuture = existingGenerator.shutdown();
       this.pendingShutdowns.put(generationId, shutdownFuture);
       LOG.atDebug()
           .addKeyValue("generationId", generationId)
@@ -858,6 +1139,77 @@ public class MaterializedViewManager implements ReplicationManager {
           .setCause(throwable)
           .log("Old generator shutdown completed exceptionally");
     }
+    try {
+      MaterializedViewGenerator newGenerator = createManagedGenerator(matViewIndexGeneration);
+      // Replace in the map immediately so subsequent operations use the new follower generator.
+      this.managedMaterializedViewGenerators.put(uuid, newGenerator);
+    } catch (Throwable e) {
+      // Do not rethrow: this runs on the leader heartbeat thread, which must keep scheduling. The
+      // old generator is left shut down in the map; refreshStatus recreates the follower.
+      recordGeneratorCreationFailure(generationId, e, "FACTORY_CREATE_AFTER_LEADERSHIP_LOSS");
+    }
+  }
+
+  /**
+   * Retires a fenced generator instead of allowing it to resync with its obsolete lease version.
+   * This releases dynamic leadership before the replacement can be activated.
+   *
+   * <p>Runs on {@link #lifecycleExecutor}, asynchronously with respect to whatever reported the
+   * fencing rejection, so both the manager and the generation's metadata may have moved on by the
+   * time this runs: bail out instead of assuming either is still around.
+   */
+  synchronized void handleFencingRejection(MaterializedViewGenerator fencedGenerator) {
+    if (isShutdown()) {
+      return;
+    }
+    MaterializedViewGenerationId generationId =
+        fencedGenerator.getIndexGeneration().getGenerationId();
+    Optional<UUID> uuid =
+        this.matViewMetadataCatalog
+            .getMetadataIfPresent(generationId)
+            .map(MaterializedViewCollectionMetadata::collectionUuid);
+    if (uuid.isEmpty()
+        || this.managedMaterializedViewGenerators.get(uuid.get()) != fencedGenerator) {
+      return;
+    }
+
+    LOG.atWarn()
+        .addKeyValue("generationId", generationId)
+        .log("Retiring fenced materialized view generator");
+    try {
+      this.leaseManager.releaseLeadership(generationId);
+    } catch (Throwable e) {
+      LOG.atWarn()
+          .addKeyValue("generationId", generationId)
+          .setCause(e)
+          .log("Failed to release fenced materialized view leadership");
+    }
+    transitionToFollower(uuid.get(), fencedGenerator);
+  }
+
+  void scheduleFencingRejection(MaterializedViewGenerator fencedGenerator) {
+    // The generator reports this while holding its monitor. Defer acquiring the manager monitor to
+    // preserve the manager-before-generator lock order used by transitionToFollower().
+    try {
+      this.lifecycleExecutor.execute(() -> handleFencingRejection(fencedGenerator));
+    } catch (RejectedExecutionException e) {
+      // The manager is already shutting down (shutdown() stops lifecycleExecutor before it gets to
+      // this generator's own shutdown() call): shutdown() shuts down every managed generator
+      // regardless, so there is nothing left here to retire.
+      LOG.atInfo()
+          .addKeyValue("generationId", fencedGenerator.getIndexGeneration().getGenerationId())
+          .log("Manager is shutting down; skipping fencing-rejection retirement");
+    }
+  }
+
+  private MaterializedViewGenerator createManagedGenerator(
+      MaterializedViewIndexGeneration matViewIndexGeneration) {
+    MaterializedViewGenerator generator =
+        this.matViewGeneratorFactory.create(matViewIndexGeneration);
+    if (this.leaseManager.supportsFencingRecovery()) {
+      generator.setFencingRejectionHandler(this::scheduleFencingRejection);
+    }
+    return generator;
   }
 
   private void recordGeneratorCreationFailure(
@@ -901,7 +1253,33 @@ public class MaterializedViewManager implements ReplicationManager {
             "Creating auto-embedding generator for static leader election (leader mode = {})",
             isLeader);
     if (isLeader) {
+      becomeLeaderSafely(generator, generationId);
+    }
+  }
+
+  /**
+   * Calls {@link MaterializedViewGenerator#becomeLeader()}, logging and swallowing any failure
+   * (e.g. the generator's tenure indexer rejecting an invalid lease) instead of letting it
+   * propagate to the caller.
+   *
+   * <p>Also releases leadership on failure: {@code becomeLeader()} never sets the generator's
+   * {@code isLeader} flag when it throws, but the lease manager can still show this generation as
+   * leader-owned (e.g. {@code add()} already added it before this call). Without releasing here,
+   * the generation would be stuck marked as owned-but-not-actually-leading forever, since
+   * refreshStatus() only attempts acquisition for generations the lease manager reports as
+   * acquirable. {@code releaseLeadership()} is a no-op for {@link StaticLeaderLeaseManager}, so
+   * this is safe to call from either lease manager.
+   */
+  private void becomeLeaderSafely(
+      MaterializedViewGenerator generator, MaterializedViewGenerationId generationId) {
+    try {
       generator.becomeLeader();
+    } catch (Throwable becomeLeaderFailure) {
+      LOG.atWarn()
+          .addKeyValue("generationId", generationId)
+          .setCause(becomeLeaderFailure)
+          .log("becomeLeader failed while activating leadership");
+      this.leaseManager.releaseLeadership(generationId);
     }
   }
 
@@ -949,21 +1327,50 @@ public class MaterializedViewManager implements ReplicationManager {
     // MaterializedViewGenerationIds.
     this.leaseManager.drop(matViewGenerationId);
     this.pendingShutdowns.remove(matViewGenerationId);
+    this.retiredGenerations.remove(matViewGenerationId);
     this.activeGenerationIdCatalog.genIdByMatViewGenId.remove(matViewGeneratorId);
     this.matViewMetadataCatalog.removeMetadata(matViewGenerationId);
+    // The generator is fully gone (last attempt dropped): release any embeddings its generation
+    // still held. matViewGeneratorId is the same canonicalKey the claims are keyed on.
+    this.embeddingRetryCache.releaseClaims(matViewGeneratorId, ReleaseTrigger.DROP);
+  }
+
+  /**
+   * Returns the MV collection UUID {@code generationId} was registered under in {@link
+   * ActiveGenerationIdCatalog#genIdByMatViewCollection}, falling back to {@code currentUuid}.
+   *
+   * <p>The metadata catalog resolves every attempt of a generation to the collection's current
+   * UUID. When a stale MV UUID is repaired between attempts, the older attempt and its generator
+   * stay keyed by the UUID they were added with; tearing that attempt down under the current UUID
+   * would find nothing and leave the old generator in the map until restart.
+   */
+  private synchronized UUID registeredCollectionUuid(GenerationId generationId, UUID currentUuid) {
+    Set<GenerationId> current =
+        this.activeGenerationIdCatalog.genIdByMatViewCollection.get(currentUuid);
+    // Common case: registered under the current UUID, same as the behavior before this lookup.
+    if (current != null && current.contains(generationId)) {
+      return currentUuid;
+    }
+    // Otherwise it was added before the MV UUID changed; find the UUID it is still listed under.
+    return this.activeGenerationIdCatalog.genIdByMatViewCollection.entrySet().stream()
+        .filter(entry -> entry.getValue().contains(generationId))
+        .map(Map.Entry::getKey)
+        .findFirst()
+        .orElse(currentUuid);
   }
 
   /**
    * Tears down this mongot's local state for a dropped generation. When this was the last local
-   * user of the MV collection (UUID ref-count hits 0), it decides whether to clean up the shared
-   * MV collection + lease now, or leave them for the leaderless stale-lease GC. {@code dropIndex}
-   * is only reached via the config-driven removal path, which means either:
+   * user of the MV collection (UUID ref-count hits 0), it decides whether to clean up the shared MV
+   * collection + lease now, or leave them for the leaderless stale-lease GC. {@code dropIndex} is
+   * only reached via the config-driven removal path, which means either:
    *
    * <ul>
-   *   <li><b>autoEmbed-field update (supersession)</b> -- a newer lease for the same indexId
-   *       survives. Leave the shared collection + lease; cleaning them up is gated on every mongot
-   *       flipping off the old version, which only the GC can safely observe.
-   *   <li><b>index deletion</b> -- no surviving sibling lease, so the leader drops both now.
+   *   <li><b>generation retired</b> (autoEmbed-field update, initial-sync retry, format upgrade) --
+   *       the index lives on. Leave the shared collection + lease; cleaning them up is gated on
+   *       every mongot flipping off the old version, which only the GC can safely observe.
+   *   <li><b>index deletion</b> -- the leader cleans up the index's MV collections and leases now,
+   *       including leftovers earlier supersessions left behind for the GC.
    * </ul>
    */
   private synchronized CompletableFuture<Void> cleanUpMatViewResources(GenerationId generationId) {
@@ -972,7 +1379,15 @@ public class MaterializedViewManager implements ReplicationManager {
       // Not a materialized-view index (e.g. search or plain vector); nothing to drop here.
       return COMPLETED_FUTURE;
     }
-    UUID uuid = metadata.get().collectionUuid();
+    UUID currentUuid = metadata.get().collectionUuid();
+    UUID uuid = registeredCollectionUuid(generationId, currentUuid);
+    if (!uuid.equals(currentUuid)) {
+      LOG.atInfo()
+          .addKeyValue("generationId", generationId)
+          .addKeyValue("registeredUuid", uuid)
+          .addKeyValue("currentUuid", currentUuid)
+          .log("Dropping generation under the MV collection UUID it was registered with");
+    }
     Set<GenerationId> genIdsByUuid =
         this.activeGenerationIdCatalog.genIdByMatViewCollection.get(uuid);
     if (genIdsByUuid == null) {
@@ -1028,70 +1443,271 @@ public class MaterializedViewManager implements ReplicationManager {
                   return null;
                 });
 
-    // Distinguish why this generation was dropped (only the config-driven removal path reaches
-    // dropIndex):
-    //   - supersession (autoEmbed-field update or ops aev bump): the index moved to a new MV
-    //     collection, whose generation is still registered in the local active catalog (the
-    //     flip ordering guarantees add(newGen) ran before dropIndex(oldGen)). Retiring the old
-    //     MV is safe only once every mongot has flipped off it -- which no single mongot can
-    //     observe -- so leave the shared collection + lease for the stale-lease GC (keyed on
-    //     lease-expiration age). A laggard still on the old version re-elects itself and keeps
-    //     the lease renewed until then.
-    //   - deletion: no other active generation for this index, so drop now.
-    // Keyed on catalog presence rather than definition versions or generator state: an ops aev
-    // bump changes no definition version (so version comparison cannot see it), a sibling whose
-    // retirement already completed has left the catalog (so it does not block a later genuine
-    // deletion), and a state check would misfire if the new generator failed between the flip
-    // and this drop. Known gap: an index deletion arriving mid-flip (both generations still
-    // registered) takes the supersession branch for the first-dropped generation, leaving one
-    // extra MV collection + lease for the stale-lease GC -- conservative (never a wrong drop),
-    // but avoidable garbage.
-    // TODO(CLOUDP-412446): replace this heuristic with an explicit deletion-vs-retirement drop
-    // reason plumbed from DesiredConfigStateUpdater.dropDeletedIndexes.
-    ObjectId indexId = generationId.indexId;
-    boolean supersededByNewMatView =
-        this.activeGenerationIdCatalog.genIdByMatViewCollection.values().stream()
-            .flatMap(Set::stream)
-            .anyMatch(genId -> indexId.equals(genId.indexId));
+    // Deletion vs retirement comes from the IndexCatalog: config removes a deleted index from
+    // the catalog before dropping its generations, while retirement paths (staged swap,
+    // phasing-out, initial-sync retry) leave the entry in place. (Format upgrades remove-then-
+    // readd, but only for unloadable-format indexes, which never register MV metadata here.)
+    // Retired MVs must stay for the stale-lease GC: retiring is safe only once every mongot has
+    // flipped off the old version, which no single mongot can observe.
+    boolean indexDeleted = this.indexCatalog.getIndexById(generationId.indexId).isEmpty();
 
-    if (supersededByNewMatView) {
+    if (!indexDeleted) {
+      // Retiring a generation does not clear checkpoint risk: the index lives on and the
+      // definition-update and retry paths keep the MV collection. The one case where we know the
+      // collection is gone clears in retireIfCollectionMissing().
       LOG.atInfo()
           .addKeyValue("generationId", generationId)
           .addKeyValue("collectionName", leaseKey)
           .addKeyValue("wasLeader", wasLeader)
           .log(
-              "Index has an active generation on a newer MV collection; leaving this MV "
-                  + "collection and lease for the stale-lease GC instead of dropping now");
-      return generatorShutdownFuture;
+              "Generation retired while the index lives on; leaving this MV collection and "
+                  + "lease for the stale-lease GC instead of dropping now");
+      // The lease document stays for the GC, but this node is done with the lease: evict the
+      // local copy after the generator finishes shutting down, so a later re-initialization of
+      // the same definition re-reads the database instead of stale metadata (a recreated MV
+      // collection keeps its name but gets a new UUID).
+      return generatorShutdownFuture.thenRun(() -> this.leaseManager.evictCachedLease(leaseKey));
     }
 
-    // No other active generation for this index: a genuine deletion. Safe to drop the shared MV
-    // collection (leader only) and the lease now.
+    // The index is gone, so MV documents without a checkpoint no longer matter.
+    //
+    // Wait for the generator to stop: drop() above already took leadership away, so a commit
+    // still running its bulk write (up to 311s in prod) would find isLeader false and re-flag an
+    // index that no longer exists. Run it before the leader check below, since the host holding
+    // the flag usually lost leadership in the same failure and never reaches the leader-only path.
+    CompletableFuture<Void> riskClearedFuture =
+        generatorShutdownFuture.thenRun(
+            () -> this.leaseManager.clearCheckpointCommitRiskForIndex(generationId.indexId));
+
+    // Index deleted: clean up the shared MV collection and lease now (leader only), plus any
+    // leftover sibling leases of this index — a supersession that completed before the deletion
+    // left its MV + lease behind for the GC, and cleaning those up now spares the GC's graces.
+    if (!wasLeader) {
+      // Cache eviction only — never the lease document. The lease document is the GC's only
+      // handle on the MV collection, so only a path that just dropped the collection may delete
+      // it. Leadership is per-generation and dies with the generation that acquired it: when
+      // sibling generations share the lease (a definition revert), the last one out reaches this
+      // branch on the very node the document still names as owner, and an owner-side delete here
+      // would strand the never-dropped MV. That owner's pair is left for the stale-lease GC,
+      // which cleans a deleted index's leases in drop-then-delete order after the graces.
+      LOG.atInfo()
+          .addKeyValue("generationId", generationId)
+          .addKeyValue("collectionName", leaseKey)
+          .log(
+              "Index deleted; not the leader, leaving shared resource cleanup to the leader "
+                  + "or, if no leader remains, to the stale-lease GC");
+      return riskClearedFuture.thenRun(() -> this.leaseManager.evictCachedLease(leaseKey));
+    }
     LOG.atInfo()
         .addKeyValue("generationId", generationId)
         .addKeyValue("collectionName", leaseKey)
-        .log("Dropping lease and materialized view collection");
-    return generatorShutdownFuture
+        .log("Index deleted; dropping its materialized view collections and leases");
+    // Detached from the returned future: the config monitor blocks on every drop it applies
+    // (IndexActions awaits them), and this cleanup retries against the source cluster -- with
+    // the mongod unreachable it would stall all config processing behind it. Nothing needs to
+    // wait for it: any failure just leaves the lease for the stale-lease GC.
+    riskClearedFuture
         .thenComposeAsync(
-            ignored -> {
-              if (wasLeader) {
-                return materializedViewIndexGeneration
+            ignored ->
+                materializedViewIndexGeneration
                     .getIndex()
                     .getWriter()
                     .dropMaterializedViewCollection()
-                    .exceptionally(
-                        throwable -> {
-                          LOG.error(
-                              "Failed to drop materialized view collection for {}, "
-                                  + "ignore it for now.",
-                              generationId,
-                              throwable);
-                          return null;
-                        });
+                    .handle(
+                        (unusedResult, dropError) -> {
+                          boolean dropped = dropError == null;
+                          recordCollectionDrop(DROP_SCENARIO_INDEX_DELETION, dropped);
+                          return dropped;
+                        }))
+        .thenAccept(
+            mvDropped -> {
+              // Leftovers first: the own-lease delete below evicts the leaseKey -> database
+              // mapping the leftover scan resolves the lease table through.
+              cleanUpLeftoverLeases(generationId.indexId, leaseKey);
+              // Drop-before-delete, as in the GC: a surviving MV's lease must stay visible to the
+              // lease-driven scanner. No mark either — it wouldn't shorten the delete grace, and
+              // the GC marks a deleted index's leases itself.
+              if (mvDropped) {
+                deleteLeaseOrLeaveForGc(leaseKey);
+              } else {
+                LOG.atWarn()
+                    .addKeyValue("generationId", generationId)
+                    .addKeyValue("collectionName", leaseKey)
+                    .log(
+                        "Failed to drop the deleted index's materialized view collection; "
+                            + "leaving its lease for the stale-lease GC");
               }
-              return COMPLETED_FUTURE;
             })
-        .thenComposeAsync(ignored -> this.leaseManager.dropLease(leaseKey));
+        .exceptionally(
+            throwable ->
+                logDetachedCleanupFailure(
+                    throwable, generationId, leaseKey, DROP_SCENARIO_INDEX_DELETION));
+    return generatorShutdownFuture;
+  }
+
+  private Void logDetachedCleanupFailure(
+      Throwable throwable, GenerationId generationId, String leaseKey, String scenario) {
+    LOG.atWarn()
+        .addKeyValue("generationId", generationId)
+        .addKeyValue("collectionName", leaseKey)
+        .addKeyValue("scenario", scenario)
+        .setCause(throwable)
+        .log("Materialized view cleanup failed; leaving the rest for the stale-lease GC");
+    return null;
+  }
+
+  /**
+   * Cleans up leases that earlier supersessions of the deleted index left behind for the GC: drops
+   * each one's MV collection, then deletes the lease. Any failure just leaves the lease where the
+   * GC already finds it. Leases still backing a locally active generation are skipped — their own
+   * {@code dropIndex} in this same config update cleans them up. Leader-only; the by-id deletes are
+   * idempotent.
+   */
+  private void cleanUpLeftoverLeases(ObjectId indexId, String droppedLeaseKey) {
+    for (LeaseManager.DeletedIndexLease leftover :
+        this.leaseManager.findLeasesForDeletedIndex(indexId, droppedLeaseKey)) {
+      Lease lease = leftover.lease();
+      if (lease.id().equals(droppedLeaseKey) || usedByLocalGeneration(lease)) {
+        continue;
+      }
+      if (leftover.matViewNamespace().isPresent()
+          && dropMatViewCollection(
+              lease.id(), leftover.matViewNamespace().get(), DROP_SCENARIO_INDEX_DELETION)) {
+        deleteLeaseOrLeaveForGc(lease.id());
+      }
+    }
+  }
+
+  /**
+   * Deletes a deleted index's lease; a failed delete is left alone — the GC scanner finds the lease
+   * on its own and, with the safeguard no longer protecting a deleted index's leases, marks and
+   * deletes it after the graces.
+   */
+  private void deleteLeaseOrLeaveForGc(String leaseKey) {
+    if (!this.leaseManager.cleanupLeaseForDeletedIndex(leaseKey)) {
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .log("Could not delete a deleted index's lease; leaving it for the stale-lease GC");
+    }
+  }
+
+  /**
+   * Cleans up a generation's MV collection and lease when the source collection it tails was
+   * dropped. The change stream binds to the source collection's uuid, which never returns, so the
+   * pair can never ingest again no matter what the config later says — and the config-driven
+   * deletion that follows arrives only after this generator's shutdown has released the lease,
+   * leaving nobody entitled to delete it (see the non-leader branch of {@code
+   * cleanUpMatViewResources}).
+   *
+   * <p>Runs from the generator's own drop handling, while this node still holds the lease. That
+   * ordering is what makes the eager cleanup safe: the lease holder is the only MV writer, and the
+   * drop closes its writer first, so the dropped collection cannot be re-created behind us.
+   * Best-effort — without leadership, or on any failure, the pair stays where the stale-lease GC
+   * finds it after the graces.
+   *
+   * <p>Deregistering the generation is not best-effort and not leader-only: it must happen on every
+   * node that witnesses the drop, before the teardown closes the index. See {@link
+   * #deregisterGenerationOfDroppedSourceCollection}.
+   */
+  private void cleanUpMatViewResourcesForDroppedSourceCollection(
+      MaterializedViewIndexGeneration generation) {
+    MaterializedViewGenerationId generationId = generation.getGenerationId();
+    // Leadership decides who cleans up the shared resources, but nobody should be replicating a
+    // collection that no longer exists, so this runs on every node that witnesses the drop.
+    deregisterGenerationOfDroppedSourceCollection(generation);
+    // The source collection is gone, so no generation of this index can ever index again --
+    // clear them all, whether or not we hold the lease or the cleanup below works.
+    // TODO(CLOUDP-XXXXX): this can run while a commit is still finishing, which re-flags a
+    // collection that is gone. Unlike the index-deletion path there is no shutdown future to
+    // wait on here, so it needs its own fix.
+    this.leaseManager.clearCheckpointCommitRiskForIndex(generationId.indexId);
+    if (!this.leaseManager.isLeader(generationId)) {
+      LOG.atInfo()
+          .addKeyValue("generationId", generationId)
+          .log(
+              "Source collection dropped; not the lease holder, leaving cleanup to the "
+                  + "stale-lease GC");
+      return;
+    }
+    var metadata = this.matViewMetadataCatalog.getMetadataIfPresent(generationId);
+    if (metadata.isEmpty()) {
+      return;
+    }
+    String leaseKey = metadata.get().collectionName();
+    LOG.atInfo()
+        .addKeyValue("generationId", generationId)
+        .addKeyValue("collectionName", leaseKey)
+        .log("Source collection dropped; cleaning up its materialized view collection and lease");
+    // Detached: the caller is the generator's lifecycle handling and must not block on mongod
+    // I/O. Drop-before-delete, as in the deletion path: a surviving MV's lease must stay
+    // visible to the lease-driven GC scanner.
+    generation
+        .getIndex()
+        .getWriter()
+        .dropMaterializedViewCollection()
+        .handle(
+            (unusedResult, dropError) -> {
+              boolean dropped = dropError == null;
+              recordCollectionDrop(DROP_SCENARIO_SOURCE_COLLECTION_DROP, dropped);
+              return dropped;
+            })
+        .thenAccept(
+            mvDropped -> {
+              if (mvDropped) {
+                deleteLeaseOrLeaveForGc(leaseKey);
+              } else {
+                LOG.atWarn()
+                    .addKeyValue("generationId", generationId)
+                    .addKeyValue("collectionName", leaseKey)
+                    .log(
+                        "Failed to drop the materialized view collection of a dropped source "
+                            + "collection; leaving its lease for the stale-lease GC");
+              }
+            })
+        .exceptionally(
+            throwable ->
+                logDetachedCleanupFailure(
+                    throwable, generationId, leaseKey, DROP_SCENARIO_SOURCE_COLLECTION_DROP));
+  }
+
+  /**
+   * Takes a generation whose source collection is gone out of the buffer that {@link
+   * #retryFailedGeneratorCreations()} and {@link #restartReplication()} rebuild generators from.
+   *
+   * <p>Both rebuild a generator for every buffered generation whose own generator is shut down --
+   * exactly the state the teardown after this callback leaves behind. The rebuilt generator would
+   * reuse the same, by then closed, index, and would find no checkpoint either, because the
+   * checkpoint lives in the lease document this cleanup deletes. It would therefore start an
+   * initial sync instead of resuming, fail to resolve the dropped collection, and take the process
+   * down committing the resulting status. The rest of this generation's bookkeeping is left alone:
+   * the config-driven deletion still finds its generator and unwinds normally.
+   */
+  private void deregisterGenerationOfDroppedSourceCollection(
+      MaterializedViewIndexGeneration generation) {
+    // Resolve the key the same way ActiveGenerationIdCatalog#add resolved it when it buffered the
+    // generation -- through the metadata catalog, not the index's own accessor -- so that a
+    // divergence between the two can never turn this removal into a silent no-op.
+    var metadata = this.matViewMetadataCatalog.getMetadataIfPresent(generation.getGenerationId());
+    if (metadata.isEmpty()) {
+      return;
+    }
+    UUID matViewCollectionUuid = metadata.get().collectionUuid();
+    // Value-matched, and deliberately not under the manager monitor: this runs on the generator's
+    // thread while it holds the generator's own lock, and the config-driven cleanup takes those
+    // two locks in the opposite order. A newer generation of the same index may already own the
+    // entry -- a definition update racing the drop -- and has to keep its place in the buffer.
+    @SuppressWarnings("GuardedBy") // ConcurrentHashMap: a single keyed removal is atomic on its own
+    boolean deregistered =
+        this.activeGenerationIdCatalog.latestMatViewIndexGenerationByCollection.remove(
+            matViewCollectionUuid, generation);
+    if (deregistered) {
+      LOG.atInfo()
+          .addKeyValue("generationId", generation.getGenerationId())
+          .addKeyValue("collectionUuid", matViewCollectionUuid)
+          .log(
+              "Source collection dropped; deregistered its generation so the status refresh "
+                  + "cannot rebuild a generator on the closed index");
+    }
   }
 
   @Override
@@ -1110,16 +1726,20 @@ public class MaterializedViewManager implements ReplicationManager {
     this.heartbeatFuture.cancel(false);
 
     // Cancel the periodic stale-lease GC scan
-    if (this.staleLeaseScannerFuture != null) {
-      this.staleLeaseScannerFuture.cancel(false);
-    }
+    this.staleLeaseScannerFuture.cancel(false);
 
-    // Shutdown all generators. Each generator handles its own role-specific cleanup.
+    // Shutdown all generators first. Each generator handles its own role-specific cleanup and
+    // synchronously transitions to SHUT_DOWN, so later read failures are treated as shutdown noise.
     // For follower mode, the map is empty, so this completes immediately.
     List<CompletableFuture<?>> futures =
         this.managedMaterializedViewGenerators.values().stream()
             .map(MaterializedViewGenerator::shutdown)
             .collect(Collectors.toList());
+
+    // Mirror MongoDbReplicationManager.abortReplicationMongoClients(): close the clients after
+    // signaling shutdown but before waiting on the generator futures, so a blocked synchronous
+    // driver read can unwind.
+    this.matViewGeneratorFactory.abortClients();
 
     // Need to create a separate executor to run the shutdown tasks, otherwise it may end up running
     // on the indexing executor. As one of the shutdown tasks is shutting down that executor, this
@@ -1131,11 +1751,13 @@ public class MaterializedViewManager implements ReplicationManager {
         // Fire and forget, no need to wait for it to complete.
         .thenRunAsync(this.matViewGeneratorFactory::shutdown, shutdownExecutor)
         .thenRunAsync(this.decodingWorkScheduler::shutdown, shutdownExecutor)
+        // Several IndexingStrategy keys can map to the same scheduler instance, so shut each
+        // distinct one down once rather than once per key.
         .thenRunAsync(
             () ->
-                this.indexingWorkSchedulerFactory
-                    .getIndexingWorkSchedulers()
-                    .forEach((strategy, scheduler) -> scheduler.shutdown()),
+                this.indexingWorkSchedulerFactory.getIndexingWorkSchedulers().values().stream()
+                    .distinct()
+                    .forEach(IndexingWorkScheduler::shutdown),
             shutdownExecutor)
         .thenRunAsync(() -> Executors.shutdownOrFail(this.heartbeatExecutor), shutdownExecutor)
         .thenRunAsync(() -> Executors.shutdownOrFail(this.optimeUpdaterExecutor), shutdownExecutor)
@@ -1162,21 +1784,14 @@ public class MaterializedViewManager implements ReplicationManager {
     if (isShutdown() || !isReplicationSupported()) {
       return;
     }
+    // Recreate any generator a transient failure left missing or shut down, before the election
+    // loop below reads the managed map.
+    retryFailedGeneratorCreations();
     // Poll all follower statuses from LeaseManager.
     var pollResult = this.leaseManager.pollFollowerStatuses();
 
-    // Update the local index status for all followers.
-    getMatViewGenerators()
-        .values()
-        .forEach(
-            generator -> {
-              var generationId = generator.getIndexGeneration().getGenerationId();
-              // Check generator.isLeader again before setting.
-              if (pollResult.statuses().containsKey(generationId) && !generator.isLeader()) {
-                var status = pollResult.statuses().get(generationId);
-                generator.getIndexGeneration().getIndex().setStatus(status);
-              }
-            });
+    // Update the local index status and replication optime for all followers.
+    this.statusUpdater.copyFollowerStatuses(pollResult);
 
     // Two-phase pendingShutdowns cleanup: collect entries that are ready (shutdown done + queue
     // clean), then activate deferred leadership and remove. Using two phases instead of removeIf
@@ -1193,13 +1808,15 @@ public class MaterializedViewManager implements ReplicationManager {
       // Activate deferred leadership from replaceGenerator: the generator is in
       // leaderGenerationIds but was never activated because the queue was dirty.
       try {
-        if (this.leaseManager.isLeader(genId)) {
+        // Retirement releases leadership, so isLeader is normally already false here; the explicit
+        // check keeps a retired generation from being re-activated if that ever stops holding.
+        if (this.leaseManager.isLeader(genId) && !isRetired(genId)) {
           var gen = getMatViewGenerator(genId);
           if (gen.isPresent() && !gen.get().isLeader()) {
             LOG.atInfo()
                 .addKeyValue("generationId", genId)
                 .log("Activating deferred leadership from replaceGenerator");
-            gen.get().becomeLeader();
+            becomeLeaderSafely(gen.get(), genId);
           }
         }
       } catch (Throwable e) {
@@ -1222,6 +1839,11 @@ public class MaterializedViewManager implements ReplicationManager {
           skippedForShutdown.add(generationId);
           continue;
         }
+        // This host still owns the retired generation's lease row, so it stays acquirable on every
+        // poll. Skip before the disqualification branch below, which would warn once per tick.
+        if (isRetired(generationId)) {
+          continue;
+        }
         // Get a fresh snapshot from managedMaterializedViewGenerators instead of the snapshot
         // taken at the start of refreshStatus(). The generator may still be missing due to a
         // race condition (leaseManager.add() called but generator not yet stored), which is
@@ -1242,20 +1864,64 @@ public class MaterializedViewManager implements ReplicationManager {
           generator.ifPresent(MaterializedViewGenerator::shutdown);
           continue;
         }
+        // The lease manager demoted this generation (that is what made the lease acquirable),
+        // but its generator still leads the prior tenure. Acquiring here would re-activate that
+        // generator under a fresh lease while its in-flight work holds the prior tenure's pin —
+        // the lose-and-reacquire ABA (CLOUDP-437680), reachable only because this acquisition can
+        // beat heartbeat pass 2, whose generator.isLeader() && !leaseManager.isLeader() check
+        // drains exactly this state. Skip acquisition for the cycle and leave the drain to pass
+        // 2; the replacement follower it installs acquires on a later cycle, pinning the new
+        // tenure's leaseVersion at beginTenure.
+        //
+        // Gated on LEASE_HEARTBEAT_PARTIAL_UPDATE (evaluated per tick, so a flip needs no
+        // restart). With the flag off, most reacquisitions-while-leading are benign
+        // CLOUDP-397647 OCC self-heals: the whole-document renewal demoted a live leader while
+        // the lease still named this host unexpired, so no interim leader was possible and
+        // re-acquiring is safe — skipping those would convert daily fleet self-heals into full
+        // generator replacements for no safety gain. The flag removes that demotion source, so
+        // the skip activates exactly when its residual triggers are real takeovers and
+        // expiries, where the drain is the correct behavior.
+        if (this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+                DynamicFeatureFlags.LEASE_HEARTBEAT_PARTIAL_UPDATE)
+            && generator.get().isLeader()) {
+          LOG.atInfo()
+              .addKeyValue("generationId", generationId)
+              .log(
+                  "Lease is acquirable but the local generator still leads the prior tenure;"
+                      + " skipping acquisition until the heartbeat drains it");
+          continue;
+        }
+        MaterializedViewGenerator generatorBeforeAcquisition = generator.get();
         if (this.leaseManager.tryAcquireLeadership(generationId)) {
           // Synchronize on the manager monitor (same lock as transitionToFollower) to
           // prevent the generator from being replaced between re-read and becomeLeader().
           synchronized (this) {
             var currentGenerator = getMatViewGenerator(generationId);
             if (currentGenerator.isEmpty()
-                || TERMINAL_STATES.contains(currentGenerator.get().getState())) {
+                || TERMINAL_STATES.contains(currentGenerator.get().getState())
+                || this.pendingShutdowns.containsKey(generationId)) {
+              // Last case: a concurrent transitionToFollower() replaced this generator (and
+              // registered its predecessor's shutdown in pendingShutdowns) while we were
+              // blocked waiting on this monitor. Do not activate while a predecessor is still
+              // draining.
               LOG.atWarn()
                   .addKeyValue("generationId", generationId)
                   .log(
-                      "Generator gone or in terminal state after leadership acquisition, "
-                          + "releasing lease");
+                      "Generator gone, in terminal state, or shutting down after leadership "
+                          + "acquisition, releasing lease");
               this.leaseManager.releaseLeadership(generationId);
               continue;
+            }
+            if (currentGenerator.get() == generatorBeforeAcquisition
+                && currentGenerator.get().isLeader()) {
+              this.meterRegistry.counter(UNSAFE_LEADERSHIP_REACQUISITION_COUNTER_NAME).increment();
+              this.unsafeLeadershipReacquisitionLastEventEpochSeconds.set(
+                  System.currentTimeMillis() / 1000);
+              LOG.atError()
+                  .addKeyValue("generationId", generationId)
+                  .log(
+                      "Reacquired materialized-view leadership while the prior local generator"
+                          + " still leads; in-flight work from the prior tenure may be unsafe");
             }
             LOG.atInfo()
                 .addKeyValue("indexId", generationId.indexId)
@@ -1284,112 +1950,56 @@ public class MaterializedViewManager implements ReplicationManager {
     }
   }
 
-  /**
-   * Periodically updates the maxPossibleReplicationOpTime for all queryable materialized view
-   * indexes. This needs to happen separately since this metric is updated only for indexes in the
-   * IndexCatalog in ReplicationOptimeUpdater.
-   *
-   * <p>This applies to both leaders and followers since both need accurate optime information for
-   * replication lag reporting (materialized view lag + lucene lag).
-   */
-  @VisibleForTesting
-  void updateMaxReplicationOpTime() {
-    if (isShutdown() || !isReplicationSupported()) {
-      return;
-    }
-    try {
-      // Use collection resolver client here for querying mongod cluster time to reduce impacts in
-      // leaseManager and writer mongoClient
-      var mongoClientOpt = this.autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient();
-      if (mongoClientOpt.isEmpty()) {
-        LOG.warn("No MongotClient is present, skipping max optime update");
-        return;
-      }
-      var opTime = MongoDbReplSetStatus.getReadConcernMajorityOpTime(mongoClientOpt.get());
-      getMatViewGenerators()
-          .values()
-          .forEach(
-              generator -> {
-                var matViewIndex = generator.getIndexGeneration().getIndex();
-                if (matViewIndex.isClosed()) {
-                  return;
-                }
-                var status = matViewIndex.getStatus();
-                if (!status.canServiceQueries()) {
-                  return;
-                }
-                var opTimeInfo =
-                    matViewIndex
-                        .getMetricsUpdater()
-                        .getIndexingMetricsUpdater()
-                        .getReplicationOpTimeInfo();
-                status
-                    .getOptime()
-                    .ifPresentOrElse(
-                        replicationOptime ->
-                            opTimeInfo.update(replicationOptime.getValue(), opTime.getValue()),
-                        () -> opTimeInfo.update(opTime.getValue()));
-              });
-    } catch (Exception e) {
-      LOG.error("Failed to update max optime for materialized views", e);
-      this.meterRegistry.counter(OPTIME_UPDATER_ERROR_COUNTER_NAME).increment();
-    }
-  }
-
   private synchronized boolean isShutdown() {
     return this.shutdown;
   }
 
   /**
-   * Periodic stale-lease GC scan (phase 1: detection). Marks leases lapsed by more than {@link
-   * #STALE_LEASE_MARK_GRACE_PERIOD} as {@link Lease.CleanupState#ELIGIBLE_FOR_CLEANUP} for the
-   * later cleanup pass to drop.
-   *
-   * <p>Staleness alone is the trigger: a superseded MV's lease stays renewed until every mongot
-   * has flipped off it (any laggard re-acquires it through re-election), so "lapsed past the grace
-   * period" is the cluster-wide all-flipped signal. Leaderless and idempotent — safe to run on
-   * every mongot concurrently (see {@link LeaseManager#findGcCandidates} and {@link
-   * LeaseManager#markEligibleForCleanup}).
-   *
-   * <p>The mark is a hint, not a verdict: the cleaner (CLOUDP-384018) re-validates before any
-   * destructive drop. TODO(CLOUDP-411009): add the "never clean up the only lease of a
-   * still-configured index" safeguard before the cleaner ships.
+   * Records one MV-collection drop attempt on the shared {@code matViewCollectionDrop} counter,
+   * tagged by scenario ({@code gc} / {@code indexDeletion}) and outcome. Replaces the GC-only
+   * failure counter so drop success/failure is comparable across paths. Each tag combination is
+   * registered lazily on first emission, and the dropped collection/lease identity stays in the
+   * structured drop logs rather than a (unbounded) label.
    */
-  @VisibleForTesting
-  void scanStaleLeasesForCleanup() {
-    if (isShutdown() || !isReplicationSupported()) {
-      return;
-    }
-    // Contain all failures to this tick: VerboseRunnable rethrows after logging, and
-    // scheduleWithFixedDelay cancels the task permanently on a throw.
-    try {
-      Instant cutoff = Instant.now().minus(STALE_LEASE_MARK_GRACE_PERIOD);
-      for (Lease lease : this.leaseManager.findGcCandidates(cutoff)) {
-        // Contain per-lease failures too: one bad lease must not starve the rest of the sweep.
-        try {
-          if (lease.cleanupState() == Lease.CleanupState.ELIGIBLE_FOR_CLEANUP) {
-            continue;
-          }
-          if (this.leaseManager.markEligibleForCleanup(lease.id(), cutoff)) {
-            LOG.atInfo()
-                .addKeyValue("leaseKey", lease.id())
-                .addKeyValue("leaseExpiration", lease.leaseExpiration())
-                .addKeyValue("gracePeriod", STALE_LEASE_MARK_GRACE_PERIOD)
-                .log("Marked stale lease eligible for cleanup");
-          }
-        } catch (Exception e) {
-          LOG.atWarn()
-              .addKeyValue("leaseKey", lease.id())
-              .setCause(e)
-              .log("Failed to mark stale lease eligible for cleanup, continuing sweep");
-        }
-      }
-      // TODO(CLOUDP-384018): the cleaner (phase 2: deletion) runs here, in this same periodic
-      // sweep, after the mark pass: for each lease already ELIGIBLE_FOR_CLEANUP and expired past
-      // the delete grace, re-validate eligibility atomically, drop the MV collection, then drop
-      // the lease.
-    } catch (Exception e) {
-      LOG.atWarn().setCause(e).log("Stale-lease GC sweep failed, will retry on next tick");
+  private void recordCollectionDrop(String scenario, boolean success) {
+    this.metricsFactory
+        .counter(
+            MAT_VIEW_COLLECTION_DROP_COUNTER_NAME,
+            Tags.of(DROP_SCENARIO_TAG, scenario, DROP_OUTCOME_TAG, success ? "success" : "failure"))
+        .increment();
+  }
+
+  /**
+   * Whether any auto-embedding index generation is currently configured on this node. Synchronized
+   * for the catalog's guard; the GC sweep takes the manager lock only for this read.
+   */
+  private synchronized boolean hasConfiguredAutoEmbeddingIndex() {
+    return !this.activeGenerationIdCatalog.genIdByMatViewCollection.isEmpty();
+  }
+
+  /**
+   * 1 only while GC is actually running: the scanner thread is scheduled and alive, the manager is
+   * up, AND {@link DynamicFeatureFlags#MV_GC_ENABLED} is on. The thread is always scheduled (gating
+   * is per tick), so the flag has to be part of the value — re-evaluated on every scrape, this
+   * tracks the flag with no restart: when the control plane turns it off (propagated by the next
+   * conf call), the gauge drops to 0 in lockstep.
+   */
+  private double gcScannerAliveValue() {
+    return !isShutdown()
+            && this.staleLeaseScannerFuture != null
+            && !this.staleLeaseScannerFuture.isCancelled()
+            && !this.staleLeaseScannerFuture.isDone()
+            && this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+                DynamicFeatureFlags.MV_GC_ENABLED)
+        ? 1.0
+        : 0.0;
+  }
+
+  /** True if a generation on this mongot still reads {@code lease}'s materialized view. */
+  private boolean usedByLocalGeneration(Lease lease) {
+    UUID matViewUuid = lease.materializedViewCollectionMetadata().collectionUuid();
+    synchronized (this) {
+      return this.activeGenerationIdCatalog.genIdByMatViewCollection.containsKey(matViewUuid);
     }
   }
 
@@ -1422,7 +2032,15 @@ public class MaterializedViewManager implements ReplicationManager {
                   // without this, we could release the new generator's lease.
                   synchronized (this) {
                     var current = getMatViewGenerator(generationId);
-                    if (current.isPresent() && current.get() == generator) {
+                    if (current.isEmpty() || current.get() != generator) {
+                      LOG.atWarn()
+                          .addKeyValue("generationId", generationId)
+                          .log(
+                              "Skipped lease release: snapshot generator no longer matches "
+                                  + "live map (same-genId replaceGenerator race)");
+                    } else if (!retireIfCollectionMissing(generator)) {
+                      // Retirement, when it applies, already released the lease and cleared
+                      // leader state.
                       LOG.atWarn()
                           .addKeyValue("generationId", generationId)
                           .addKeyValue("state", generator.getState())
@@ -1435,12 +2053,6 @@ public class MaterializedViewManager implements ReplicationManager {
                       // failAndRetainIndex / shutDownReplicationOnStale* paths never reach
                       // index.close(), so without this the gauge stays at 1 indefinitely.
                       generator.clearLeaderState();
-                    } else {
-                      LOG.atWarn()
-                          .addKeyValue("generationId", generationId)
-                          .log(
-                              "Skipped lease release: snapshot generator no longer matches "
-                                  + "live map (same-genId replaceGenerator race)");
                     }
                   }
                 }
@@ -1491,6 +2103,24 @@ public class MaterializedViewManager implements ReplicationManager {
               });
     }
 
+    // Self-heal the leaderStatus gauge if it was evicted from the registry while the generation is
+    // still live (e.g. a sibling matview generation sharing the same Meter.Id tore it down on
+    // close). The generator map is keyed by source-collection UUID, so it holds at most one attempt
+    // per index; re-registering under the manager monitor and only when the snapshot generator is
+    // still the mapped one guarantees a concurrently-replaced (soon-to-be-dropped) attempt can
+    // never own the re-registered gauge — same guard as the passes above. No-op when the gauge is
+    // present; only a missing gauge is re-registered, against the current owner's state object.
+    getMatViewGenerators()
+        .forEach(
+            (uuid, generator) -> {
+              synchronized (this) {
+                var current = getMatViewGenerator(generator.getIndexGeneration().getGenerationId());
+                if (current.isPresent() && current.get() == generator) {
+                  generator.ensureLeaderStatusGaugeRegistered();
+                }
+              }
+            });
+
     // Log heartbeat for monitoring
     var leaderIndexIds =
         this.leaseManager.getLeaderGenerationIds().stream()
@@ -1501,6 +2131,46 @@ public class MaterializedViewManager implements ReplicationManager {
           .addKeyValue("leaderIndexCount", leaderIndexIds.size())
           .addKeyValue("leaderIndexIds", leaderIndexIds)
           .log("Auto-embedding leader heartbeat");
+    }
+  }
+
+  /**
+   * Drops the MV collection at {@code namespace} via the writer client, recording the attempt on
+   * the matViewCollectionDrop counter under {@code scenario}. Missing collections drop as a no-op,
+   * keeping retries and concurrent cleanups idempotent.
+   */
+  private boolean dropMatViewCollection(
+      String leaseKey, MongoNamespace namespace, String scenario) {
+    try {
+      var mongoClient =
+          Check.isPresent(
+              this.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient(),
+              "materializedViewWriterMongoClient");
+      // Retries + request metrics like every lease-table op; failure below means failed retries.
+      this.matViewWriterOperationExecutor.execute(
+          "dropMatViewCollection",
+          () ->
+              mongoClient
+                  .getDatabase(namespace.getDatabaseName())
+                  .getCollection(namespace.getCollectionName())
+                  .drop());
+      recordCollectionDrop(scenario, true);
+      LOG.atInfo()
+          .addKeyValue("leaseKey", leaseKey)
+          .addKeyValue("collectionName", namespace.getCollectionName())
+          .addKeyValue("database", namespace.getDatabaseName())
+          .addKeyValue("scenario", scenario)
+          .log("Dropped materialized view collection");
+      return true;
+    } catch (Exception | AssertionError e) {
+      recordCollectionDrop(scenario, false);
+      LOG.atWarn()
+          .addKeyValue("leaseKey", leaseKey)
+          .addKeyValue("collectionName", namespace.getCollectionName())
+          .addKeyValue("scenario", scenario)
+          .setCause(e)
+          .log("Failed to drop materialized view collection");
+      return false;
     }
   }
 
@@ -1522,11 +2192,9 @@ public class MaterializedViewManager implements ReplicationManager {
    * <p>Per-generation generator creation can throw {@link MaterializedViewTransientException} —
    * e.g. a mongod primary stepdown returning {@code 10107 NotPrimary} during the lease read in
    * {@link com.xgen.mongot.index.mongodb.MaterializedViewWriter#getCommitUserData}. Such failures
-   * are caught and the affected generation is skipped (and its lease-manager registration rolled
-   * back so {@link #refreshStatus} doesn't see a follower with no generator). Retry happens on the
-   * next conf push that drives another {@code restartReplication}; {@code refreshStatus} itself
-   * does not re-attempt generator creation. Non-transient exceptions still propagate so genuine
-   * bugs remain fatal.
+   * are caught and the affected generation is skipped; {@link #refreshStatus} periodically retries
+   * any active generation still missing a generator. Non-transient exceptions still propagate so
+   * genuine bugs remain fatal.
    *
    * <p>No-op if the generator factory's sync source URIs are not yet available.
    */
@@ -1538,25 +2206,170 @@ public class MaterializedViewManager implements ReplicationManager {
     }
     this.isReplicationEnabled = true;
     this.activeGenerationIdCatalog.latestMatViewIndexGenerationByCollection.forEach(
+        this::createAndStoreGenerator);
+  }
+
+  /** Outcome of {@link #createAndStoreGenerator}. A deliberate skip is not a retry outcome. */
+  private enum GeneratorCreation {
+    CREATED,
+    SKIPPED_RETIRED,
+    SKIPPED_DEREGISTERED,
+    FAILED
+  }
+
+  /**
+   * Creates a generator for the collection and stores it, swallowing transient failures so they
+   * don't crash mongot. Rolls back the lease registration on a transient failure and leaves the
+   * retry to {@link #refreshStatus}; non-transient exceptions propagate.
+   */
+  private synchronized GeneratorCreation createAndStoreGenerator(
+      UUID uuid, MaterializedViewIndexGeneration matViewIndexGeneration) {
+    // restartReplication rebuilds every active generation without consulting
+    // needsGeneratorRecreation, so the retirement check is repeated at this shared choke point.
+    if (isRetired(matViewIndexGeneration.getGenerationId())) {
+      LOG.atInfo()
+          .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
+          .log("Skipping generator creation for retired generation");
+      return GeneratorCreation.SKIPPED_RETIRED;
+    }
+    // Presence in the buffer is the mandate to rebuild, so re-read it here: both callers iterate
+    // that map, and a weakly consistent iteration can carry an entry that a source-collection drop
+    // deregistered in the meantime. Rebuilding then would resurrect a generation whose index the
+    // drop teardown has already closed. Ordering makes this read decisive rather than lucky: a
+    // rebuild only follows the old generator reaching SHUT_DOWN, which follows the deregistration.
+    if (this.activeGenerationIdCatalog.latestMatViewIndexGenerationByCollection.get(uuid)
+        != matViewIndexGeneration) {
+      LOG.atInfo()
+          .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
+          .log("Skipping generator creation for a generation that is no longer registered");
+      return GeneratorCreation.SKIPPED_DEREGISTERED;
+    }
+    try {
+      this.managedMaterializedViewGenerators.put(uuid, createNewGenerator(matViewIndexGeneration));
+      return GeneratorCreation.CREATED;
+    } catch (MaterializedViewTransientException e) {
+      this.leaseManager.drop(matViewIndexGeneration.getGenerationId());
+      LOG.atWarn()
+          .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
+          .addKeyValue("reason", e.getReason())
+          .setCause(e)
+          .log("Skipping generator creation for index; will retry on next refresh.");
+      return GeneratorCreation.FAILED;
+    }
+  }
+
+  /**
+   * Recreates generators for active generations that are missing or were left shut down, so an
+   * unreplicated index recovers without operator intervention. No-op unless replication is enabled
+   * and the generator factory is initialized.
+   */
+  private synchronized void retryFailedGeneratorCreations() {
+    if (isShutdown()
+        || !this.isReplicationEnabled
+        || !this.matViewGeneratorFactory.isInitialized()) {
+      return;
+    }
+    this.activeGenerationIdCatalog.latestMatViewIndexGenerationByCollection.forEach(
         (uuid, matViewIndexGeneration) -> {
+          if (!needsGeneratorRecreation(uuid, matViewIndexGeneration)) {
+            return;
+          }
           try {
-            this.managedMaterializedViewGenerators.put(
-                uuid, createNewGenerator(matViewIndexGeneration));
-          } catch (MaterializedViewTransientException e) {
-            // Swallow transient failures (e.g. 10107 NotPrimary during mongod stepdown) so they
-            // don't propagate to PeriodicConfigMonitor.Crash and halt the JVM. Retry happens on
-            // the conf call changes; refreshStatus() does not re-attempt generator creation.
-            // createNewGenerator() has already called leaseManager.add() before throwing, so
-            // roll that back to avoid leaving a dangling follower entry that refreshStatus()
-            // would log "Generator disqualified" against every heartbeat.
-            this.leaseManager.drop(matViewIndexGeneration.getGenerationId());
-            LOG.atWarn()
-                .addKeyValue("generationId", matViewIndexGeneration.getGenerationId())
-                .addKeyValue("reason", e.getReason())
+            MaterializedViewGenerator shutDownGenerator =
+                this.managedMaterializedViewGenerators.get(uuid);
+            if (shutDownGenerator != null) {
+              // The replacement reuses the same materialized-view index, including its gauge.
+              // Clear stale leadership before installing the fresh follower.
+              shutDownGenerator.clearLeaderState();
+            }
+            recordGeneratorRetry(createAndStoreGenerator(uuid, matViewIndexGeneration));
+          } catch (Exception e) {
+            // Last line of defense: a throw out of the status-refresh runnable would permanently
+            // cancel scheduleWithFixedDelay. Log and move on; the next tick retries.
+            recordGeneratorRetry(GeneratorCreation.FAILED);
+            LOG.atError()
+                .addKeyValue("collectionUuid", uuid)
                 .setCause(e)
-                .log("Skipping generator restart for index; will retry on next conf push.");
+                .log("Generator creation retry failed; will retry on next refresh.");
           }
         });
+  }
+
+  /** Retirement is intentional, so it is neither a successful retry nor a failed one. */
+  private void recordGeneratorRetry(GeneratorCreation outcome) {
+    if (outcome == GeneratorCreation.SKIPPED_RETIRED
+        || outcome == GeneratorCreation.SKIPPED_DEREGISTERED) {
+      return;
+    }
+    this.meterRegistry
+        .counter(
+            GENERATOR_CREATION_RETRY_COUNTER_NAME,
+            "outcome",
+            outcome == GeneratorCreation.CREATED ? "success" : "failure")
+        .increment();
+  }
+
+  /**
+   * True when a collection's active generation has no usable generator: none is stored, or the
+   * stored one was left {@code SHUT_DOWN} (e.g. a failed transition to follower) with no shutdown
+   * still in flight for it. Runtime-error states (FAILED/FAILED_EXCEEDED) are left alone —
+   * recreating them would churn without resolving the underlying failure. Retired generations never
+   * need one.
+   */
+  private synchronized boolean needsGeneratorRecreation(
+      UUID uuid, MaterializedViewIndexGeneration matViewIndexGeneration) {
+    // Tested by generation id before the generator is read, because shutdownReplication clears the
+    // generator: otherwise a retired generation looks like a missing one and every later refresh
+    // records a creation-retry failure.
+    if (isRetired(matViewIndexGeneration.getGenerationId())) {
+      return false;
+    }
+    var generator = this.managedMaterializedViewGenerators.get(uuid);
+    if (generator == null) {
+      return true;
+    }
+    if (retireIfCollectionMissing(generator)) {
+      return false;
+    }
+    return generator.getState() == SHUT_DOWN
+        && !this.pendingShutdowns.containsKey(generator.getIndexGeneration().getGenerationId());
+  }
+
+  /**
+   * Whether this generation has been retired. Membership is the authority: the condition retirement
+   * is derived from is not stable, because {@link #refreshStatus()} overwrites the index status
+   * from the lease on every tick a generator is not leader.
+   */
+  private boolean isRetired(MaterializedViewGenerationId generationId) {
+    return this.retiredGenerations.contains(generationId);
+  }
+
+  /**
+   * Retires {@code generator}'s generation if its materialized view collection is missing, so that
+   * only a new generation can recover it — never a recreated generator. Idempotent.
+   *
+   * <p>Releases leadership here rather than leaving it to the heartbeat, because a shutdown between
+   * retiring and the next heartbeat would leave the lease manager renewing a lease no generator
+   * will ever claim.
+   */
+  private boolean retireIfCollectionMissing(MaterializedViewGenerator generator) {
+    if (!generator.isCollectionMissing()) {
+      return false;
+    }
+    var generationId = generator.getIndexGeneration().getGenerationId();
+    if (this.retiredGenerations.add(generationId)) {
+      this.meterRegistry.counter(RETIRED_GENERATION_COUNTER_NAME).increment();
+      LOG.atWarn()
+          .addKeyValue("indexId", generationId.indexId)
+          .addKeyValue("generationId", generationId)
+          .log(
+              "Materialized view collection is missing on this shard; retiring generation until "
+                  + "the index is recreated");
+      this.leaseManager.releaseLeadership(generationId);
+      generator.clearLeaderState();
+      this.leaseManager.clearCheckpointCommitRisk(generationId);
+    }
+    return true;
   }
 
   @VisibleForTesting
@@ -1564,204 +2377,14 @@ public class MaterializedViewManager implements ReplicationManager {
     return this.activeGenerationIdCatalog;
   }
 
-  /**
-   * Factory for creating MaterializedViewGenerator instances. All generators are created as
-   * followers. The caller is responsible for calling {@link
-   * MaterializedViewGenerator#becomeLeader()} to activate leader mode when appropriate.
-   */
-  static class MaterializedViewGeneratorFactory {
-    private final Path resolvedPath;
-    private final NamedExecutorService lifecycleExecutor;
-    private final MongotCursorManager cursorManager;
-    private final MeterAndFtdcRegistry meterAndFtdcRegistry;
-    private final FeatureFlags featureFlags;
-    private final Duration resyncBackoff;
-    private final Duration transientBackoff;
-    private final Duration requestRateLimitBackoffMs;
-    private final boolean enableNaturalOrderScan;
-    private final AutoEmbeddingMaterializedViewConfig materializedViewConfig;
-    private final IndexingWorkSchedulerFactory indexingWorkSchedulerFactory;
-    private final DecodingWorkScheduler decodingWorkScheduler;
-    private final InitialSyncConfig initialSyncConfig;
-    private final MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog;
+  @VisibleForTesting
+  StaleLeaseGarbageCollector staleLeaseGarbageCollector() {
+    return this.staleLeaseGarbageCollector;
+  }
 
-    // These fields are initialized in updateSyncSourceConfig(), owned by
-    // MaterializedViewGeneratorFactory
-    private boolean initialized;
-    private Map<String, ClientSessionRecord> clientSessionRecordMap;
-    private Optional<BatchMongoClient> syncBatchMongoClient;
-    private Optional<InitialSyncQueue> initialSyncQueue;
-    private Optional<SteadyStateManager> steadyStateManager;
-
-    MaterializedViewGeneratorFactory(
-        Path resolvedPath,
-        NamedExecutorService lifecycleExecutor,
-        MongotCursorManager cursorManager,
-        InitialSyncConfig initialSyncConfig,
-        MeterAndFtdcRegistry meterAndFtdcRegistry,
-        FeatureFlags featureFlags,
-        IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
-        DecodingWorkScheduler decodingWorkScheduler,
-        MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog,
-        AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
-      this.resolvedPath = resolvedPath;
-      this.lifecycleExecutor = lifecycleExecutor;
-      this.cursorManager = cursorManager;
-      this.meterAndFtdcRegistry = meterAndFtdcRegistry;
-      this.featureFlags = featureFlags;
-      this.enableNaturalOrderScan = initialSyncConfig.enableNaturalOrderScan();
-      this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
-      this.decodingWorkScheduler = decodingWorkScheduler;
-      this.initialSyncConfig = initialSyncConfig;
-      this.matViewMetadataCatalog = matViewMetadataCatalog;
-      this.materializedViewConfig = materializedViewConfig;
-      this.resyncBackoff =
-          materializedViewConfig.resyncBackoff.orElse(
-              ReplicationIndexManager.DEFAULT_RESYNC_BACKOFF);
-      this.transientBackoff =
-          materializedViewConfig.transientBackoff.orElse(
-              ReplicationIndexManager.DEFAULT_TRANSIENT_BACKOFF);
-      this.requestRateLimitBackoffMs =
-          Duration.ofMillis(materializedViewConfig.requestRateLimitBackoffMs);
-      // Sets to empty values. updateSyncSourceConfig() will be called later to initialize them.
-      this.initialized = false;
-      this.clientSessionRecordMap = new HashMap<>();
-      this.syncBatchMongoClient = Optional.empty();
-      this.initialSyncQueue = Optional.empty();
-      this.steadyStateManager = Optional.empty();
-    }
-
-    /**
-     * Creates a MaterializedViewGenerator in follower mode. Call {@link
-     * MaterializedViewGenerator#becomeLeader()} on the returned generator to activate leader mode
-     * and start the replication loop.
-     */
-    MaterializedViewGenerator create(MaterializedViewIndexGeneration matViewIndexGeneration) {
-      InitializedMaterializedViewIndex matViewIndex = matViewIndexGeneration.getIndex();
-      DocumentIndexer indexer = DefaultDocumentIndexer.create(matViewIndex);
-      // TODO(CLOUDP-361153): Remove this or replace this as our customized committer.
-      PeriodicIndexCommitter committer =
-          PeriodicIndexCommitter.createInactive(matViewIndex, indexer);
-      return MaterializedViewGenerator.create(
-          this.lifecycleExecutor,
-          this.cursorManager,
-          Check.isPresent(this.initialSyncQueue, "initialSyncQueue"),
-          Check.isPresent(this.steadyStateManager, "steadyStateManager"),
-          matViewIndexGeneration,
-          matViewIndex,
-          indexer,
-          committer,
-          this.resyncBackoff,
-          this.transientBackoff,
-          this.requestRateLimitBackoffMs,
-          this.meterAndFtdcRegistry.meterRegistry(),
-          this.featureFlags,
-          this.enableNaturalOrderScan);
-    }
-
-    boolean isInitialized() {
-      return this.initialized;
-    }
-
-    void markUninitialized() {
-      this.initialized = false;
-    }
-
-    /** Returns true if the InitialSyncQueue has an entry for this generationId. */
-    boolean hasQueueEntry(GenerationId generationId) {
-      return this.initialSyncQueue.map(q -> q.hasEntry(generationId)).orElse(false);
-    }
-
-    void updateSyncSourceConfig(SyncSourceConfig syncSourceConfig) {
-      syncSourceConfig.validateReplicationUrisAvailable();
-
-      var meterRegistry = this.meterAndFtdcRegistry.meterRegistry();
-      var sessionRefreshExecutor =
-          Executors.singleThreadScheduledExecutor("auto-embedding-session-refresh", meterRegistry);
-
-      var syncSourceHost = getSyncSourceHost(syncSourceConfig);
-
-      this.clientSessionRecordMap =
-          getClientSessionRecords(
-              syncSourceConfig,
-              getSyncMaxConnections(this.materializedViewConfig),
-              AUTO_EMBEDDING,
-              meterRegistry,
-              sessionRefreshExecutor,
-              syncSourceHost);
-
-      var syncMongoClient = this.clientSessionRecordMap.get(syncSourceHost).syncMongoClient();
-      var sessionRefresher = this.clientSessionRecordMap.get(syncSourceHost).sessionRefresher();
-
-      this.syncBatchMongoClient =
-          Optional.of(
-              getSyncBatchMongoClient(
-                  syncSourceConfig,
-                  this.materializedViewConfig.numConcurrentChangeStreams,
-                  AUTO_EMBEDDING.metricsNamespacePrefix,
-                  meterRegistry));
-
-      this.steadyStateManager =
-          Optional.of(
-              SteadyStateManager.create(
-                  this.meterAndFtdcRegistry,
-                  sessionRefresher,
-                  this.indexingWorkSchedulerFactory,
-                  syncMongoClient,
-                  this.syncBatchMongoClient.get(),
-                  this.decodingWorkScheduler,
-                  getAutoEmbeddingSteadyStateReplicationConfig(this.materializedViewConfig),
-                  this.featureFlags.isEnabled(Feature.LIFECYCLE_ATTRIBUTION_METRICS)));
-
-      this.initialSyncQueue =
-          Optional.of(
-              InitialSyncQueue.create(
-                  meterRegistry,
-                  this.clientSessionRecordMap,
-                  syncSourceHost,
-                  this.indexingWorkSchedulerFactory,
-                  this.materializedViewConfig,
-                  this.initialSyncConfig,
-                  /* This path should be different from the dataPath used in Lucene */
-                  this.resolvedPath,
-                  ToggleGate.opened(),
-                  Optional.of(this.matViewMetadataCatalog)));
-      this.initialized = true;
-    }
-
-    public CompletionStage<Void> shutdown() {
-      // Capture current state before clearing fields. shutdown() is invoked asynchronously (off
-      // the MaterializedViewManager lock). Callers MUST block on the returned future before
-      // calling updateSyncSourceConfig(); otherwise a concurrent updateSyncSourceConfig() could
-      // repopulate these fields and this shutdown chain would capture and close the new resources.
-      // Captured locals are private to this shutdown chain. Async callbacks MUST NOT reference
-      // this.X for the same reason.
-      var sessionRecordsToClose = this.clientSessionRecordMap;
-      var batchClientToClose = this.syncBatchMongoClient;
-      var initialSyncQueueFuture =
-          this.initialSyncQueue.map(InitialSyncQueue::shutdown).orElse(COMPLETED_FUTURE);
-      var steadyStateFuture =
-          this.steadyStateManager.map(SteadyStateManager::shutdown).orElse(COMPLETED_FUTURE);
-
-      // Clear fields synchronously so any re-initialization starts from a clean slate.
-      this.clientSessionRecordMap = new HashMap<>();
-      this.syncBatchMongoClient = Optional.empty();
-      this.steadyStateManager = Optional.empty();
-      this.initialSyncQueue = Optional.empty();
-
-      return CompletableFuture.allOf(initialSyncQueueFuture, steadyStateFuture)
-          .whenCompleteAsync(
-              (result, throwable) ->
-                  sessionRecordsToClose
-                      .values()
-                      .forEach(
-                          clientSessionRecord -> {
-                            clientSessionRecord.sessionRefresher().shutdown();
-                            clientSessionRecord.syncMongoClient().close();
-                          }))
-          .whenCompleteAsync(
-              (result, throwable) -> batchClientToClose.ifPresent(BatchMongoClient::close));
-    }
+  @VisibleForTesting
+  MaterializedViewStatusUpdater statusUpdater() {
+    return this.statusUpdater;
   }
 
   /**
@@ -1795,21 +2418,26 @@ public class MaterializedViewManager implements ReplicationManager {
     // buffer MatViewIndexGeneration since GeneratorFactory is being updated.
     final Map<UUID, MaterializedViewIndexGeneration> latestMatViewIndexGenerationByCollection;
 
-    private ActiveGenerationIdCatalog(
-        MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog) {
+    @VisibleForTesting
+    ActiveGenerationIdCatalog(MaterializedViewCollectionMetadataCatalog matViewMetadataCatalog) {
       this.matViewMetadataCatalog = matViewMetadataCatalog;
       this.genIdByMatViewCollection = new ConcurrentHashMap<>();
       this.genIdByMatViewGenId = new ConcurrentHashMap<>();
       this.latestMatViewIndexGenerationByCollection = new ConcurrentHashMap<>();
     }
 
-    void add(AutoEmbeddingIndexGeneration autoEmbeddingIndexGeneration) {
+    /**
+     * Registers the generation. Returns the stale MV collection UUID whose generator serves this MV
+     * generation, if any; the caller must hand that generator over to the current UUID.
+     */
+    Optional<UUID> add(AutoEmbeddingIndexGeneration autoEmbeddingIndexGeneration) {
       MaterializedViewIndexGeneration matViewIndexGeneration =
           autoEmbeddingIndexGeneration.getMaterializedViewIndexGeneration();
       GenerationId generationId = autoEmbeddingIndexGeneration.getGenerationId();
       UUID uuid = this.matViewMetadataCatalog.getMetadata(generationId).collectionUuid();
       // Reference counting by all indexGenerations with all attempts
       String matViewGeneratorId = canonicalKey(generationId);
+      Optional<UUID> staleUuid = moveOffStaleUuids(uuid, matViewGeneratorId);
       this.genIdByMatViewCollection
           .computeIfAbsent(uuid, unused -> ConcurrentHashMap.newKeySet())
           .add(generationId);
@@ -1835,7 +2463,97 @@ public class MaterializedViewManager implements ReplicationManager {
                         + " version than existing, likely a bug");
             return existing;
           });
+      return staleUuid;
     }
+
+    /**
+     * Moves this MV generation's attempts off any other MV collection UUID onto {@code uuid}. A
+     * repaired stale MV UUID re-keys the collection between attempts; without the move, drop
+     * ref-counting and generator retries would keep following the stale UUID. Attempts of other MV
+     * generations sharing the stale UUID stay where they are.
+     *
+     * <p>Returns the stale UUID whose generator serves this MV generation, if any. At most one is
+     * expected, since every add moves all of this MV generation's attempts onto the current UUID.
+     */
+    @VisibleForTesting
+    Optional<UUID> moveOffStaleUuids(UUID uuid, String matViewGeneratorId) {
+      Map<UUID, Set<GenerationId>> attemptsByStaleUuid = new HashMap<>();
+      this.genIdByMatViewCollection.forEach(
+          (otherUuid, genIds) -> {
+            Set<GenerationId> ours =
+                genIds.stream()
+                    .filter(id -> canonicalKey(id).equals(matViewGeneratorId))
+                    .collect(Collectors.toSet());
+            if (!otherUuid.equals(uuid) && !ours.isEmpty()) {
+              attemptsByStaleUuid.put(otherUuid, ours);
+            }
+          });
+      List<UUID> handOverFrom = new ArrayList<>();
+      attemptsByStaleUuid.forEach(
+          (staleUuid, ours) -> {
+            moveAttempts(staleUuid, uuid, ours);
+            // The generator under a UUID serves its latest generation. Only if that is this MV
+            // generation does the generator move with us; otherwise it keeps serving the other one.
+            var latest = this.latestMatViewIndexGenerationByCollection.get(staleUuid);
+            if (latest != null
+                && canonicalKey(latest.getGenerationId()).equals(matViewGeneratorId)) {
+              // Drop the retry buffer entry too, or the status refresh would recreate a generator.
+              this.latestMatViewIndexGenerationByCollection.remove(staleUuid);
+              handOverFrom.add(staleUuid);
+            }
+            LOG.atInfo()
+                .addKeyValue("matViewGeneratorId", matViewGeneratorId)
+                .addKeyValue("staleUuid", staleUuid)
+                .addKeyValue("currentUuid", uuid)
+                .addKeyValue("movedGenerationIds", new ArrayList<>(ours))
+                .log("MV collection UUID changed; moved earlier attempts off the stale UUID");
+          });
+      if (handOverFrom.size() > 1) {
+        LOG.atWarn()
+            .addKeyValue("matViewGeneratorId", matViewGeneratorId)
+            .addKeyValue("staleUuids", handOverFrom)
+            .log("Several stale MV collection UUIDs hold this MV generation's generator");
+      }
+      return handOverFrom.stream().findFirst();
+    }
+
+    private void moveAttempts(UUID fromUuid, UUID toUuid, Set<GenerationId> attempts) {
+      Set<GenerationId> remaining = this.genIdByMatViewCollection.get(fromUuid);
+      if (remaining != null) {
+        remaining.removeAll(attempts);
+        if (remaining.isEmpty()) {
+          this.genIdByMatViewCollection.remove(fromUuid);
+        }
+      }
+      this.genIdByMatViewCollection
+          .computeIfAbsent(toUuid, unused -> ConcurrentHashMap.newKeySet())
+          .addAll(attempts);
+    }
+  }
+
+  /**
+   * Runs {@code publish} only while {@code generator} is still the generator installed for {@code
+   * uuid}. The comparison is by identity, not generation id: a replacement can keep the generation
+   * id (Lucene rebuild, attempt replay). Running inside {@code computeIfPresent} makes the check
+   * and the write atomic against installation, which {@link #add} and {@link #transitionToFollower}
+   * both perform on this map. Without it a generator displaced after the caller's snapshot would
+   * still pass its own checks -- {@link MaterializedViewGenerator#shutdown} clears isLeader -- and
+   * overwrite the status its successor shares with it.
+   *
+   * <p>{@code publish} must only touch memory. It runs under this key's map lock, which generator
+   * installation also holds while creating and shutting down generators.
+   */
+  @SuppressWarnings("GuardedBy") // ConcurrentHashMap compute is thread safe
+  private void publishIfCurrentGenerator(
+      UUID uuid, MaterializedViewGenerator generator, Runnable publish) {
+    this.managedMaterializedViewGenerators.computeIfPresent(
+        uuid,
+        (ignored, current) -> {
+          if (current == generator) {
+            publish.run();
+          }
+          return current;
+        });
   }
 
   /**
@@ -1845,38 +2563,5 @@ public class MaterializedViewManager implements ReplicationManager {
   @SuppressWarnings("GuardedBy") // iterations through ConcurrentHashMap (copying) are thread safe
   private Map<UUID, MaterializedViewGenerator> getMatViewGenerators() {
     return new HashMap<>(this.managedMaterializedViewGenerators);
-  }
-
-  /**
-   * Creates a SteadyStateReplicationConfig for auto-embedding indexes with INDEXED_FIELDS mode
-   * enforced. Auto-embedding indexes always have well-defined field mappings, so projection is
-   * always applicable. This eliminates unnecessary IO from non-indexed field updates.
-   */
-  private static SteadyStateReplicationConfig getAutoEmbeddingSteadyStateReplicationConfig(
-      AutoEmbeddingMaterializedViewConfig materializedViewConfig) {
-    return SteadyStateReplicationConfig.builder()
-        .setNumConcurrentChangeStreams(materializedViewConfig.numConcurrentChangeStreams)
-        .setChangeStreamQueryMaxTimeMs(materializedViewConfig.changeStreamMaxTimeMs)
-        .setChangeStreamCursorMaxTimeSec(materializedViewConfig.changeStreamCursorMaxTimeSec)
-        .setEnableChangeStreamProjection(Optional.of(true)) // Force INDEXED_FIELDS mode
-        .setMaxInFlightEmbeddingGetMores(materializedViewConfig.maxInFlightEmbeddingGetMores)
-        .setEmbeddingGetMoreBatchSize(materializedViewConfig.embeddingGetMoreBatchSize)
-        .setExcludedChangestreamFields(materializedViewConfig.getExcludedChangestreamFields())
-        .setMatchCollectionUuidForUpdateLookup(
-            materializedViewConfig.getMatchCollectionUuidForUpdateLookup())
-        .setEnableSplitLargeChangeStreamEvents(
-            materializedViewConfig.getEnableSplitLargeChangeStreamEvents())
-        .setReplicationType(AUTO_EMBEDDING)
-        .build();
-  }
-
-  private static int getSyncMaxConnections(AutoEmbeddingMaterializedViewConfig replicationConfig) {
-    int initialSyncConnections = (2 * replicationConfig.getNumConcurrentInitialSyncs());
-    int sessionRefreshConnections = 1;
-    int changeStreamModeSelectionConnections = 1;
-
-    return initialSyncConnections
-        + sessionRefreshConnections
-        + changeStreamModeSelectionConnections;
   }
 }

@@ -39,6 +39,9 @@ public class PerIndexMetricsFactory {
 
   public static double[] defaultSummaryPercentiles = {0.5, 0.75, 0.9, 0.99};
 
+  private static final String GENERATION_ID_TAG = "generationId logString";
+  private static final String INDEX_ID_TAG = "indexId logString";
+
   private final MeterAndFtdcRegistry meterAndFtdcRegistry;
   private final MetricsFactory perIndexAllFactory;
   private final MetricsFactory perIndexFtdcFactory;
@@ -59,17 +62,48 @@ public class PerIndexMetricsFactory {
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       String indexGenerationId,
       String indexId) {
+    this(namespace, meterAndFtdcRegistry, indexGenerationId, indexId, false);
+  }
+
+  /**
+   * Creates a per-index metrics factory, optionally with identity-safe close semantics.
+   *
+   * @param identitySafeClose when true, the closed per-index factories only tear down meters the
+   *     registry still maps to the exact instance they registered. Auto-embedding matview
+   *     generations share a Meter.Id across attempts, so this prevents a dropped generation from
+   *     removing a live successor's gauge. See {@link MetricsFactory#close()}.
+   */
+  public PerIndexMetricsFactory(
+      String namespace,
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      String indexGenerationId,
+      String indexId,
+      boolean identitySafeClose) {
+    // Compute Tags once to ensure internal Tag[] is shared across metrics for both factories
+    this(namespace, meterAndFtdcRegistry, tagsFor(indexGenerationId, indexId), identitySafeClose);
+  }
+
+  private PerIndexMetricsFactory(
+      String namespace,
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      Tags tags,
+      boolean identitySafeClose) {
+    // Composite-registered meters read from FTDC, which is unfiltered and so holds real values.
     this(
         meterAndFtdcRegistry,
         new MetricsFactory(
             namespace,
             meterAndFtdcRegistry.meterRegistry(),
-            Tags.of("generationId logString", indexGenerationId).and("indexId logString", indexId)),
+            tags,
+            identitySafeClose,
+            meterAndFtdcRegistry.ftdcRegistry()),
+        new MetricsFactory(namespace, meterAndFtdcRegistry.ftdcRegistry(), tags, identitySafeClose),
         new MetricsFactory(
             namespace,
-            meterAndFtdcRegistry.ftdcRegistry(),
-            Tags.of("generationId logString", indexGenerationId).and("indexId logString", indexId)),
-        new MetricsFactory(namespace, meterAndFtdcRegistry.meterRegistry()));
+            meterAndFtdcRegistry.meterRegistry(),
+            Tags.empty(),
+            false,
+            meterAndFtdcRegistry.ftdcRegistry()));
   }
 
   private PerIndexMetricsFactory(
@@ -81,6 +115,47 @@ public class PerIndexMetricsFactory {
     this.perIndexAllFactory = perIndexAllFactory;
     this.perIndexFtdcFactory = perIndexFtdcFactory;
     this.perProcessFactory = perProcessFactory;
+  }
+
+  /**
+   * The per-generation identity tags every per-index meter carries. Alerts join separately
+   * registered meters on these labels, so all producers must build them from here rather than
+   * repeating the literals — a typo is invisible at compile time and only shows up as a rule that
+   * silently stops matching.
+   */
+  public static Tags tagsFor(GenerationId generationId) {
+    return tagsFor(generationId.uniqueString(), generationId.indexId.toHexString());
+  }
+
+  public static Tags tagsFor(String indexGenerationId, String indexId) {
+    return Tags.of(GENERATION_ID_TAG, indexGenerationId, INDEX_ID_TAG, indexId);
+  }
+
+  /**
+   * The index-id tag alone, for meters that must not carry the generation identity. {@link
+   * #tagsFor} always emits both tags, so meters whose identity is the index id (e.g. the
+   * quarantined-index status gauge, where the map key and the meter key must match) must build
+   * their tags from here rather than repeating the literal.
+   */
+  public static Tags indexIdTag(String indexId) {
+    return Tags.of(INDEX_ID_TAG, indexId);
+  }
+
+  /**
+   * Returns the underlying per-process {@link MetricsFactory}, which creates a single process-wide
+   * timeseries per (metric, tags) tuple with no per-index counterpart.
+   *
+   * <p>Counters, histograms, and gauges should be created per-process by default — i.e. via this
+   * factory — to limit the number of prometheus timeseries we export, which is the primary lever on
+   * prometheus scalability. Only reach for the per-index variants ({@link #perIndexCounter}, {@link
+   * #perIndexObjectValueGauge}, etc.) when the per-index breakdown is genuinely needed: it is
+   * consumed in perf testing, it is reported to MMS in a {@code ConfCallRequest}, or there is some
+   * other specific motivation that justifies the per-index fanout.
+   *
+   * @return the per-process {@link MetricsFactory}.
+   */
+  public MetricsFactory getProcessMetricsFactory() {
+    return this.perProcessFactory;
   }
 
   private static class PerProcessAndIndexCounter implements Counter {
@@ -254,6 +329,9 @@ public class PerIndexMetricsFactory {
    *
    * @param name the name of the metric
    * @return a {@link Counter} that can be incremented.
+   * @apiNote - All metrics should be created per-process by default (see {@link
+   *     PerIndexMetricsFactory#getProcessMetricsFactory()}) unless they are needed in perf testing,
+   *     are reported to MMS in ConfCallRequest, or have some other specific motivation
    */
   public Counter counter(String name) {
     return counter(name, Tags.empty());
@@ -324,6 +402,18 @@ public class PerIndexMetricsFactory {
     return this.perIndexAllFactory.objectValueGauge(name, stateObject, valueFunc, meterTags);
   }
 
+  /**
+   * Re-registers the per-index gauge for {@code stateObject} only if it is missing from the
+   * registry. See {@link MetricsFactory#ensureObjectValueGaugeRegistered}.
+   *
+   * @return true if a re-registration occurred, false if the gauge was already present.
+   */
+  public <T> boolean ensurePerIndexObjectValueGaugeRegistered(
+      String name, T stateObject, ToDoubleFunction<T> valueFunc) {
+    return this.perIndexAllFactory.ensureObjectValueGaugeRegistered(
+        name, stateObject, valueFunc, Tags.empty());
+  }
+
   public <T extends Collection<?>> T perIndexCollectionSizeGauge(String name, T collection) {
     return perIndexCollectionSizeGauge(name, collection, Tags.empty());
   }
@@ -380,8 +470,8 @@ public class PerIndexMetricsFactory {
   /**
    * Export distribution summary with histogram buckets defined by {@code buckets}.
    *
-   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
-   * compute accurate percentiles aggregated across all instances.
+   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to compute
+   * accurate percentiles aggregated across all instances.
    *
    * <p>NB: to limit prometheus metric growth this method will record both per-index and per-process
    * distribution summaries, but only the latter will be exported.
@@ -398,8 +488,8 @@ public class PerIndexMetricsFactory {
   /**
    * Export distribution summary with histogram buckets defined by {@code buckets}.
    *
-   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to
-   * compute accurate percentiles aggregated across all instances.
+   * <p>The exported summary supports PromQL queries such as {@code histogram_quantile()} to compute
+   * accurate percentiles aggregated across all instances.
    *
    * <p>NB: to limit prometheus metric growth this method will record both per-index and per-process
    * distribution summaries, but only the latter will be exported.
@@ -432,9 +522,7 @@ public class PerIndexMetricsFactory {
   public Timer perIndexTimer(String name, Tags meterTags) {
     return this.perIndexAllFactory.timer(
         name,
-        meterTags.and(
-            Tags.of(
-                "timeUnit", Enums.convertNameTo(CaseFormat.LOWER_CAMEL, TimeUnit.MILLISECONDS))),
+        meterTags.and(MetricsFactory.getTimeUnitTag(TimeUnit.MILLISECONDS)),
         0.5,
         0.75,
         0.9,
@@ -457,13 +545,7 @@ public class PerIndexMetricsFactory {
    * distribution summaries, but only the latter will be exported.
    */
   public Timer timer(String name) {
-    return timer(
-        name,
-        Tags.of("timeUnit", Enums.convertNameTo(CaseFormat.LOWER_CAMEL, TimeUnit.MILLISECONDS)),
-        0.5,
-        0.75,
-        0.9,
-        0.99);
+    return timer(name, MetricsFactory.getTimeUnitTag(TimeUnit.MILLISECONDS), 0.5, 0.75, 0.9, 0.99);
   }
 
   /**
@@ -538,8 +620,8 @@ public class PerIndexMetricsFactory {
                 type -> type,
                 type ->
                     perIndexCounter(Enums.convertNameTo(CaseFormat.LOWER_CAMEL, type), meterTags),
-                (oldCounter, newCounter) -> Check.unreachable(
-                    "Duplicate enum key should not occur"),
+                (oldCounter, newCounter) ->
+                    Check.unreachable("Duplicate enum key should not occur"),
                 () -> new EnumMap<>(enumClass)));
   }
 
@@ -561,8 +643,8 @@ public class PerIndexMetricsFactory {
             Collectors.toMap(
                 type -> type,
                 type -> nameToCounter.apply(Enums.convertNameTo(CaseFormat.LOWER_CAMEL, type)),
-                (oldCounter, newCounter) -> Check.unreachable(
-                    "Duplicate enum key should not occur"),
+                (oldCounter, newCounter) ->
+                    Check.unreachable("Duplicate enum key should not occur"),
                 () -> new EnumMap<>(enumClass)));
   }
 }

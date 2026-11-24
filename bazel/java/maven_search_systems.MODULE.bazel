@@ -15,10 +15,6 @@ shared version to each named group inline instead.
 Note: the CVE-pinned Netty transitive artifacts live in bazel/java/maven.MODULE.bazel
 (they were PINNED_TRANSITIVE_ARTIFACTS, not systems deps, pre-bzlmod). Keep
 _NETTY_VERSION below in sync with those.
-
-This file replaces maven_search_systems.MODULE.bazel in the open source repository.
-It is temporary while community and Atlas use different netty-tcnative versions.
-Once the versions are aligned, this file and maven_pin_info-community.json can be removed.
 """
 
 # Vendor groups that pin every artifact to one shared version. Only the artifact
@@ -35,7 +31,7 @@ _AWS_SDK_ARTIFACTS = [
     "secretsmanager",
 ]
 
-_NETTY_VERSION = "4.1.137.Final"
+_NETTY_VERSION = "4.2.18.Final"
 
 _NETTY_CORE_ARTIFACTS = [
     "netty-buffer",
@@ -44,10 +40,7 @@ _NETTY_CORE_ARTIFACTS = [
     "netty-transport",
 ]
 
-# 2.0.79.Final is the first release where the linux-aarch_64-fedora artifact
-# links against OpenSSL 3.x (matching the x86_64-fedora behavior), enabling
-# FIPS compliance on AL2023 aarch64 where OpenSSL 3.x is installed.
-_NETTY_TCNATIVE_VERSION = "2.0.79.Final"
+_NETTY_TCNATIVE_VERSION = "2.0.81.Final"
 
 _NETTY_TCNATIVE_ARTIFACTS = [
     "netty-tcnative-boringssl-static",
@@ -94,7 +87,7 @@ _GCP_ARTIFACTS = [
 ]
 
 _MONGO_DRIVER_ARTIFACTS = [
-    ("org.mongodb", "mongodb-driver-sync", "4.11.5"),
+    ("org.mongodb", "mongodb-driver-sync", "5.8.0"),
 ]
 
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")

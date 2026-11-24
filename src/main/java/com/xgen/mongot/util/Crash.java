@@ -28,6 +28,10 @@ public class Crash {
   private static final int FAIL_EXIT_CODE = 1;
   private static final Pattern FAILED_TO_SHUTDOWN_EXECUTOR =
       Pattern.compile("^failed to shut down .* executor.*");
+  // Thrown by FileLockGuard when another process already holds the lock file. Matching on the
+  // "another process" wording keeps unrelated failures of the same call site (a missing data
+  // directory, an unreadable lock file) in OTHER, where they still need investigating.
+  private static final String LOCK_CONTENTION_MESSAGE = "Another process may be running";
 
   private static final AtomicReference<Optional<Path>> crashLogPath =
       new AtomicReference<>(Optional.empty());
@@ -77,12 +81,15 @@ public class Crash {
   /**
    * Sets the path to write a crash log to in the event of failure.
    *
-   * <p>Can only be invoked once.
+   * <p>Setting the same path again is a no-op: bootstrap reads the crash log path out of the config
+   * file twice, once leniently before the config is parsed and once from the parsed config. Setting
+   * a different path is a bug, and crashes.
    */
   public static void setCrashLogPath(Path crashLogPath) {
-    var wasEmpty = Crash.crashLogPath.compareAndSet(Optional.empty(), Optional.of(crashLogPath));
-    if (!wasEmpty) {
-      Crash.because("CRASH_LOG_PATH already set").now();
+    var newPath = Optional.of(crashLogPath);
+    var wasEmpty = Crash.crashLogPath.compareAndSet(Optional.empty(), newPath);
+    if (!wasEmpty && !newPath.equals(Crash.crashLogPath.get())) {
+      Crash.because("CRASH_LOG_PATH already set to a different path").now();
     }
   }
 
@@ -118,16 +125,35 @@ public class Crash {
    * logging.
    */
   public static void ifDoesNotJoin(Thread thread, Duration timeout) {
+    ifDoesNotJoin(thread, timeout, Optional.empty());
+  }
+
+  /**
+   * Like {@link #ifDoesNotJoin(Thread, Duration)}, but assigns {@code category} to the crash
+   * instead of inferring one from the crash message.
+   */
+  public static void ifDoesNotJoin(Thread thread, Duration timeout, CrashCategory category) {
+    ifDoesNotJoin(thread, timeout, Optional.of(category));
+  }
+
+  private static void ifDoesNotJoin(
+      Thread thread, Duration timeout, Optional<CrashCategory> category) {
     checkArg(!timeout.isNegative() && !timeout.isZero(), "timeout must be positive");
 
-    Crash.because(String.format("Interrupted waiting for thread %s to finish", thread.getName()))
-        .withThreadDump()
-        .ifThrows(() -> thread.join(timeout.toMillis()));
+    Crash interrupted =
+        Crash.because(
+                String.format("Interrupted waiting for thread %s to finish", thread.getName()))
+            .withThreadDump();
+    interrupted.crashCategory = category;
+    interrupted.ifThrows(() -> thread.join(timeout.toMillis()));
 
     if (thread.isAlive()) {
-      Crash.because(String.format("Timed out waiting for thread %s to finish", thread.getName()))
-          .withThreadDump()
-          .now();
+      Crash timedOut =
+          Crash.because(
+                  String.format("Timed out waiting for thread %s to finish", thread.getName()))
+              .withThreadDump();
+      timedOut.crashCategory = category;
+      timedOut.now();
     }
   }
 
@@ -279,30 +305,28 @@ public class Crash {
   /** Crashes immediately. */
   public void now() {
     try {
-      LOG.atError()
-          .addKeyValue("noCrashLogReason", this.noCrashLogReason)
-          .addKeyValue("threadDump", this.dumpThreads ? Runtime.INSTANCE.getThreadDump() : "")
-          .addKeyValue("shutdownStarted", Crash.isShutdownStarted.get())
-          .setCause(this.throwable.orElse(null))
-          .log(this.message);
-
       String throwableTrace =
           this.throwable.map(t -> "\n" + ExceptionUtils.getStackTrace(t)).orElse("");
       String exceptionName =
           this.throwable.map(Object::getClass).map(Class::getTypeName).orElse("");
-
-      String threadDump =
-          this.dumpThreads ? "\nthread dump:\n" + Runtime.INSTANCE.getThreadDump() : "";
+      String threadDump = getThreadDump();
 
       // Use MongotVersionResolver.getOptional() instead of create().getVersion() to prevent a
       // loop, because create() Crashes if the version can't be found.
       String mongotVersion = MongotVersionResolver.getOptional().orElse("unknown");
 
-      CrashCategory category = this.crashCategory.orElse(assignCrashCategory(throwableTrace));
+      CrashCategory category = resolveCrashCategory(throwableTrace);
 
       String crashLogs =
           buildCrashLogs(
               exceptionName, this.message, throwableTrace, threadDump, mongotVersion, category);
+
+      LOG.atError()
+          .addKeyValue("noCrashLogReason", this.noCrashLogReason)
+          .addKeyValue("crashLog", crashLogs)
+          .addKeyValue("shutdownStarted", Crash.isShutdownStarted.get())
+          .setCause(this.throwable.orElse(null))
+          .log(this.message);
 
       if (this.noCrashLogReason.isEmpty()) {
         this.writeCrashLog(crashLogs);
@@ -353,6 +377,29 @@ public class Crash {
     }
   }
 
+  // Generating the thread dump could cause another OOM exception if mongot is very low on memory.
+  // We want to include the thread dump in the crash log if we can, but if it fails we don't want to
+  // mask the original exception.
+  private String getThreadDump() {
+    if (!this.dumpThreads) {
+      return "";
+    }
+    try {
+      return "\nthread dump:\n" + Runtime.INSTANCE.getThreadDump();
+    } catch (Throwable e) {
+      return "";
+    }
+  }
+
+  /**
+   * Returns the category this crash will be reported under: the one assigned by {@link
+   * #withCrashCategory}, or otherwise the one inferred from the message and stack trace.
+   */
+  @VisibleForTesting
+  CrashCategory resolveCrashCategory(String stackTrace) {
+    return this.crashCategory.orElseGet(() -> assignCrashCategory(stackTrace));
+  }
+
   public CrashCategory assignCrashCategory(String stackTrace) {
     CrashCategory category;
     if (isShutdownStarted.get()) {
@@ -363,6 +410,8 @@ public class Crash {
       category = CrashCategory.OOM;
     } else if (FAILED_TO_SHUTDOWN_EXECUTOR.matcher(this.message).matches()) {
       category = CrashCategory.EXECUTOR_SHUTDOWN;
+    } else if (stackTrace.contains(LOCK_CONTENTION_MESSAGE)) {
+      category = CrashCategory.LOCK_CONTENTION;
     } else {
       category = CrashCategory.OTHER;
     }
@@ -374,6 +423,8 @@ public class Crash {
     DISK_FULL,
     OOM,
     EXECUTOR_SHUTDOWN,
+    LOCK_CONTENTION,
+    CONFIG_JOURNAL_INITIALIZE_FAILURE,
     OTHER
   }
 }

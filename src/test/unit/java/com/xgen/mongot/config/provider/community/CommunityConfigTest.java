@@ -4,6 +4,7 @@ import static com.xgen.testing.BsonDeserializationTestSuite.fromDocument;
 import static com.xgen.testing.BsonSerializationTestSuite.fromEncodable;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -15,15 +16,24 @@ import com.xgen.mongot.config.provider.community.ServerConfig.GrpcServerConfig;
 import com.xgen.mongot.config.provider.community.ServerConfig.GrpcServerConfig.GrpcTls;
 import com.xgen.mongot.config.provider.community.embedding.EmbeddingConfig;
 import com.xgen.mongot.config.util.TlsMode;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.mongot.util.mongodb.Databases;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonSerializationTestSuite;
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import org.bson.BsonArray;
+import org.bson.BsonBoolean;
+import org.bson.BsonInt32;
+import org.bson.BsonString;
+import org.bson.BsonValue;
 import org.bson.types.ObjectId;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -46,7 +56,8 @@ public class CommunityConfigTest {
         fromDocument(
             "src/test/unit/resources/config/provider/community",
             SUITE_NAME,
-            CommunityConfig::fromBson);
+            CommunityConfig::fromBson,
+            Optional.of(DeploymentEnvironment.COMMUNITY));
 
     private final BsonDeserializationTestSuite.TestSpecWrapper<CommunityConfig> testSpec;
 
@@ -61,6 +72,7 @@ public class CommunityConfigTest {
       return TEST_SUITE.withExamples(
           simple(),
           full(),
+          durabilityOverride(),
           replicaSetX509(),
           withDefaultLogVerbosity(),
           grpcDisabledTls(),
@@ -73,7 +85,10 @@ public class CommunityConfigTest {
           ftdcOverrides(),
           withReplicationReader(),
           withReplicationReaderTagSets(),
-          withDiskMonitor());
+          withDiskMonitor(),
+          srvHostReplicaSet(),
+          srvScramNoTlsDefaultsTlsEnabled(),
+          hostPortScramNoTlsDefaultsTlsDisabled());
     }
 
     @Test
@@ -89,31 +104,76 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> durabilityOverride() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "durability override",
+          new CommunityConfig(
+              new SyncSourceConfig(
+                  new ReplicaSetConfig(
+                      List.of(HostAndPort.fromParts("mongod", 27017)),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(
+                          new ScramConfig(
+                              Databases.ADMIN,
+                              "user",
+                              Path.of("/etc/mongot/replicaSet.passwd"),
+                              new TlsConfig(
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+                  Optional.empty()),
+              new StorageConfig(Path.of("data/mongot")),
+              new ServerConfig(
+                  new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
+              Optional.of(new HealthCheckConfig("localhost:8080")),
+              Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
+              Optional.empty(),
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.of(new CommunityDurabilityConfig(Optional.of(2000)))));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> replicaSetX509() {
@@ -133,8 +193,7 @@ public class CommunityConfigTest {
                 "caFile should be present within x509",
                 replicaSet.x509().get().tlsConfig().caFile().isPresent());
             assertEquals(
-                Path.of("/etc/mongot/ca.pem"),
-                replicaSet.x509().get().tlsConfig().caFile().get());
+                Path.of("/etc/mongot/ca.pem"), replicaSet.x509().get().tlsConfig().caFile().get());
           });
     }
 
@@ -148,6 +207,7 @@ public class CommunityConfigTest {
                           HostAndPort.fromParts("mongod1", 27017),
                           HostAndPort.fromParts("mongod2", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.LOCAL,
@@ -157,12 +217,14 @@ public class CommunityConfigTest {
                                   true,
                                   Optional.of(Path.of("/etc/mongot/tls/client-combined.pem")),
                                   Optional.empty(),
-                                  Optional.of(Path.of("/etc/mongot/ca.pem")))))),
+                                  Optional.of(Path.of("/etc/mongot/ca.pem"))))),
+                      Optional.empty()),
                   Optional.of(
                       new RouterConfig(
                           List.of(
                               HostAndPort.fromParts("mongos1", 27017),
                               HostAndPort.fromParts("mongos2", 27017)),
+                          Optional.empty(),
                           Optional.empty(),
                           Optional.of(
                               new ScramConfig(
@@ -173,7 +235,8 @@ public class CommunityConfigTest {
                                       false,
                                       Optional.empty(),
                                       Optional.empty(),
-                                      Optional.empty()))))),
+                                      Optional.empty()))),
+                          Optional.empty())),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
@@ -186,19 +249,22 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.of("server-name")),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000))))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000)))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -210,31 +276,36 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("INFO", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcDisabledTls() {
@@ -245,13 +316,15 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
@@ -265,19 +338,22 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.empty()))),
                   Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcTls() {
@@ -288,13 +364,15 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
@@ -308,19 +386,22 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.empty()))),
                   Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcTlsWithPassword() {
@@ -331,13 +412,15 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
@@ -351,19 +434,22 @@ public class CommunityConfigTest {
                               Optional.of(Path.of("/etc/ssl/common-cert.pass")),
                               Optional.empty()))),
                   Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> grpcMtls() {
@@ -374,13 +460,15 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
@@ -394,19 +482,22 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -418,6 +509,7 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
@@ -427,25 +519,29 @@ public class CommunityConfigTest {
                                   true,
                                   Optional.of(Path.of("/etc/mongot/tls/client-combined.pem")),
                                   Optional.of(Path.of("/etc/mongot/secrets/cert-key-pass")),
-                                  Optional.of(Path.of("/etc/mongot/ca.pem")))))),
+                                  Optional.of(Path.of("/etc/mongot/ca.pem"))))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -457,19 +553,21 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.of(
@@ -478,15 +576,18 @@ public class CommunityConfigTest {
                       Optional.empty(),
                       Optional.empty(),
                       false)),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
@@ -498,51 +599,55 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.of(
-                  new EmbeddingConfig(
-                      Optional.empty(), Optional.empty(), Optional.empty(), true)),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(
-                      new CommunityAutoEmbeddingConfig(
-                          Optional.of(
-                              new CommunityAutoEmbeddingConfig.MaterializedViewConfig(
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.of(50),
-                                  Optional.empty(),
-                                  Optional.empty(),
-                                  Optional.empty())))),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+                  new EmbeddingConfig(Optional.empty(), Optional.empty(), Optional.empty(), true)),
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(
+                          new CommunityAutoEmbeddingConfig(
+                              Optional.of(
+                                  new CommunityAutoEmbeddingConfig.MaterializedViewConfig(
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.of(50),
+                                      Optional.empty(),
+                                      Optional.empty(),
+                                      Optional.empty())))),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> ftdcOverrides() {
@@ -553,31 +658,36 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000))))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000)))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> withReplicationReader() {
@@ -588,32 +698,37 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.of(
                       new ReadPreferenceConfig(MongoReadPreferenceName.NEAREST, Optional.empty()))),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
                   new GrpcServerConfig("localhost:27028", Optional.empty()), Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(FtdcCommunityConfig.getDefault())))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
 
     private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> withDiskMonitor() {
@@ -646,6 +761,46 @@ public class CommunityConfigTest {
             assertTrue(
                 "second tagSet should contain dc=west",
                 tagSets.get(1).containsAll(new TagSet(new Tag("dc", "west"))));
+          });
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig> srvHostReplicaSet() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "srvHost replicaSet",
+          (CommunityConfig config) -> {
+            var replicaSet = config.syncSourceConfig().replicaSet();
+            assertTrue("srvHost should be present", replicaSet.srvHost().isPresent());
+            assertEquals("mongod.example.com", replicaSet.srvHost().get());
+            assertTrue(
+                "hostAndPorts should be empty when srvHost is set",
+                replicaSet.hostandPorts().isEmpty());
+            assertTrue("replicaSet should use scram auth", replicaSet.scram().isPresent());
+            assertEquals("user", replicaSet.scram().get().username());
+            assertEquals(
+                Path.of("/etc/mongot/replicaSet.passwd"), replicaSet.scram().get().passwordFile());
+          });
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
+        srvScramNoTlsDefaultsTlsEnabled() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "scram no tls with srvHost defaults to tls enabled",
+          (CommunityConfig config) -> {
+            ScramConfig scram = config.syncSourceConfig().replicaSet().scram().get();
+            assertTrue(
+                "scram tls should default to enabled when srvHost is set", scram.tls().enabled());
+          });
+    }
+
+    private static BsonDeserializationTestSuite.ValidSpec<CommunityConfig>
+        hostPortScramNoTlsDefaultsTlsDisabled() {
+      return BsonDeserializationTestSuite.TestSpec.valid(
+          "scram no tls with hostPort defaults to tls disabled",
+          (CommunityConfig config) -> {
+            ScramConfig scram = config.syncSourceConfig().replicaSet().scram().get();
+            assertFalse(
+                "scram tls should default to disabled when hostAndPort is set",
+                scram.tls().enabled());
           });
     }
   }
@@ -681,13 +836,15 @@ public class CommunityConfigTest {
                   new ReplicaSetConfig(
                       List.of(HostAndPort.fromParts("mongod", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("/etc/mongot/replicaSet.passwd"),
                               new TlsConfig(
-                                  false, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  false, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.empty(),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
@@ -701,7 +858,7 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.of("server-name")),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.empty(),
@@ -714,7 +871,9 @@ public class CommunityConfigTest {
                       Optional.empty(),
                       Optional.empty(),
                       Optional.of(DiskMonitorConfig.getDefault()),
-                      Optional.of(FtdcCommunityConfig.getDefault())))));
+                      Optional.of(FtdcCommunityConfig.getDefault()))),
+              Optional.empty(),
+              Optional.empty()));
     }
   }
 
@@ -725,7 +884,9 @@ public class CommunityConfigTest {
     public void deserializeFromYaml() throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfig.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
       CommunityConfig expected =
           new CommunityConfig(
               new SyncSourceConfig(
@@ -734,16 +895,19 @@ public class CommunityConfigTest {
                           HostAndPort.fromParts("mongod1", 27017),
                           HostAndPort.fromParts("mongod2", 27017)),
                       Optional.empty(),
+                      Optional.empty(),
                       Optional.of(
                           new ScramConfig(
                               Databases.ADMIN,
                               "user",
                               Path.of("replicaSet.passwd"),
                               new TlsConfig(
-                                  true, Optional.empty(), Optional.empty(), Optional.empty())))),
+                                  true, Optional.empty(), Optional.empty(), Optional.empty()))),
+                      Optional.empty()),
                   Optional.of(
                       new RouterConfig(
                           List.of(HostAndPort.fromParts("mongos", 27017)),
+                          Optional.empty(),
                           Optional.empty(),
                           Optional.of(
                               new ScramConfig(
@@ -754,7 +918,8 @@ public class CommunityConfigTest {
                                       false,
                                       Optional.empty(),
                                       Optional.empty(),
-                                      Optional.empty()))))),
+                                      Optional.empty()))),
+                          Optional.empty())),
                   Optional.empty()),
               new StorageConfig(Path.of("data/mongot")),
               new ServerConfig(
@@ -767,19 +932,22 @@ public class CommunityConfigTest {
                               Optional.empty(),
                               Optional.of(Path.of("/etc/mongot-tls/ca.pem"))))),
                   Optional.empty()),
-              Optional.of(new MetricsConfig(true, "localhost:9946")),
+              Optional.of(new MetricsConfig(true, "localhost:9946", Optional.empty())),
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("WARNING", Optional.of("/var/log/mongot"))),
               Optional.empty(),
-              Optional.of(new AdvancedConfigs(
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.empty(),
-                  Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000)))));
+              Optional.of(
+                  new AdvancedConfigs(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.of(new FtdcCommunityConfig(false, 200, 20, 3000)))),
+              Optional.empty(),
+              Optional.empty());
 
       assertEquals(expected, result);
     }
@@ -789,7 +957,9 @@ public class CommunityConfigTest {
         throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfigX509.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
 
       var replicaSet = result.syncSourceConfig().replicaSet();
       assertTrue("replicaSet should use x509", replicaSet.x509().isPresent());
@@ -809,13 +979,194 @@ public class CommunityConfigTest {
           Path.of("/etc/mongot/tls/ca.pem"), replicaSet.x509().get().tlsConfig().caFile().get());
     }
 
+    /**
+     * Enterprise runtime: the {@code oidc} block parses into its typed {@link CustomOidcConfig}
+     * representation.
+     */
+    @Test
+    public void readFromFile_withOidc_enterpriseRuntime_parsesTypedConfig()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigOidc.yaml");
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.ENTERPRISE))
+              .config();
+
+      var replicaSet = result.syncSourceConfig().replicaSet();
+      assertTrue("replicaSet should use oidc auth", replicaSet.oidc().isPresent());
+      CustomOidcConfig oidc = (CustomOidcConfig) replicaSet.oidc().get();
+      assertEquals(OidcConfig.Environment.CUSTOM, oidc.environment());
+      assertEquals(URI.create("https://idp.example.com/token"), oidc.tokenEndpoint());
+      assertEquals("mongot", oidc.clientId());
+      assertEquals(Path.of("/etc/mongot/secrets/oidc-client-secret"), oidc.clientSecretFile());
+      assertEquals(Path.of("/etc/mongot/tls/ca.pem"), oidc.tls().caFile().get());
+    }
+
+    /** Community runtime: the enterprise-gated {@code oidc} field is rejected at parse time. */
+    @Test
+    public void readFromFile_withOidc_communityRuntime_failsWithEditionError() {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigOidc.yaml");
+
+      BsonParseException e =
+          assertThrows(
+              BsonParseException.class,
+              () ->
+                  CommunityConfig.readFromFile(
+                      configPath, Optional.of(DeploymentEnvironment.COMMUNITY)));
+
+      // The parse context prefixes the field path; assert on the message tail.
+      assertTrue(
+          "expected the community edition error, got: " + e.getMessage(),
+          e.getMessage().endsWith("is not supported in the COMMUNITY edition"));
+    }
+
+    private static final String OIDC_FIXTURE =
+        "src/test/unit/resources/config/provider/community/communityConfigOidc.yaml";
+
+    /**
+     * Fixture with the oidc block's trailing {@code tls} content replaced and optionally routed.
+     */
+    private static String oidcConfigYaml(String connection, String oidcTlsAndExtras)
+        throws IOException {
+      String yaml = Files.readString(Path.of(OIDC_FIXTURE));
+      String tls = "      tls:\n        caFile: \"/etc/mongot/tls/ca.pem\"\n";
+      assertTrue("fixture must contain the tls block", yaml.contains(tls));
+      assertNotEquals("replacement must change the fixture", tls, oidcTlsAndExtras);
+      if (connection.equals("router")) {
+        String oidcBlock =
+            yaml.substring(yaml.indexOf("    oidc:"), yaml.indexOf("storage:"))
+                .replace(tls, oidcTlsAndExtras);
+        return yaml.replace(
+            "storage:",
+            "  router:\n    hostAndPort: \"router.example.com:27017\"\n" + oidcBlock + "storage:");
+      }
+      return yaml.replace(tls, oidcTlsAndExtras);
+    }
+
+    private static BsonParseException parseOidcConfig(String connection, String oidcTlsAndExtras)
+        throws IOException {
+      return parseYaml(oidcConfigYaml(connection, oidcTlsAndExtras));
+    }
+
+    private static BsonParseException parseOidcConfigWithoutLine(String line) throws IOException {
+      String yaml = Files.readString(Path.of(OIDC_FIXTURE));
+      assertTrue("fixture must contain line: " + line, yaml.contains(line));
+      return parseYaml(yaml.replace(line, ""));
+    }
+
+    private static BsonParseException parseYaml(String yaml) throws IOException {
+      Path configPath = Files.createTempFile("oidcConfig", ".yaml");
+      try {
+        Files.writeString(configPath, yaml);
+        return assertThrows(
+            BsonParseException.class,
+            () ->
+                CommunityConfig.readFromFile(
+                    configPath, Optional.of(DeploymentEnvironment.ENTERPRISE)));
+      } finally {
+        Files.deleteIfExists(configPath);
+      }
+    }
+
+    /**
+     * TLS is always enabled for oidc, so {@code enabled} is not a field of the oidc tls block and
+     * an explicit value, true or false, is rejected as an unknown field.
+     */
+    @Test
+    public void readFromFile_oidcTlsExplicitEnabled_rejectsUnknownField() throws IOException {
+      for (String connection : List.of("replicaSet", "router")) {
+        for (String enabled : List.of("true", "false")) {
+          BsonParseException e =
+              parseOidcConfig(
+                  connection,
+                  "      tls:\n        enabled: "
+                      + enabled
+                      + "\n        caFile: \"/etc/mongot/tls/ca.pem\"\n");
+          assertEquals(
+              "\"syncSource."
+                  + connection
+                  + ".oidc.tls\" unrecognized field \"enabled\". Expected fields are: "
+                  + "caFile, tlsCertificateKeyFile, tlsCertificateKeyFilePasswordFile",
+              e.getMessage());
+        }
+      }
+    }
+
+    @Test
+    public void readFromFile_oidcTlsMisspelledCertKeyField_rejectsUnknownField()
+        throws IOException {
+      for (String connection : List.of("replicaSet", "router")) {
+        BsonParseException e =
+            parseOidcConfig(
+                connection,
+                "      tls:\n        caFile: \"/etc/mongot/tls/ca.pem\"\n"
+                    + "        tlsCertificateKeyFil: \"/etc/mongot/tls/client.pem\"\n");
+        assertEquals(
+            "\"syncSource."
+                + connection
+                + ".oidc.tls\" unrecognized field \"tlsCertificateKeyFil\". Expected fields are: "
+                + "caFile, tlsCertificateKeyFile, tlsCertificateKeyFilePasswordFile",
+            e.getMessage());
+      }
+    }
+
+    @Test
+    public void readFromFile_oidcUnknownKey_rejectsUnknownField() throws IOException {
+      for (String connection : List.of("replicaSet", "router")) {
+        BsonParseException e =
+            parseOidcConfig(
+                connection,
+                "      tls:\n        caFile: \"/etc/mongot/tls/ca.pem\"\n      bogusKey: 1\n");
+        assertEquals(
+            "\"syncSource."
+                + connection
+                + ".oidc\" unrecognized field \"bogusKey\". Expected fields are: "
+                + "clientId, clientSecretFile, environment, idpCaFile, scope, tls, tokenEndpoint",
+            e.getMessage());
+      }
+    }
+
+    @Test
+    public void readFromFile_oidcMissingTokenEndpoint_reportsRequiredFieldNotUnknown()
+        throws IOException {
+      BsonParseException e =
+          parseOidcConfigWithoutLine("      tokenEndpoint: \"https://idp.example.com/token\"\n");
+      assertEquals("\"syncSource.replicaSet.oidc.tokenEndpoint\" is required", e.getMessage());
+      assertFalse(e.getMessage().contains("unrecognized"));
+    }
+
+    @Test
+    public void readFromFile_oidcMissingEnvironment_reportsRequiredFieldNotUnknown()
+        throws IOException {
+      BsonParseException e = parseOidcConfigWithoutLine("      environment: \"custom\"\n");
+      assertEquals("\"syncSource.replicaSet.oidc.environment\" is required", e.getMessage());
+      assertFalse(e.getMessage().contains("unrecognized"));
+    }
+
+    /** A config without an {@code oidc} block parses under the enterprise edition too. */
+    @Test
+    public void readFromFile_withoutOidc_enterpriseRuntime_parses()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigX509.yaml");
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.ENTERPRISE))
+              .config();
+
+      assertTrue(
+          "replicaSet should use x509", result.syncSourceConfig().replicaSet().x509().isPresent());
+    }
+
     @Test
     public void readFromFile_withScram_tlsCertKeyFileNoCaFile()
         throws IOException, BsonParseException {
       Path configPath =
           Path.of(
               "src/test/unit/resources/config/provider/community/communityConfigScramNoCa.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
 
       var replicaSet = result.syncSourceConfig().replicaSet();
       assertTrue("replicaSet should use scram auth", replicaSet.scram().isPresent());
@@ -837,7 +1188,9 @@ public class CommunityConfigTest {
         throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfigScram.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
 
       var replicaSet = result.syncSourceConfig().replicaSet();
       assertTrue("replicaSet should use scram auth", replicaSet.scram().isPresent());
@@ -857,11 +1210,12 @@ public class CommunityConfigTest {
     }
 
     @Test
-    public void readFromFile_withTuningConfigs()
-        throws IOException, BsonParseException {
+    public void readFromFile_withTuningConfigs() throws IOException, BsonParseException {
       Path configPath =
           Path.of("src/test/unit/resources/config/provider/community/communityConfigTuning.yaml");
-      CommunityConfig result = CommunityConfig.readFromFile(configPath).config();
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
       var advanced = result.advancedConfigs().get();
 
       var lucene = advanced.indexingConfig().get().luceneConfig().get();
@@ -894,8 +1248,10 @@ public class CommunityConfigTest {
                   new ObjectId("507f1f77bcf86cd799439011"),
                   new ObjectId("507f1f77bcf86cd799439012"))),
           mongodb.pauseInitialSyncOnIndexIds());
-      assertEquals(
-          Optional.of(List.of("lsid", "txnNumber")), mongodb.excludedChangestreamFields());
+      assertEquals(Optional.of(List.of("lsid", "txnNumber")), mongodb.excludedChangestreamFields());
+
+      var initialSync = advanced.replicationConfig().get().initialSyncConfig().get();
+      assertTrue(initialSync.bufferlessConfig().get().enableNaturalOrderScan().get());
 
       var matView = advanced.autoEmbeddingConfig().get().materializedViewConfig().get();
       assertEquals(Optional.of(10), matView.numConcurrentChangeStreams());
@@ -919,9 +1275,10 @@ public class CommunityConfigTest {
       assertEquals(Optional.of(3600000), cursor.cursorIdleTimeMs());
 
       var regularBlockingRequest = advanced.regularBlockingRequestConfig().get();
-      assertEquals(Optional.of(3.0), regularBlockingRequest.threadPoolSizeMultiplier());
-      assertEquals(Optional.of(30.0), regularBlockingRequest.queueCapacityMultiplier());
-      assertEquals(Optional.of(true), regularBlockingRequest.virtualQueueCapacity());
+      assertEquals(3.0, regularBlockingRequest.threadPoolSizeMultiplier(), 0.0);
+      assertEquals(30.0, regularBlockingRequest.queueCapacityMultiplier(), 0.0);
+      assertTrue(regularBlockingRequest.virtualQueueCapacity());
+      assertTrue(regularBlockingRequest.shouldRetryViaLoadBalancer());
 
       var diskMonitor = advanced.diskMonitorConfig().get();
       assertEquals(0.93, diskMonitor.pauseReplicationThreshold(), 0.0);
@@ -938,13 +1295,33 @@ public class CommunityConfigTest {
     }
 
     @Test
+    public void readFromFile_withAdmissionControl_usesSpecifiedValuesAndDefaultRetry()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigAdmissionControl.yaml");
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
+      var advanced = result.advancedConfigs().get();
+
+      var regularBlockingRequest = advanced.regularBlockingRequestConfig().get();
+      assertEquals(5.0, regularBlockingRequest.threadPoolSizeMultiplier(), 0.0);
+      assertEquals(50.0, regularBlockingRequest.queueCapacityMultiplier(), 0.0);
+      assertFalse(regularBlockingRequest.virtualQueueCapacity());
+      assertFalse(regularBlockingRequest.shouldRetryViaLoadBalancer());
+    }
+
+    @Test
     public void readFromFile_withUnsupportedTuningKeys_warnsAndIgnoresButKeepsKnownFields()
         throws IOException, BsonParseException {
       Path configPath =
           Path.of(
               "src/test/unit/resources/config/provider/community/"
                   + "communityConfigTuningUnknownKey.yaml");
-      CommunityConfig.ParsedCommunityConfig parsed = CommunityConfig.readFromFile(configPath);
+      CommunityConfig.ParsedCommunityConfig parsed =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY));
       CommunityConfig result = parsed.config();
       var advanced = result.advancedConfigs().get();
 
@@ -952,8 +1329,7 @@ public class CommunityConfigTest {
       assertEquals(
           Optional.of(500), advanced.indexingConfig().get().luceneConfig().get().fieldLimit());
       assertEquals(
-          Optional.of(1024),
-          advanced.queryingConfig().get().luceneConfig().get().maxClauseLimit());
+          Optional.of(1024), advanced.queryingConfig().get().luceneConfig().get().maxClauseLimit());
     }
 
     @Test
@@ -962,7 +1338,11 @@ public class CommunityConfigTest {
           Path.of(
               "src/test/unit/resources/config/provider/community/"
                   + "communityConfigInvalidTuning.yaml");
-      assertThrows(BsonParseException.class, () -> CommunityConfig.readFromFile(configPath));
+      assertThrows(
+          BsonParseException.class,
+          () ->
+              CommunityConfig.readFromFile(
+                  configPath, Optional.of(DeploymentEnvironment.COMMUNITY)));
     }
 
     @Test
@@ -972,9 +1352,128 @@ public class CommunityConfigTest {
           Path.of(
               "src/test/unit/resources/config/provider/community/"
                   + "communityConfigInvalidTuningDuplicateField.yaml");
-      CommunityConfig.ParsedCommunityConfig parsedConfig = CommunityConfig.readFromFile(configPath);
+      CommunityConfig.ParsedCommunityConfig parsedConfig =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY));
       assertEquals("data/mongot", parsedConfig.config().storageConfig().dataPath().toString());
       assertFalse(parsedConfig.unknownFieldExceptions().isEmpty());
+    }
+
+    @Test
+    public void readFromFile_withSrvHost_replicaSetHasSrvHost()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigSrvHost.yaml");
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
+
+      var replicaSet = result.syncSourceConfig().replicaSet();
+      assertTrue("replicaSet should have srvHost", replicaSet.srvHost().isPresent());
+      assertEquals("mongod.example.com", replicaSet.srvHost().get());
+      assertTrue(
+          "hostAndPorts should be empty when srvHost is set", replicaSet.hostandPorts().isEmpty());
+      assertTrue("replicaSet should use scram auth", replicaSet.scram().isPresent());
+      assertEquals("user", replicaSet.scram().get().username());
+      assertEquals(
+          Path.of("/etc/mongot/replicaSet.passwd"), replicaSet.scram().get().passwordFile());
+    }
+
+    @Test
+    public void readFromFile_withTracing_parsesTracingBlock()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of("src/test/unit/resources/config/provider/community/communityConfigTracing.yaml");
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
+
+      TracingConfig tracing = result.tracingConfig().orElseThrow();
+      assertTrue(tracing.enabled());
+      assertEquals(TracingConfig.SamplingStrategy.HEAD, tracing.searchSamplingStrategy());
+      assertEquals(1.0, tracing.searchTracingSamplerRate(), 0.0);
+    }
+
+    @Test
+    public void readFromFile_withUnknownTracingField_reportsUnknownField()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigTracingUnknownField.yaml");
+      CommunityConfig.ParsedCommunityConfig parsed =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY));
+
+      assertFalse(parsed.unknownFieldExceptions().isEmpty());
+      assertEquals(
+          TracingConfig.SamplingStrategy.HEAD,
+          parsed.config().tracingConfig().orElseThrow().searchSamplingStrategy());
+    }
+
+    @Test
+    public void readFromFile_withLoggingOtlp_parsesLoggingOtlpBlock()
+        throws IOException, BsonParseException {
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigLoggingOtlp.yaml");
+      CommunityConfig result =
+          CommunityConfig.readFromFile(configPath, Optional.of(DeploymentEnvironment.COMMUNITY))
+              .config();
+
+      LoggingConfig logging = result.loggingConfig().orElseThrow();
+      assertEquals("DEBUG", logging.verbosity());
+      assertEquals("https://collector.example.com:4317", logging.otlp().orElseThrow().endpoint());
+      assertTrue(result.tracingConfig().isEmpty());
+    }
+
+    @Test
+    public void readFromFile_withUnknownLoggingOtlpField_failsFast() {
+      // A misspelled caCertificateFile under logging.otlp must fail startup, not warn, or the
+      // exporter would silently fall back to the JVM trust store.
+      Path configPath =
+          Path.of(
+              "src/test/unit/resources/config/provider/community/"
+                  + "communityConfigLoggingOtlpUnknownField.yaml");
+
+      assertThrows(
+          BsonParseException.class,
+          () ->
+              CommunityConfig.readFromFile(
+                  configPath, Optional.of(DeploymentEnvironment.COMMUNITY)));
+    }
+
+    @Test
+    public void cliOptionRegistry_traverse_returnsOneFieldFromEachChildRegistry() {
+      // Full traversal test coverage should be in each child Config's unit test
+      CommunityConfig.CommunityConfigCliOptionRegistry registry =
+          new CommunityConfig.CommunityConfigCliOptionRegistry();
+      registry.serverConfigCliOptionRegistry.serverName = Optional.of("mongot-1");
+      registry.syncSourceConfigCliOptionRegistry.replicaSetConfigCliOptionRegistry.hostPorts =
+          List.of("mongod:27017");
+      registry.storageConfigCliOptionRegistry.dataPath = Optional.of(Path.of("data/mongot"));
+      registry.metricsConfigCliOptionRegistry.enabled = Optional.of(Boolean.TRUE);
+      registry.healthCheckConfigCliOptionRegistry.address = Optional.of("localhost:8080");
+      registry.loggingConfigCliOptionRegistry.verbosity = Optional.of("WARNING");
+      registry.embeddingConfigCliOptionRegistry.providerEndpoint =
+          Optional.of("https://embedding.example.com");
+      registry.advancedConfigsCliOptionRegistry.ftdcConfigCliOptionRegistry.fileSizeMb =
+          Optional.of(20);
+
+      Map<String, BsonValue> cliValues = registry.traverse();
+
+      assertEquals(8, cliValues.size());
+      assertEquals(new BsonString("mongot-1"), cliValues.get("server.name"));
+      assertEquals(
+          new BsonArray(List.of(new BsonString("mongod:27017"))),
+          cliValues.get("syncSource.replicaSet.hostAndPort"));
+      assertEquals(new BsonString("data/mongot"), cliValues.get("storage.dataPath"));
+      assertEquals(BsonBoolean.TRUE, cliValues.get("metrics.enabled"));
+      assertEquals(new BsonString("localhost:8080"), cliValues.get("healthCheck.address"));
+      assertEquals(new BsonString("WARNING"), cliValues.get("logging.verbosity"));
+      assertEquals(
+          new BsonString("https://embedding.example.com"),
+          cliValues.get("embedding.providerEndpoint"));
+      assertEquals(new BsonInt32(20), cliValues.get("advancedConfigs.ftdc.fileSizeMb"));
     }
   }
 }

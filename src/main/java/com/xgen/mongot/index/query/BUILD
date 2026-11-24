@@ -3,6 +3,7 @@ load("//bazel/java:package.bzl", "java_library")
 java_library(
     name = "query",
     srcs = [
+        "AutoEmbedQueryVectorReconciler.java",
         "CollectorQuery.java",
         "DeadlineExceededException.java",
         "InvalidQueryException.java",
@@ -16,6 +17,7 @@ java_library(
         "ReturnScope.java",
         "SearchNodePreference.java",
         "SearchQuery.java",
+        "SearchQueryParseOptions.java",
         "SearchQueryTimeMappingChecks.java",
         "Tracking.java",
         "VectorQueryTimeMappingChecks.java",
@@ -33,11 +35,13 @@ java_library(
     ],
     deps = [
         "//src/main/java/com/xgen/mongot/index/definition",
+        "//src/main/java/com/xgen/mongot/index/definition/quantization",
         "//src/main/java/com/xgen/mongot/index/path/string",
         "//src/main/java/com/xgen/mongot/index/query/collectors",
         "//src/main/java/com/xgen/mongot/index/query/counts",
         "//src/main/java/com/xgen/mongot/index/query/highlights",
         "//src/main/java/com/xgen/mongot/index/query/operators",
+        "//src/main/java/com/xgen/mongot/index/query/operators/mql",
         "//src/main/java/com/xgen/mongot/index/query/sort",
         "//src/main/java/com/xgen/mongot/trace",
         "//src/main/java/com/xgen/mongot/util",

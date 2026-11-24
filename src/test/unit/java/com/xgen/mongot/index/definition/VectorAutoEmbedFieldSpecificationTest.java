@@ -84,8 +84,8 @@ public class VectorAutoEmbedFieldSpecificationTest {
 
   /**
    * A model-config similarity value mongot doesn't recognize must not fail the index: the field
-   * falls back to the hardcoded quantization default, and the skipped config value is surfaced as
-   * a WARN carrying the model, quantization, and offending value an operator needs to find the bad
+   * falls back to the hardcoded quantization default, and the skipped config value is surfaced as a
+   * WARN carrying the model, quantization, and offending value an operator needs to find the bad
    * conf-call config.
    */
   @Test
@@ -106,8 +106,7 @@ public class VectorAutoEmbedFieldSpecificationTest {
       ILoggingEvent warning =
           listAppender.list.stream()
               .filter(event -> event.getLevel() == Level.WARN)
-              .filter(
-                  event -> event.getFormattedMessage().contains("Unrecognized model-config"))
+              .filter(event -> event.getFormattedMessage().contains("Unrecognized model-config"))
               .findFirst()
               .orElseThrow(
                   () -> new AssertionError("expected a WARN for the unrecognized similarity"));
@@ -194,6 +193,65 @@ public class VectorAutoEmbedFieldSpecificationTest {
                     Optional.of(VectorAutoEmbedQuantization.SCALAR)));
 
     assertThat(e.getMessage()).contains("unregistered-model");
+  }
+
+  /**
+   * {@code binaryNoRescore} produces packed-bit vectors, which Lucene only supports with Euclidean
+   * similarity. An explicit non-Euclidean similarity must be rejected on the resolved value,
+   * regardless of whether it came from the fast-path or from the model config, rather than silently
+   * skipped later when the field is indexed.
+   */
+  @Test
+  public void resolveAutoEmbedVectorParams_binaryDimensionsNotMultipleOfEight_throwsBsonParse() {
+    BsonParseException e =
+        assertThrows(
+            BsonParseException.class,
+            () ->
+                VectorAutoEmbedFieldSpecification.resolveAutoEmbedVectorParams(
+                    MODEL,
+                    Optional.of(255),
+                    Optional.of(VectorSimilarity.EUCLIDEAN),
+                    Optional.of(VectorAutoEmbedQuantization.BINARY)));
+
+    assertThat(e.getMessage()).contains("multiple of 8");
+  }
+
+  @Test
+  public void resolveAutoEmbedVectorParams_binaryNoRescoreWithExplicitCosine_throwsBsonParse() {
+    BsonParseException e =
+        assertThrows(
+            BsonParseException.class,
+            () ->
+                VectorAutoEmbedFieldSpecification.resolveAutoEmbedVectorParams(
+                    MODEL,
+                    Optional.of(256),
+                    Optional.of(VectorSimilarity.COSINE),
+                    Optional.of(VectorAutoEmbedQuantization.BINARY_NO_RESCORE)));
+
+    assertThat(e.getMessage()).contains("binaryNoRescore");
+    assertThat(e.getMessage()).contains("euclidean");
+    // The offending similarity must be reported in the user-facing camelCase spelling
+    // (e.g. "cosine"), not the Java enum constant name ("COSINE").
+    assertThat(e.getMessage()).contains("cosine");
+  }
+
+  @Test
+  public void resolveAutoEmbedVectorParams_binaryNoRescoreModelConfigDotProduct_throwsBsonParse() {
+    registerModel(MODEL, Optional.of(Map.of("binaryNoRescore", "dotProduct")));
+
+    BsonParseException e =
+        assertThrows(
+            BsonParseException.class,
+            () ->
+                VectorAutoEmbedFieldSpecification.resolveAutoEmbedVectorParams(
+                    MODEL,
+                    Optional.of(256),
+                    Optional.empty(),
+                    Optional.of(VectorAutoEmbedQuantization.BINARY_NO_RESCORE)));
+
+    assertThat(e.getMessage()).contains("binaryNoRescore");
+    assertThat(e.getMessage()).contains("euclidean");
+    assertThat(e.getMessage()).contains("dotProduct");
   }
 
   private static void registerModel(

@@ -3,7 +3,11 @@ load("//bazel/java:test.bzl", "java_test_suite")
 java_test_suite(
     name = "facet",
     srcs = [
+        "ParentDedupedLongRangeFacetCountsTest.java",
+        "ParentDedupedSortedSetDocValuesFacetCountsTest.java",
+        "QueryTimeStringFacetCountsTest.java",
         "TokenFacetOrdinalMapMismatchTest.java",
+        "TokenFacetSparseRoutingTest.java",
         "TokenSsdvFacetStateTest.java",
         "TokensFacetStateCacheTest.java",
     ],
@@ -17,5 +21,6 @@ java_test_suite(
         "@maven//:junit_junit",
         "@maven//:org_apache_lucene_lucene_core",
         "@maven//:org_apache_lucene_lucene_facet",
+        "@maven//:org_apache_lucene_lucene_join",
     ],
 )

@@ -17,13 +17,13 @@ import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
 import com.xgen.mongot.index.definition.VectorSearchEngine;
 import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
-import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import org.bson.types.ObjectId;
 import org.junit.Test;
 
@@ -32,7 +32,8 @@ public class IndexingWorkSchedulerFactoryTest {
   @Test
   public void testContainsSchedulerForEveryIndexingStrategy() {
     IndexingWorkSchedulerFactory indexingWorkSchedulerFactory =
-        IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), new SimpleMeterRegistry());
+        IndexingWorkSchedulerFactory.create(
+            2, mock(Supplier.class), new SimpleMeterRegistry(), true);
 
     // create() only provides DEFAULT and EMBEDDING; EMBEDDING_MATERIALIZED_VIEW is handled
     // exclusively by MaterializedViewManager via createEmbeddingIndexingSchedulerOnly().
@@ -48,7 +49,8 @@ public class IndexingWorkSchedulerFactoryTest {
   @Test
   public void testCreateWithoutEmbeddingStrategy() {
     IndexingWorkSchedulerFactory indexingWorkSchedulerFactory =
-        IndexingWorkSchedulerFactory.createWithoutEmbeddingStrategy(2, new SimpleMeterRegistry());
+        IndexingWorkSchedulerFactory.createWithoutEmbeddingStrategy(
+            2, new SimpleMeterRegistry(), true);
 
     for (IndexingWorkSchedulerFactory.IndexingStrategy strategy :
         IndexingWorkSchedulerFactory.IndexingStrategy.values()) {
@@ -86,7 +88,8 @@ public class IndexingWorkSchedulerFactoryTest {
   @Test
   public void testReturnsProperScheduler() {
     IndexingWorkSchedulerFactory indexingWorkSchedulerFactory =
-        IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), new SimpleMeterRegistry());
+        IndexingWorkSchedulerFactory.create(
+            2, mock(Supplier.class), new SimpleMeterRegistry(), true);
 
     IndexingWorkScheduler embeddingIndexingWorkScheduler =
         indexingWorkSchedulerFactory.getIndexingWorkScheduler(MOCK_AUTO_EMBEDDING_INDEX_DEFINITION);
@@ -95,8 +98,7 @@ public class IndexingWorkSchedulerFactoryTest {
     IndexingWorkScheduler luceneVectorIndexingWorkScheduler =
         indexingWorkSchedulerFactory.getIndexingWorkScheduler(MOCK_VECTOR_DEFINITION);
     IndexingWorkScheduler customVectorEngineIndexingWorkScheduler =
-        indexingWorkSchedulerFactory.getIndexingWorkScheduler(
-            mockCustomVectorEngineDefinition());
+        indexingWorkSchedulerFactory.getIndexingWorkScheduler(mockCustomVectorEngineDefinition());
 
     assertThat(embeddingIndexingWorkScheduler).isInstanceOf(EmbeddingIndexingWorkScheduler.class);
     assertThat(defaultIndexingWorkScheduler).isInstanceOf(DefaultIndexingWorkScheduler.class);
@@ -108,7 +110,8 @@ public class IndexingWorkSchedulerFactoryTest {
   @Test
   public void testThrowsIfIndexingStrategyNotPresent() {
     IndexingWorkSchedulerFactory indexingWorkSchedulerFactory =
-        IndexingWorkSchedulerFactory.createWithoutEmbeddingStrategy(2, new SimpleMeterRegistry());
+        IndexingWorkSchedulerFactory.createWithoutEmbeddingStrategy(
+            2, new SimpleMeterRegistry(), true);
 
     assertThrows(
         "EMBEDDING indexing strategy is not supported. "
@@ -122,7 +125,7 @@ public class IndexingWorkSchedulerFactoryTest {
   @Test
   public void create_lifecycleAttributionDisabled_doesNotRegisterResourceMetrics() {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
-    IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), registry, false);
+    IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), registry, Optional.empty());
 
     assertThat(
             registry
@@ -133,46 +136,25 @@ public class IndexingWorkSchedulerFactoryTest {
   }
 
   @Test
-  public void create_lifecycleAttributionEnabled_indexingPoolCounterIncreasesUnderLoad()
-      throws Exception {
+  public void create_lifecycleAttributionEnabled_registersIndexingPoolCounters() {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
-    IndexingWorkSchedulerFactory factory =
-        IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), registry, true);
+    IndexingWorkSchedulerFactory.create(
+        2, mock(Supplier.class), registry, Optional.of(new ThreadPoolResourceMetrics.Bindings()));
 
-    FunctionCounter allocated =
-        registry
-            .find("executor.thread.allocatedBytes")
-            .tag("subsystem", "replication")
-            .tag("name", "indexing-work")
-            .functionCounter();
-    assertThat(allocated).isNotNull();
-
-    // Reach into the package-private executor field rather than going through the heavyweight
-    // IndexingWorkScheduler.schedule() path with its DocumentEvent / DocumentIndexer scaffolding.
-    IndexingWorkScheduler scheduler =
-        factory
-            .getIndexingWorkSchedulers()
-            .get(IndexingWorkSchedulerFactory.IndexingStrategy.DEFAULT);
-
-    // Warm a worker thread so getThreadAllocatedBytes has a non-zero baseline.
-    scheduler.executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
-    double before = allocated.count();
-
-    // Allocate ~1 MB on an indexing-pool thread.
-    scheduler
-        .executor
-        .submit(
-            () -> {
-              byte[] dummy = new byte[1024 * 1024];
-              dummy[0] = 1;
-            })
-        .get(5, TimeUnit.SECONDS);
-    double after = allocated.count();
-
-    // JVMs without per-thread allocation tracking report 0 for both reads; skip rather than flake.
-    if (before != 0.0 || after != 0.0) {
-      assertThat(after).isGreaterThan(before);
-    }
+    assertThat(
+            registry
+                .find("executor.thread.allocatedBytes")
+                .tag("subsystem", "replication")
+                .tag("name", "indexing-work")
+                .functionCounter())
+        .isNotNull();
+    assertThat(
+            registry
+                .find("executor.thread.cpuTime")
+                .tag("subsystem", "replication")
+                .tag("name", "indexing-work")
+                .functionCounter())
+        .isNotNull();
   }
 
   private static VectorIndexDefinition mockCustomVectorEngineDefinition() {

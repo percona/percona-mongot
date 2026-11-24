@@ -9,6 +9,8 @@ import com.mongodb.client.model.changestream.OperationType;
 import com.mongodb.client.model.changestream.TruncatedArray;
 import com.mongodb.client.model.changestream.UpdateDescription;
 import com.xgen.mongot.index.definition.FieldDefinitionResolver;
+import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.ViewDefinition;
 import com.xgen.mongot.util.CollectionUtils;
 import com.xgen.mongot.util.FieldPath;
@@ -32,6 +34,7 @@ public class ChangeStreams {
    */
   public static boolean updateDescriptionAppliesToIndex(
       UpdateDescription updateDescription,
+      IndexDefinition indexDefinition,
       FieldDefinitionResolver fieldDefinitionResolver,
       Optional<ViewDefinition> view) {
 
@@ -70,7 +73,20 @@ public class ChangeStreams {
     return fields.stream()
         .map(FieldPath::parse)
         .map(ChangeStreams::filterFieldPath)
-        .anyMatch(fieldDefinitionResolver::isUsed);
+        .anyMatch(
+            fieldPath ->
+                fieldDefinitionResolver.isUsed(fieldPath)
+                    || isSearchAutoEmbedPath(indexDefinition, fieldPath));
+  }
+
+  private static boolean isSearchAutoEmbedPath(
+      IndexDefinition indexDefinition, FieldPath updatedFieldPath) {
+    if (!(indexDefinition instanceof SearchIndexDefinition searchIndexDefinition)) {
+      return false;
+    }
+
+    return searchIndexDefinition.getModelNamePerPath().keySet().stream()
+        .anyMatch(updatedFieldPath::isDirectRelation);
   }
 
   /**
@@ -105,7 +121,7 @@ public class ChangeStreams {
    * returned with a value from IndexDefinition::getField. That is, if the root mapping is dynamic,
    * "a.b.c" would return as configured to be indexed.
    */
-  private static FieldPath filterFieldPath(FieldPath fieldPath) {
+  static FieldPath filterFieldPath(FieldPath fieldPath) {
     // Get the path elements up to but not including the first integer path element.
     ImmutableList<FieldPath> integerPrefix =
         fieldPath.getPathHierarchy().stream()

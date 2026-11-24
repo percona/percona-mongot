@@ -53,6 +53,10 @@ public class ExplainTimings {
     // facet specific types
     GENERATE_FACET_COUNTS("generateFacetCounts"),
 
+    // search aggregation specific types
+    AGGREGATION_COLLECT("aggregationCollect"),
+    AGGREGATION_MERGE("aggregationMerge"),
+
     // highlight specific
     EXECUTE_HIGHLIGHT("executeHighlight"),
     SETUP_HIGHLIGHT("setupHighlight"),
@@ -98,7 +102,6 @@ public class ExplainTimings {
         .withSnapshot(combineTimingData(first.extractTimingData(), second))
         .build();
   }
-
 
   public static ImmutableMap<Type, TimingData> combineTimingData(
       Map<Type, TimingData> a, ExplainTimings b) {
@@ -148,8 +151,7 @@ public class ExplainTimings {
     private Map<Type, TimingData> snapshot = Map.of();
     private boolean ignoreInvocationCounts = false;
 
-    private Builder() {
-    }
+    private Builder() {}
 
     public Builder withTicker(Ticker ticker) {
       this.ticker = Optional.of(ticker);
@@ -175,9 +177,10 @@ public class ExplainTimings {
           type -> {
             boolean useSampling = HIGH_FREQUENCY_TYPES.contains(type);
             TimingData data = initialData.getOrDefault(type, TimingData.EMPTY);
-            InvocationCountingTimer.TimingDataCreator creator = this.ignoreInvocationCounts
-                ? TimingData.NoInvocationCountTimingData::new
-                : TimingData.InvocationCountTimingData::new;
+            InvocationCountingTimer.TimingDataCreator creator =
+                this.ignoreInvocationCounts
+                    ? TimingData.NoInvocationCountTimingData::new
+                    : TimingData.InvocationCountTimingData::new;
 
             return useSampling
                 ? new SamplingInvocationCountingTimer(ticker, creator, data)

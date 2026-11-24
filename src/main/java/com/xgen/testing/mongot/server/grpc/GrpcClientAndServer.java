@@ -2,10 +2,10 @@ package com.xgen.testing.mongot.server.grpc;
 
 import com.xgen.mongot.catalog.DefaultIndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.config.manager.IncompatibleIndexes;
 import com.xgen.mongot.config.util.TlsMode;
 import com.xgen.mongot.cursor.CursorConfig;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.auth.SecurityConfig;
 import com.xgen.mongot.server.command.search.SearchCommandsRegister;
@@ -49,6 +49,7 @@ public class GrpcClientAndServer implements ClientAndServer {
   private GrpcStreamingServer server;
   private GrpcStreamingClient client;
   private ExecutorManager executorManager;
+  private Optional<String> overrideAuthority = Optional.empty();
 
   public enum ServiceMethod {
     AUTHENTICATED_COMMAND,
@@ -80,13 +81,27 @@ public class GrpcClientAndServer implements ClientAndServer {
     waitUntilServerHealthy();
   }
 
+  /**
+   * Sets the {@code :authority} pseudo-header the client sends on every call, so the server-side
+   * {@code ServerCall.getAuthority()} sees it (e.g. a warm-up "-shadow" host). Must be called
+   * before {@link #start}. The authority cannot be carried in {@link SearchEnvoyMetadata}/headers.
+   */
+  public void setOverrideAuthority(String authority) {
+    this.overrideAuthority = Optional.of(authority);
+  }
+
   @Override
   public BsonDocument runCommand(BsonDocument command) {
-    BsonDocument reply = this.streamCommand.run(command, this.client);
+    BsonDocument reply = runCommandRaw(command);
     if (reply.get("ok").asNumber().intValue() == 0) {
       throw new RuntimeException(reply.get("errmsg").asString().getValue());
     }
     return reply;
+  }
+
+  /** Runs the command and returns the reply as-is, so tests can inspect an {@code ok: 0} body. */
+  public BsonDocument runCommandRaw(BsonDocument command) {
+    return this.streamCommand.run(command, this.client);
   }
 
   @Override
@@ -152,19 +167,24 @@ public class GrpcClientAndServer implements ClientAndServer {
             this.executorManager,
             new DefaultIndexCatalog(),
             new InitializedIndexCatalog(),
+            new IncompatibleIndexes(mocks.meterRegistry),
             new SearchCommandsRegister.BootstrapperMetadata(
                 "testVersion",
                 "localhost",
                 () -> MongoDbServerInfo.EMPTY,
                 FeatureFlags.getDefault(),
-                DynamicFeatureFlagRegistry.empty()),
+                mocks.dynamicFeatureFlagRegistry),
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             CursorConfig.DEFAULT_MESSAGE_SIZE_LIMIT,
             mocks.embeddingServiceManagerSupplier);
     this.server.start();
     this.client =
         GrpcStreamingClient.create(
-            getServerAddress(), searchEnvoyMetadata, this.tlsMode, Optional.empty());
+            getServerAddress(),
+            searchEnvoyMetadata,
+            this.tlsMode,
+            Optional.empty(),
+            this.overrideAuthority);
   }
 
   // NB: when using TCP sockets this will use port 0 to auto-assign the bind port; callers will
