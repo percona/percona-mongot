@@ -575,6 +575,7 @@ public class CommunityConfigTest {
                       Optional.of("https://custom-api.example.com/v1/embeddings"),
                       Optional.empty(),
                       Optional.empty(),
+                      Optional.empty(),
                       false)),
               Optional.of(
                   new AdvancedConfigs(
@@ -617,7 +618,12 @@ public class CommunityConfigTest {
               Optional.of(new HealthCheckConfig("localhost:8080")),
               Optional.of(new LoggingConfig("DEBUG", Optional.of("/var/log/mongot"))),
               Optional.of(
-                  new EmbeddingConfig(Optional.empty(), Optional.empty(), Optional.empty(), true)),
+                  new EmbeddingConfig(
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      Optional.empty(),
+                      true)),
               Optional.of(
                   new AdvancedConfigs(
                       Optional.empty(),

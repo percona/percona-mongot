@@ -202,6 +202,44 @@
           "useFlexTier": false
         }
       }
+    },
+    {
+      "description": "bge-small-en-v1.5 hugging face inference config",
+      "value": {
+        "embeddingProvider": "HUGGINGFACE_INFERENCE",
+        "modelName": "bge-small-en-v1.5",
+        "config": {
+          "modelConfig": {
+            "_provider": "HUGGINGFACE_INFERENCE",
+            "modelId": "BAAI/bge-small-en-v1.5",
+            "outputDimensions": 384,
+            "batchSize": 32,
+            "batchTokenLimit": 120000,
+            "quantization": "float",
+            "normalize": true,
+            "truncate": false,
+            "queryPrefix": "query: ",
+            "documentPrefix": "passage: "
+          },
+          "errorHandlingConfig": {
+            "initialRetryWaitMs": 50,
+            "jitter": 0.1,
+            "maxRetries": 50,
+            "maxRetryWaitMs": 10
+          },
+          "credentials": {
+            "_provider": "HUGGINGFACE_INFERENCE",
+            "apiToken": "hf_token123"
+          },
+          "query": {
+            "credentials": {
+              "_provider": "HUGGINGFACE_INFERENCE",
+              "apiToken": "hf_query_token"
+            }
+          },
+          "providerEndpoint": "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5/pipeline/feature-extraction"
+        }
+      }
     }
   ],
   "invalid": [

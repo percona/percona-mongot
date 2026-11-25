@@ -7,10 +7,13 @@ java_library(
         "EmbeddingModelCatalog.java",
         "EmbeddingModelConfig.java",
         "EmbeddingServiceConfig.java",
+        "HuggingFaceApiSchema.java",
+        "OpenAiApiSchema.java",
         "VoyageApiSchema.java",
     ],
     visibility = ["//:__subpackages__"],
     exports = [
+        "//src/main/java/com/xgen/mongot/index/definition/quantization",
         "//src/main/java/com/xgen/mongot/util/bson",
         "@maven//:org_mongodb_bson",
     ],

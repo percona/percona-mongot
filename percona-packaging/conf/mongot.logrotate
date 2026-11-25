@@ -1,0 +1,10 @@
+/var/log/mongot/mongot.log {
+    minsize 200M
+    daily
+    rotate 5
+    compress
+    create 0640 mongod mongod
+    missingok
+    notifempty
+    copytruncate
+}

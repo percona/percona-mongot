@@ -49,7 +49,10 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
                         : Optional.of("must be '" + DEFAULT_MODALITY + "'"))
             .required();
 
-    /** Omitted in BSON → model {@code outputDimensions} → default NUM_DIMENSIONS of 1024. */
+    /**
+     * Omitted in BSON → model {@code outputDimensions}; if the model config doesn't set it either,
+     * parsing fails ("numDimensions cannot be resolved from model config").
+     */
     static final Field.Optional<Integer> NUM_DIMENSIONS =
         Field.builder("numDimensions")
             .intField()
@@ -281,32 +284,36 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
           userNumDimensions.get(), userSimilarity.get(), userQuantization.get());
     }
 
-    // Resolve model config from catalog. When confcall response doesn't contain embedding model
-    // configs, the model may not be registered yet. Wrap as BsonParseException so the confcall
-    // handler marks the index as invalid instead of crashing confcall processing.
+    // Resolve model config from catalog via the polymorphic ModelConfig interface (not a cast to
+    // VoyageModelConfig) so non-Voyage providers (e.g. OPENAI_COMPATIBLE) resolve correctly. When
+    // the confcall response doesn't carry embedding model configs the model may not be registered
+    // yet; wrap as BsonParseException so the confcall handler marks the index invalid instead of
+    // crashing.
     EmbeddingModelConfig cfg;
     try {
       cfg = EmbeddingModelCatalog.getModelConfig(modelName);
     } catch (EmbeddingProviderNonTransientException e) {
       throw new BsonParseException(e.getMessage(), Optional.empty(), e);
     }
-    EmbeddingServiceConfig.VoyageModelConfig modelConfig =
-        (EmbeddingServiceConfig.VoyageModelConfig) cfg.collectionScan().modelConfig();
+    EmbeddingServiceConfig.ModelConfig modelConfig = cfg.collectionScan().modelConfig();
 
     // resolve numDimensions
-    if (modelConfig.outputDimensions.isEmpty()) {
+    Optional<Integer> configuredDimensions = modelConfig.getConfiguredOutputDimensions();
+    if (configuredDimensions.isEmpty()) {
       throw new BsonParseException(
           "numDimensions cannot be resolved from model config", Optional.empty());
     }
-    Integer resolvedNumDimensions = userNumDimensions.orElse(modelConfig.outputDimensions.get());
+    Integer resolvedNumDimensions = userNumDimensions.orElse(configuredDimensions.get());
 
     // resolve VectorProviderQuantization
-    if (modelConfig.quantization.isEmpty()) {
+    Optional<VectorAutoEmbedQuantization> configuredQuantization =
+        modelConfig.getConfiguredQuantization();
+    if (configuredQuantization.isEmpty()) {
       throw new BsonParseException(
           "quantization cannot be resolved from model config", Optional.empty());
     }
     VectorAutoEmbedQuantization resolvedQuantization =
-        userQuantization.orElse(modelConfig.quantization.get());
+        userQuantization.orElse(configuredQuantization.get());
 
     // resolve VectorSimilarity: explicit BSON value, then model-config per-quantization default,
     // then the static quantization-based fallback. Search fields skip the model config.
@@ -317,7 +324,7 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
                   modelName,
                   userSimilarity,
                   resolvedQuantization,
-                  modelConfig.similarityByQuantization);
+                  modelConfig.getConfiguredSimilarityByQuantization());
           case SEARCH ->
               userSimilarity.orElseGet(() -> getSearchDefaultSimilarity(resolvedQuantization));
         };

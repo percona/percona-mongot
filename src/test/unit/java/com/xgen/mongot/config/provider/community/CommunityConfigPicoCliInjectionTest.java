@@ -6,6 +6,7 @@ import static org.junit.Assert.assertThrows;
 import com.google.common.net.HostAndPort;
 import com.mongodb.Tag;
 import com.mongodb.TagSet;
+import com.xgen.mongot.config.provider.community.embedding.EmbeddingConfig;
 import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
@@ -97,6 +98,8 @@ public class CommunityConfigPicoCliInjectionTest {
     "/etc/mongot/query-key.pem",
     "--embeddingIndexingKeyFile",
     "/etc/mongot/indexing-key.pem",
+    "--embeddingModelConfigFile",
+    "/etc/mongot/embedding-service-configs.yml",
     "--isAutoEmbeddingViewWriter",
     "--indexingLuceneRefreshIntervalMs",
     "1000",
@@ -216,6 +219,15 @@ public class CommunityConfigPicoCliInjectionTest {
     assertEquals("localhost:8080", config.healthCheckConfig().get().address());
     assertEquals("WARNING", config.loggingConfig().get().verbosity());
     assertEquals("/var/log/mongot", config.loggingConfig().get().logPath().get());
+
+    assertEquals(
+        new EmbeddingConfig(
+            Optional.of("https://embedding.example.com"),
+            Optional.of(Path.of("/etc/mongot/query-key.pem")),
+            Optional.of(Path.of("/etc/mongot/indexing-key.pem")),
+            Optional.of(Path.of("/etc/mongot/embedding-service-configs.yml")),
+            true),
+        config.embeddingConfig().get());
 
     assertEquals(new FtdcCommunityConfig(false, 200, 20, 3000), config.ftdcConfig());
   }
@@ -380,6 +392,15 @@ public class CommunityConfigPicoCliInjectionTest {
     assertEquals("localhost:8080", config.healthCheckConfig().get().address());
     assertEquals("WARNING", config.loggingConfig().get().verbosity());
     assertEquals("/var/log/mongot", config.loggingConfig().get().logPath().get());
+
+    assertEquals(
+        new EmbeddingConfig(
+            Optional.of("https://embedding.example.com"),
+            Optional.of(Path.of("/etc/mongot/query-key.pem")),
+            Optional.of(Path.of("/etc/mongot/indexing-key.pem")),
+            Optional.of(Path.of("/etc/mongot/embedding-service-configs.yml")),
+            true),
+        config.embeddingConfig().get());
 
     assertEquals(new FtdcCommunityConfig(false, 200, 20, 3000), config.ftdcConfig());
   }

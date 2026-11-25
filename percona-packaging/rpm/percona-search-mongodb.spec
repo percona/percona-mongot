@@ -1,0 +1,146 @@
+%undefine _missing_build_ids_terminate_build
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+%global __debug_install_post %{nil}
+%global _build_id_links none
+%global __jar_repack 0
+%{!?with_systemd:%global systemd 0}
+%{?el8:          %global systemd 1}
+%{?el9:          %global systemd 1}
+%{?el10:         %global systemd 1}
+%{?amzn2023:     %global systemd 1}
+
+Name:    percona-search-mongodb
+Version: @@VERSION@@
+Release: @@RELEASE@@%{?dist}
+Summary: Percona Search for MongoDB (mongot)
+
+Group:   Applications/Databases
+License: SSPL-1.0
+URL:     https://github.com/percona/percona-mongot
+Source0: percona-search-mongodb-%{version}.tar.gz
+Source1: percona-search-mongodb-bundle.tar.gz
+
+# The bundle ships a prebuilt JDK and native .so libraries; skip auto-discovery.
+AutoReqProv: no
+
+Requires(pre):  /usr/sbin/useradd, /usr/bin/getent
+Requires(postun): /usr/sbin/userdel
+%if 0%{?systemd}
+# RHEL split %systemd_* macros and %{_unitdir} into a separate ~200KB
+# package; require that one at build time rather than dragging in the full
+# systemd runtime (~50MB with pam/libcap/dbus) into the CI container.
+BuildRequires:  systemd-rpm-macros
+Requires(post):   systemd
+Requires(preun):  systemd
+Requires(postun): systemd
+%endif
+
+%description
+Percona Search for MongoDB is the Percona-supported distribution of
+MongoDB Search (mongot). It provides Full Text and Vector Search
+capabilities for MongoDB and is intended to run alongside Percona Server
+for MongoDB to serve search queries and manage search indexes.
+
+%prep
+%setup -q -n percona-search-mongodb-%{version}
+
+%build
+# The mongot bundle is built externally with Bazel (see mongot_builder.sh).
+# Nothing to compile here. Install just puts the prebuilt tarball into place.
+
+%install
+rm -rf $RPM_BUILD_ROOT
+install -m 0755 -d $RPM_BUILD_ROOT/usr/lib/percona-search-mongodb
+install -m 0755 -d $RPM_BUILD_ROOT%{_bindir}
+install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot
+install -m 0750 -d $RPM_BUILD_ROOT%{_sysconfdir}/mongot/secrets
+install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig
+install -m 0755 -d $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d
+install -m 0750 -d $RPM_BUILD_ROOT%{_sharedstatedir}/mongot
+install -m 0750 -d $RPM_BUILD_ROOT%{_sharedstatedir}/mongot/tmp
+install -m 0750 -d $RPM_BUILD_ROOT%{_localstatedir}/log/mongot
+
+# Lay out the prebuilt bundle.
+tar -xzf %{SOURCE1} -C $RPM_BUILD_ROOT/usr/lib/percona-search-mongodb --strip-components=1
+
+# Thin launcher on PATH.
+install -m 0755 percona-packaging/conf/mongot-wrapper.sh $RPM_BUILD_ROOT%{_bindir}/mongot
+
+# Config + env + logrotate.
+install -m 0640 percona-packaging/conf/mongot.yml      $RPM_BUILD_ROOT%{_sysconfdir}/mongot/mongot.yml
+install -m 0640 percona-packaging/conf/mongot.env      $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/mongot
+install -m 0644 percona-packaging/conf/mongot.logrotate $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d/mongot
+
+%if 0%{?systemd}
+install -m 0755 -d $RPM_BUILD_ROOT%{_unitdir}
+install -m 0644 percona-packaging/conf/mongot.service $RPM_BUILD_ROOT%{_unitdir}/mongot.service
+%endif
+
+%pre
+/usr/bin/getent group mongod  >/dev/null || /usr/sbin/groupadd -r mongod
+if ! /usr/bin/getent passwd mongod >/dev/null; then
+    /usr/sbin/useradd -M -r -g mongod -d /var/lib/mongo -s /bin/false -c mongod mongod
+    # mongot-only host: PSMDB is not present to create mongod's home, so the JVM
+    # would warn about a missing user.home. Create it; do nothing if mongod
+    # already exists (PSMDB owns /var/lib/mongo in that case).
+    mkdir -p /var/lib/mongo
+    chown mongod:mongod /var/lib/mongo
+fi
+
+%post
+%if 0%{?systemd}
+%systemd_post mongot.service
+if [ $1 -eq 1 ]; then
+    /usr/bin/systemctl enable mongot.service >/dev/null 2>&1 || :
+fi
+%endif
+chown mongod:mongod %{_sharedstatedir}/mongot %{_sharedstatedir}/mongot/tmp
+chown -R mongod:mongod %{_localstatedir}/log/mongot
+install -d -m 0750 -o root -g mongod %{_sysconfdir}/mongot/secrets
+
+chown root:mongod %{_sysconfdir}/mongot %{_sysconfdir}/mongot/secrets
+chmod 0750 %{_sysconfdir}/mongot %{_sysconfdir}/mongot/secrets
+if [ -f %{_sysconfdir}/mongot/mongot.yml ]; then
+    chown root:mongod %{_sysconfdir}/mongot/mongot.yml
+    chmod 0640 %{_sysconfdir}/mongot/mongot.yml
+fi
+
+# mongot reads these as mongod, and SecretsParser rejects any group or other
+# bit, so the owner has to be mongod. Repairs installs where the earlier
+# chown -R root:mongod left them unreadable.
+for f in %{_sysconfdir}/mongot/secrets/*; do
+    if [ -f "$f" ]; then
+        chown mongod:mongod "$f"
+    fi
+done
+
+%preun
+%if 0%{?systemd}
+%systemd_preun mongot.service
+%endif
+
+%postun
+%if 0%{?systemd}
+%systemd_postun_with_restart mongot.service
+%endif
+
+%files
+%defattr(-,root,root,-)
+/usr/lib/percona-search-mongodb
+%{_bindir}/mongot
+%dir %attr(0750, root, mongod) %{_sysconfdir}/mongot
+%dir %attr(0750, root, mongod) %{_sysconfdir}/mongot/secrets
+%config(noreplace) %attr(0640, root, mongod) %{_sysconfdir}/mongot/mongot.yml
+%config(noreplace) %attr(0640, root, root)   %{_sysconfdir}/sysconfig/mongot
+%{_sysconfdir}/logrotate.d/mongot
+%if 0%{?systemd}
+%{_unitdir}/mongot.service
+%endif
+%dir %attr(0750, mongod, mongod) %{_sharedstatedir}/mongot
+%dir %attr(0750, mongod, mongod) %{_sharedstatedir}/mongot/tmp
+%dir %attr(0750, mongod, mongod) %{_localstatedir}/log/mongot
+
+%changelog
+* Sun May 10 2026 Oleksandr Miroshnychenko <alex.miroshnychenko@percona.com>
+- Initial Percona packaging of MongoDB Search (mongot).

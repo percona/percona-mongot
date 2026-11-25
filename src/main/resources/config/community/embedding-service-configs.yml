@@ -72,3 +72,145 @@ configs:
         initialRetryWaitMs: 200
         maxRetryWaitMs: 10000
         jitter: 0.1
+
+  # ---------------------------------------------------------------------------
+  # OpenAI-compatible models (OpenAI /v1/embeddings protocol).
+  #
+  # These route to any server speaking the OpenAI embeddings API: a local engine
+  # (Ollama, vLLM, HF TEI) or a cloud endpoint. The default providerEndpoint
+  # below targets a local Ollama instance. Set it per-model here (each engine has
+  # its own URL); the global `providerEndpoint` in the community embedding config
+  # applies to VOYAGE models only and does NOT affect these entries.
+  #
+  # - No API key is sent unless `credentials.apiKey` is set (keyless local).
+  # - Day-1 returns float vectors only.
+  # - `outputDimensions` MUST match the model's native dimension: it sizes the
+  #   auto-embed index (numDimensions). It is NOT forwarded as the OpenAI
+  #   `dimensions` request field (local engines serve a fixed native dimension
+  #   and reject it), so it must equal what the model actually returns.
+  # ---------------------------------------------------------------------------
+  - modelName: bge-m3
+    embeddingProvider: OPENAI_COMPATIBLE
+    config:
+      providerEndpoint: http://localhost:11434/v1/embeddings
+      modelConfig:
+        batchSize: 96
+        batchTokenLimit: 120000
+        outputDimensions: 1024
+        quantization: float
+      errorHandlingConfig:
+        maxRetries: 10
+        initialRetryWaitMs: 200
+        maxRetryWaitMs: 10000
+        jitter: 0.1
+      credentials: {}
+
+  - modelName: nomic-embed-text
+    embeddingProvider: OPENAI_COMPATIBLE
+    config:
+      providerEndpoint: http://localhost:11434/v1/embeddings
+      modelConfig:
+        batchSize: 96
+        batchTokenLimit: 120000
+        outputDimensions: 768
+        quantization: float
+        # nomic-embed-text needs task-instruction prefixes for good retrieval quality: the query
+        # path and the indexing path are embedded differently. The separator (": ") is part of the
+        # value. Symmetric models (e.g. OpenAI text-embedding-3) should omit these.
+        queryPrefix: "search_query: "
+        documentPrefix: "search_document: "
+      errorHandlingConfig:
+        maxRetries: 10
+        initialRetryWaitMs: 200
+        maxRetryWaitMs: 10000
+        jitter: 0.1
+      credentials: {}
+
+  # ---------------------------------------------------------------------------
+  # Azure OpenAI via the OPENAI_COMPATIBLE provider (commented example template).
+  #
+  # Uncomment and fill in your resource/deployment/key to enable. It is left
+  # disabled by default because it needs real per-deployment values; without them
+  # it would load a non-functional model.
+  #
+  # Azure hosts the standard OpenAI embedding models (text-embedding-3-small/large,
+  # text-embedding-ada-002) but differs from OpenAI in two ways:
+  #
+  #   1. The endpoint is a per-deployment URL with a required api-version query
+  #      parameter (kept here in providerEndpoint, no code change needed):
+  #        https://{resource}.openai.azure.com/openai/deployments/{deployment}/embeddings?api-version=2024-02-01
+  #   2. Auth uses an `api-key: <key>` request header instead of
+  #      `Authorization: Bearer <key>`. Set credentials.authHeaderName to api-key;
+  #      the raw key is then sent in that header (no Bearer prefix).
+  #
+  # authHeaderName defaults to Authorization (Bearer scheme) when omitted, which is
+  # what plain OpenAI and most local engines expect.
+  #
+  # forwardDimensions (optional, default false): when true, outputDimensions is sent as the
+  # OpenAI `dimensions` request field for Matryoshka dimension reduction (OpenAI/Azure
+  # text-embedding-3 only). Leave false/unset for local engines (Ollama/TEI), which serve a
+  # fixed native dimension and reject the field.
+  #
+  # - modelName: text-embedding-3-small
+  #   embeddingProvider: OPENAI_COMPATIBLE
+  #   config:
+  #     providerEndpoint: https://my-resource.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-02-01
+  #     modelConfig:
+  #       batchSize: 96
+  #       batchTokenLimit: 120000
+  #       outputDimensions: 1536
+  #       quantization: float
+  #       forwardDimensions: true
+  #     errorHandlingConfig:
+  #       maxRetries: 10
+  #       initialRetryWaitMs: 200
+  #       maxRetryWaitMs: 10000
+  #       jitter: 0.1
+  #     credentials:
+  #       apiKey: "<your-azure-openai-api-key>"
+  #       authHeaderName: api-key
+
+  # ---------------------------------------------------------------------------
+  # Hugging Face Inference API via the HUGGINGFACE_INFERENCE provider (commented
+  # example template). See docs/huggingface-inference-embeddings.md.
+  #
+  # Uncomment and set your Hugging Face access token to enable. It is left
+  # disabled by default because the hosted API rejects requests without a token;
+  # an HUGGINGFACE_INFERENCE entry with no apiToken (and no providerEndpoint) is
+  # skipped at startup with a warning.
+  #
+  # Requests go to the hf-inference feature-extraction pipeline:
+  #   https://router.huggingface.co/hf-inference/models/{modelId}/pipeline/feature-extraction
+  # with `Authorization: Bearer <token>`. Use a fine-grained token with the
+  # "Make calls to Inference Providers" permission.
+  #
+  # - modelId is the exact, case-sensitive Hub repo id. modelName is the name
+  #   used in index definitions (lowercased); modelId defaults to modelName.
+  # - outputDimensions MUST equal the model's native dimension (384 for
+  #   bge-small-en-v1.5); it sizes the auto-embed index.
+  # - truncate (default true) cuts over-long inputs to the model's max sequence
+  #   length instead of failing the batch. normalize is sent only when set
+  #   (otherwise the server default applies).
+  # - queryPrefix / documentPrefix work as for OPENAI_COMPATIBLE models.
+  # - providerEndpoint (optional) replaces the router URL verbatim, e.g. a
+  #   dedicated Inference Endpoint or a self-hosted TEI server's /embed route.
+  # - Billing is pay-as-you-go: free accounts must buy credits, PRO and
+  #   Team/Enterprise plans include a monthly allowance. Once credits are
+  #   exhausted, requests are typically rejected with HTTP 402. Float vectors only.
+  #
+  # - modelName: bge-small-en-v1.5
+  #   embeddingProvider: HUGGINGFACE_INFERENCE
+  #   config:
+  #     modelConfig:
+  #       modelId: BAAI/bge-small-en-v1.5
+  #       batchSize: 32
+  #       batchTokenLimit: 120000
+  #       outputDimensions: 384
+  #       quantization: float
+  #     errorHandlingConfig:
+  #       maxRetries: 10
+  #       initialRetryWaitMs: 500
+  #       maxRetryWaitMs: 30000
+  #       jitter: 0.1
+  #     credentials:
+  #       apiToken: "<your-hugging-face-access-token>"

@@ -31,6 +31,10 @@ py_test(
     args = ["$(location //:catalog-info.yaml)"],
     data = ["//:catalog-info.yaml"],
     main = "check_catalog_workflow_drift.py",
-    tags = ["lint"],
+    # Percona: manual -- //:catalog-info.yaml is MongoDB-internal and not in the published sources.
+    tags = [
+        "lint",
+        "manual",
+    ],
     deps = [requirement("PyYAML")],
 )
