@@ -24,6 +24,8 @@ Source1: percona-search-mongodb-bundle.tar.gz
 # The bundle ships a prebuilt JDK and native .so libraries; skip auto-discovery.
 AutoReqProv: no
 
+BuildRequires:  jq
+
 Requires(pre):  /usr/sbin/useradd, /usr/bin/getent
 Requires(postun): /usr/sbin/userdel
 %if 0%{?systemd}
@@ -63,6 +65,15 @@ install -m 0750 -d $RPM_BUILD_ROOT%{_localstatedir}/log/mongot
 
 # Lay out the prebuilt bundle.
 tar -xzf %{SOURCE1} -C $RPM_BUILD_ROOT/usr/lib/percona-search-mongodb --strip-components=1
+
+# The bundle carries its SBOM at the root; ship it as the package SBOM under
+# the rpm's own purl instead, so there is exactly one in the package.
+SBOM_SRC=$(ls $RPM_BUILD_ROOT/usr/lib/percona-search-mongodb/percona-search-mongodb-*.cdx.json)
+sh percona-packaging/sbom/retag.sh "$SBOM_SRC" \
+    "pkg:rpm/percona/percona-search-mongodb@%{version}-%{release}?arch=%{_arch}" \
+    "%{version}-%{release}" \
+    $RPM_BUILD_ROOT%{_docdir}/percona-search-mongodb/percona-search-mongodb-%{version}.cdx.json
+rm -f "$SBOM_SRC"
 
 # Thin launcher on PATH.
 install -m 0755 percona-packaging/conf/mongot-wrapper.sh $RPM_BUILD_ROOT%{_bindir}/mongot
@@ -129,6 +140,8 @@ done
 %defattr(-,root,root,-)
 /usr/lib/percona-search-mongodb
 %{_bindir}/mongot
+%dir %{_docdir}/percona-search-mongodb
+%{_docdir}/percona-search-mongodb/percona-search-mongodb-%{version}.cdx.json
 %dir %attr(0750, root, mongod) %{_sysconfdir}/mongot
 %dir %attr(0750, root, mongod) %{_sysconfdir}/mongot/secrets
 %config(noreplace) %attr(0640, root, mongod) %{_sysconfdir}/mongot/mongot.yml

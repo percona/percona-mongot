@@ -4,3 +4,4 @@ etc/mongot/mongot.yml /etc/mongot/
 etc/default/mongot /etc/default/
 etc/logrotate.d/mongot /etc/logrotate.d/
 lib/systemd/system/mongot.service /lib/systemd/system/
+usr/share/doc/percona-search-mongodb/*.cdx.json /usr/share/doc/percona-search-mongodb/
