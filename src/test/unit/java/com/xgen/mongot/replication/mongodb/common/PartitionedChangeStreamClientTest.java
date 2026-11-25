@@ -11,12 +11,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.mongodb.MongoException;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.mongodb.BatchMongoClient;
+import com.xgen.mongot.util.mongodb.Errors;
+import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,8 +43,12 @@ import org.junit.Test;
 
 public class PartitionedChangeStreamClientTest {
   private static final ChangeStreamPartition FIRST = new ChangeStreamPartition(0, 2);
+  private static final ChangeStreamPartition SECOND = new ChangeStreamPartition(1, 2);
+  private static final BsonDocument START_TOKEN =
+      ChangeStreamUtils.resumeToken(new BsonTimestamp(0, 0));
 
   private final BatchMongoClient mongoClient = mock(BatchMongoClient.class);
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
   private final ExecutorService fetchExecutor = mock(ExecutorService.class);
   private final ExecutorService caller = Executors.newSingleThreadExecutor();
   private final ExecutorService closer = Executors.newSingleThreadExecutor();
@@ -54,12 +66,272 @@ public class PartitionedChangeStreamClientTest {
   }
 
   @Test
+  public void getNext_twoLaggingReaders_pausesAheadReaderUntilBothCatchUp() throws Exception {
+    var fast = reader(timedBatch(161), timedBatch(162));
+    var second = reader(timedBatch(161));
+    var third = reader(timedBatch(161));
+    try (var client = pacingClient(List.of(fast, second, third), this.fetches::add, 100, 60)) {
+      var initial = this.caller.submit(client::getNext);
+      var fastFetch = nextFetch();
+      var secondFetch = nextFetch();
+      var thirdFetch = nextFetch();
+      fastFetch.run();
+      assertThat(initial.get(10, TimeUnit.SECONDS).getPostBatchResumeToken())
+          .isEqualTo(ChangeStreamUtils.resumeToken(new BsonTimestamp(100, 0)));
+
+      var next = this.caller.submit(client::getNext);
+      secondFetch.run();
+      assertThat(next.get(10, TimeUnit.SECONDS).getPartition())
+          .hasValue(new ChangeStreamPartition(1, 3));
+      assertThat(this.fetches).isEmpty();
+      var lastSlow = this.caller.submit(client::getNext);
+      thirdFetch.run();
+      assertThat(lastSlow.get(10, TimeUnit.SECONDS).getPartition())
+          .hasValue(new ChangeStreamPartition(2, 3));
+      assertThat(this.fetches).isEmpty();
+      verify(fast).getNext();
+
+      var resumed = this.caller.submit(client::getNext);
+      nextFetch().run();
+      assertThat(resumed.get(10, TimeUnit.SECONDS).getPostBatchResumeToken())
+          .isEqualTo(timedBatch(161).getPostBatchResumeToken());
+      verify(fast, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_exactThreshold_remainsEligible() throws Exception {
+    var fast = reader(timedBatch(160), timedBatch(161));
+    try (var client =
+        pacingClient(List.of(fast, reader(timedBatch(100))), Runnable::run, 100, 60)) {
+      client.getNext();
+      client.getNext();
+
+      verify(fast, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_zeroGap_differentIncrementsInSameSecondRemainEligible() throws Exception {
+    var fast = reader(timedBatch(new BsonTimestamp(100, -1)), timedBatch(101));
+    var slow = reader(timedBatch(100));
+    try (var client = pacingClient(List.of(fast, slow), Runnable::run, 100, 0)) {
+      client.getNext();
+      client.getNext();
+
+      verify(fast, times(2)).getNext();
+      verify(slow).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_customThreshold_pausesAboveConfiguredGap() throws Exception {
+    var fast = reader(timedBatch(111));
+    try (var client =
+        pacingClient(List.of(fast, reader(timedBatch(100))), Runnable::run, 100, 10)) {
+      client.getNext();
+      client.getNext();
+
+      verify(fast).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_unsignedTimestampSeconds_pausesAcrossSignedIntegerBoundary()
+      throws Exception {
+    int start = Integer.MAX_VALUE - 10;
+    var fast = reader(timedBatch(Integer.MIN_VALUE + 50));
+    try (var client =
+        pacingClient(List.of(fast, reader(timedBatch(start))), Runnable::run, start, 60)) {
+      client.getNext();
+      client.getNext();
+
+      verify(fast).getNext();
+    }
+  }
+
+  @Test(timeout = 10000)
+  public void getNext_finishedReader_doesNotPreventRemainingReaderReachingLifecycle()
+      throws Exception {
+    var lifecycle =
+        new ChangeStreamBatch(
+            List.of(event(50, "invalidate")),
+            timedBatch(100).getPostBatchResumeToken(),
+            Optional.empty());
+    var first = reader(lifecycle);
+    var second = reader(timedBatch(200), lifecycle);
+    try (var client = pacingClient(List.of(first, second), Runnable::run, 100, 60)) {
+      assertThat(client.getNext().getRawEvents()).isEmpty();
+      assertThat(client.getNext().getRawEvents()).containsExactly(event(50, "invalidate"));
+
+      verify(first).getNext();
+      verify(second, times(2)).getNext();
+    }
+  }
+
+  @Test(timeout = 10000)
+  public void getNext_splitRenameAcrossOptimeGap_completesWithoutPacing() throws Exception {
+    var firstRename =
+        new ChangeStreamBatch(
+            List.of(event(10, "rename")),
+            timedBatch(100).getPostBatchResumeToken(),
+            Optional.empty());
+    var secondRename =
+        new ChangeStreamBatch(
+            List.of(event(20, "rename")),
+            timedBatch(200).getPostBatchResumeToken(),
+            Optional.empty());
+    var invalidate =
+        new ChangeStreamBatch(
+            List.of(event(30, "invalidate")),
+            timedBatch(400).getPostBatchResumeToken(),
+            Optional.empty());
+    var first = reader(firstRename, invalidate);
+    var second = reader(secondRename, timedBatch(300), invalidate);
+    try (var client = pacingClient(List.of(first, second), Runnable::run, 100, 60)) {
+      var result = client.getNext();
+
+      assertThat(result.getRawEvents())
+          .containsExactly(event(20, "rename"), event(30, "invalidate"))
+          .inOrder();
+      assertThat(result.getPostBatchResumeToken()).isEqualTo(invalidate.getPostBatchResumeToken());
+      verify(first, times(2)).getNext();
+      verify(second, times(3)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_failedSlowReader_propagatesFailureWithoutRefetchingAheadReader()
+      throws Exception {
+    var failure = SteadyStateException.createTransient(new RuntimeException("fetch failed"));
+    var fast = reader(timedBatch(161));
+    var slow = reader(timedBatch(161));
+    when(slow.getNext()).thenThrow(failure);
+    try (var client = pacingClient(List.of(fast, slow), Runnable::run, 100, 60)) {
+      client.getNext();
+      assertThat(assertThrows(SteadyStateException.class, client::getNext))
+          .isSameInstanceAs(failure);
+      verify(fast).getNext();
+      verify(slow).getNext();
+    }
+    verify(fast).close();
+    verify(slow).close();
+  }
+
+  @Test
+  public void close_fastReaderPacedAndSlowReaderStalled_wakesCaller() throws Exception {
+    try (var client =
+        pacingClient(
+            List.of(reader(timedBatch(161)), reader(timedBatch(100))),
+            this.fetches::add,
+            100,
+            60)) {
+      var initial = this.caller.submit(client::getNext);
+      var fastFetch = nextFetch();
+      var slowFetch = nextFetch();
+      fastFetch.run();
+      initial.get(10, TimeUnit.SECONDS);
+      var waiting =
+          this.caller.submit(() -> assertThrows(IllegalStateException.class, client::getNext));
+
+      client.close();
+
+      assertThat(waiting.get(10, TimeUnit.SECONDS))
+          .hasMessageThat()
+          .isEqualTo("Change stream client is closed");
+      slowFetch.run();
+      assertThat(this.fetches).isEmpty();
+    }
+  }
+
+  @Test
+  public void resume_defaultGap_initializesProgressBeforeFirstBatch() throws Exception {
+    var fast = reader(timedBatch(160), timedBatch(161));
+    var releaseSlow = new CountDownLatch(1);
+    var slow = reader(timedBatch(100));
+    when(slow.getNext())
+        .thenAnswer(
+            unused -> {
+              assertThat(releaseSlow.await(10, TimeUnit.SECONDS)).isTrue();
+              return timedBatch(100);
+            });
+    var readers = List.of(fast, slow);
+    try (var client =
+        PartitionedChangeStreamClient.resume(
+            2,
+            timedBatch(100).getPostBatchResumeToken(),
+            this.mongoClient,
+            (mongo, partition, start) -> readers.get(partition.partitionId()),
+            this.executor,
+            SteadyStateException::wrapIfThrows)) {
+      try {
+        assertThat(
+                this.caller
+                    .submit(client::getNext)
+                    .get(10, TimeUnit.SECONDS)
+                    .getPostBatchResumeToken())
+            .isEqualTo(timedBatch(100).getPostBatchResumeToken());
+        // With a starting optime of 100, exactly 60 seconds ahead remains eligible.
+        assertThat(
+                this.caller
+                    .submit(client::getNext)
+                    .get(10, TimeUnit.SECONDS)
+                    .getPostBatchResumeToken())
+            .isEqualTo(timedBatch(100).getPostBatchResumeToken());
+        verify(fast, times(2)).getNext();
+      } finally {
+        releaseSlow.countDown();
+      }
+    }
+  }
+
+  @Test
+  public void getNext_singleReader_neverPausesItself() throws Exception {
+    try (var client =
+        pacingClient(List.of(reader(timedBatch(200), timedBatch(400))), Runnable::run, 100, 60)) {
+      client.getNext();
+      assertThat(client.getNext().getPostBatchResumeToken())
+          .isEqualTo(timedBatch(400).getPostBatchResumeToken());
+    }
+  }
+
+  @Test
+  public void constructor_invalidPacingGap_throws() throws Exception {
+    var readers = List.of(reader(timedBatch(100)));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new PartitionedChangeStreamClient<>(
+                readers,
+                this.fetchExecutor,
+                SteadyStateException::wrapIfThrows,
+                ChangeStreamUtils.resumeToken(new BsonTimestamp(100, 0)),
+                new BsonTimestamp(100, 0),
+                Duration.ofSeconds(-1)));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new PartitionedChangeStreamClient<>(
+                readers,
+                this.fetchExecutor,
+                SteadyStateException::wrapIfThrows,
+                ChangeStreamUtils.resumeToken(new BsonTimestamp(100, 0)),
+                new BsonTimestamp(100, 0),
+                Duration.ofMillis(500)));
+  }
+
+  @Test
   public void constructor_noReaders_throws() {
     assertThrows(
         IllegalArgumentException.class,
         () ->
             new PartitionedChangeStreamClient<>(
-                List.of(), this.fetchExecutor, SteadyStateException::wrapIfThrows));
+                List.of(),
+                this.fetchExecutor,
+                SteadyStateException::wrapIfThrows,
+                ChangeStreamUtils.resumeToken(new BsonTimestamp(0, 0)),
+                new BsonTimestamp(0, 0),
+                Duration.ofSeconds(60)));
   }
 
   @Test
@@ -75,14 +347,14 @@ public class PartitionedChangeStreamClientTest {
         var first = initial.get(10, TimeUnit.SECONDS);
 
         assertThat(first.getRawEvents()).containsExactly(event(9));
-        assertThat(first.getPostBatchResumeToken()).isEqualTo(token(10));
+        assertThat(first.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
 
         var subsequent = this.caller.submit(client::getNext);
         nextFetch().run();
         var second = subsequent.get(10, TimeUnit.SECONDS);
 
         assertThat(second.getRawEvents()).containsExactly(event(19));
-        assertThat(second.getPostBatchResumeToken()).isEqualTo(token(20));
+        assertThat(second.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
         verify(fast, times(2)).getNext();
         verify(slow, times(0)).getNext();
       } finally {
@@ -106,12 +378,12 @@ public class PartitionedChangeStreamClientTest {
       try {
         firstFetch.run();
         assertThat(initial.get(10, TimeUnit.SECONDS).getPostBatchResumeToken())
-            .isEqualTo(token(10));
+            .isEqualTo(START_TOKEN);
         secondFetch.run();
 
         var readyBatch = client.getNext();
 
-        assertThat(readyBatch.getPostBatchResumeToken()).isEqualTo(token(20));
+        assertThat(readyBatch.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
         // The first reader's next fetch is already submitted while the caller handles this batch.
         assertThat(this.fetches).hasSize(1);
         nextFetch().run();
@@ -131,15 +403,15 @@ public class PartitionedChangeStreamClientTest {
     var second = reader(batch(20));
     var third = reader(batch(30));
     try (var client = client(List.of(first, second, third), Runnable::run)) {
-      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(10));
+      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(START_TOKEN);
 
-      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(20));
+      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(START_TOKEN);
 
       verify(first, times(2)).getNext();
       verify(second).getNext();
       verify(third).getNext();
-      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(30));
-      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(40));
+      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(10));
+      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(20));
       verify(first, times(2)).getNext();
     }
   }
@@ -158,43 +430,27 @@ public class PartitionedChangeStreamClientTest {
   }
 
   @Test
-  public void getNext_completedBatches_carriesReadersRealPostBatchToken() throws Exception {
-    // Distinct reader positions: batches must carry real reader tokens for the checkpoint to move.
+  public void getNext_completedBatches_carriesMinimumReaderCheckpoint() throws Exception {
     try (var client = client(reader(batch(20, event(19))), reader(batch(10, event(9))))) {
       var initial = client.getNext();
       var next = client.getNext();
 
-      assertThat(initial.getPostBatchResumeToken()).isEqualTo(token(20));
+      assertThat(initial.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
       assertThat(next.getPostBatchResumeToken()).isEqualTo(token(10));
     }
   }
 
   @Test
-  public void getNext_emptyBatch_carriesReadersPostBatchToken() throws Exception {
+  public void getNext_emptyBatch_advancesMinimumReaderCheckpoint() throws Exception {
     try (var client = client(reader(batch(20)), reader(batch(10)))) {
       var first = client.getNext();
       var second = client.getNext();
 
-      // Empty batches still carry the reader's real token — progress must never move backward.
+      // Empty batches advance reader progress even though they contain no indexing work.
       assertThat(first.getRawEvents()).isEmpty();
-      assertThat(first.getPostBatchResumeToken()).isEqualTo(token(20));
+      assertThat(first.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
       assertThat(second.getRawEvents()).isEmpty();
       assertThat(second.getPostBatchResumeToken()).isEqualTo(token(10));
-    }
-  }
-
-  @Test
-  public void getNext_realThenEmptyBatch_emptyBatchCarriesItsOwnToken() throws Exception {
-    // The empty batch must not fall back to an earlier token — confirmed positions would move
-    // backward.
-    try (var client =
-        client(reader(batch(20, event(19)), batch(10)), reader(batch(30, event(29))))) {
-      var batches = List.of(client.getNext(), client.getNext(), client.getNext());
-
-      // The empty batch must carry its own token, not the starting token.
-      var emptyBatch =
-          batches.stream().filter(b -> b.getRawEvents().isEmpty()).findFirst().orElseThrow();
-      assertThat(emptyBatch.getPostBatchResumeToken()).isEqualTo(token(10));
     }
   }
 
@@ -216,29 +472,26 @@ public class PartitionedChangeStreamClientTest {
   }
 
   @Test
-  public void getNext_failedReaderRetry_retainsResultsFromOtherReadersOfTheSameIndex()
+  public void getNext_failedReader_propagatesFailureWithoutReturningBufferedBatches()
       throws Exception {
     var first = reader(batch(10, event(1)));
-    var failure = SteadyStateException.createTransient(new RuntimeException("getMore rejected"));
-    when(first.getNext()).thenThrow(failure).thenReturn(batch(10, event(1)));
+    var failure =
+        SteadyStateException.wrapMongoException(
+            new MongoException(Errors.ADMISSION_QUEUE_OVERFLOW.code, "getMore rejected"));
+    when(first.getNext()).thenThrow(failure);
     var second = reader(batch(20, event(19)));
     try (var client = client(first, second)) {
       assertThat(assertThrows(SteadyStateException.class, client::getNext))
           .isSameInstanceAs(failure);
-      var otherReaderBatch = client.getNext();
-      var retried = client.getNext();
-
-      assertThat(otherReaderBatch.getRawEvents()).containsExactly(event(19));
-      assertThat(otherReaderBatch.getPostBatchResumeToken()).isEqualTo(token(20));
-      assertThat(retried.getRawEvents()).containsExactly(event(1));
-      assertThat(retried.getPostBatchResumeToken()).isEqualTo(token(10));
-      verify(first, times(2)).getNext();
+      verify(first).getNext();
+      verify(second).getNext();
     }
+    verify(first).close();
+    verify(second).close();
   }
 
   @Test
-  public void getNext_executorRejectsPartialSubmission_retainsAcceptedWorkForRetry()
-      throws Exception {
+  public void getNext_executorRejectsPartialSubmission_propagatesRejection() throws Exception {
     var first = reader(batch(10, event(1)));
     var second = reader(batch(20, event(19)));
     var submitted = new AtomicInteger();
@@ -254,41 +507,29 @@ public class PartitionedChangeStreamClientTest {
             })) {
       assertThat(assertThrows(RejectedExecutionException.class, client::getNext))
           .isSameInstanceAs(rejection);
-      var accepted = client.getNext();
-      var retried = client.getNext();
-
-      assertThat(accepted.getRawEvents()).containsExactly(event(1));
-      assertThat(retried.getRawEvents()).containsExactly(event(19));
-      assertThat(retried.getPostBatchResumeToken()).isEqualTo(token(20));
-      verify(second).getNext();
+      verify(first).getNext();
+      verify(second, never()).getNext();
     }
+    verify(first).close();
+    verify(second).close();
   }
 
   @Test
-  public void getNext_refillRejected_retainsReadyBatchForRetry() throws Exception {
-    var first = reader(batch(10), batch(30));
+  public void getNext_refillRejected_propagatesRejection() throws Exception {
+    var first = reader(batch(10));
     var second = reader(batch(20));
     var rejection = new RejectedExecutionException();
     try (var client = client(first, second)) {
-      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(token(10));
-      doThrow(rejection)
-          .doAnswer(
-              invocation -> {
-                invocation.getArgument(0, Runnable.class).run();
-                return null;
-              })
-          .when(this.fetchExecutor)
-          .execute(any(Runnable.class));
+      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      doThrow(rejection).when(this.fetchExecutor).execute(any(Runnable.class));
 
       assertThat(assertThrows(RejectedExecutionException.class, client::getNext))
           .isSameInstanceAs(rejection);
-      var retained = client.getNext();
-      var refetched = client.getNext();
-
-      assertThat(retained.getPostBatchResumeToken()).isEqualTo(token(20));
-      assertThat(refetched.getPostBatchResumeToken()).isEqualTo(token(30));
-      verify(first, times(2)).getNext();
+      verify(first).getNext();
+      verify(second).getNext();
     }
+    verify(first).close();
+    verify(second).close();
   }
 
   @Test
@@ -623,6 +864,166 @@ public class PartitionedChangeStreamClientTest {
   }
 
   @Test
+  public void resume_copiesTokensAtOwnershipBoundaries() throws Exception {
+    var restartToken = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(100, 0));
+    var expectedRestartToken = restartToken.clone();
+    var firstToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(101, 0));
+    var secondToken = ChangeStreamUtils.resumeToken(new BsonTimestamp(102, 0));
+    var readers = List.of(reader(batch(firstToken)), reader(batch(secondToken)));
+    try (var client =
+        PartitionedChangeStreamClient.resume(
+            2,
+            restartToken,
+            this.mongoClient,
+            (mongo, partition, start) -> {
+              restartToken.clear();
+              return readers.get(partition.partitionId());
+            },
+            Runnable::run,
+            SteadyStateException::wrapIfThrows)) {
+      var first = client.getNext();
+      assertThat(first.getPostBatchResumeToken()).isEqualTo(expectedRestartToken);
+
+      first.getPostBatchResumeToken().clear();
+
+      assertThat(client.getNext().getPostBatchResumeToken()).isEqualTo(firstToken);
+    }
+  }
+
+  @Test
+  public void getNext_globalMinimumCheckpoints_keepsPacingBasedOnRawReaderProgress()
+      throws Exception {
+    var anchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(100, 1));
+    var fast = reader(timedBatch(100), timedBatch(101));
+    var slow = reader(timedBatch(1), timedBatch(100));
+    try (var client = resumedClient(anchor, List.of(fast, slow), Runnable::run)) {
+      client.getNext();
+      client.getNext();
+      client.getNext();
+      client.getNext();
+      verify(fast, times(2)).getNext();
+
+      client.getNext();
+
+      verify(fast, times(3)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_finalDocumentsAtInvalidationBoundary_returnsMixedFinalBatch()
+      throws Exception {
+    var boundaryTime = new BsonTimestamp(100, 5);
+    var anchor = ChangeStreamUtils.invalidateResumeToken(boundaryTime);
+    var firstDocument = event(ChangeStreamUtils.eventResumeToken(boundaryTime, 1, 1), "insert");
+    var secondDocument = event(ChangeStreamUtils.eventResumeToken(boundaryTime, 1, 2), "update");
+    var rename = event(ChangeStreamUtils.eventResumeToken(new BsonTimestamp(101, 1)), "rename");
+    var newAnchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(101, 2));
+    var invalidate = event(newAnchor, "invalidate");
+    var firstSource = batch(newAnchor, firstDocument, rename, invalidate);
+    var secondSource = batch(newAnchor, secondDocument, rename, invalidate);
+    var tracker = new PartitionedChangeStreamProgressTracker(Map.of(FIRST, anchor, SECOND, anchor));
+    try (var client =
+        resumedClient(anchor, List.of(reader(firstSource), reader(secondSource)), Runnable::run)) {
+      var firstDocuments = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstDocuments.getRawEvents()).containsExactly(firstDocument);
+      assertThat(firstDocuments.getPostBatchResumeToken()).isEqualTo(anchor);
+      assertThat(firstDocuments.getPartition()).hasValue(FIRST);
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(secondDocument, rename, invalidate)
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(newAnchor);
+      assertThat(finalBatch.getPartition()).hasValue(SECOND);
+      assertThat(finalBatch.getCommandOperationTime())
+          .isEqualTo(secondSource.getCommandOperationTime());
+      tracker.registerBatch(FIRST, firstDocuments.getPostBatchResumeToken()).run();
+      assertThat(tracker.getLowWaterMark()).isEqualTo(anchor);
+      assertThat(firstSource.getRawEvents())
+          .containsExactly(firstDocument, rename, invalidate)
+          .inOrder();
+      assertThat(secondSource.getRawEvents())
+          .containsExactly(secondDocument, rename, invalidate)
+          .inOrder();
+      assertThat(assertThrows(IllegalStateException.class, client::getNext))
+          .hasMessageThat()
+          .isEqualTo("All lifecycle batches have been returned");
+    }
+  }
+
+  @Test
+  public void getNext_finalDocumentBeforeInvalidationBoundary_returnsMixedFinalBatch()
+      throws Exception {
+    var anchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(100, 5));
+    var document = event(ChangeStreamUtils.eventResumeToken(new BsonTimestamp(100, 4)), "insert");
+    var newAnchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(101, 1));
+    var invalidate = event(newAnchor, "invalidate");
+    var source = reader(batch(newAnchor, document, invalidate));
+    try (var client = resumedClient(anchor, List.of(source), Runnable::run)) {
+      var finalBatch = client.getNext();
+
+      assertThat(finalBatch.getRawEvents()).containsExactly(document, invalidate).inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(newAnchor);
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(source).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_lifecycleOnlyAfterInvalidationResume_returnsNoExtraDocumentBatch()
+      throws Exception {
+    var anchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(100, 5));
+    var newAnchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(101, 1));
+    var invalidate = event(newAnchor, "invalidate");
+    var source = reader(batch(newAnchor, invalidate));
+    try (var client = resumedClient(anchor, List.of(source), Runnable::run)) {
+      var lifecycle = client.getNext();
+
+      assertThat(lifecycle.getRawEvents()).containsExactly(invalidate);
+      assertThat(lifecycle.getPostBatchResumeToken()).isEqualTo(newAnchor);
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(source).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_finalDocumentsPastInvalidationBoundary_returnsMixedFinalBatch()
+      throws Exception {
+    var anchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(100, 5));
+    var document = event(ChangeStreamUtils.eventResumeToken(new BsonTimestamp(100, 6)), "insert");
+    var newAnchor = ChangeStreamUtils.invalidateResumeToken(new BsonTimestamp(101, 1));
+    var invalidate = event(newAnchor, "invalidate");
+    var source = batch(newAnchor, document, invalidate);
+    try (var client = resumedClient(anchor, List.of(reader(source)), Runnable::run)) {
+      var finalBatch = client.getNext();
+
+      assertThat(finalBatch.getRawEvents()).containsExactly(document, invalidate).inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(newAnchor);
+      assertThrows(IllegalStateException.class, client::getNext);
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameWithUnexpectedSuffix_returnsMixedFinalBatch() throws Exception {
+    var boundaryTime = new BsonTimestamp(100, 5);
+    var anchor = ChangeStreamUtils.invalidateResumeToken(boundaryTime);
+    var document = event(ChangeStreamUtils.eventResumeToken(boundaryTime), "insert");
+    var renameToken = ChangeStreamUtils.eventResumeToken(new BsonTimestamp(101, 1));
+    var rename = event(renameToken, "rename");
+    var unexpectedToken = ChangeStreamUtils.eventResumeToken(new BsonTimestamp(101, 2));
+    var unexpected = event(unexpectedToken, "insert");
+    var source = reader(batch(renameToken, document, rename), batch(unexpectedToken, unexpected));
+    try (var client = resumedClient(anchor, List.of(source), Runnable::run)) {
+      var finalBatch = client.getNext();
+
+      assertThat(finalBatch.getRawEvents()).containsExactly(document, rename, unexpected).inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(unexpectedToken);
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(source, times(2)).getNext();
+    }
+  }
+
+  @Test
   public void resume_readerCreationFails_closesOnlyPreviouslyCreatedReaders() throws Exception {
     var first = reader(batch(10));
     var failure = SteadyStateException.createTransient(new RuntimeException("open failed"));
@@ -669,12 +1070,599 @@ public class PartitionedChangeStreamClientTest {
   }
 
   @Test
-  public void getNext_lifecycleEvent_rejectsUntilCoordinationIsImplemented() throws Exception {
-    try (var client = client(reader(batch(5, event(5, "rename"))), reader(batch(10)))) {
-      var failure = assertThrows(IllegalStateException.class, client::getNext);
+  public void getNext_unknownEvent_returnsBeforeStalledReader() throws Exception {
+    var fast = reader(batch(50, event(49), event(50, "unknownOperation")));
+    var slow = reader(batch(20, event(19)));
+    try (var client = client(List.of(fast, slow), this.fetches::add)) {
+      var waiting = this.caller.submit(client::getNext);
+      var fastFetch = nextFetch();
+      var slowFetch = nextFetch();
+      try {
+        fastFetch.run();
+        var result = waiting.get(10, TimeUnit.SECONDS);
 
-      assertThat(failure).hasMessageThat().contains("lifecycle coordination is not implemented");
+        assertThat(result.getRawEvents())
+            .containsExactly(event(49), event(50, "unknownOperation"))
+            .inOrder();
+        assertThat(result.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+        assertThat(result.getPartition()).hasValue(FIRST);
+        verify(slow, never()).getNext();
+      } finally {
+        slowFetch.run();
+      }
     }
+  }
+
+  @Test
+  public void getNext_unknownEvent_keepsReaderOpen() throws Exception {
+    var reader = reader(batch(50, event(50, "unknownOperation")), batch(51, event(51)));
+    try (var client = client(List.of(reader), Runnable::run)) {
+      var other = client.getNext();
+      var next = client.getNext();
+
+      assertThat(other.getRawEvents()).containsExactly(event(50, "unknownOperation"));
+      assertThat(next.getRawEvents()).containsExactly(event(51));
+      assertThat(next.getPostBatchResumeToken()).isEqualTo(token(51));
+      verify(reader, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_unknownEventInMiddle_preservesWholeBatch() throws Exception {
+    var fast = reader(batch(50, event(47), event(48, "unknownOperation"), event(49), event(50)));
+    var slow = reader(batch(20, event(19)));
+    try (var client = client(fast, slow)) {
+      var result = client.getNext();
+
+      assertThat(result.getRawEvents())
+          .containsExactly(event(47), event(48, "unknownOperation"), event(49), event(50))
+          .inOrder();
+      assertThat(result.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(result.getPartition()).hasValue(FIRST);
+    }
+  }
+
+  @Test
+  public void getNext_unknownEventBeforeRename_preservesUnknownEventAndItsToken() throws Exception {
+    var boundary =
+        batch(
+            52,
+            event(49),
+            event(50, "unknownOperation"),
+            event(51, "rename"),
+            event(52, "invalidate"));
+    try (var client = client(reader(boundary), reader(boundary))) {
+      var firstDocuments = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstDocuments.getRawEvents())
+          .containsExactly(event(49), event(50, "unknownOperation"))
+          .inOrder();
+      assertThat(firstDocuments.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(firstDocuments.getPartition()).hasValue(FIRST);
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(
+              event(49),
+              event(50, "unknownOperation"),
+              event(51, "rename"),
+              event(52, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(token(52));
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 2));
+    }
+  }
+
+  @Test
+  public void getNext_unknownEventBeforeRenameWithoutDocuments_retainsUnknownEvent()
+      throws Exception {
+    var boundary =
+        batch(52, event(50, "unknownOperation"), event(51, "rename"), event(52, "invalidate"));
+    try (var client = client(reader(boundary), reader(boundary))) {
+      var firstDocuments = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstDocuments.getRawEvents()).containsExactly(event(50, "unknownOperation"));
+      assertThat(firstDocuments.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(firstDocuments.getPartition()).hasValue(FIRST);
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(
+              event(50, "unknownOperation"), event(51, "rename"), event(52, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(token(52));
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 2));
+      assertThrows(IllegalStateException.class, client::getNext);
+    }
+  }
+
+  @Test
+  public void getNext_lifecycleBatch_stopsReaderWhileOtherReadersCatchUp() throws Exception {
+    var boundary = batch(50, event(49, "rename"), event(50, "invalidate"));
+    // Keep the document preceding the lifecycle event in this reader's retained batch too.
+    var first = reader(batch(50, event(10), event(49, "rename"), event(50, "invalidate")));
+    var second = reader(batch(20, event(19)), boundary);
+    var third = reader(batch(30, event(29)), batch(40), boundary);
+    try (var client = client(List.of(first, second, third), Runnable::run)) {
+      var secondBatch = client.getNext();
+      var thirdBatch = client.getNext();
+      var emptyBatch = client.getNext();
+
+      assertThat(secondBatch.getRawEvents()).containsExactly(event(19));
+      assertThat(secondBatch.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(secondBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 3));
+      assertThat(thirdBatch.getRawEvents()).containsExactly(event(29));
+      assertThat(thirdBatch.getPartition()).hasValue(new ChangeStreamPartition(2, 3));
+      assertThat(emptyBatch.getRawEvents()).isEmpty();
+      assertThat(emptyBatch.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      verify(first).getNext();
+      verify(second, times(2)).getNext();
+      verify(third, times(2)).getNext();
+
+      var retainedDocuments = client.getNext();
+      var lifecycle = client.getNext();
+
+      assertThat(retainedDocuments.getRawEvents()).containsExactly(event(10));
+      assertThat(retainedDocuments.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(retainedDocuments.getPartition()).hasValue(new ChangeStreamPartition(0, 3));
+      assertThat(lifecycle.getRawEvents())
+          .containsExactly(event(49, "rename"), event(50, "invalidate"))
+          .inOrder();
+      assertThat(lifecycle.getPostBatchResumeToken()).isEqualTo(token(50));
+      assertThat(lifecycle.getPartition()).hasValue(new ChangeStreamPartition(2, 3));
+      assertThat(assertThrows(IllegalStateException.class, client::getNext))
+          .hasMessageThat()
+          .isEqualTo("All lifecycle batches have been returned");
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first).getNext();
+      verify(second, times(2)).getNext();
+      verify(third, times(3)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_finalBatches_returnsEveryDocumentBeforeSingleLifecycleTail()
+      throws Exception {
+    var first =
+        reader(
+            batch(
+                50,
+                event(10),
+                event(11, "update"),
+                event(12, "replace"),
+                event(13, "delete"),
+                event(49, "drop"),
+                event(50, "invalidate")));
+    var second = reader(batch(49, event(20), event(21), event(49, "drop")));
+    var third = reader(batch(50, event(30), event(49, "drop"), event(50, "invalidate")));
+    try (var client = client(List.of(first, second, third), Runnable::run)) {
+      var firstBatch = client.getNext();
+      var secondBatch = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstBatch.getRawEvents())
+          .containsExactly(
+              event(10), event(11, "update"), event(12, "replace"), event(13, "delete"))
+          .inOrder();
+      assertThat(firstBatch.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(firstBatch.getPartition()).hasValue(new ChangeStreamPartition(0, 3));
+      assertThat(firstBatch.getCommandOperationTime()).hasValue(new BsonTimestamp(1, 1));
+      assertThat(secondBatch.getRawEvents()).containsExactly(event(20), event(21)).inOrder();
+      assertThat(secondBatch.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(secondBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 3));
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(event(30), event(49, "drop"), event(50, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(token(50));
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(2, 3));
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first).getNext();
+      verify(second).getNext();
+      verify(third).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_longLifecycleTail_removesEveryDuplicateLifecycleEvent() throws Exception {
+    var first =
+        reader(
+            batch(
+                50,
+                event(10),
+                event(48, "drop"),
+                event(49, "dropDatabase"),
+                event(50, "invalidate")));
+    var second =
+        reader(batch(50, event(48, "drop"), event(49, "dropDatabase"), event(50, "invalidate")));
+    var third =
+        reader(
+            batch(
+                50,
+                event(30),
+                event(48, "drop"),
+                event(49, "dropDatabase"),
+                event(50, "invalidate")));
+    try (var client = client(List.of(first, second, third), Runnable::run)) {
+      var firstDocuments = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstDocuments.getRawEvents()).containsExactly(event(10));
+      assertThat(firstDocuments.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(firstDocuments.getPartition()).hasValue(new ChangeStreamPartition(0, 3));
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(
+              event(30), event(48, "drop"), event(49, "dropDatabase"), event(50, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(2, 3));
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first).getNext();
+      verify(second).getNext();
+      verify(third).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_slowReader_holdsFinalBatchesUntilEveryReaderFinishes() throws Exception {
+    var first = reader(batch(50, event(10), event(50, "drop")));
+    var second = reader(batch(50, event(20), event(50, "drop")));
+    var third = reader(batch(50, event(30), event(50, "drop")));
+    try (var client = client(List.of(first, second, third), this.fetches::add)) {
+      var waiting = this.caller.submit(client::getNext);
+      nextFetch().run();
+      nextFetch().run();
+      var slowFetch = nextFetch();
+
+      assertThat(waiting.isDone()).isFalse();
+      slowFetch.run();
+      assertThat(waiting.get(10, TimeUnit.SECONDS).getRawEvents()).containsExactly(event(10));
+      assertThat(client.getNext().getRawEvents()).containsExactly(event(20));
+      assertThat(client.getNext().getRawEvents())
+          .containsExactly(event(30), event(50, "drop"))
+          .inOrder();
+      assertThat(this.fetches).isEmpty();
+      verify(first).getNext();
+      verify(second).getNext();
+      verify(third).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRename_fetchesInvalidateForEveryReader() throws Exception {
+    var first = reader(batch(49, event(49, "rename")), batch(50, event(50, "invalidate")));
+    var second =
+        reader(batch(49, event(20), event(49, "rename")), batch(50, event(50, "invalidate")));
+    try (var client = client(first, second)) {
+      var finalBatch = client.getNext();
+
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(event(20), event(49, "rename"), event(50, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(token(50));
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 2));
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first, times(2)).getNext();
+      verify(second, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameWithEmptyBatch_keepsOtherReaderStopped() throws Exception {
+    var first = reader(batch(51, event(10), event(49, "rename"), event(51, "invalidate")));
+    var second =
+        reader(
+            batch(49, event(20), event(49, "rename")),
+            batch(50),
+            new ChangeStreamBatch(
+                List.of(event(51, "invalidate")), token(51), Optional.of(new BsonTimestamp(2, 1))));
+    try (var client = client(first, second)) {
+      var firstDocuments = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstDocuments.getRawEvents()).containsExactly(event(10));
+      assertThat(firstDocuments.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(event(20), event(49, "rename"), event(51, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(token(51));
+      assertThat(finalBatch.getCommandOperationTime()).hasValue(new BsonTimestamp(2, 1));
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 2));
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first).getNext();
+      verify(second, times(3)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameOnFirstReader_fetchesInvalidateBeforeStopping() throws Exception {
+    var first =
+        reader(batch(49, event(10), event(49, "rename")), batch(50, event(50, "invalidate")));
+    var second = reader(batch(50, event(20), event(49, "rename"), event(50, "invalidate")));
+    try (var client = client(first, second)) {
+      var firstDocuments = client.getNext();
+      var finalBatch = client.getNext();
+
+      assertThat(firstDocuments.getRawEvents()).containsExactly(event(10));
+      assertThat(firstDocuments.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(firstDocuments.getPartition()).hasValue(FIRST);
+      assertThat(finalBatch.getRawEvents())
+          .containsExactly(event(20), event(49, "rename"), event(50, "invalidate"))
+          .inOrder();
+      assertThat(finalBatch.getPostBatchResumeToken()).isEqualTo(token(50));
+      assertThat(finalBatch.getPartition()).hasValue(new ChangeStreamPartition(1, 2));
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first, times(2)).getNext();
+      verify(second).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameFetchFails_propagatesFailureWithoutReturningPartialBatch()
+      throws Exception {
+    var first = reader(batch(50, event(10), event(49, "rename"), event(50, "invalidate")));
+    var second = reader(batch(49, event(20), event(49, "rename")));
+    var failure =
+        SteadyStateException.wrapMongoException(
+            new MongoException(Errors.ADMISSION_QUEUE_OVERFLOW.code, "getMore rejected"));
+    when(second.getNext())
+        .thenReturn(batch(49, event(20), event(49, "rename")))
+        .thenThrow(failure)
+        .thenReturn(batch(50, event(50, "invalidate")));
+    try (var client = client(first, second)) {
+      assertThat(assertThrows(SteadyStateException.class, client::getNext))
+          .isSameInstanceAs(failure);
+
+      verify(first).getNext();
+      verify(second, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameEmptyResponseThenFailure_propagatesFailure() throws Exception {
+    var first = reader(batch(49, event(10), event(49, "rename")));
+    var failure =
+        SteadyStateException.wrapMongoException(
+            new MongoException(Errors.ADMISSION_QUEUE_OVERFLOW.code, "getMore rejected"));
+    when(first.getNext())
+        .thenReturn(batch(49, event(10), event(49, "rename")))
+        .thenReturn(batch(49))
+        .thenThrow(failure)
+        .thenReturn(batch(50, event(50, "invalidate")));
+    try (var client = client(List.of(first), Runnable::run)) {
+      assertThat(assertThrows(SteadyStateException.class, client::getNext))
+          .isSameInstanceAs(failure);
+      verify(first, times(3)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameUnexpectedEvent_returnsCombinedBatch() throws Exception {
+    var finalReader = reader(batch(49, event(49, "rename")), batch(50, event(50)));
+    try (var client = client(List.of(finalReader), Runnable::run)) {
+      var result = client.getNext();
+
+      assertThat(result.getRawEvents()).containsExactly(event(49, "rename"), event(50)).inOrder();
+      assertThat(result.getPostBatchResumeToken()).isEqualTo(token(50));
+      assertThat(result.getPartition()).hasValue(new ChangeStreamPartition(0, 1));
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(finalReader, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRenameUnexpectedEvent_waitsForAllReaders() throws Exception {
+    var first =
+        reader(
+            batch(49, event(10), event(11, "update"), event(49, "rename")), batch(50, event(50)));
+    var second = reader(batch(49, event(20), event(49, "rename")), batch(50, event(50)));
+    try (var client = client(List.of(first, second), this.fetches::add)) {
+      var waiting = this.caller.submit(client::getNext);
+      nextFetch().run();
+      var slowFetch = nextFetch();
+
+      assertThat(waiting.isDone()).isFalse();
+      slowFetch.run();
+      var documents = waiting.get(10, TimeUnit.SECONDS);
+      assertThat(documents.getRawEvents())
+          .containsExactly(event(10), event(11, "update"))
+          .inOrder();
+      assertThat(documents.getPostBatchResumeToken()).isEqualTo(START_TOKEN);
+      assertThat(client.getNext().getRawEvents())
+          .containsExactly(event(20), event(49, "rename"), event(50))
+          .inOrder();
+      assertThrows(IllegalStateException.class, client::getNext);
+      verify(first, times(2)).getNext();
+      verify(second, times(2)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_splitRename_fetchesInvalidateWhileOtherReadersCatchUp() throws Exception {
+    var first =
+        reader(batch(49, event(10), event(49, "rename")), batch(50, event(50, "invalidate")));
+    var last =
+        reader(
+            batch(20, event(20)),
+            batch(49, event(49, "rename")),
+            batch(50, event(50, "invalidate")));
+    try (var client = client(List.of(first, last), this.fetches::add)) {
+      var initial = this.caller.submit(client::getNext);
+      nextFetch().run();
+      nextFetch().run();
+      assertThat(initial.get(10, TimeUnit.SECONDS).getRawEvents()).containsExactly(event(20));
+      verify(first, times(2)).getNext();
+      verify(last).getNext();
+
+      var documents = this.caller.submit(client::getNext);
+      nextFetch().run();
+      assertThat(documents.get(10, TimeUnit.SECONDS).getRawEvents()).containsExactly(event(10));
+      assertThat(client.getNext().getRawEvents())
+          .containsExactly(event(49, "rename"), event(50, "invalidate"))
+          .inOrder();
+      assertThat(this.fetches).isEmpty();
+      verify(first, times(2)).getNext();
+      verify(last, times(3)).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_waitingForInvalidate_returnsOtherReadersDocuments() throws Exception {
+    var first = reader(batch(49, event(10), event(49, "rename")));
+    var second =
+        reader(batch(20, event(20)), batch(50, event(49, "rename"), event(50, "invalidate")));
+    var fetchingInvalidate = new CountDownLatch(1);
+    var releaseInvalidate = new CountDownLatch(1);
+    when(first.getNext())
+        .thenReturn(batch(49, event(10), event(49, "rename")))
+        .thenAnswer(
+            unused -> {
+              fetchingInvalidate.countDown();
+              assertThat(releaseInvalidate.await(10, TimeUnit.SECONDS)).isTrue();
+              return batch(50, event(50, "invalidate"));
+            });
+    try (var client = client(List.of(first, second), this.executor)) {
+      try {
+        var normal = this.caller.submit(client::getNext);
+        assertThat(fetchingInvalidate.await(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(normal.get(10, TimeUnit.SECONDS).getRawEvents()).containsExactly(event(20));
+        var lifecycle = this.caller.submit(client::getNext);
+        assertThat(lifecycle.isDone()).isFalse();
+        releaseInvalidate.countDown();
+        assertThat(lifecycle.get(10, TimeUnit.SECONDS).getRawEvents()).containsExactly(event(10));
+        assertThat(client.getNext().getRawEvents())
+            .containsExactly(event(49, "rename"), event(50, "invalidate"))
+            .inOrder();
+        verify(first, times(2)).getNext();
+        verify(second, times(2)).getNext();
+      } finally {
+        releaseInvalidate.countDown();
+      }
+    }
+  }
+
+  @Test
+  public void getNext_drop_stopsBeforeFetchingInvalidate() throws Exception {
+    var first = reader(batch(10, event(10, "drop")), batch(11, event(11, "invalidate")));
+    try (var client = client(List.of(first), Runnable::run)) {
+      var result = client.getNext();
+
+      assertThat(result.getRawEvents()).containsExactly(event(10, "drop"));
+      assertThat(result.getPostBatchResumeToken()).isEqualTo(token(10));
+      assertThat(result.getPartition()).hasValue(new ChangeStreamPartition(0, 1));
+      assertThrows(IllegalStateException.class, client::getNext);
+
+      verify(first).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_dropDatabase_stopsReader() throws Exception {
+    var first = reader(batch(10, event(10, "dropDatabase")));
+    try (var client = client(List.of(first), Runnable::run)) {
+      assertThat(client.getNext().getRawEvents()).containsExactly(event(10, "dropDatabase"));
+      assertThrows(IllegalStateException.class, client::getNext);
+
+      verify(first).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_standaloneInvalidate_stopsReader() throws Exception {
+    var first = reader(batch(10, event(10, "invalidate")));
+    try (var client = client(List.of(first), Runnable::run)) {
+      assertThat(client.getNext().getRawEvents()).containsExactly(event(10, "invalidate"));
+      assertThrows(IllegalStateException.class, client::getNext);
+
+      verify(first).getNext();
+    }
+  }
+
+  @Test
+  public void getNext_otherReaderFails_propagatesFailure() throws Exception {
+    var first = reader(batch(50, event(49, "rename"), event(50, "invalidate")));
+    var second = reader(batch(20, event(19)));
+    var failure = SteadyStateException.createTransient(new RuntimeException("getMore rejected"));
+    when(second.getNext()).thenThrow(failure);
+    try (var client = client(first, second)) {
+      assertThat(assertThrows(SteadyStateException.class, client::getNext))
+          .isSameInstanceAs(failure);
+      verify(first).getNext();
+      verify(second).getNext();
+    }
+  }
+
+  @Test
+  public void close_lifecycleReaderAndStalledReader_wakesCaller() throws Exception {
+    var first = reader(batch(50, event(49, "rename"), event(50, "invalidate")));
+    var second = reader(batch(20), batch(30));
+    try (var client = client(List.of(first, second), this.fetches::add)) {
+      var initial = this.caller.submit(client::getNext);
+      nextFetch().run();
+      nextFetch().run();
+      assertThat(initial.get(10, TimeUnit.SECONDS).getPostBatchResumeToken())
+          .isEqualTo(START_TOKEN);
+      var waiting =
+          this.caller.submit(() -> assertThrows(IllegalStateException.class, client::getNext));
+      var stalledFetch = nextFetch();
+
+      client.close();
+
+      assertThat(waiting.get(10, TimeUnit.SECONDS))
+          .hasMessageThat()
+          .isEqualTo("Change stream client is closed");
+      stalledFetch.run();
+      verify(first).getNext();
+      verify(second).getNext();
+      assertThat(this.fetches).isEmpty();
+    }
+  }
+
+  @Test
+  public void close_waitingForInvalidate_wakesCaller() throws Exception {
+    var first = reader(batch(50, event(49, "rename"), event(50, "invalidate")));
+    var second = reader(batch(49, event(49, "rename")));
+    var fetchingInvalidate = new CountDownLatch(1);
+    var readerClosed = new CountDownLatch(1);
+    when(second.getNext())
+        .thenReturn(batch(49, event(49, "rename")))
+        .thenAnswer(
+            unused -> {
+              fetchingInvalidate.countDown();
+              assertThat(readerClosed.await(10, TimeUnit.SECONDS)).isTrue();
+              return batch(50);
+            });
+    doAnswer(
+            unused -> {
+              readerClosed.countDown();
+              return null;
+            })
+        .when(second)
+        .close();
+    try (var client = client(List.of(first, second), this.executor)) {
+      var waiting =
+          this.caller.submit(() -> assertThrows(IllegalStateException.class, client::getNext));
+      assertThat(fetchingInvalidate.await(10, TimeUnit.SECONDS)).isTrue();
+
+      client.close();
+
+      assertThat(waiting.get(10, TimeUnit.SECONDS))
+          .hasMessageThat()
+          .isEqualTo("Change stream client is closed");
+      verify(first).close();
+      verify(second, times(2)).getNext();
+    }
+  }
+
+  private PartitionedChangeStreamClient<SteadyStateException> resumedClient(
+      BsonDocument resumeToken,
+      List<ChangeStreamMongoClient<SteadyStateException>> readers,
+      Executor executor)
+      throws SteadyStateException {
+    return PartitionedChangeStreamClient.resume(
+        readers.size(),
+        resumeToken,
+        this.mongoClient,
+        (mongo, partition, start) -> readers.get(partition.partitionId()),
+        executor,
+        SteadyStateException::wrapIfThrows);
   }
 
   private PartitionedChangeStreamClient<SteadyStateException> client(
@@ -687,6 +1675,143 @@ public class PartitionedChangeStreamClientTest {
   private PartitionedChangeStreamClient<SteadyStateException> client(
       List<ChangeStreamMongoClient<SteadyStateException>> readers, Executor executor)
       throws Exception {
+    return pacingClient(readers, executor, 0, 60);
+  }
+
+  @Test
+  public void metrics_pacingPause_countsEachTransitionOnce() throws Exception {
+    // Fast reader pulls ahead, pauses (1), catches up, pulls ahead again (2). While it stays
+    // paused, repeated passes must not add more counts.
+    var fast = reader(timedBatch(200), timedBatch(210));
+    var slow =
+        reader(timedBatch(105), timedBatch(190), timedBatch(195), timedBatch(200), timedBatch(205));
+    try (var client = metricsPacingClient(List.of(fast, slow), 100, 10)) {
+      client.getNext(); // fast delivered; fast.optime = 200
+      client.getNext(); // slowest 100: fast pauses (counter 1); slow taken, optime 105
+      assertThat(this.meterRegistry.get("changestream.partitionReaderPauses").counter().count())
+          .isEqualTo(1.0);
+
+      client.getNext(); // slowest 105: fast stays paused (no new count)
+      client.getNext(); // slowest 190 (slow's take): fast unpauses and fetches 210
+      client.getNext(); // slowest 190: fast pauses again (counter 2)
+      assertThat(this.meterRegistry.get("changestream.partitionReaderPauses").counter().count())
+          .isEqualTo(2.0);
+    }
+  }
+
+  @Test
+  public void metrics_gap_recordsLargestGapPerPass() throws Exception {
+    var fast = reader(timedBatch(200));
+    var slow = reader(timedBatch(105), timedBatch(115));
+    try (var client = metricsPacingClient(List.of(fast, slow), 100, 60)) {
+      client.getNext(); // pass 1: both at start, gap 0; fast delivered (optime 200)
+      client.getNext(); // pass 2: slowest 105, gap 95; slow delivered
+      client.getNext(); // pass 3: slowest 115, gap 85
+
+      var gap = this.meterRegistry.get("changestream.partitionReaderDifferenceSeconds").summary();
+      assertThat(gap.count()).isEqualTo(3);
+      // Pass 2 measures fast (200) against slow's untaken optime (100), before slow's take.
+      assertThat(gap.max()).isEqualTo(100.0);
+    }
+  }
+
+  @Test
+  public void metrics_gap_excludesFinishedReaders() throws Exception {
+    // The finished reader stops AHEAD of the live one (optime 200 vs 105): including it would
+    // fabricate a ~95s gap, since the live reader would be measured against it as the slowest.
+    var dropAt200 =
+        new ChangeStreamBatch(
+            List.of(event(5, "drop")),
+            new BsonDocument("_data", new BsonString("82%08X00000001".formatted(200))),
+            Optional.of(new BsonTimestamp(1, 1)));
+    var finished = reader(dropAt200);
+    var live = reader(timedBatch(105), timedBatch(110), timedBatch(115));
+    try (var client = metricsPacingClient(List.of(finished, live), 100, 60)) {
+      client.getNext();
+      client.getNext();
+      client.getNext();
+
+      var gap = this.meterRegistry.get("changestream.partitionReaderDifferenceSeconds").summary();
+      assertThat(gap.count()).isEqualTo(4);
+      assertThat(gap.max()).isEqualTo(0.0);
+    }
+  }
+
+  @Test
+  public void metrics_gap_sampledWhileEveryReaderIsStalledOrPaused() throws Exception {
+    // Reader A is stuck mid-fetch at its start optime; reader B delivers one batch, crosses the
+    // pacing gap, and is paused. No reader completes another batch, so the second getNext blocks
+    // in its wait — the poll wake must keep the gap metric sampling anyway.
+    var started = new CountDownLatch(1);
+    var releaseFetch = new CountDownLatch(1);
+    var unblocked = new CountDownLatch(1);
+    var readersClosed = new CountDownLatch(1);
+    var stuck = blockedReader(started, releaseFetch, unblocked, readersClosed);
+    var pausedPeer = reader(timedBatch(161));
+    var client =
+        new PartitionedChangeStreamClient<SteadyStateException>(
+            List.of(stuck, pausedPeer),
+            this.executor,
+            SteadyStateException::wrapIfThrows,
+            ChangeStreamUtils.resumeToken(new BsonTimestamp(100, 0)),
+            new BsonTimestamp(100, 0),
+            Duration.ofSeconds(60),
+            new MetricsFactory("changestream", this.meterRegistry));
+    client.getNextPollInterval = Duration.ofMillis(20);
+
+    var first = this.caller.submit(client::getNext);
+    assertThat(started.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(first.get(10, TimeUnit.SECONDS)).isNotNull(); // B's batch, optime 161
+
+    var second = this.caller.submit(client::getNext);
+    var gap = this.meterRegistry.get("changestream.partitionReaderDifferenceSeconds").summary();
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (gap.count() < 10 && System.nanoTime() < deadline) {
+      Thread.sleep(20);
+    }
+
+    assertThat(gap.count()).isAtLeast(10); // sampled every wake, not only at completions
+    assertThat(gap.max()).isAtLeast(61.0); // B is 61s ahead of the stuck A
+    assertThat(this.meterRegistry.get("changestream.partitionReaderPauses").counter().count())
+        .isEqualTo(1.0); // B paused once and stays paused
+
+    // Close first: the marker wakes the blocked getNext and it throws. Releasing the stuck
+    // fetch before close would race — the blocked call could consume that completion and return
+    // normally instead.
+    client.close();
+    assertThrows(ExecutionException.class, () -> second.get(10, TimeUnit.SECONDS));
+    releaseFetch.countDown();
+    assertThat(unblocked.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(readersClosed.await(10, TimeUnit.SECONDS)).isTrue();
+  }
+
+  private PartitionedChangeStreamClient<SteadyStateException> metricsPacingClient(
+      List<ChangeStreamMongoClient<SteadyStateException>> readers,
+      int startSeconds,
+      long gapSeconds)
+      throws Exception {
+    doAnswer(
+            invocation -> {
+              ((Runnable) invocation.getArgument(0)).run();
+              return null;
+            })
+        .when(this.fetchExecutor)
+        .execute(any(Runnable.class));
+    return new PartitionedChangeStreamClient<>(
+        readers,
+        this.fetchExecutor,
+        SteadyStateException::wrapIfThrows,
+        ChangeStreamUtils.resumeToken(new BsonTimestamp(startSeconds, 0)),
+        new BsonTimestamp(startSeconds, 0),
+        Duration.ofSeconds(gapSeconds),
+        new MetricsFactory("changestream", this.meterRegistry));
+  }
+
+  private PartitionedChangeStreamClient<SteadyStateException> pacingClient(
+      List<ChangeStreamMongoClient<SteadyStateException>> readers,
+      Executor executor,
+      int startSeconds,
+      long gapSeconds) {
     doAnswer(
             invocation -> {
               executor.execute(invocation.getArgument(0));
@@ -695,7 +1820,24 @@ public class PartitionedChangeStreamClientTest {
         .when(this.fetchExecutor)
         .execute(any(Runnable.class));
     return new PartitionedChangeStreamClient<>(
-        readers, this.fetchExecutor, SteadyStateException::wrapIfThrows);
+        readers,
+        this.fetchExecutor,
+        SteadyStateException::wrapIfThrows,
+        ChangeStreamUtils.resumeToken(new BsonTimestamp(startSeconds, 0)),
+        new BsonTimestamp(startSeconds, 0),
+        Duration.ofSeconds(gapSeconds));
+  }
+
+  private static ChangeStreamBatch timedBatch(int seconds) {
+    return timedBatch(new BsonTimestamp(seconds, 1));
+  }
+
+  private static ChangeStreamBatch timedBatch(BsonTimestamp optime) {
+    var token =
+        new BsonDocument(
+            "_data", new BsonString("82%08X%08X".formatted(optime.getTime(), optime.getInc())));
+    // Deliberately unrelated server time: pacing must use the token, including for empty batches.
+    return new ChangeStreamBatch(List.of(), token, Optional.of(new BsonTimestamp(10000, 1)));
   }
 
   private Runnable nextFetch() throws Exception {
@@ -759,6 +1901,12 @@ public class PartitionedChangeStreamClientTest {
     return new BsonDocument("_data", new BsonString("820000000100000001%04X".formatted(position)));
   }
 
+  private static RawBsonDocument event(BsonDocument resumeToken, String operation) {
+    return new RawBsonDocument(
+        new BsonDocument("_id", resumeToken).append("operationType", new BsonString(operation)),
+        new BsonDocumentCodec());
+  }
+
   private static RawBsonDocument event(int position) {
     return event(position, "insert");
   }
@@ -769,6 +1917,11 @@ public class PartitionedChangeStreamClientTest {
             .append("operationType", new BsonString(operation))
             .append("documentKey", new BsonDocument("_id", new BsonInt32(position))),
         new BsonDocumentCodec());
+  }
+
+  private static ChangeStreamBatch batch(BsonDocument resumeToken, RawBsonDocument... events) {
+    return new ChangeStreamBatch(
+        List.of(events), resumeToken, Optional.of(new BsonTimestamp(10000, 1)));
   }
 
   private static ChangeStreamBatch batch(int position, RawBsonDocument... events) {

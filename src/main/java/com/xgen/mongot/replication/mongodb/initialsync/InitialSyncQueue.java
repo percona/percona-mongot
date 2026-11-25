@@ -134,6 +134,8 @@ public class InitialSyncQueue {
   /** Gate for pausing initial syncs. */
   private final Gate initialSyncGate;
 
+  final InitialSyncPauseState initialSyncPauseState;
+
   private final InitialSyncConfig initialSyncConfig;
   private final Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig;
   private final FeatureFlags featureFlags;
@@ -153,7 +155,8 @@ public class InitialSyncQueue {
       InitialSyncManagerFactory managerFactory,
       Path dataPath,
       Gate initialSyncGate,
-      FeatureFlags featureFlags) {
+      FeatureFlags featureFlags,
+      InitialSyncPauseState initialSyncPauseState) {
     this.mongoClients = mongoClients;
     this.syncSourceHost = syncSourceHost;
     this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
@@ -162,6 +165,7 @@ public class InitialSyncQueue {
     this.cancelled = cancelled;
     this.inProgress = inProgress;
     this.featureFlags = featureFlags;
+    this.initialSyncPauseState = initialSyncPauseState;
 
     this.queueLock = new ReentrantLock();
     this.shutdown = false;
@@ -242,6 +246,32 @@ public class InitialSyncQueue {
       FeatureFlags featureFlags,
       Optional<MaterializedViewCollectionMetadataCatalog>
           materializedViewCollectionMetadataCatalog) {
+    return create(
+        meterRegistry,
+        mongoClientSessions,
+        syncSourceHost,
+        indexingWorkSchedulerFactory,
+        replicationConfig,
+        initialSyncConfig,
+        dataPath,
+        initialSyncGate,
+        featureFlags,
+        materializedViewCollectionMetadataCatalog,
+        new InitialSyncPauseState());
+  }
+
+  public static InitialSyncQueue create(
+      MeterRegistry meterRegistry,
+      Map<String, ClientSessionRecord> mongoClientSessions,
+      String syncSourceHost,
+      IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
+      CommonReplicationConfig replicationConfig,
+      InitialSyncConfig initialSyncConfig,
+      Path dataPath,
+      Gate initialSyncGate,
+      FeatureFlags featureFlags,
+      Optional<MaterializedViewCollectionMetadataCatalog> materializedViewCollectionMetadataCatalog,
+      InitialSyncPauseState initialSyncPauseState) {
     Check.argIsPositive(
         replicationConfig.getNumConcurrentInitialSyncs(), "numConcurrentInitialSyncs");
 
@@ -269,7 +299,8 @@ public class InitialSyncQueue {
         factory,
         dataPath,
         initialSyncGate,
-        featureFlags);
+        featureFlags,
+        initialSyncPauseState);
   }
 
   @VisibleForTesting
@@ -283,7 +314,8 @@ public class InitialSyncQueue {
       InitialSyncManagerFactory managerFactory,
       Path dataPath,
       Gate initialSyncGate,
-      FeatureFlags featureFlags) {
+      FeatureFlags featureFlags,
+      InitialSyncPauseState initialSyncPauseState) {
     Check.argIsPositive(
         replicationConfig.getNumConcurrentInitialSyncs(), "numConcurrentInitialSyncs");
 
@@ -306,7 +338,8 @@ public class InitialSyncQueue {
         managerFactory,
         dataPath,
         initialSyncGate,
-        featureFlags);
+        featureFlags,
+        initialSyncPauseState);
   }
 
   /**
@@ -480,6 +513,11 @@ public class InitialSyncQueue {
             .addKeyValue("generationId", generationId)
             .log("Initial sync for index is paused");
         throw InitialSyncException.createShutDown();
+      }
+
+      if (this.initialSyncPauseState.isPaused(indexDefinition.getIndexId())) {
+        throw InitialSyncException.createResumableTransient(
+            new PauseInitialSyncException("Initial sync for index is paused"));
       }
 
       checkState(
@@ -823,6 +861,16 @@ public class InitialSyncQueue {
               continue;
             }
 
+            if (InitialSyncQueue.this.initialSyncPauseState.isPaused(generationId.indexId)) {
+              this.concurrentSyncs.release();
+              request
+                  .getOnCompleteFuture()
+                  .completeExceptionally(
+                      InitialSyncException.createResumableTransient(
+                          new PauseInitialSyncException("Initial sync for index is paused")));
+              continue;
+            }
+
             // Run the InitialSyncManager on its own explicit thread so we can interrupt it if we
             // need to.
             OneShotSingleThreadExecutor syncExecutor =
@@ -1001,6 +1049,7 @@ public class InitialSyncQueue {
                 request.getUseNaturalOrderScan(),
                 InitialSyncQueue.this.initialSyncConfig.enableParallelNaturalOrderScan(),
                 InitialSyncQueue.this.initialSyncConfig.parallelPartitionCount(),
+                InitialSyncQueue.this.initialSyncConfig.parallelScanMaxConcurrentBatches(),
                 InitialSyncQueue.this.initialSyncGate,
                 InitialSyncQueue.this.autoEmbeddingMaterializedViewConfig,
                 InitialSyncQueue.this.featureFlags);

@@ -86,7 +86,7 @@ public class LuceneVectorIndexFieldValueHandler implements FieldValueHandler {
         NumericFieldOptions.Representation.DOUBLE,
         true);
     IndexableFieldFactory.addFloatingPointValueToSortableNumericField(
-        this.documentWrapper, this.path, supplier.get(), NumericFieldOptions.Representation.INT64);
+        this.documentWrapper, this.path, supplier.get(), NumericFieldOptions.Representation.DOUBLE);
   }
 
   @Override
@@ -128,7 +128,12 @@ public class LuceneVectorIndexFieldValueHandler implements FieldValueHandler {
     Vector vector = maybeVector.get();
     VectorIndexVectorFieldDefinition vectorField = this.fieldDefinition.get().asVectorField();
     VectorFieldSpecification specification = vectorField.specification();
-    IndexableFieldFactory.addKnnVectorField(this.documentWrapper, this.path, vector, specification);
+    IndexableFieldFactory.addKnnVectorField(
+        this.documentWrapper,
+        this.path,
+        vector,
+        specification,
+        this.documentWrapper.indexCapabilities);
   }
 
   @Override
@@ -166,7 +171,11 @@ public class LuceneVectorIndexFieldValueHandler implements FieldValueHandler {
       VectorIndexVectorFieldDefinition vectorField = this.fieldDefinition.get().asVectorField();
       VectorFieldSpecification specification = vectorField.specification();
       IndexableFieldFactory.addKnnVectorField(
-          this.documentWrapper, this.path, vector, specification);
+          this.documentWrapper,
+          this.path,
+          vector,
+          specification,
+          this.documentWrapper.indexCapabilities);
       return;
     }
 

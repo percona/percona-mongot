@@ -43,6 +43,8 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.CountResult;
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.InitialSyncIndexUnavailableException;
 import com.xgen.mongot.index.InitializedIndex;
@@ -111,7 +113,6 @@ import java.util.function.Supplier;
 import org.bson.BsonArray;
 import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
-import org.bson.BsonDouble;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
 import org.bson.BsonValue;
@@ -173,6 +174,13 @@ public class SearchCommandTest {
               new BsonDocument()
                   .append("path", new BsonString("a"))
                   .append("query", new BsonString("b")));
+
+  private static final BsonDocument SEARCH_VECTOR_SEARCH_QUERY =
+      BsonDocument.parse(
+          "{\"index\":\""
+              + INDEX_NAME
+              + "\",\"vectorSearch\":{\"path\":\"vector\","
+              + "\"queryVector\":[1.0,2.0],\"numCandidates\":10,\"limit\":5}}");
 
   private static final BsonDocument INVALID_OPERATOR_QUERY =
       new BsonDocument().append("text", new BsonDocument().append("query", new BsonString("b")));
@@ -2123,120 +2131,6 @@ public class SearchCommandTest {
         .isEqualTo(0.0);
   }
 
-  @Test
-  public void searchVectorSearchOmittedNumCandidatesWithoutAutoFlag_returnsUserError()
-      throws Exception {
-    BsonDocument vectorSearchQuery =
-        new BsonDocument()
-            .append(
-                "vectorSearch",
-                new BsonDocument()
-                    .append("path", new BsonString("embedding"))
-                    .append(
-                        "queryVector",
-                        new BsonArray(
-                            List.of(new BsonDouble(1.0), new BsonDouble(2.0), new BsonDouble(3.0))))
-                    .append("limit", new BsonInt32(10)));
-
-    SearchCommand command =
-        new SearchCommand(
-            new SearchCommand.Metrics(mockMetricsFactory()),
-            getCursorManager(),
-            new DefaultIndexCatalog(),
-            new InitializedIndexCatalog(),
-            new IncompatibleIndexes(TestMeterRegistry.get()),
-            SearchCommandDefinitionBuilder.builder()
-                .db(DATABASE_NAME)
-                .collectionName(COLLECTION_NAME)
-                .collectionUuid(COLLECTION_UUID)
-                .query(vectorSearchQuery)
-                .build(),
-            new SearchCommandsRegister.BootstrapperMetadata(
-                "testVersion",
-                "localhost",
-                () -> MongoDbServerInfo.EMPTY,
-                FeatureFlags.withDefaults().disable(Feature.AUTO_NUM_CANDIDATES).build(),
-                DynamicFeatureFlagRegistry.empty()),
-            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
-            () -> null);
-
-    BsonDocument result = command.run();
-
-    Assert.assertEquals(0, result.getInt32("ok").getValue());
-    Assert.assertTrue(
-        result
-            .getString("errmsg")
-            .getValue()
-            .contains("numCandidates is required for approximate vector search"));
-  }
-
-  @Test
-  public void searchVectorSearchOmittedNumCandidatesWithoutAutoFlag_rejectsBeforeCatalogLookup()
-      throws Exception {
-    // The omitted-numCandidates flag-off validation must run before the catalog lookup and
-    // embedding, so a request that would otherwise surface an index-unavailable error still gets
-    // the expected "numCandidates is required" user error. Set up an index that is unavailable for
-    // querying (INITIAL_SYNC) and assert the numCandidates error wins.
-    IndexCatalog catalog = mock(IndexCatalog.class);
-    InitializedIndexCatalog initializedIndexCatalog = mock(InitializedIndexCatalog.class);
-
-    var searchIndexDefinition = SearchIndex.mockSearchDefinition(new ObjectId());
-    var definitionGeneration = mockDefinitionGeneration(searchIndexDefinition);
-    com.xgen.mongot.index.SearchIndex mockSearchIndex = SearchIndex.mockIndex(definitionGeneration);
-    doThrow(
-            new InitialSyncIndexUnavailableException(
-                String.format(
-                    "cannot query search index %s while in state %s",
-                    searchIndexDefinition, IndexStatus.StatusCode.INITIAL_SYNC)))
-        .when(mockSearchIndex)
-        .throwIfUnavailableForQuerying();
-    var indexGeneration = new IndexGeneration(mockSearchIndex, definitionGeneration);
-    when(catalog.getIndex(DATABASE_NAME, COLLECTION_UUID, Optional.empty(), INDEX_NAME))
-        .thenReturn(Optional.of(indexGeneration));
-
-    BsonDocument vectorSearchQuery =
-        new BsonDocument()
-            .append(
-                "vectorSearch",
-                new BsonDocument()
-                    .append("path", new BsonString("embedding"))
-                    .append(
-                        "queryVector",
-                        new BsonArray(
-                            List.of(new BsonDouble(1.0), new BsonDouble(2.0), new BsonDouble(3.0))))
-                    .append("limit", new BsonInt32(10)));
-
-    SearchCommand command =
-        new SearchCommand(
-            new SearchCommand.Metrics(mockMetricsFactory()),
-            getCursorManager(),
-            catalog,
-            initializedIndexCatalog,
-            new IncompatibleIndexes(TestMeterRegistry.get()),
-            SearchCommandDefinitionBuilder.builder()
-                .db(DATABASE_NAME)
-                .collectionName(COLLECTION_NAME)
-                .collectionUuid(COLLECTION_UUID)
-                .query(vectorSearchQuery)
-                .build(),
-            new SearchCommandsRegister.BootstrapperMetadata(
-                "testVersion",
-                "localhost",
-                () -> MongoDbServerInfo.EMPTY,
-                FeatureFlags.withDefaults().disable(Feature.AUTO_NUM_CANDIDATES).build(),
-                DynamicFeatureFlagRegistry.empty()),
-            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
-            () -> null);
-
-    BsonDocument result = command.run();
-
-    Assert.assertEquals(0, result.getInt32("ok").getValue());
-    String errmsg = result.getString("errmsg").getValue();
-    Assert.assertTrue(errmsg.contains("numCandidates is required for approximate vector search"));
-    Assert.assertFalse(errmsg.contains("INITIAL_SYNC"));
-    verify(mockSearchIndex, never()).throwIfUnavailableForQuerying();
-  }
-
   /**
    * An empty text query on an auto-embedding field must be rejected with the auto-embedding error
    * instead of falling through to the vector path without a queryVector, where it failed with the
@@ -2313,6 +2207,10 @@ public class SearchCommandTest {
     InitializedIndexCatalog initializedIndexCatalog = mock(InitializedIndexCatalog.class);
     InitializedIndex initializedIndex = mock(InitializedSearchIndex.class);
     when(initializedIndex.getDefinition()).thenReturn(autoEmbeddingDefinition);
+    var metrics = searchVectorSearchMetrics(IndexTypeData.IndexTypeTag.TAG_SEARCH_AUTO_EMBEDDING);
+    IndexMetricsUpdater indexMetricsUpdater = mock(IndexMetricsUpdater.class);
+    when(indexMetricsUpdater.getQueryingMetricsUpdater()).thenReturn(metrics);
+    when(initializedIndex.getMetricsUpdater()).thenReturn(indexMetricsUpdater);
     when(catalog.getIndex(DATABASE_NAME, COLLECTION_UUID, Optional.empty(), INDEX_NAME))
         .thenReturn(Optional.of(indexGeneration));
     when(initializedIndexCatalog.getIndex(indexGeneration.getGenerationId()))
@@ -2340,6 +2238,15 @@ public class SearchCommandTest {
     Assert.assertEquals(
         "'query' field cannot be empty when querying Automated Embedding index",
         result.getString("errmsg").getValue());
+    // Rejected while embedding, before the reader runs: still counted as an attempt and a failure.
+    Truth.assertThat(metrics.getSearchVectorSearchQueryCounter().count()).isEqualTo(1.0);
+    Truth.assertThat(metrics.getSearchVectorSearchFailedQueryCounter().count()).isEqualTo(1.0);
+    Truth.assertThat(
+            metrics
+                .getSearchVectorSearchQueryCounter()
+                .getId()
+                .getTag(IndexTypeData.INDEX_TYPE_TAG_NAME))
+        .isEqualTo("search_auto_embedding");
   }
 
   private static SearchCommand buildSearchCommand(IndexCatalog catalog) throws Exception {
@@ -2622,5 +2529,98 @@ public class SearchCommandTest {
             });
 
     return cursorManager;
+  }
+
+  @Test
+  public void searchVectorSearch_success_countsAttemptOnly() throws Exception {
+    var metrics = searchVectorSearchMetrics(IndexTypeData.IndexTypeTag.TAG_SEARCH);
+    SearchCommand command =
+        searchVectorSearchCommand(getCursorManager(), metrics, SEARCH_VECTOR_SEARCH_QUERY);
+
+    BsonDocument result = command.run();
+
+    Assert.assertEquals(1, result.getInt32("ok").getValue());
+    Truth.assertThat(metrics.getSearchVectorSearchQueryCounter().count()).isEqualTo(1.0);
+    Truth.assertThat(metrics.getSearchVectorSearchFailedQueryCounter().count()).isEqualTo(0.0);
+  }
+
+  @Test
+  public void searchVectorSearch_executionFailure_countsAttemptAndFailure() throws Exception {
+    var metrics = searchVectorSearchMetrics(IndexTypeData.IndexTypeTag.TAG_SEARCH);
+    MongotCursorManager cursorManager = mock(MongotCursorManager.class);
+    when(cursorManager.newCursor(any(), any(), any(), any(), any(Query.class), any(), any(), any()))
+        .thenThrow(new IOException("reader failed"));
+    SearchCommand command =
+        searchVectorSearchCommand(cursorManager, metrics, SEARCH_VECTOR_SEARCH_QUERY);
+
+    BsonDocument result = command.run();
+
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Truth.assertThat(metrics.getSearchVectorSearchQueryCounter().count()).isEqualTo(1.0);
+    Truth.assertThat(metrics.getSearchVectorSearchFailedQueryCounter().count()).isEqualTo(1.0);
+  }
+
+  @Test
+  public void nonVectorSearchQuery_doesNotCountSearchVectorSearch() throws Exception {
+    var metrics = searchVectorSearchMetrics(IndexTypeData.IndexTypeTag.TAG_SEARCH);
+    SearchCommand command =
+        searchVectorSearchCommand(getCursorManager(), metrics, VALID_OPERATOR_QUERY);
+
+    BsonDocument result = command.run();
+
+    Assert.assertEquals(1, result.getInt32("ok").getValue());
+    Truth.assertThat(metrics.getSearchVectorSearchQueryCounter().count()).isEqualTo(0.0);
+    Truth.assertThat(metrics.getSearchVectorSearchFailedQueryCounter().count()).isEqualTo(0.0);
+  }
+
+  private static IndexMetricsUpdater.QueryingMetricsUpdater searchVectorSearchMetrics(
+      IndexTypeData.IndexTypeTag indexTypeTag) {
+    return new IndexMetricsUpdater.QueryingMetricsUpdater(
+        SearchIndex.mockMetricsFactory(),
+        indexTypeTag,
+        SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
+        true,
+        /* isSearchAggregationEnabled= */ true);
+  }
+
+  /** Builds a command over a resolvable, non-auto-embedding Search index using {@code metrics}. */
+  private static SearchCommand searchVectorSearchCommand(
+      MongotCursorManager cursorManager,
+      IndexMetricsUpdater.QueryingMetricsUpdater metrics,
+      BsonDocument query) {
+    var searchIndexDefinition = SearchIndex.mockSearchDefinition(new ObjectId());
+    var definitionGeneration = mockDefinitionGeneration(searchIndexDefinition);
+    com.xgen.mongot.index.SearchIndex mockSearchIndex = SearchIndex.mockIndex(definitionGeneration);
+    mockSearchIndex.setStatus(IndexStatus.steady());
+    var indexGeneration = new IndexGeneration(mockSearchIndex, definitionGeneration);
+
+    IndexCatalog catalog = mock(IndexCatalog.class);
+    when(catalog.getIndex(DATABASE_NAME, COLLECTION_UUID, Optional.empty(), INDEX_NAME))
+        .thenReturn(Optional.of(indexGeneration));
+
+    IndexMetricsUpdater indexMetricsUpdater = mock(IndexMetricsUpdater.class);
+    when(indexMetricsUpdater.getQueryingMetricsUpdater()).thenReturn(metrics);
+    InitializedIndex initializedIndex = mock(InitializedSearchIndex.class);
+    when(initializedIndex.getDefinition()).thenReturn(searchIndexDefinition);
+    when(initializedIndex.getMetricsUpdater()).thenReturn(indexMetricsUpdater);
+    InitializedIndexCatalog initializedIndexCatalog = mock(InitializedIndexCatalog.class);
+    when(initializedIndexCatalog.getIndex(indexGeneration.getGenerationId()))
+        .thenReturn(Optional.of(initializedIndex));
+
+    return new SearchCommand(
+        new SearchCommand.Metrics(mockMetricsFactory()),
+        cursorManager,
+        catalog,
+        initializedIndexCatalog,
+        new IncompatibleIndexes(TestMeterRegistry.get()),
+        SearchCommandDefinitionBuilder.builder()
+            .db(DATABASE_NAME)
+            .collectionName(COLLECTION_NAME)
+            .collectionUuid(COLLECTION_UUID)
+            .query(query)
+            .build(),
+        BOOTSTRAPPER_METADATA,
+        CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
+        () -> null);
   }
 }

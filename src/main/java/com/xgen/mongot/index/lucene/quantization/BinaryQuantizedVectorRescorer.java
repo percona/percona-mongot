@@ -22,7 +22,6 @@ import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.ReaderUtil;
-import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
@@ -100,7 +99,8 @@ public class BinaryQuantizedVectorRescorer {
     // Stage 1 - rescore query against the oversampled dequantized binary vectors
     ApproximateRescorer approximateRescorer = new ApproximateRescorer(luceneQuery, parentFilter);
     TopDocs approximatelyRescored =
-        approximateRescorer.rescore(indexSearcher, topDocs, searchCriteria.resolveNumCandidates());
+        approximateRescorer.rescore(
+            indexSearcher, topDocs, searchCriteria.resolveNumCandidates(true));
 
     // Stage 2 - rescore query against full fidelity vectors for the limited subset of docs
     FullFidelityRescorer fullFidelityRescorer =
@@ -110,7 +110,7 @@ public class BinaryQuantizedVectorRescorer {
     // towards the lower one (limit). Using a larger number improves recall, but affects latency
     // as accessing full fidelity vectors could result in page faults
     int fullFidelityLimit =
-        (int) Math.sqrt(searchCriteria.limit() * searchCriteria.resolveNumCandidates());
+        (int) Math.sqrt(searchCriteria.limit() * searchCriteria.resolveNumCandidates(true));
     TopDocs fullFidelityRescoredDocs =
         fullFidelityRescorer.rescore(indexSearcher, approximatelyRescored, fullFidelityLimit);
 
@@ -405,9 +405,12 @@ public class BinaryQuantizedVectorRescorer {
         }
         int end = i;
 
-        VectorSimilarityFunction sim =
-            getFieldInfo(segment.reader(), this.query).getVectorSimilarityFunction();
-        VectorScorer scorer = this.query.fullFidelityScorer(segment.reader(), sim);
+        Optional<VectorScorer> maybeScorer = this.query.fullFidelityScorer(segment.reader());
+        if (maybeScorer.isEmpty()) {
+          // No full-precision vectors in this segment; keep the approximate-stage scores.
+          continue;
+        }
+        VectorScorer scorer = maybeScorer.get();
 
         if (this.parentFilter.isPresent()) {
           BitSetProducer filter = this.parentFilter.get();

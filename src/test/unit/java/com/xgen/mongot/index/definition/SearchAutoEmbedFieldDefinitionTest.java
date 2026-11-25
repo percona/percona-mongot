@@ -12,6 +12,8 @@ import com.xgen.mongot.util.bson.parser.BsonParseException;
 import java.util.Map;
 import java.util.Optional;
 import org.bson.BsonDocument;
+import org.bson.BsonInt32;
+import org.bson.BsonString;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -61,24 +63,57 @@ public class SearchAutoEmbedFieldDefinitionTest {
   }
 
   @Test
-  public void fromBson_normalizesModelAndModalityToLowerCase() throws Exception {
+  public void fromBson_uppercaseModelFailsToParse() {
     BsonDocument bson =
         BsonDocument.parse(
             """
             {
               "type": "autoEmbed",
               "model": "Voyage-3-Large",
+              "modality": "text"
+            }
+            """);
+
+    BsonParseException exception = assertThrows(BsonParseException.class, () -> parse(bson));
+
+    assertThat(exception.getMessage()).contains("must be lowercase");
+  }
+
+  @Test
+  public void fromBson_uppercaseModalityFailsToParse() {
+    BsonDocument bson =
+        BsonDocument.parse(
+            """
+            {
+              "type": "autoEmbed",
+              "model": "voyage-3-large",
               "modality": "TEXT"
             }
             """);
 
-    SearchAutoEmbedFieldDefinition definition = parse(bson);
-    BsonDocument serialized = definition.fieldTypeToBson();
+    BsonParseException exception = assertThrows(BsonParseException.class, () -> parse(bson));
 
-    assertThat(definition.modelName()).isEqualTo("voyage-3-large");
-    assertThat(definition.modality()).isEqualTo("text");
-    assertThat(serialized.getString("model").getValue()).isEqualTo("voyage-3-large");
-    assertThat(serialized.getString("modality").getValue()).isEqualTo("text");
+    assertThat(exception.getMessage()).contains("must be one of [text]");
+  }
+
+  @Test
+  public void constructor_uppercaseModel_throws() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new SearchAutoEmbedFieldDefinition("Voyage-3-Large"));
+
+    assertThat(exception.getMessage()).contains("must be lowercase");
+  }
+
+  @Test
+  public void constructor_uppercaseModality_throws() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new SearchAutoEmbedFieldDefinition(MODEL, "TEXT"));
+
+    assertThat(exception.getMessage()).contains("must be one of [text]");
   }
 
   @Test
@@ -209,13 +244,13 @@ public class SearchAutoEmbedFieldDefinitionTest {
   }
 
   @Test
-  public void fromBson_omittedFields_usesModelConfigDefaults() throws Exception {
+  public void fromBson_omittedFields_usesModelConfigDefaultsAndSearchSimilarity() throws Exception {
     EmbeddingModelCatalog.clear();
     registerModel(
         "voyage-4-lite",
         512,
         VectorAutoEmbedQuantization.SCALAR,
-        Optional.of(Map.of("scalar", "cosine")));
+        Optional.of(Map.of("scalar", "dotProduct")));
     BsonDocument bson =
         BsonDocument.parse(
             """
@@ -239,28 +274,53 @@ public class SearchAutoEmbedFieldDefinitionTest {
   }
 
   @Test
-  public void fromBson_explicitQuantization_omittedSimilarity_usesModelConfigSimilarity()
+  public void fromBson_omittedSimilarity_usesSearchDefaultsAndIgnoresModelConfigSimilarity()
       throws Exception {
     EmbeddingModelCatalog.clear();
+    // Mirrors the Atlas conf-call map, whose per-quantization defaults apply only to Vector Search.
     registerModel(
-        MODEL, 1024, VectorAutoEmbedQuantization.FLOAT, Optional.of(Map.of("binary", "cosine")));
-    BsonDocument bson =
-        BsonDocument.parse(
-            """
-            {
-              "type": "autoEmbed",
-              "model": "voyage-3-large",
-              "modality": "text",
-              "numDimensions": 256,
-              "quantization": "binary"
-            }
-            """);
+        MODEL,
+        1024,
+        VectorAutoEmbedQuantization.FLOAT,
+        Optional.of(
+            Map.of(
+                "scalar", "dotProduct",
+                "float", "euclidean",
+                "binary", "euclidean",
+                "binaryNoRescore", "euclidean")));
+    Map<String, VectorSimilarity> expectedByQuantization =
+        Map.of(
+            "scalar", VectorSimilarity.COSINE,
+            "float", VectorSimilarity.DOT_PRODUCT,
+            "binary", VectorSimilarity.DOT_PRODUCT,
+            "binaryNoRescore", VectorSimilarity.EUCLIDEAN);
 
-    SearchAutoEmbedFieldDefinition definition = parse(bson);
+    for (Map.Entry<String, VectorSimilarity> expected : expectedByQuantization.entrySet()) {
+      BsonDocument bson =
+          new BsonDocument("type", new BsonString("autoEmbed"))
+              .append("model", new BsonString(MODEL))
+              .append("modality", new BsonString("text"))
+              .append("numDimensions", new BsonInt32(256))
+              .append("quantization", new BsonString(expected.getKey()));
+
+      SearchAutoEmbedFieldDefinition definition = parse(bson);
+
+      assertThat(definition.specification().similarity()).isEqualTo(expected.getValue());
+    }
+  }
+
+  @Test
+  public void constructor_modelOnly_usesSearchDefaultSimilarity() {
+    EmbeddingModelCatalog.clear();
+    registerModel(
+        MODEL,
+        1024,
+        VectorAutoEmbedQuantization.SCALAR,
+        Optional.of(Map.of("scalar", "dotProduct")));
+
+    SearchAutoEmbedFieldDefinition definition = new SearchAutoEmbedFieldDefinition(MODEL);
 
     assertThat(definition.specification().similarity()).isEqualTo(VectorSimilarity.COSINE);
-    assertThat(definition.specification().autoEmbedQuantization())
-        .isEqualTo(VectorAutoEmbedQuantization.BINARY);
   }
 
   @Test
