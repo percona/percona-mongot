@@ -4,6 +4,8 @@
 # as `prebuilt/percona-search-mongodb-bundle.tar.gz`. Here we just lay it out.
 
 export DH_VERBOSE=1
+include /usr/share/dpkg/pkg-info.mk
+include /usr/share/dpkg/architecture.mk
 TMP=$(CURDIR)/debian/tmp
 BUNDLE=$(CURDIR)/prebuilt/percona-search-mongodb-bundle.tar.gz
 
@@ -37,6 +39,14 @@ override_dh_auto_install:
 	mkdir -p $(TMP)/var/lib/mongot/tmp
 	mkdir -p $(TMP)/var/log/mongot
 	tar -xzf $(BUNDLE) -C $(TMP)/usr/lib/percona-search-mongodb --strip-components=1
+	# The bundle carries its SBOM at the root; ship it as the package SBOM under
+	# the deb's own purl instead, so there is exactly one in the package.
+	sh percona-packaging/sbom/retag.sh \
+	    $$(ls $(TMP)/usr/lib/percona-search-mongodb/percona-search-mongodb-*.cdx.json) \
+	    "pkg:deb/percona/percona-search-mongodb@$(DEB_VERSION)?arch=$(DEB_HOST_ARCH)" \
+	    "$(DEB_VERSION)" \
+	    $(TMP)/usr/share/doc/percona-search-mongodb/percona-search-mongodb-$(DEB_VERSION_UPSTREAM).cdx.json
+	rm -f $(TMP)/usr/lib/percona-search-mongodb/percona-search-mongodb-*.cdx.json
 	install -m 0755 percona-packaging/conf/mongot-wrapper.sh $(TMP)/usr/bin/mongot
 	install -m 0640 percona-packaging/conf/mongot.yml       $(TMP)/etc/mongot/mongot.yml
 	install -m 0640 percona-packaging/conf/mongot.env       $(TMP)/etc/default/mongot
@@ -48,6 +58,10 @@ override_dh_auto_install:
 override_dh_systemd_start:
 	dh_systemd_enable --name=mongot mongot.service
 	dh_systemd_start --restart-after-upgrade
+
+# keep the SBOM readable by scanners that don't unpack .gz
+override_dh_compress:
+	dh_compress -X.cdx.json
 
 override_dh_builddeb:
 	dh_builddeb -- -Zgzip

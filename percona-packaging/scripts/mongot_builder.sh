@@ -187,7 +187,7 @@ install_deps() {
           *)         yum -y install wget curl         tar gzip bzip2 zip unzip which ;;
       esac
       yum -y install make git gcc gcc-c++
-      yum -y install python3 python3-pip
+      yum -y install python3 python3-pip jq
       yum -y install rpm-build rpmdevtools systemd-rpm-macros
 
       if [ "x${RHEL}" = "x8" ]; then
@@ -210,7 +210,7 @@ install_deps() {
       done
       DEBIAN_FRONTEND=noninteractive apt-get -y install lsb-release gpg wget ca-certificates
       export DEBIAN=$(lsb_release -sc)
-      INSTALL_LIST="wget git devscripts debhelper debconf pkg-config make gcc g++ python3 python3-pip tar gzip bzip2 unzip zip ca-certificates fakeroot lintian"
+      INSTALL_LIST="wget git devscripts debhelper debconf pkg-config make gcc g++ python3 python3-pip jq tar gzip bzip2 unzip zip ca-certificates fakeroot lintian"
       if [ x"${DEBIAN}" = xjammy ]; then
           INSTALL_LIST="${INSTALL_LIST} gcc-12 g++-12"
       fi
@@ -343,6 +343,24 @@ build_mongot(){
         exit 1
     fi
     mv "${REPACK_DIR}/mongot-community" "${REPACK_DIR}/${PRODUCT}"
+
+    # CycloneDX SBOM at the bundle root. The rpm/deb stages take it from there
+    # and re-label it for their package, so it has to be in the tarball.
+    SBOM_NAME="${PRODUCT}-${VERSION}.cdx.json"
+    if ! ./percona-packaging/sbom/generate_bundle_sbom.sh \
+            --bazel="${BAZELISK} --output_user_root=${BAZEL_OUTPUT_USER_ROOT}" \
+            --platform="${PLATFORM}" \
+            --bundle="${REPACK_DIR}/${PRODUCT}" \
+            --version="${VERSION}" \
+            --release="${RELEASE}" \
+            --git_commit="${GITCOMMIT}" \
+            --tools_dir="${WORKDIR}/.sbom-tools" \
+            --output="${REPACK_DIR}/${PRODUCT}/${SBOM_NAME}"; then
+        echo "SBOM generation failed"
+        rm -rf "${REPACK_DIR}"
+        exit 1
+    fi
+
     if ! tar --owner=0 --group=0 -czf "${WORKDIR}/tarball/${OUT_NAME}" -C "${REPACK_DIR}" "${PRODUCT}"; then
         echo "Failed to repack ${OUT_NAME}"
         rm -rf "${REPACK_DIR}"
