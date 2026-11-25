@@ -255,4 +255,26 @@ maven.install(
     name = "protobuf_maven",
     lock_file = "//bazel/java:protobuf_maven_pin_info.json",
 )
+
+# protobuf's java/util is built from source and takes these from its own
+# @protobuf_maven hub, so they land on the runtime classpath next to the @maven
+# copies and both get merged into the deploy jar. Keep them on the @maven
+# versions, otherwise classes of the old jars stay in the jar and CVE scans
+# keep reporting them.
+[
+    maven.artifact(
+        name = "protobuf_maven",
+        artifact = artifact,
+        force_version = True,
+        group = group,
+        version = version,
+    )
+    for (group, artifact, version) in [
+        ("com.google.guava", "guava", "33.7.2-jre"),
+        ("com.google.guava", "failureaccess", "1.0.1"),
+        ("com.google.code.gson", "gson", "2.13.2"),
+        ("com.google.j2objc", "j2objc-annotations", "3.1"),
+        ("com.google.errorprone", "error_prone_annotations", "2.27.1"),
+    ]
+]
 use_repo(maven, "protobuf_maven")
