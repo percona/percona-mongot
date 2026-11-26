@@ -21,11 +21,16 @@ import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.ReturnScope;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
+import com.xgen.mongot.index.query.collectors.MetricDefinition;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.operators.EmbeddedDocumentScope;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.FieldPath;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.facet.range.LongRange;
@@ -75,6 +80,86 @@ public class LuceneFacetContext {
         .embeddedDocument()
         .map(EmbeddedDocumentScope::path)
         .or(() -> returnScope.map(ReturnScope::path));
+  }
+
+  /**
+   * Resolves every metric of the collector to the Lucene field holding its numeric doc values,
+   * keyed by metric name. Metrics read the {@link FieldName.TypeField#NUMBER_DOUBLE_V2} field that
+   * {@code number} fields with the (default) double representation index for every document.
+   *
+   * @throws InvalidQueryException if a path is not indexed as a {@code number} field, uses the
+   *     int64 representation (which has no double doc values to read; metrics are computed in
+   *     double precision regardless), or targets embedded documents on an index that predates
+   *     numeric V2 fields in embedded documents.
+   */
+  Map<String, String> getMetricLuceneFields(
+      MetricsCollector collector, Optional<ReturnScope> returnScope) throws InvalidQueryException {
+    Optional<FieldPath> returnScopePath = returnScope.map(ReturnScope::path);
+    Map<String, String> luceneFields = new LinkedHashMap<>();
+    for (Map.Entry<String, MetricDefinition> entry : collector.metricDefinitions().entrySet()) {
+      luceneFields.put(entry.getKey(), getMetricLuceneField(entry.getValue(), returnScopePath));
+    }
+    return luceneFields;
+  }
+
+  private String getMetricLuceneField(MetricDefinition definition, Optional<FieldPath> returnScope)
+      throws InvalidQueryException {
+    FieldPath path = FieldPath.parse(definition.path());
+    // Without this, a path outside the scope resolves through the embedded root's dynamic mapping
+    // to a field no child document has, and the metric silently comes back null or 0.0.
+    if (returnScope.isPresent() && !path.isChildOf(returnScope.get())) {
+      throw new InvalidQueryException(
+          String.format(
+              "metric path '%s' must be a descendant of returnScope.path '%s'",
+              path, returnScope.get()));
+    }
+    if (returnScope.isPresent()
+        && !this.searchIndexCapabilities.supportsEmbeddedNumericAndDateV2()) {
+      throw new InvalidQueryException(
+          "This index does not support metrics over numbers in embeddedDocuments. "
+              + "Upgrade or recreate your index to use this feature.");
+    }
+    Optional<NumberFieldDefinition> numberFieldDefinition =
+        this.fieldDefinitionResolver
+            .getFieldDefinition(path, returnScope)
+            .flatMap(FieldDefinition::numberFieldDefinition);
+    if (numberFieldDefinition.isEmpty()) {
+      String returnScopeSubstring =
+          returnScope.map(scope -> String.format(" at returnScope \"%s\"", scope)).orElse("");
+      throw new InvalidQueryException(
+          String.format(
+              "Cannot compute metric \"%s\" on field \"%s\"%s because it was not indexed as a "
+                  + "\"number\" field.",
+              definition.type().name().toLowerCase(Locale.ROOT),
+              definition.path(),
+              returnScopeSubstring));
+    }
+    NumericFieldOptions options = numberFieldDefinition.get().options();
+    if (options.representation() != NumericFieldOptions.Representation.DOUBLE) {
+      throw new InvalidQueryException(
+          String.format(
+              "Cannot compute metric \"%s\" on field \"%s\" because it is indexed with "
+                  + "representation \"%s\". Metrics read the double-precision doc values that "
+                  + "representation \"double\" indexes and always compute in double precision, "
+                  + "so integers beyond 2^53 are rounded either way; index the field with "
+                  + "representation \"double\" to use it in metrics.",
+              definition.type().name().toLowerCase(Locale.ROOT),
+              definition.path(),
+              options.representation().name().toLowerCase(Locale.ROOT)));
+    }
+    // Values of the excluded kind get no doc values, so the metric would silently cover only the
+    // other kind (e.g. an avg over the non-integral values only).
+    if (!options.indexIntegers() || !options.indexDoubles()) {
+      throw new InvalidQueryException(
+          String.format(
+              "Cannot compute metric \"%s\" on field \"%s\" because it is indexed with "
+                  + "\"%s\": false, so some of its values are not indexed; metrics require "
+                  + "\"indexIntegers\" and \"indexDoubles\" to both be true.",
+              definition.type().name().toLowerCase(Locale.ROOT),
+              definition.path(),
+              options.indexIntegers() ? "indexDoubles" : "indexIntegers"));
+    }
+    return FieldName.TypeField.NUMBER_DOUBLE_V2.getLuceneFieldName(path, returnScope);
   }
 
   /**

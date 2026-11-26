@@ -14,7 +14,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonValue;
 
 public sealed interface Collector extends DocumentEncodable
-    permits FacetCollector, AggregationCollector {
+    permits FacetCollector, AggregationCollector, MetricsCollector {
 
   /** The {@code facet} collector wire field name, shared by every {@code facet} field builder. */
   String FACET_FIELD = "facet";
@@ -31,6 +31,13 @@ public sealed interface Collector extends DocumentEncodable
         Field.builder(FACET_FIELD)
             .classField(
                 FacetCollector::fromBson10kAllowed, FacetCollector::collectorToBson10kAllowed)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
+
+    public static final Field.Optional<MetricsCollector> METRICS =
+        Field.builder("metrics")
+            .classField(MetricsCollector::fromBson, MetricsCollector::collectorToBson)
             .disallowUnknownFields()
             .optional()
             .noDefault();
@@ -67,15 +74,16 @@ public sealed interface Collector extends DocumentEncodable
    *
    * <p>Please keep Type enumeration in alphabetical order.
    *
-   * <p>Although currently facet is the only existing collector, we'll follow a structure parallel
-   * to that in Operator.java (see it for reference)
+   * <p>We follow a structure parallel to that in Operator.java (see it for reference)
    */
   enum Type {
     /** All collector types (with their associated name in MQL) */
     FACET("facet"),
 
     /** Aggregation collector type */
-    AGGREGATION("aggregation");
+    AGGREGATION("aggregation"),
+
+    METRICS("metrics");
 
     private final String name;
 
@@ -111,6 +119,8 @@ public sealed interface Collector extends DocumentEncodable
           builder.field(Fields.FACET_10K_ALLOWED, Optional.of(facetCollector)).build();
       case AggregationCollector aggregationCollector ->
           builder.field(Fields.FACET_AGGREGATION_10K, Optional.of(aggregationCollector)).build();
+      case MetricsCollector metricsCollector ->
+          builder.field(Fields.METRICS, Optional.of(metricsCollector)).build();
     };
   }
 
@@ -128,12 +138,15 @@ public sealed interface Collector extends DocumentEncodable
       return parser
           .getGroup()
           .atMostOneOf(
-              parser.getField(allow10k ? Fields.FACET_AGGREGATION_10K : Fields.FACET_AGGREGATION))
+              parser.getField(allow10k ? Fields.FACET_AGGREGATION_10K : Fields.FACET_AGGREGATION),
+              parser.getField(Fields.METRICS))
           .map(c -> (Collector) c);
     }
     return parser
         .getGroup()
-        .atMostOneOf(parser.getField(allow10k ? Fields.FACET_10K_ALLOWED : Fields.FACET))
+        .atMostOneOf(
+            parser.getField(allow10k ? Fields.FACET_10K_ALLOWED : Fields.FACET),
+            parser.getField(Fields.METRICS))
         .map(c -> (Collector) c);
   }
 

@@ -153,6 +153,16 @@ public class AutoEmbedQueryPathValidatorTest {
   }
 
   @Test
+  public void queriedPaths_metricsCollector_returnsOperatorAndMetricPaths() throws Exception {
+    assertPaths(
+        "{metrics:{operator:{exists:{path:'o'}},"
+            + "metrics:{a:{type:'avg',path:'p'},m:{type:'max',path:'q'}}}}",
+        "o",
+        "p",
+        "q");
+  }
+
+  @Test
   public void queriedPaths_embeddedScopedSort_returnsScopePaths() throws Exception {
     SearchQuery query =
         SearchQuery.fromBson(

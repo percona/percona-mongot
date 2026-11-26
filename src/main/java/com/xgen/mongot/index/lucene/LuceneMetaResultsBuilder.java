@@ -24,6 +24,7 @@ import com.xgen.mongot.index.query.aggregation.AggregationResult;
 import com.xgen.mongot.index.query.collectors.AggregationCollector;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.counts.Count;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.CheckedStream;
@@ -37,6 +38,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -49,6 +51,7 @@ import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetCounts;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.bson.BsonString;
+import org.bson.BsonValue;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -81,6 +84,29 @@ class LuceneMetaResultsBuilder {
 
   public MetaResults getCountMetaResults(TopDocs topDocs, Count.Type countType) {
     return new MetaResults(LuceneFacetResultUtil.getCount(topDocs.totalHits.value(), countType));
+  }
+
+  /**
+   * Builds the {@link MetaResults} of a metrics collector query from the accumulated state of each
+   * metric (keyed by metric name). Metrics are ordered by name, like the sharded merge pipeline
+   * orders them.
+   */
+  static MetaResults buildMetricsMetaResults(
+      long totalHits,
+      Count.Type countType,
+      MetricsCollector metricsCollector,
+      Map<String, NumericMetricAccumulator> accumulatorsByMetricName) {
+    Map<String, BsonValue> metrics = new TreeMap<>();
+    metricsCollector
+        .metricDefinitions()
+        .forEach(
+            (name, definition) ->
+                metrics.put(name, accumulatorsByMetricName.get(name).resultFor(definition.type())));
+    return new MetaResults(
+        LuceneFacetResultUtil.getCount(totalHits, countType),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of(metrics));
   }
 
   public MetaResults buildFacetMetaResults(
@@ -176,6 +202,8 @@ class LuceneMetaResultsBuilder {
         throw new UnsupportedOperationException(
             "AggregationCollector is not supported in legacy search facet");
       }
+      case MetricsCollector ignored ->
+          Check.unreachable("metrics collector queries do not build facet meta results");
     };
   }
 
@@ -203,6 +231,8 @@ class LuceneMetaResultsBuilder {
         throw new UnsupportedOperationException(
             "FacetCollector is not supported in aggregation search");
       }
+      case MetricsCollector ignored ->
+          Check.unreachable("metrics collector queries do not build aggregation meta results");
     };
   }
 
@@ -260,6 +290,8 @@ class LuceneMetaResultsBuilder {
         throw new UnsupportedOperationException(
             "AggregationCollector is not supported in drill sideways facet");
       }
+      case MetricsCollector ignored ->
+          Check.unreachable("metrics collector queries do not build facet meta results");
     };
   }
 

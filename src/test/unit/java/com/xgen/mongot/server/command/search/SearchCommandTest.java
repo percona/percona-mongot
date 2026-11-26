@@ -1047,7 +1047,7 @@ public class SearchCommandTest {
         "Query should contain either an operator [autocomplete, compound, embeddedDocument,"
             + " equals, exists, geoShape, geoWithin, hasAncestor, hasRoot, in, knnBeta,"
             + " moreLikeThis, near, phrase, queryString, range, regex, search, span, term, text,"
-            + " vectorSearch, wildcard] or a collector [facet]",
+            + " vectorSearch, wildcard] or a collector [facet, metrics]",
         result.getString("errmsg").getValue());
   }
 
@@ -1077,7 +1077,7 @@ public class SearchCommandTest {
         "Query should contain either an operator [autocomplete, compound, embeddedDocument,"
             + " equals, exists, geoShape, geoWithin, hasAncestor, hasRoot, in, knnBeta,"
             + " moreLikeThis, near, phrase, queryString, range, regex, search, span, term, text,"
-            + " vectorSearch, wildcard] or a collector [facet]",
+            + " vectorSearch, wildcard] or a collector [facet, metrics]",
         result.getString("errmsg").getValue());
   }
 

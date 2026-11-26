@@ -19,7 +19,9 @@ import com.xgen.mongot.index.query.collectors.AggregationFacetDefinition;
 import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
+import com.xgen.mongot.index.query.collectors.MetricDefinition;
 import com.xgen.mongot.index.query.collectors.MetricSpec;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.highlights.UnresolvedHighlight;
 import com.xgen.mongot.index.query.operators.AllDocumentsOperator;
 import com.xgen.mongot.index.query.operators.AutocompleteOperator;
@@ -253,6 +255,12 @@ final class AutoEmbedQueryPathValidator {
             .values()
             .forEach(facet -> collectAggregationFacetPaths(facet, paths));
         aggregationCollector.sortSpec().ifPresent(sort -> collectSortPaths(sort, paths));
+      }
+      case MetricsCollector metricsCollector -> {
+        collectOperatorPaths(metricsCollector.operator(), paths);
+        for (MetricDefinition metric : metricsCollector.metricDefinitions().values()) {
+          paths.add(FieldPath.parse(metric.path()));
+        }
       }
     }
   }

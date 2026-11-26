@@ -12,7 +12,9 @@ java_library(
         "FacetCollector.java",
         "FacetDefinition.java",
         "GenericDrillSidewaysFacetOperatorBuilder.java",
+        "MetricDefinition.java",
         "MetricSpec.java",
+        "MetricsCollector.java",
     ],
     visibility = ["//visibility:public"],
     exports = [

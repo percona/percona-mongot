@@ -33,6 +33,7 @@ import org.bson.BsonArray;
 import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
+import org.bson.BsonNull;
 import org.bson.BsonString;
 import org.junit.After;
 import org.junit.Assert;
@@ -387,6 +388,150 @@ public class ShardedSearchPlannerTest {
         ShardedSearchPlanBuilder.collector()
             .facetDocs(facetDocs)
             .bucketDoc(bucketDoc)
+            .countType("lowerBound")
+            .build();
+
+    Assert.assertEquals(expected, result);
+  }
+
+  private static BsonDocument createMetricFacetDoc(String metricName, String component) {
+    return new BsonDocument(
+        metricName + "_" + component,
+        new BsonArray(
+            List.of(
+                new BsonDocument(
+                    "$match",
+                    new BsonDocument()
+                        .append("_id.type", new BsonDocument("$eq", new BsonString("metric")))
+                        .append("_id.tag", new BsonDocument("$eq", new BsonString(metricName)))
+                        .append(
+                            "_id.bucket", new BsonDocument("$eq", new BsonString(component)))))));
+  }
+
+  private static BsonDocument first(String metricName, String component, String accumulator) {
+    return new BsonDocument(
+        "$first", new BsonString("$" + metricName + "_" + component + "." + accumulator));
+  }
+
+  private static BsonDocument nullIfMissing(BsonDocument expression) {
+    return new BsonDocument("$ifNull", new BsonArray(List.of(expression, BsonNull.VALUE)));
+  }
+
+  /**
+   * Pins the exact expression that was checked against mongod 9.0. Fed the sum buckets of two
+   * shards holding [1e16, 1.0] (sent as parts 1e16 and 1.0) and [-1e16], it returned 1.0 in every
+   * arrival order, while {@code $sum} returns 0.0 for [1e16, 1.0, -1e16]. It also returned Infinity
+   * for [Infinity, 5], NaN for [Infinity, -Infinity], Infinity for [1e308, 1e308], and 0.0 for a
+   * missing input. Re-check against mongod before changing this expression.
+   */
+  @Test
+  public void testCompensatedSumExpression() {
+    BsonDocument expected =
+        BsonDocument.parse(
+            """
+            {"$ifNull": [
+              {"$let": {
+                "vars": {"r": {"$reduce": {
+                  "input": "$x",
+                  "initialValue": {"s": 0.0, "c": 0.0},
+                  "in": {"$let": {
+                    "vars": {"t": {"$add": ["$$value.s", "$$this"]}},
+                    "in": {
+                      "s": "$$t",
+                      "c": {"$add": ["$$value.c", {"$cond": [
+                        {"$gte": [{"$abs": "$$value.s"}, {"$abs": "$$this"}]},
+                        {"$add": [{"$subtract": ["$$value.s", "$$t"]}, "$$this"]},
+                        {"$add": [{"$subtract": ["$$this", "$$t"]}, "$$value.s"]}]}]}}}}}}},
+                "in": {"$cond": [
+                  {"$in": ["$$r.s", [{"$numberDouble": "Infinity"},
+                                     {"$numberDouble": "-Infinity"}]]},
+                  "$$r.s",
+                  {"$add": ["$$r.s", "$$r.c"]}]}}},
+              0.0]}
+            """);
+    Assert.assertEquals(expected, ShardedSearchPlanner.compensatedSum(new BsonString("$x")));
+  }
+
+  @Test
+  public void testMetrics() throws Exception {
+    var query =
+        new BsonDocument(
+            "metrics",
+            new BsonDocument()
+                .append("operator", getOperatorQuery())
+                .append(
+                    "metrics",
+                    new BsonDocument()
+                        .append(
+                            "maxPrice",
+                            new BsonDocument()
+                                .append("type", new BsonString("max"))
+                                .append("path", new BsonString("price")))
+                        .append(
+                            "avgRating",
+                            new BsonDocument()
+                                .append("type", new BsonString("avg"))
+                                .append("path", new BsonString("rating")))
+                        .append(
+                            "minPrice",
+                            new BsonDocument()
+                                .append("type", new BsonString("min"))
+                                .append("path", new BsonString("price")))
+                        .append(
+                            "totalPrice",
+                            new BsonDocument()
+                                .append("type", new BsonString("sum"))
+                                .append("path", new BsonString("price")))));
+    PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan result =
+        ShardedSearchPlanner.planSearch(
+            SearchQuery.fromBson(query),
+            new PlanShardedSearchCommandDefinition.SearchFeatures(0),
+            DEFAULT_FEATURE_FLAGS);
+
+    // Metrics are emitted in name order: avgRating (sum, count), maxPrice (max), minPrice (min),
+    // totalPrice (sum).
+    var facetDocs =
+        List.of(
+            createMetricFacetDoc("avgRating", "sum"),
+            createMetricFacetDoc("avgRating", "count"),
+            createMetricFacetDoc("maxPrice", "max"),
+            createMetricFacetDoc("minPrice", "min"),
+            createMetricFacetDoc("totalPrice", "sum"));
+    var metricsDoc =
+        new BsonDocument()
+            .append(
+                "avgRating",
+                new BsonDocument(
+                    "$cond",
+                    new BsonDocument()
+                        .append(
+                            "if",
+                            new BsonDocument(
+                                "$gt",
+                                new BsonArray(
+                                    List.of(
+                                        first("avgRating", "count", "value"), new BsonInt32(0)))))
+                        .append(
+                            "then",
+                            new BsonDocument(
+                                "$divide",
+                                new BsonArray(
+                                    List.of(
+                                        ShardedSearchPlanner.compensatedSum(
+                                            first("avgRating", "sum", "metricSumParts")),
+                                        first("avgRating", "count", "value")))))
+                        .append("else", BsonNull.VALUE)))
+            // min/max buckets are absent when no shard saw a value; $ifNull keeps the field as
+            // null.
+            .append("maxPrice", nullIfMissing(first("maxPrice", "max", "metricMax")))
+            .append("minPrice", nullIfMissing(first("minPrice", "min", "metricMin")))
+            .append(
+                "totalPrice",
+                ShardedSearchPlanner.compensatedSum(first("totalPrice", "sum", "metricSumParts")));
+    PlanShardedSearchCommandResponseDefinition.ShardedSearchPlan expected =
+        ShardedSearchPlanBuilder.metrics()
+            .facetDocs(facetDocs)
+            .metricsDoc(metricsDoc)
             .countType("lowerBound")
             .build();
 

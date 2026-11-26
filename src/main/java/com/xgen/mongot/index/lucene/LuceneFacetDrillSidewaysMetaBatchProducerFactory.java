@@ -15,6 +15,8 @@ import com.xgen.mongot.index.query.ReturnScope;
 import com.xgen.mongot.index.query.collectors.AggregationCollector;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
+import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.CheckedStream;
 import com.xgen.mongot.util.FieldPath;
 import java.io.IOException;
@@ -82,6 +84,8 @@ public class LuceneFacetDrillSidewaysMetaBatchProducerFactory {
 
         return new LuceneFacetCollectorMetaBatchProducer(
             topDocs.totalHits.value(), bucketProducers, facetCollector);
+      case MetricsCollector ignored:
+        return Check.unreachable("metrics collector queries do not produce facet buckets");
       case AggregationCollector aggregationCollector:
         throw new UnsupportedOperationException(
             "Aggregation is not supported for DrillSideways query yet");

@@ -20,6 +20,7 @@ import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSide
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
 import com.xgen.mongot.index.query.collectors.MetricSpec;
+import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.operators.AllDocumentsOperator;
 import com.xgen.mongot.index.query.operators.AutocompleteOperator;
 import com.xgen.mongot.index.query.operators.CompoundOperator;
@@ -297,6 +298,8 @@ public class QueryMetricsRecorder {
         yield Streams.concat(
             getOperatorCounters(aggregationCollector.operator()), collectorTypeCounter);
       }
+      case MetricsCollector metricsCollector ->
+          Stream.concat(getOperatorCounters(metricsCollector.operator()), collectorTypeCounter);
     };
   }
 

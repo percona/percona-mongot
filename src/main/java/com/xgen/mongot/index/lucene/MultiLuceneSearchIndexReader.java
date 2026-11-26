@@ -151,10 +151,12 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
               facetMergingBatchProducer.getMetaResultsAndClose(query.count().type());
           case AggregationIntermediateBatchProducer aggregationBatchProducer ->
               aggregationBatchProducer.getMetaResultsAndClose(query.count().type());
+          case MetricsMergingBatchProducer metricsMergingBatchProducer ->
+              metricsMergingBatchProducer.getMetaResultsAndClose(query.count().type());
           default ->
               throw new IllegalStateException(
-                  "metaProducer from intermediateQuery() must be a FacetMergingBatchProducer or"
-                      + " an AggregationIntermediateBatchProducer.");
+                  "metaProducer from intermediateQuery() must be a FacetMergingBatchProducer, an "
+                      + "AggregationIntermediateBatchProducer or a MetricsMergingBatchProducer.");
         };
     return new SearchProducerAndMetaResults(result.searchBatchProducer, metaResults);
   }
@@ -176,6 +178,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
     List<AggregationIntermediateBatchProducer> aggregationBatchProducers =
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
+    List<LuceneMetricsCollectorMetaBatchProducer> metricsBatchProducers =
+        java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
 
     try {
       executeOnAllPartitions(
@@ -191,7 +195,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
                   extraBatchProducersToClose,
                   facetBatchProducers,
                   countBatchProducers,
-                  aggregationBatchProducers));
+                  aggregationBatchProducers,
+                  metricsBatchProducers));
     } catch (Exception e) {
       closeProducersOfSucceededPartitions(e, searchBatchProducers, extraBatchProducersToClose);
       throw e;
@@ -213,12 +218,14 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       mergedMetaProducer =
           AggregationIntermediateBatchProducer.merge(
               aggregationBatchProducers, this.readers.get(0).getSearchAggregationMetricsReporter());
+    } else if (!metricsBatchProducers.isEmpty()) {
+      mergedMetaProducer = new MetricsMergingBatchProducer(metricsBatchProducers);
     } else if (!countBatchProducers.isEmpty()) {
       mergedMetaProducer = new CountMergingBatchProducer(countBatchProducers);
     } else {
       return Check.unreachable(
-          "Either facetBatchProducers, aggregationBatchProducers or countBatchProducers must be"
-              + " non-empty");
+          "One of facetBatchProducers, aggregationBatchProducers, metricsBatchProducers or "
+              + "countBatchProducers must be non-empty");
     }
     return new SearchProducerAndMetaProducer(searchBatchProducer, mergedMetaProducer);
   }
@@ -464,7 +471,8 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       List<BatchProducer> extraBatchProducersToClose,
       List<LuceneFacetCollectorMetaBatchProducer> facetBatchProducers,
       List<CountMetaBatchProducer> countBatchProducers,
-      List<AggregationIntermediateBatchProducer> aggregationBatchProducers)
+      List<AggregationIntermediateBatchProducer> aggregationBatchProducers,
+      List<LuceneMetricsCollectorMetaBatchProducer> metricsBatchProducers)
       throws IOException, InvalidQueryException, InterruptedException {
     try (var indexPartitionResourceManager = Explain.maybeEnterIndexPartitionQueryContext(i)) {
       var reader = this.readers.get(i);
@@ -483,6 +491,9 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
       } else if (result.metaBatchProducer
           instanceof AggregationIntermediateBatchProducer aggregationBatchProducer) {
         aggregationBatchProducers.add(aggregationBatchProducer);
+      } else if (result.metaBatchProducer
+          instanceof LuceneMetricsCollectorMetaBatchProducer metricsMetaBatchProducer) {
+        metricsBatchProducers.add(metricsMetaBatchProducer);
       } else {
         throw new IllegalStateException(
             String.format(

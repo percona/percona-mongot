@@ -12,6 +12,7 @@ import com.xgen.mongot.index.lucene.LuceneAggregationPlanResolver.AggregationPla
 import com.xgen.mongot.index.lucene.LuceneAggregationSearchManager.AggregationQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneFacetCollectorSearchManager.FacetCollectorQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneFacetGenericDrillSidewaysSearchManager.GenericDrillSidewaysResultFacetCollectorQueryInfo;
+import com.xgen.mongot.index.lucene.LuceneMetricsCollectorSearchManager.MetricsCollectorQueryInfo;
 import com.xgen.mongot.index.lucene.quantization.BinaryQuantizedVectorRescorer;
 import com.xgen.mongot.index.lucene.query.NestedAvgVectorRescorer;
 import com.xgen.mongot.index.query.OperatorQuery;
@@ -24,6 +25,7 @@ import com.xgen.mongot.index.query.sort.SequenceToken;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.lucene.search.Query;
@@ -69,6 +71,16 @@ class LuceneSearchManagerFactory {
             indexPartitionId,
             applyLimitOnReduce,
             this.metricsUpdater.getSearchAggregationMetricsReporter()));
+  }
+
+  LuceneSearchManager<MetricsCollectorQueryInfo> newMetricsCollectorManager(
+      Query query,
+      Optional<Sort> luceneSort,
+      Optional<SequenceToken> searchAfter,
+      Collection<String> luceneFields) {
+    return new MeteredLuceneSearchManager<>(
+        this.metricsUpdater,
+        new LuceneMetricsCollectorSearchManager(query, luceneSort, searchAfter, luceneFields));
   }
 
   LuceneSearchManager<QueryInfo> newOperatorManager(
