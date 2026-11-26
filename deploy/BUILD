@@ -37,8 +37,9 @@ DISTRUSTED_ROOT_CNS = [
 
 # Strip the distrusted roots from the bundled-JDK trust store. cacerts is
 # platform-independent data, byte-identical across the linux/macos tarballs of a given
-# Temurin release (sha256-verified for 21.0.3+9 and 21.0.11+10), so each JDK family is
-# sanitized once from its linux_x86_64 repo and packaged into every platform's bundle.
+# Temurin release (sha256-verified for 21.0.3+9, 21.0.11+10 and 21.0.13.1+2), so each
+# JDK family is sanitized once from its linux_x86_64 repo and packaged into every
+# platform's bundle.
 # The JDK pkg_files exclude the stock cacerts; package_deploy_tar ships this copy in its
 # place. keytool runs on the exec platform so cross-building linux artifacts works.
 [
