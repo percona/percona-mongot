@@ -18,6 +18,7 @@ import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistryFactory;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.lifecycle.LifecycleManager;
+import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.monitor.ReplicationStateMonitor;
 import com.xgen.mongot.replication.ReplicationManagerFactory;
 import com.xgen.mongot.util.FileUtils;
@@ -58,7 +59,11 @@ public class DefaultConfigManagerMocks {
       ReplicationManagerFactory replicationManagerFactory,
       Optional<Set<ObjectId>> desiredIndexIds,
       ReplicationStateMonitor replicationStateMonitor) {
-    this(mockedDependencies, replicationManagerFactory, desiredIndexIds, replicationStateMonitor,
+    this(
+        mockedDependencies,
+        replicationManagerFactory,
+        desiredIndexIds,
+        replicationStateMonitor,
         FeatureFlags.getDefault());
   }
 
@@ -110,14 +115,29 @@ public class DefaultConfigManagerMocks {
     wrapped.configState.postInitializationFromConfigJournal();
 
     return new DefaultConfigManagerMocks(
-        wrapped, wrapped.getReplicationManagerFactory(), Optional.empty(),
-        ReplicationStateMonitor.enabled(), featureFlags);
+        wrapped,
+        wrapped.getReplicationManagerFactory(),
+        Optional.empty(),
+        ReplicationStateMonitor.enabled(),
+        featureFlags);
+  }
+
+  public static DefaultConfigManagerMocks create(ReplicationStateMonitor replicationStateMonitor)
+      throws Exception {
+    return create(getConfigJournalPath(), Optional.empty(), replicationStateMonitor);
   }
 
   public static DefaultConfigManagerMocks create(
-      ReplicationStateMonitor replicationStateMonitor)
+      ReplicationStateMonitor replicationStateMonitor, Gate autoEmbeddingReplicationGate)
       throws Exception {
-    return create(getConfigJournalPath(), Optional.empty(), replicationStateMonitor);
+    return create(
+        getConfigJournalPath(),
+        Optional.empty(),
+        ReplicationStateMonitor.builder()
+            .setInitialSyncGate(replicationStateMonitor.getInitialSyncGate())
+            .setReplicationGate(replicationStateMonitor.getReplicationGate())
+            .setAutoEmbeddingReplicationGate(autoEmbeddingReplicationGate)
+            .build());
   }
 
   public static DefaultConfigManagerMocks create(Path configJournalPath) throws Exception {
@@ -138,6 +158,23 @@ public class DefaultConfigManagerMocks {
     return create(path, Optional.of(desiredIndexIds));
   }
 
+  /**
+   * Initializes over the journal already at {@code configJournalPath} under the given feature
+   * flags, so that flag-dependent journal-read behaviour is exercised through the real
+   * DefaultConfigManager.initialize entry point.
+   */
+  public static DefaultConfigManagerMocks create(Path configJournalPath, FeatureFlags featureFlags)
+      throws Exception {
+    ConfigStateMocks wrapped = ConfigStateMocks.create(configJournalPath, false);
+
+    return new DefaultConfigManagerMocks(
+        wrapped,
+        wrapped.getReplicationManagerFactory(),
+        Optional.empty(),
+        ReplicationStateMonitor.enabled(),
+        featureFlags);
+  }
+
   static DefaultConfigManagerMocks create(
       Path configJournalPath, Optional<Set<ObjectId>> desiredIndexIds) throws Exception {
     var replicationStateMonitor = ReplicationStateMonitor.enabled();
@@ -153,7 +190,11 @@ public class DefaultConfigManagerMocks {
     wrapped.configState.postInitializationFromConfigJournal();
 
     return new DefaultConfigManagerMocks(
-        wrapped, wrapped.getReplicationManagerFactory(), desiredIndexIds, replicationStateMonitor);
+        wrapped,
+        wrapped.getReplicationManagerFactory(),
+        desiredIndexIds,
+        replicationStateMonitor,
+        FeatureFlags.getDefault());
   }
 
   public void assertOneIndexInstantiated() throws Exception {

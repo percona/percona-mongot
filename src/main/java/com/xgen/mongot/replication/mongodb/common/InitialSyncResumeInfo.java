@@ -20,10 +20,14 @@ import org.bson.json.JsonWriterSettings;
  * application, or a bufferless initial sync (which will always resume as a collection scan phase).
  *
  * <p>For a bufferless initial sync, it would be BufferlessInitialSyncIdOrderResumeInfo if _id scan
- * is used, and it would be BufferlessNaturalOrderInitialSyncResumeInfo if natural order scan is
- * used. It would be empty when there is no resumeInfo commited yet
+ * is used, BufferlessNaturalOrderInitialSyncResumeInfo if natural order scan is used, and
+ * BufferlessParallelNaturalOrderInitialSyncResumeInfo if that natural order scan was split into
+ * partitions. It would be empty when there is no resumeInfo commited yet
  */
-public abstract class InitialSyncResumeInfo implements DocumentEncodable {
+public abstract sealed class InitialSyncResumeInfo implements DocumentEncodable
+    permits BufferlessIdOrderInitialSyncResumeInfo,
+        BufferlessNaturalOrderInitialSyncResumeInfo,
+        BufferlessParallelNaturalOrderInitialSyncResumeInfo {
   protected static class Fields {
 
     @Deprecated
@@ -54,6 +58,20 @@ public abstract class InitialSyncResumeInfo implements DocumentEncodable {
             Field.builder("bufferlessNaturalOrderInitialSync")
                 .classField(
                     BufferlessNaturalOrderInitialSyncResumeInfo::deserialize,
+                    InitialSyncResumeInfo::resumeInfoToBson)
+                .disallowUnknownFields()
+                .optional()
+                .noDefault();
+
+    /**
+     * BufferlessParallelNaturalOrderInitialSyncResumeInfo stores K-cursor parallel natural-order
+     * scan resume info.
+     */
+    protected static final Field.Optional<BufferlessParallelNaturalOrderInitialSyncResumeInfo>
+        BUFFERLESS_PARALLEL_NATURAL_ORDER_INITIAL_SYNC_RESUME_INFO =
+            Field.builder("bufferlessParallelNaturalOrderInitialSync")
+                .classField(
+                    BufferlessParallelNaturalOrderInitialSyncResumeInfo::deserialize,
                     InitialSyncResumeInfo::resumeInfoToBson)
                 .disallowUnknownFields()
                 .optional()
@@ -89,6 +107,16 @@ public abstract class InitialSyncResumeInfo implements DocumentEncodable {
         .isPresent()) {
       return parser
           .getField(Fields.BUFFERLESS_NATURAL_ORDER_INITIAL_SYNC_RESUME_INFO)
+          .unwrap()
+          .map(Function.identity());
+    }
+
+    if (parser
+        .getField(Fields.BUFFERLESS_PARALLEL_NATURAL_ORDER_INITIAL_SYNC_RESUME_INFO)
+        .unwrap()
+        .isPresent()) {
+      return parser
+          .getField(Fields.BUFFERLESS_PARALLEL_NATURAL_ORDER_INITIAL_SYNC_RESUME_INFO)
           .unwrap()
           .map(Function.identity());
     }
@@ -133,6 +161,21 @@ public abstract class InitialSyncResumeInfo implements DocumentEncodable {
 
   public boolean isBufferlessNaturalOrderInitialSyncResumeInfo() {
     return this instanceof BufferlessNaturalOrderInitialSyncResumeInfo;
+  }
+
+  public boolean isBufferlessParallelNaturalOrderInitialSyncResumeInfo() {
+    return this instanceof BufferlessParallelNaturalOrderInitialSyncResumeInfo;
+  }
+
+  /**
+   * Whether this position only means something on the node that produced it. Natural-order scans,
+   * sequential and parallel alike, resume from record ids, which are node-local; _id-order scans
+   * resume from _id values, which are the same everywhere. Resuming a node-local position against a
+   * different sync source fails the $initialSyncId check and costs a full resync.
+   */
+  public boolean hasNodeLocalResumePosition() {
+    return isBufferlessNaturalOrderInitialSyncResumeInfo()
+        || isBufferlessParallelNaturalOrderInitialSyncResumeInfo();
   }
 
   /** Returns the opTime of the change stream high watermark. */

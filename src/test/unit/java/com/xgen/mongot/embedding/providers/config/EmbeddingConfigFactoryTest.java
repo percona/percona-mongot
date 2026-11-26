@@ -216,8 +216,7 @@ public class EmbeddingConfigFactoryTest {
         creds
             .getCredentialsUuID()
             .equals(
-                new HuggingFaceEmbeddingCredentials(Optional.of("hf_other"))
-                    .getCredentialsUuID()));
+                new HuggingFaceEmbeddingCredentials(Optional.of("hf_other")).getCredentialsUuID()));
     assertFalse(
         new HuggingFaceEmbeddingCredentials(Optional.empty()).getCredentialsUuID().isEmpty());
   }

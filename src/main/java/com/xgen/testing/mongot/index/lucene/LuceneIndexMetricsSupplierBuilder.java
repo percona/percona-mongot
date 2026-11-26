@@ -5,6 +5,7 @@ import static org.mockito.Mockito.when;
 
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.IndexReader;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.SearchIndexReader;
 import com.xgen.mongot.index.VectorIndexReader;
 import com.xgen.mongot.index.analyzer.definition.CustomAnalyzerDefinition;
@@ -12,6 +13,7 @@ import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
 import com.xgen.mongot.index.definition.SearchIndexCapabilities;
 import com.xgen.mongot.index.definition.VectorIndexCapabilities;
+import com.xgen.mongot.index.definition.VectorIndexFieldMapping;
 import com.xgen.mongot.index.lucene.LuceneIndexMetricValuesSupplier;
 import com.xgen.mongot.index.lucene.LuceneSearchIndexMetricValuesSupplier;
 import com.xgen.mongot.index.lucene.LuceneVectorIndexMetricValuesSupplier;
@@ -40,6 +42,9 @@ public class LuceneIndexMetricsSupplierBuilder {
   private Optional<LuceneIndexWriter> indexWriter = Optional.empty();
   private IndexDefinition.Type type = IndexDefinition.Type.SEARCH;
   private boolean isEmbedded = false;
+  private boolean hasNestedVectorFields = false;
+  private VectorIndexFieldMapping fieldMapping =
+      VectorIndexFieldMapping.create(List.of(), Optional.empty());
   private Optional<SearchFieldDefinitionResolver> resolver = Optional.empty();
   private final List<CustomAnalyzerDefinition> customAnalyzers = new ArrayList<>();
   private MeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -53,7 +58,7 @@ public class LuceneIndexMetricsSupplierBuilder {
   private LuceneIndexMetricsSupplierBuilder() {
     when(this.indexBackingStrategy.getDiskStats()).thenReturn(DiskStats.EMPTY);
   }
-  
+
   public static LuceneIndexMetricsSupplierBuilder builder() {
     return new LuceneIndexMetricsSupplierBuilder();
   }
@@ -87,6 +92,16 @@ public class LuceneIndexMetricsSupplierBuilder {
 
   public LuceneIndexMetricsSupplierBuilder isEmbedded(boolean isEmbedded) {
     this.isEmbedded = isEmbedded;
+    return this;
+  }
+
+  public LuceneIndexMetricsSupplierBuilder hasNestedVectorFields(boolean hasNestedVectorFields) {
+    this.hasNestedVectorFields = hasNestedVectorFields;
+    return this;
+  }
+
+  public LuceneIndexMetricsSupplierBuilder fieldMapping(VectorIndexFieldMapping fieldMapping) {
+    this.fieldMapping = fieldMapping;
     return this;
   }
 
@@ -150,6 +165,7 @@ public class LuceneIndexMetricsSupplierBuilder {
                 GenerationIdBuilder.create()),
             SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
             true,
+            IndexTypeData.IndexTypeTag.TAG_SEARCH,
             this.numFieldsCacheDuration,
             this.asyncRefreshExecutor,
             this.dynamicFeatureFlagRegistry);
@@ -170,8 +186,11 @@ public class LuceneIndexMetricsSupplierBuilder {
         yield LuceneVectorIndexMetricValuesSupplier.create(
             this.indexStatusSupplier,
             this.indexBackingStrategy,
-            vectorIndexReader,
             this.indexWriter.get(),
+            vectorIndexReader,
+            this.hasNestedVectorFields,
+            this.fieldMapping,
+            IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH,
             new PerIndexMetricsFactory(
                 METRICS_NAMESPACE,
                 MeterAndFtdcRegistry.createWithMeterRegistry(this.meterRegistry),

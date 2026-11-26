@@ -7,6 +7,7 @@ import static com.xgen.testing.BsonSerializationTestSuite.fromEncodable;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.google.common.truth.Truth;
@@ -14,7 +15,9 @@ import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
+import com.xgen.mongot.index.version.IndexEngine;
 import com.xgen.mongot.util.FieldPath;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonDeserializationTestSuite.TestSpecWrapper;
 import com.xgen.testing.BsonSerializationTestSuite;
@@ -24,7 +27,9 @@ import java.util.List;
 import java.util.Optional;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
+import org.bson.BsonString;
 import org.bson.types.ObjectId;
+import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -35,9 +40,201 @@ import org.junit.runners.Suite;
     value = {
       VectorIndexDefinitionTest.DeserializationTest.class,
       VectorIndexDefinitionTest.SerializationTest.class,
-      VectorIndexDefinitionTest.NestedRootTest.class
+      VectorIndexDefinitionTest.NestedRootTest.class,
+      VectorIndexDefinitionTest.IndexNamespaceTest.class,
+      VectorIndexDefinitionTest.VectorEngineTest.class
     })
 public class VectorIndexDefinitionTest {
+
+  /** One engine per index, and one vector field for the custom engine. */
+  @RunWith(org.junit.runners.JUnit4.class)
+  public static class VectorEngineTest {
+
+    @Test
+    public void mixedEnginesAreRejected() {
+      var builder =
+          VectorIndexDefinitionBuilder.builder()
+              .withCustomEngineVectorField("custom.field", 3)
+              .withDotProductVectorField("lucene.field", 3);
+      Assert.assertThrows(IllegalArgumentException.class, builder::build);
+    }
+
+    @Test
+    public void multipleCustomEngineVectorFieldsAreRejected() {
+      var builder =
+          VectorIndexDefinitionBuilder.builder()
+              .withCustomEngineVectorField("first.field", 3)
+              .withCustomEngineVectorField("second.field", 3);
+      Assert.assertThrows(IllegalArgumentException.class, builder::build);
+    }
+
+    @Test
+    public void oneCustomEngineVectorFieldWithFiltersIsAccepted() {
+      var definition =
+          VectorIndexDefinitionBuilder.builder()
+              .withCustomEngineVectorField("custom.field", 3)
+              .withFilterPath("filter.field")
+              .build();
+      Assert.assertTrue(definition.isCustomVectorEngineIndex());
+    }
+
+    @Test
+    public void multipleLuceneVectorFieldsAreAccepted() {
+      var definition =
+          VectorIndexDefinitionBuilder.builder()
+              .withDotProductVectorField("first.field", 3)
+              .withDotProductVectorField("second.field", 3)
+              .build();
+      Assert.assertFalse(definition.isCustomVectorEngineIndex());
+    }
+  }
+
+  /** Tests for VectorIndexDefinition with the indexNamespace option. */
+  @RunWith(org.junit.runners.JUnit4.class)
+  public static class IndexNamespaceTest {
+
+    private static BsonDocument namespaceBson() {
+      return new BsonDocument("path", new BsonString("tenantId"));
+    }
+
+    @Test
+    public void testGetIndexNamespace_WhenAbsent() {
+      VectorIndexDefinition definition =
+          VectorIndexDefinitionBuilder.builder()
+              .withCustomEngineVectorField("embedding", 128)
+              .build();
+
+      Truth.assertThat(definition.getIndexNamespace()).isEmpty();
+    }
+
+    @Test
+    public void testRoundTrip_WithIndexNamespace() throws Exception {
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .indexNamespace("tenantId")
+              .withCustomEngineVectorField("embedding", 128)
+              .build();
+
+      BsonDocument bson = original.toBson();
+      Truth.assertThat(bson.containsKey("indexNamespace")).isTrue();
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(bson);
+
+      Truth.assertThat(parsed.getIndexNamespace()).isPresent();
+      Truth.assertThat(parsed.getIndexNamespace().get().path())
+          .isEqualTo(FieldPath.parse("tenantId"));
+      assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testConstructor_IndexNamespaceWithoutCustomEngine_IsVectorlite() {
+      VectorIndexDefinition definition =
+          VectorIndexDefinitionBuilder.builder()
+              .indexNamespace("tenantId")
+              .withCosineVectorField("embedding", 128)
+              .build();
+
+      Assert.assertTrue(definition.isCustomVectorEngineIndex());
+      Assert.assertEquals(IndexEngine.VECTORLITE, definition.engine());
+      Truth.assertThat(definition.getVectorliteVectorField()).isPresent();
+    }
+
+    @Test
+    public void testFromBson_AcceptsIndexNamespaceWithoutCustomEngine() throws Exception {
+      BsonDocument bson =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("embedding", 128)
+              .build()
+              .toBson()
+              .append("indexNamespace", namespaceBson());
+
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(bson);
+
+      Truth.assertThat(parsed.isCustomVectorEngineIndex()).isTrue();
+      Truth.assertThat(parsed.engine()).isEqualTo(IndexEngine.VECTORLITE);
+      Truth.assertThat(parsed.getVectorliteVectorField()).isPresent();
+      Truth.assertThat(parsed.getVectorliteVectorField().get().getPath().toString())
+          .isEqualTo("embedding");
+    }
+
+    @Test
+    public void testFromBson_RejectsMultipleVectorFieldsWithIndexNamespace() {
+      BsonDocument bson =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("first.embedding", 128)
+              .withCosineVectorField("second.embedding", 128)
+              .build()
+              .toBson()
+              .append("indexNamespace", namespaceBson());
+
+      var thrown =
+          assertThrows(BsonParseException.class, () -> VectorIndexDefinition.fromBson(bson));
+      Truth.assertThat(thrown)
+          .hasMessageThat()
+          .contains("a vectorlite index supports exactly one vector field");
+    }
+
+    @Test
+    public void testConstructor_IndexNamespaceWithAutoEmbedField_Rejected() {
+      var builder =
+          VectorIndexDefinitionBuilder.builder()
+              .indexNamespace("tenantId")
+              .withAutoEmbedField("summary");
+
+      Assert.assertThrows(IllegalArgumentException.class, builder::build);
+    }
+
+    @Test
+    public void testFromBson_RejectsIndexNamespaceWithAutoEmbedField() {
+      BsonDocument bson =
+          VectorIndexDefinitionBuilder.builder()
+              .withAutoEmbedField("summary")
+              .build()
+              .toBson()
+              .append("indexNamespace", namespaceBson());
+
+      var thrown =
+          assertThrows(BsonParseException.class, () -> VectorIndexDefinition.fromBson(bson));
+      Truth.assertThat(thrown)
+          .hasMessageThat()
+          .contains("indexNamespace is only supported with vector fields of type \"vector\"");
+    }
+
+    @Test
+    public void testFromBson_AllowsIndexNamespaceWithFilterFields() throws Exception {
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .indexNamespace("tenantId")
+              .withCustomEngineVectorField("embedding", 128)
+              .withFilterPath("genre")
+              .build();
+
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(original.toBson());
+
+      Truth.assertThat(parsed.getIndexNamespace()).isPresent();
+      assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testEquals_SensitiveToIndexNamespace() {
+      VectorIndexDefinition without =
+          VectorIndexDefinitionBuilder.builder()
+              .withCustomEngineVectorField("embedding", 128)
+              .build();
+      VectorIndexDefinition with =
+          VectorIndexDefinitionBuilder.builder()
+              .indexNamespace("tenantId")
+              .withCustomEngineVectorField("embedding", 128)
+              .build();
+      VectorIndexDefinition sameAsWith =
+          VectorIndexDefinitionBuilder.builder()
+              .indexNamespace("tenantId")
+              .withCustomEngineVectorField("embedding", 128)
+              .build();
+
+      assertNotEquals(without, with);
+      assertEquals(with, sameAsWith);
+    }
+  }
 
   /** Tests for VectorIndexDefinition with nestedRoot (flat fields under an array root). */
   @RunWith(org.junit.runners.JUnit4.class)
@@ -284,6 +481,32 @@ public class VectorIndexDefinitionTest {
       Truth.assertThat(parsed.getIndexIdAtCreationTime()).isPresent();
       Truth.assertThat(parsed.getIndexIdAtCreationTime().get()).isEqualTo(indexIdAtCreationTime);
       assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testDefinitionVersionId_roundTrip() throws Exception {
+      var definitionVersionId = new ObjectId("707f191e810c19729de860ec");
+      VectorIndexDefinition original =
+          VectorIndexDefinitionBuilder.builder()
+              .withDefinitionVersionId(Optional.of(definitionVersionId))
+              .withCosineVectorField("my.vector.field", 128)
+              .build();
+
+      VectorIndexDefinition parsed = VectorIndexDefinition.fromBson(original.toBson());
+
+      Truth.assertThat(parsed.getDefinitionVersionId()).hasValue(definitionVersionId);
+      assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testDefinitionVersionId_whenNotSet_omittedFromBson() {
+      VectorIndexDefinition definition =
+          VectorIndexDefinitionBuilder.builder()
+              .withCosineVectorField("my.vector.field", 128)
+              .build();
+
+      Truth.assertThat(definition.getDefinitionVersionId()).isEmpty();
+      Truth.assertThat(definition.toBson().containsKey("definitionVersionId")).isFalse();
     }
   }
 

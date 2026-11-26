@@ -7,15 +7,21 @@ import com.google.common.annotations.VisibleForTesting;
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoException;
 import com.mongodb.MongoInterruptedException;
+import com.mongodb.ServerAddress;
 import com.xgen.mongot.index.DocsExceededLimitsException;
 import com.xgen.mongot.index.FieldExceededLimitsException;
 import com.xgen.mongot.util.functionalinterfaces.CheckedRunnable;
 import com.xgen.mongot.util.mongodb.Errors;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Stream;
+import org.bson.BsonDocument;
+import org.bson.BsonInt32;
+import org.bson.BsonString;
 import org.bson.codecs.configuration.CodecConfigurationException;
 import org.jetbrains.annotations.Nullable;
 
@@ -26,8 +32,8 @@ import org.jetbrains.annotations.Nullable;
 public class InitialSyncException extends Exception {
 
   public static final String BSON_TOO_LARGE_MESSAGE =
-      "Unrecoverable replication error due to %s payload exceeding 16MB BSON limit. Rescheduling "
-          + "new initial sync. To avoid the issue see: "
+      "Unrecoverable replication error due to %s payload exceeding 16MB BSON limit. Rescheduling"
+          + " new initial sync. To avoid the issue see: "
           + "https://www.mongodb.com/docs/atlas/atlas-search/manage-indexes/#disk--memory--and-resource-usage.";
 
   public static final String NOTABLE_SCAN_ERROR_MESSAGE =
@@ -83,6 +89,10 @@ public class InitialSyncException extends Exception {
 
   public static InitialSyncException createRequiresResync(Throwable cause, String message) {
     return new InitialSyncException(Type.REQUIRES_RESYNC, cause, message);
+  }
+
+  public static InitialSyncException createInitialSyncIdMismatch(String message) {
+    return createRequiresResync(initialSyncIdMismatch(), message);
   }
 
   public static InitialSyncException createResumableTransient(Throwable cause) {
@@ -171,8 +181,10 @@ public class InitialSyncException extends Exception {
   public static <T> T wrapIfThrows(Callable<T> callable, Phase phase) throws InitialSyncException {
     try {
       return callable.call();
-    } catch (MongoInterruptedException | InterruptedException e) {
+    } catch (MongoInterruptedException | InterruptedException | RegexInterruptedException e) {
       throw createShutDown();
+    } catch (RegexLimitExceededException e) {
+      throw new InitialSyncException(Type.ANALYSIS_LIMIT_EXCEEDED, e.getMessage());
     } catch (MongoException e) {
       if (MongoExceptionUtils.isRetryable(e)) {
         throw createResumableTransient(e);
@@ -304,6 +316,14 @@ public class InitialSyncException extends Exception {
         && mongoCommandException.getErrorCode() == Errors.INITIAL_SYNC_ID_MISMATCH.code;
   }
 
+  public static MongoCommandException initialSyncIdMismatch() {
+    return new MongoCommandException(
+        new BsonDocument()
+            .append("code", new BsonInt32(Errors.INITIAL_SYNC_ID_MISMATCH.code))
+            .append("codeName", new BsonString(Errors.INITIAL_SYNC_ID_MISMATCH.name)),
+        new ServerAddress("mongot", 0));
+  }
+
   public static boolean isBsonTooLargeError(@Nullable Throwable cause) {
     return cause instanceof MongoException mongoException
         && mongoException.getCode() == Errors.BSON_OBJECT_TOO_LARGE.code;
@@ -362,10 +382,17 @@ public class InitialSyncException extends Exception {
     /** Index has exceeded a usage field limit. */
     FIELD_EXCEEDED,
 
+    /** Custom analyzer regex matching exhausted its resource budget. */
+    ANALYSIS_LIMIT_EXCEEDED,
+
     /** Index has exceeded docs limit */
     DOCS_EXCEEDED,
 
-    /** The collection that is being replicated has been dropped or never existed. */
+    /**
+     * The collection that is being replicated was dropped: a witnessed change-stream drop event, or
+     * the collection stopped resolving after it had been resolved. A collection that was never
+     * resolvable is {@link #DOES_NOT_EXIST}, not this.
+     */
     DROPPED,
 
     /** The initial sync itself was cooperatively shut down. */

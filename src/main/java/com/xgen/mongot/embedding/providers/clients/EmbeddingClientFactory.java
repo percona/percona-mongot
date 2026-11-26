@@ -3,11 +3,11 @@ package com.xgen.mongot.embedding.providers.clients;
 import static com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.EmbeddingProvider;
 import static com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig.ServiceTier;
 
-import com.xgen.mongot.config.util.DeploymentEnvironment;
 import com.xgen.mongot.embedding.MongotMetadata;
 import com.xgen.mongot.embedding.providers.configs.EmbeddingModelConfig;
 import com.xgen.mongot.embedding.providers.congestion.DynamicSemaphore;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
@@ -139,7 +139,7 @@ public class EmbeddingClientFactory {
                 this.mongotMetadata,
                 this.deploymentEnvironment == DeploymentEnvironment.ATLAS,
                 useFlexTier);
-        // Set congestion semaphore only when flex tier is enabled 
+        // Set congestion semaphore only when flex tier is enabled
         // and congestion control semaphore is present
         if (useFlexTier) {
           voyageClient.setCongestionSemaphore(congestionControlSemaphore.get());

@@ -117,6 +117,11 @@ public class VectorIndexingAndQueryingLargeScaleTest {
         // Also reduce the target recall for binary quantization.
         this.testHarness.setTargetRecall(0.6);
       }
+      if (this.vectorType == Vector.VectorType.BIT) {
+        // Lucene #15003 caused lower recall to trade for faster merge time.
+        // TODO(CLOUDP-426611): Consider tuning target recall for bit vectors.
+        this.testHarness.setTargetRecall(0.89);
+      }
       harness.setUp(
           buildVectorIndexDefinition(
               this.vectorSimilarity, DIMENSIONS, this.numPartitions, this.vectorQuantization));
@@ -132,6 +137,7 @@ public class VectorIndexingAndQueryingLargeScaleTest {
                   .map(VectorIndexingAndQueryingTestHarness::fromNativeFloats)
                   .toList();
         }
+        case FLOAT16 -> throw new AssertionError();
         case BYTE -> {
           byte[][] byteVectors = harness.generateRandomByteVectors(NUM_VECTORS, DIMENSIONS);
           this.docs = harness.createVectorDocs(byteVectors, 0, Vector::fromBytes);

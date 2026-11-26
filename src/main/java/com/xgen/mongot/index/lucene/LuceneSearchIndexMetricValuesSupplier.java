@@ -9,6 +9,7 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.DocCounts;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.SearchIndexReader;
 import com.xgen.mongot.index.analyzer.custom.TokenizerDefinition;
@@ -18,6 +19,7 @@ import com.xgen.mongot.index.definition.SearchFieldDefinitionResolver;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.definition.StringFieldDefinition;
 import com.xgen.mongot.index.lucene.backing.IndexBackingStrategy;
+import com.xgen.mongot.index.lucene.facet.TokenFacetsStateCache;
 import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.writer.LuceneIndexWriter;
 import com.xgen.mongot.index.path.string.StringMultiFieldPath;
@@ -56,6 +58,9 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
   @VisibleForTesting
   public static final Duration DEFAULT_NUM_FIELDS_CACHE_DURATION = Duration.ofMinutes(5);
 
+  /** Shared TTL for all token-facets cache gauges: one searcher acquire and heap walk. */
+  @VisibleForTesting static final Duration TOKEN_FACETS_CACHE_SNAPSHOT_TTL = Duration.ofMinutes(1);
+
   private final SearchIndexReader indexReader;
   private final boolean hasEmbeddedFields;
   private final SearchFieldDefinitionResolver resolver;
@@ -64,6 +69,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
       new AtomicReference<>(Collections.emptyMap());
   private final Supplier<Void> numFieldsRefreshTrigger;
   private final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
+  private final Supplier<TokenFacetsStateCache.Snapshot> tokenFacetsCacheSnapshot;
 
   public static class MetricNames extends IndexMetricValuesSupplier.MetricNames {
     public static final String NUM_EMBEDDED_ROOT_DOCS = "numEmbeddedRootDocs";
@@ -84,7 +90,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
       Duration numFieldsCacheDuration,
       Executor asyncRefreshExecutor,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
-    super(indexStatusSupplier, indexBackingStrategy, searchIndexReader, luceneIndexWriter);
+    super(indexStatusSupplier, indexBackingStrategy, luceneIndexWriter);
 
     this.indexReader = searchIndexReader;
     this.hasEmbeddedFields = hasEmbeddedFields;
@@ -92,6 +98,11 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
     this.autocompleteLikeCustomAnalyzerNames =
         getAutocompleteLikeCustomAnalyzerNames(customAnalyzerDefinitions);
     this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
+    this.tokenFacetsCacheSnapshot =
+        Suppliers.memoizeWithExpiration(
+            this::loadTokenFacetsStateCacheSnapshot,
+            TOKEN_FACETS_CACHE_SNAPSHOT_TTL.toMillis(),
+            TimeUnit.MILLISECONDS);
     if (!this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
         DynamicFeatureFlags.NUM_FIELDS_PER_DATATYPE_METRIC.getName(),
         DynamicFeatureFlags.NUM_FIELDS_PER_DATATYPE_METRIC.getFallback())) {
@@ -140,6 +151,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
       PerIndexMetricsFactory indexStatsMetricFactory,
       int indexFeatureVersion,
       boolean isIndexFeatureVersionFourEnabled,
+      IndexTypeData.IndexTypeTag indexTypeTag,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
       Executor asyncRefreshExecutor) {
     return create(
@@ -153,6 +165,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
         indexStatsMetricFactory,
         indexFeatureVersion,
         isIndexFeatureVersionFourEnabled,
+        indexTypeTag,
         DEFAULT_NUM_FIELDS_CACHE_DURATION,
         asyncRefreshExecutor,
         dynamicFeatureFlagRegistry);
@@ -170,6 +183,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
       PerIndexMetricsFactory indexStatsMetricFactory,
       int indexFeatureVersion,
       boolean isIndexFeatureVersionFourEnabled,
+      IndexTypeData.IndexTypeTag indexTypeTag,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry,
       Executor asyncRefreshExecutor) {
     return create(
@@ -183,6 +197,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
         indexStatsMetricFactory,
         indexFeatureVersion,
         isIndexFeatureVersionFourEnabled,
+        indexTypeTag,
         DEFAULT_NUM_FIELDS_CACHE_DURATION,
         asyncRefreshExecutor,
         dynamicFeatureFlagRegistry);
@@ -204,6 +219,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
       PerIndexMetricsFactory indexStatsMetricFactory,
       int indexFeatureVersion,
       boolean isIndexFeatureVersionFourEnabled,
+      IndexTypeData.IndexTypeTag indexTypeTag,
       Duration numFieldsCacheDuration,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
     return create(
@@ -217,6 +233,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
         indexStatsMetricFactory,
         indexFeatureVersion,
         isIndexFeatureVersionFourEnabled,
+        indexTypeTag,
         numFieldsCacheDuration,
         Runnable::run,
         dynamicFeatureFlagRegistry);
@@ -238,6 +255,7 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
       PerIndexMetricsFactory indexStatsMetricFactory,
       int indexFeatureVersion,
       boolean isIndexFeatureVersionFourEnabled,
+      IndexTypeData.IndexTypeTag indexTypeTag,
       Duration numFieldsCacheDuration,
       Executor asyncRefreshExecutor,
       DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry) {
@@ -256,7 +274,10 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
 
     // Register common gauges after construction is complete
     supplier.registerCommonGauges(
-        indexStatsMetricFactory, indexFeatureVersion, isIndexFeatureVersionFourEnabled);
+        indexStatsMetricFactory,
+        indexFeatureVersion,
+        isIndexFeatureVersionFourEnabled,
+        indexTypeTag);
 
     // Register search-index-specific gauges
     if (supplier.hasEmbeddedFields) {
@@ -277,6 +298,31 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
               LuceneSearchIndexMetricValuesSupplier::getMaxStringFacetCardinality,
               Duration.ofMinutes(5)));
     }
+
+    // Each search index holds its own token-facets ordinal-map cache, so heap/entries/hit-rate
+    // are per-index gauges (same as maxStringFacetCardinality). They are not charged to a query.
+    // One memoized snapshot per TTL so the five gauges share a single searcher acquire and heap
+    // walk. CachedGauge cannot hold the snapshot object (it is a ToDoubleFunction).
+    indexStatsMetricFactory.perIndexObjectValueGauge(
+        MetricNames.TOKEN_FACETS_STATE_HEAP_BYTES,
+        supplier,
+        s -> s.tokenFacetsCacheSnapshot.get().heapBytes());
+    indexStatsMetricFactory.perIndexObjectValueGauge(
+        MetricNames.TOKEN_FACETS_STATE_ENTRIES,
+        supplier,
+        s -> s.tokenFacetsCacheSnapshot.get().entries());
+    indexStatsMetricFactory.perIndexObjectValueGauge(
+        MetricNames.TOKEN_FACETS_STATE_HITS,
+        supplier,
+        s -> s.tokenFacetsCacheSnapshot.get().hits());
+    indexStatsMetricFactory.perIndexObjectValueGauge(
+        MetricNames.TOKEN_FACETS_STATE_MISSES,
+        supplier,
+        s -> s.tokenFacetsCacheSnapshot.get().misses());
+    indexStatsMetricFactory.perIndexObjectValueGauge(
+        MetricNames.TOKEN_FACETS_STATE_EVICTIONS,
+        supplier,
+        s -> s.tokenFacetsCacheSnapshot.get().evictions());
 
     return supplier;
   }
@@ -461,5 +507,21 @@ public final class LuceneSearchIndexMetricValuesSupplier extends LuceneIndexMetr
         },
         Exception.class,
         0);
+  }
+
+  private TokenFacetsStateCache.Snapshot loadTokenFacetsStateCacheSnapshot() {
+    try {
+      if (!this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+          DynamicFeatureFlags.TOKEN_FACETS_CACHE_METRICS)) {
+        return TokenFacetsStateCache.Snapshot.EMPTY;
+      }
+      return Objects.requireNonNullElse(
+          this.indexReader.getTokenFacetsStateCacheSnapshot(),
+          TokenFacetsStateCache.Snapshot.EMPTY);
+    } catch (Exception e) {
+      FLOGGER.atWarning().atMostEvery(5, TimeUnit.MINUTES).withCause(e).log(
+          "Failed to snapshot token facets state cache metrics");
+      return TokenFacetsStateCache.Snapshot.EMPTY;
+    }
   }
 }

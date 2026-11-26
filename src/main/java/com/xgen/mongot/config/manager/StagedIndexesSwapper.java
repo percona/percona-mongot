@@ -6,8 +6,8 @@ import com.xgen.mongot.config.util.IndexDefinitions;
 import com.xgen.mongot.config.util.Invariants;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
-import com.xgen.mongot.index.Index;
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -36,14 +36,10 @@ class StagedIndexesSwapper {
                     return true;
                   }
 
-                  Optional<IndexStatus> mainIndexStatusOpt =
-                      configState
-                          .indexCatalog
-                          .getIndexById(staged.getDefinition().getIndexId())
-                          .map(IndexGeneration::getIndex)
-                          .map(Index::getStatus);
+                  Optional<IndexGeneration> mainIndexOpt =
+                      configState.indexCatalog.getIndexById(staged.getDefinition().getIndexId());
 
-                  if (mainIndexStatusOpt.isEmpty()) {
+                  if (mainIndexOpt.isEmpty()) {
                     // This indicates that there is no corresponding main index, which theoretically
                     // should not occur. If it does, the current behavior is to swap in these staged
                     // indexes.
@@ -54,7 +50,24 @@ class StagedIndexesSwapper {
                     return true;
                   }
 
-                  IndexStatus mainIndexStatus = mainIndexStatusOpt.get();
+                  IndexGeneration mainIndex = mainIndexOpt.get();
+                  IndexStatus mainIndexStatus = mainIndex.getIndex().getStatus();
+
+                  // A recovered auto-embedding attempt can determine that this shard does not
+                  // host the source collection. Replace its stale transient-failure predecessor
+                  // so the index reports the quiet DOES_NOT_EXIST state instead of remaining
+                  // permanently FAILED.
+                  if (staged.getIndex().getStatus().isCollectionNotFound()
+                      && AutoEmbeddingIndexGenerationFactory.isAutoEmbeddingResolutionFailed(
+                          mainIndex)) {
+                    LOG.atInfo()
+                        .addKeyValue("indexId", staged.getGenerationId().indexId)
+                        .addKeyValue("generationId", staged.getGenerationId())
+                        .log(
+                            "Converging unresolved auto-embedding index to DOES_NOT_EXIST after "
+                                + "recovered collection-not-found resolution.");
+                    return true;
+                  }
 
                   // Do the swap when both the main index and staged index are in the
                   // DOES_NOT_EXIST state due to the collection is not found on the mongod. This
@@ -69,10 +82,6 @@ class StagedIndexesSwapper {
                     }
                   }
 
-                  IndexStatus.StatusCode transientStatusCode =
-                      featureFlags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN)
-                          ? IndexStatus.StatusCode.UNKNOWN
-                          : IndexStatus.StatusCode.NOT_STARTED;
                   // or non-ready staged indexes which have a corresponding live index in any
                   // non-queryable status (case when live index has failed, got corrupted or in
                   // INITIAL_SYNC and we need to prematurely swap it with the staged one to avoid
@@ -82,15 +91,14 @@ class StagedIndexesSwapper {
                   // Allow premature swap only if the main index
                   // (1) cannot serve queries
                   // (2) cannot be recovered (due to initialization error)
-                  // (3) is not transient (UNKNOWN || NOT_STARTED depends on the feature flag) -
-                  //     the corresponding index may transition to a queryable status after
-                  //     resolving commit token.
+                  // (3) is not transient (UNKNOWN) - the corresponding index may transition to a
+                  //     queryable status after resolving commit token.
                   // (4) is not DOES_NOT_EXIST due to collection not found - this check is added
                   // to prevent premature swap when feature flag
                   // shutDownReplicationWhenCollectionNotFound is disabled
                   return !(mainIndexStatus.canServiceQueries()
                       || mainIndexStatus.canBeRecovered()
-                      || mainIndexStatus.getStatusCode().equals(transientStatusCode)
+                      || mainIndexStatus.getStatusCode().equals(IndexStatus.StatusCode.UNKNOWN)
                       || mainIndexStatus.isCollectionNotFound());
                 })
             .collect(Collectors.toList());

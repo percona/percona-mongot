@@ -55,7 +55,7 @@ public class DefaultChangeStreamMongoClient<E extends Exception>
     this.initialSyncMetricsUpdaterOpt = initialSyncMetricsUpdaterOpt;
     // TODO(CLOUDP-289914): Remove this getMoreTimer after switching to new one by
     // IndexMetricsUpdater
-    this.getMoreTimer = metricsFactory.timer("getMoreDurations");
+    this.getMoreTimer = metricsFactory.timerSec("getMoreDurations");
     this.batchSize = batchSize;
     this.cursorId = OptionalLong.empty();
     this.state = State.OPEN_CURSOR;
@@ -74,13 +74,38 @@ public class DefaultChangeStreamMongoClient<E extends Exception>
       InitialSyncMetrics initialSyncMetricsUpdater,
       Optional<Integer> batchSize)
       throws InitialSyncException {
+    return createInitialSync(
+        aggregateCommand,
+        mongoClient,
+        sessionRefresher,
+        namespace,
+        metricsFactory,
+        initialSyncMetricsUpdater,
+        batchSize,
+        InitialSyncException::wrapIfThrowsChangeStream);
+  }
+
+  /**
+   * Overload taking an explicit exception wrapper, so callers can decorate it — for example to
+   * count overload rejections (CLOUDP-441246) without instrumenting every mongod call site.
+   */
+  public static DefaultChangeStreamMongoClient<InitialSyncException> createInitialSync(
+      ChangeStreamAggregateCommand aggregateCommand,
+      MongoClient mongoClient,
+      SessionRefresher sessionRefresher,
+      MongoNamespace namespace,
+      MetricsFactory metricsFactory,
+      InitialSyncMetrics initialSyncMetricsUpdater,
+      Optional<Integer> batchSize,
+      WrapIfThrows<InitialSyncException> exceptionWrapper)
+      throws InitialSyncException {
     return create(
         aggregateCommand,
         mongoClient,
         sessionRefresher,
         metricsFactory,
         namespace,
-        InitialSyncException::wrapIfThrowsChangeStream,
+        exceptionWrapper,
         Optional.of(initialSyncMetricsUpdater),
         batchSize);
   }
@@ -103,6 +128,45 @@ public class DefaultChangeStreamMongoClient<E extends Exception>
         metricsFactory,
         namespace,
         SynonymSyncException::wrapIfThrows,
+        Optional.empty(),
+        Optional.empty());
+  }
+
+  /**
+   * The collection name mongod reports for a collection-less {@code aggregate: 1} cursor; getMore
+   * and killCursors address the cursor with it, so a database-level namespace must use it.
+   */
+  private static final String DATABASE_LEVEL_CURSOR_COLLECTION = "$cmd.aggregate";
+
+  /**
+   * Creates a new DefaultChangeStreamMongoClient for a database-level (collection-less) change
+   * stream on the supplied database.
+   *
+   * <p>A collection-less {@link ChangeStreamAggregateCommand} is sent as {@code aggregate: 1}, and
+   * mongod reports the resulting cursor's namespace as {@code <db>.$cmd.aggregate}. This factory
+   * therefore requires a collection-less command and addresses the cursor with the {@code
+   * <db>.$cmd.aggregate} namespace it constructs, so getMore and killCursors target it correctly.
+   */
+  public static DefaultChangeStreamMongoClient<SteadyStateException> createDatabaseLevel(
+      ChangeStreamAggregateCommand aggregateCommand,
+      MongoClient mongoClient,
+      SessionRefresher sessionRefresher,
+      String databaseName,
+      MetricsFactory metricsFactory)
+      throws SteadyStateException {
+    Check.checkArg(
+        aggregateCommand.isCollectionLess(),
+        "database-level change stream requires a collection-less (aggregate: 1) command so"
+            + " getMore/killCursors address the %s cursor correctly",
+        DATABASE_LEVEL_CURSOR_COLLECTION);
+    MongoNamespace namespace = new MongoNamespace(databaseName, DATABASE_LEVEL_CURSOR_COLLECTION);
+    return create(
+        aggregateCommand,
+        mongoClient,
+        sessionRefresher,
+        metricsFactory,
+        namespace,
+        SteadyStateException::wrapIfThrows,
         Optional.empty(),
         Optional.empty());
   }

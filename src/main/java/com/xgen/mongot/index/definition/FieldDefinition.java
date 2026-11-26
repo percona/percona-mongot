@@ -147,6 +147,22 @@ public record FieldDefinition(
                     && definition.get().getType() != FieldTypeDefinition.Type.DOCUMENT);
   }
 
+  /** Returns true if the field has at least one type definition among the given types. */
+  public boolean hasAnyFieldDefinitionOf(Set<FieldTypeDefinition.Type> includedTypes) {
+    return getAllDefinitions()
+        .anyMatch(
+            definition ->
+                definition.isPresent() && includedTypes.contains(definition.get().getType()));
+  }
+
+  /** Returns true if the field has any type definition other than the given types. */
+  public boolean hasFieldDefinitionsOtherThan(FieldTypeDefinition.Type... excludedTypes) {
+    ImmutableSet<FieldTypeDefinition.Type> excluded = ImmutableSet.copyOf(excludedTypes);
+    return getAllDefinitions()
+        .anyMatch(
+            definition -> definition.isPresent() && !excluded.contains(definition.get().getType()));
+  }
+
   Stream<Optional<? extends FieldTypeDefinition>> getAllDefinitions() {
     return Stream.of(
         this.autocompleteFieldDefinition,
@@ -180,8 +196,7 @@ public record FieldDefinition(
     @Var
     Optional<EmbeddedDocumentsFieldDefinition> embeddedDocumentsFieldDefinition = Optional.empty();
     @Var Optional<GeoFieldDefinition> geoFieldDefinition = Optional.empty();
-    @Var
-    Optional<SearchAutoEmbedFieldDefinition> searchAutoEmbedFieldDefinition = Optional.empty();
+    @Var Optional<SearchAutoEmbedFieldDefinition> searchAutoEmbedFieldDefinition = Optional.empty();
     @Var
     Optional<SearchIndexVectorFieldDefinition> searchIndexVectorFieldDefinition = Optional.empty();
     @Var Optional<KnnVectorFieldDefinition> knnVectorFieldDefinition = Optional.empty();
@@ -212,8 +227,7 @@ public record FieldDefinition(
         case EmbeddedDocumentsFieldDefinition fd ->
             embeddedDocumentsFieldDefinition = Optional.of(fd);
         case GeoFieldDefinition fd -> geoFieldDefinition = Optional.of(fd);
-        case SearchAutoEmbedFieldDefinition fd ->
-            searchAutoEmbedFieldDefinition = Optional.of(fd);
+        case SearchAutoEmbedFieldDefinition fd -> searchAutoEmbedFieldDefinition = Optional.of(fd);
         case SearchIndexVectorFieldDefinition fd ->
             searchIndexVectorFieldDefinition = Optional.of(fd);
         case KnnVectorFieldDefinition fd -> knnVectorFieldDefinition = Optional.of(fd);
@@ -302,11 +316,11 @@ public record FieldDefinition(
                 Set.of(
                     FieldTypeDefinition.Type.KNN_VECTOR,
                     FieldTypeDefinition.Type.VECTOR,
-                    FieldTypeDefinition.Type.AUTO_EMBED_VECTOR))
+                    FieldTypeDefinition.Type.AUTO_EMBED))
             .size();
 
     if (numVectorTypes > 1) {
-      String vectorTypes = "[knnVector, vector]";
+      String vectorTypes = "[autoEmbed, knnVector, vector]";
       return context.handleSemanticError("can only define one of " + vectorTypes);
     }
 

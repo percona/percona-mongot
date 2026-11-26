@@ -18,7 +18,7 @@ public class ApproximateVectorQueryCriteriaBuilder {
   private Optional<VectorSearchFilter> parentFilter = Optional.empty();
   private Optional<Integer> numCandidates = Optional.empty();
   private Optional<Integer> limit = Optional.empty();
-  private final Optional<VectorSearchCriteria.ExplainOptions> explainOptions = Optional.empty();
+  private Optional<VectorSearchCriteria.ExplainOptions> explainOptions = Optional.empty();
   private Optional<Boolean> returnStoredSource = Optional.empty();
   private Optional<VectorEmbeddedOptions> embeddedOptions = Optional.empty();
 
@@ -33,10 +33,10 @@ public class ApproximateVectorQueryCriteriaBuilder {
         new ApproximateVectorQueryCriteriaBuilder()
             .path(criteria.path())
             .queryVector(criteria.queryVector().orElse(null))
-            .numCandidates(criteria.numCandidates())
             .limit(criteria.limit())
             .returnStoredSource(criteria.returnStoredSource());
 
+    criteria.getNumCandidates().ifPresent(builder::numCandidates);
     criteria.filter().ifPresent(builder::filter);
     criteria.query().ifPresent(builder::query);
     criteria.parentFilter().ifPresent(builder::parentFilter);
@@ -94,12 +94,17 @@ public class ApproximateVectorQueryCriteriaBuilder {
     return this;
   }
 
+  public ApproximateVectorQueryCriteriaBuilder explainOptions(
+      VectorSearchCriteria.ExplainOptions explainOptions) {
+    this.explainOptions = Optional.of(explainOptions);
+    return this;
+  }
+
   public ApproximateVectorSearchCriteria build() {
     Check.isPresent(this.path, "path");
     Check.checkArg(
         this.queryVector.isPresent() != this.query.isPresent(),
         "one of queryVector and query must be present");
-    Check.isPresent(this.numCandidates, "numCandidates");
     Check.isPresent(this.limit, "limit");
     Check.isPresent(this.path, "path");
 
@@ -110,7 +115,7 @@ public class ApproximateVectorQueryCriteriaBuilder {
         this.filter,
         this.parentFilter,
         this.limit.get(),
-        this.numCandidates.get(),
+        this.numCandidates,
         this.explainOptions,
         this.returnStoredSource.orElse(false),
         this.embeddedOptions);

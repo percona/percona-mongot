@@ -2,6 +2,7 @@ package com.xgen.mongot.index;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Streams;
+import com.google.common.math.LongMath;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
 import com.xgen.mongot.index.path.string.UnresolvedStringPath;
@@ -11,10 +12,14 @@ import com.xgen.mongot.index.query.OperatorQuery;
 import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.SearchQuery;
 import com.xgen.mongot.index.query.VectorSearchQuery;
+import com.xgen.mongot.index.query.collectors.AggregationCollector;
+import com.xgen.mongot.index.query.collectors.AggregationFacetDefinition;
 import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo;
 import com.xgen.mongot.index.query.collectors.DrillSidewaysInfoBuilder.DrillSidewaysInfo.QueryOptimizationStatus;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
+import com.xgen.mongot.index.query.collectors.FacetDefinition;
+import com.xgen.mongot.index.query.collectors.MetricSpec;
 import com.xgen.mongot.index.query.collectors.MetricsCollector;
 import com.xgen.mongot.index.query.operators.AllDocumentsOperator;
 import com.xgen.mongot.index.query.operators.AutocompleteOperator;
@@ -52,6 +57,7 @@ import com.xgen.mongot.index.query.operators.mql.SimpleClause;
 import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
 import io.micrometer.core.instrument.Counter;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -69,12 +75,21 @@ import java.util.stream.Stream;
 public class QueryMetricsRecorder {
   private final IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater
       queryFeaturesMetricsUpdater;
+  private final SearchAggregationMetricsReporter searchAggregationMetricsReporter;
 
   @VisibleForTesting
   QueryMetricsRecorder(
       IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater
           queryFeaturesMetricsUpdater) {
+    this(queryFeaturesMetricsUpdater, SearchAggregationMetricsReporter.noop());
+  }
+
+  QueryMetricsRecorder(
+      IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater
+          queryFeaturesMetricsUpdater,
+      SearchAggregationMetricsReporter searchAggregationMetricsReporter) {
     this.queryFeaturesMetricsUpdater = queryFeaturesMetricsUpdater;
+    this.searchAggregationMetricsReporter = searchAggregationMetricsReporter;
   }
 
   public void record(Query query) {
@@ -107,21 +122,29 @@ public class QueryMetricsRecorder {
   private Stream<Counter> getQueryCounters(Query query) {
     return switch (query) {
       case SearchQuery searchQuery -> getQueryCounters(searchQuery);
-      case VectorSearchQuery vectorSearchQuery ->
-          getVectorSearchOperatorCounters(vectorSearchQuery.criteria());
+      case VectorSearchQuery vectorSearchQuery -> getQueryCounters(vectorSearchQuery);
     };
   }
 
-  private Stream<Counter> getQueryCounters(SearchQuery query) {
+  private Stream<Counter> getQueryCounters(VectorSearchQuery query) {
     return Streams.concat(
-        getQueryTypeSpecificCounters(query),
+        getVectorSearchOperatorCounters(query.criteria()), getConcurrentCounter(query));
+  }
+
+  private Stream<Counter> getQueryCounters(SearchQuery query) {
+    // Materialized rather than left lazy so the highlight branch can ask which operators the query
+    // used without walking the operator tree a second time.
+    List<Counter> queryTypeSpecificCounters = getQueryTypeSpecificCounters(query).toList();
+
+    return Streams.concat(
+        queryTypeSpecificCounters.stream(),
         getConcurrentCounter(query),
         getReturnStoredSourceCounter(query),
         getScoreDetailsCounter(query),
         getPaginationCounter(query),
         getSortCounters(query),
         getTrackingCounter(query),
-        getQueryHighlightCounters(query),
+        getQueryHighlightCounters(query, queryTypeSpecificCounters),
         getReturnScopeCounter(query));
   }
 
@@ -159,9 +182,26 @@ public class QueryMetricsRecorder {
               .filter(sortOptions -> sortOptions instanceof UserFieldSortOptions)
               .map(sortOptions -> ((UserFieldSortOptions) sortOptions).nullEmptySortPosition())
               .map(this.queryFeaturesMetricsUpdater::getNoDataSortPositionCounter);
-      return Stream.concat(sortCounter, noDataCounter);
+      return Stream.concat(Stream.concat(sortCounter, noDataCounter), getScopedSortCounter(query));
     }
     return Stream.empty();
+  }
+
+  /**
+   * Increments once (deduped by {@link #record}) if any sort key carries an inline {@code
+   * embeddedDocument} block, so we can track adoption of embeddedDocument-scoped sort.
+   */
+  private Stream<Counter> getScopedSortCounter(SearchQuery query) {
+    boolean hasScopedSort =
+        query.sortSpec().get().getSortFields().stream()
+            .map(sortField -> sortField.options())
+            .anyMatch(
+                options ->
+                    options instanceof UserFieldSortOptions userOptions
+                        && userOptions.embeddedScope().isPresent());
+    return hasScopedSort
+        ? Stream.of(this.queryFeaturesMetricsUpdater.getScopedSortCounter())
+        : Stream.empty();
   }
 
   private Stream<Counter> getTrackingCounter(SearchQuery query) {
@@ -170,17 +210,46 @@ public class QueryMetricsRecorder {
         : Stream.empty();
   }
 
-  private Stream<Counter> getQueryHighlightCounters(SearchQuery query) {
-    return query.highlight().isPresent()
-        ? Stream.concat(
-            Stream.of(this.queryFeaturesMetricsUpdater.getHighlightingCounter()),
-            maybeGetWildcardPathCounter(query.highlight().get().paths()))
-        : Stream.empty();
+  /**
+   * Counters for the query's {@code highlight} block, including its combination with autocomplete.
+   *
+   * @param queryTypeSpecificCounters the already-computed counters for this query's operators, used
+   *     to detect autocomplete without re-traversing.
+   */
+  private Stream<Counter> getQueryHighlightCounters(
+      SearchQuery query, List<Counter> queryTypeSpecificCounters) {
+    if (query.highlight().isEmpty()) {
+      return Stream.empty();
+    }
+
+    boolean usesAutocomplete =
+        queryTypeSpecificCounters.contains(
+            this.queryFeaturesMetricsUpdater.getOperatorTypeCounter(Operator.Type.AUTOCOMPLETE));
+
+    return Streams.concat(
+        Stream.of(this.queryFeaturesMetricsUpdater.getHighlightingCounter()),
+        maybeGetWildcardPathCounter(query.highlight().get().paths()),
+        usesAutocomplete
+            ? Stream.of(this.queryFeaturesMetricsUpdater.getHighlightWithAutocompleteCounter())
+            : Stream.empty());
   }
 
   private Stream<Counter> getReturnScopeCounter(SearchQuery query) {
     return query.returnScope().isPresent()
         ? Stream.of(this.queryFeaturesMetricsUpdater.getReturnScopeCounter())
+        : Stream.empty();
+  }
+
+  /**
+   * Increments once (deduped by {@link #record}) if any facet in the collector carries an inline
+   * {@code embeddedDocument} block, so we can track adoption of embeddedDocument-scoped faceting.
+   */
+  private Stream<Counter> getScopedFacetCounter(FacetCollector facetCollector) {
+    boolean hasScopedFacet =
+        facetCollector.facetDefinitions().values().stream()
+            .anyMatch(definition -> definition.embeddedDocument().isPresent());
+    return hasScopedFacet
+        ? Stream.of(this.queryFeaturesMetricsUpdater.getScopedFacetCounter())
         : Stream.empty();
   }
 
@@ -198,16 +267,122 @@ public class QueryMetricsRecorder {
     return switch (collector) {
       case FacetCollector facetCollector ->
           Stream.concat(
-              Stream.concat(getOperatorCounters(facetCollector.operator()), collectorTypeCounter),
+              Stream.concat(
+                  Stream.concat(
+                      getOperatorCounters(facetCollector.operator()), collectorTypeCounter),
+                  getScopedFacetCounter(facetCollector)),
               facetCollector
                   .drillSidewaysInfo()
                   .map(DrillSidewaysInfo::optimizationStatus)
                   .filter(status -> status != QueryOptimizationStatus.NON_DRILL_SIDEWAYS)
                   .map(this.queryFeaturesMetricsUpdater::getFacetDrillSidewaysCounter)
                   .stream());
+      case AggregationCollector aggregationCollector -> {
+        if (!this.queryFeaturesMetricsUpdater.isAggregationEnabled()) {
+          // No aggregation counter is registered while the feature flag is off.
+          yield Stream.empty();
+        }
+        this.searchAggregationMetricsReporter.recordNesting(
+            nestingDepth(aggregationCollector.facets()));
+        aggregationCollector.facets().values().stream()
+            .flatMap(QueryMetricsRecorder::groupTypes)
+            .distinct()
+            .forEach(this.searchAggregationMetricsReporter::recordGroupType);
+        aggregationCollector.facets().values().stream()
+            .flatMap(QueryMetricsRecorder::metricTypes)
+            .distinct()
+            .forEach(this.searchAggregationMetricsReporter::recordMetricType);
+        this.searchAggregationMetricsReporter.recordRequestedBuckets(
+            totalRequestedBuckets(aggregationCollector.facets()),
+            maxPathRequestedBuckets(aggregationCollector.facets()));
+        yield Streams.concat(
+            getOperatorCounters(aggregationCollector.operator()), collectorTypeCounter);
+      }
       case MetricsCollector metricsCollector ->
           Stream.concat(getOperatorCounters(metricsCollector.operator()), collectorTypeCounter);
     };
+  }
+
+  /**
+   * Metric type of every {@code aggregations} leaf in a search-aggregation facet subtree. Repeated
+   * types collapse via {@code distinct()} in the caller, so these count queries using a metric
+   * type, not occurrences of it.
+   */
+  private static Stream<com.xgen.mongot.index.query.aggregation.Operator> metricTypes(
+      AggregationFacetDefinition facet) {
+    return Stream.concat(
+        facet.aggregations().values().stream().map(MetricSpec::operator),
+        facet.facets().values().stream().flatMap(QueryMetricsRecorder::metricTypes));
+  }
+
+  /**
+   * Deepest nesting level over all top-level facet trees, so a query contributes exactly one
+   * histogram sample. A query may declare several independent top-level trees of differing depth;
+   * recording one sample per tree would inflate the histogram count past the {@code aggregation}
+   * collector count that is its denominator.
+   */
+  private static int nestingDepth(Map<String, AggregationFacetDefinition> facets) {
+    return facets.values().stream().mapToInt(QueryMetricsRecorder::subtreeDepth).max().orElse(0);
+  }
+
+  /** Levels in this subtree, counting the node itself. */
+  private static int subtreeDepth(AggregationFacetDefinition facet) {
+    return 1 + nestingDepth(facet.facets());
+  }
+
+  /**
+   * Grouping type of every node in a search-aggregation facet subtree. Repeated types collapse via
+   * {@code distinct()} in the caller, so these count queries using a grouping type, not occurrences
+   * of it.
+   */
+  private static Stream<FacetDefinition.Type> groupTypes(AggregationFacetDefinition facet) {
+    return Stream.concat(
+        Stream.of(facet.group().getType()),
+        facet.facets().values().stream().flatMap(QueryMetricsRecorder::groupTypes));
+  }
+
+  /**
+   * A query's total requested bucket space: the product of requested bucket counts down each
+   * root-to-leaf path, summed over every path in every top-level tree. The product is what a nested
+   * path actually asks for — a child's ordinal space is sized by the product of its ancestors'
+   * bucket counts — so summing the nodes would badly understate a deep tree.
+   *
+   * <p>Saturating arithmetic throughout: nothing bounds tree depth today (AggregationValidator
+   * enforces no maximum), and a deep enough tree of 10k-bucket nodes overflows a long. Samples
+   * above the 1M SLO bound (including {@code Long.MAX_VALUE}) are counted in the histogram's {@code
+   * +Inf} bucket, which is the right answer for "absurdly large ask".
+   */
+  private static long totalRequestedBuckets(Map<String, AggregationFacetDefinition> facets) {
+    return facets.values().stream()
+        .mapToLong(QueryMetricsRecorder::subtreeRequestedBuckets)
+        .reduce(0, LongMath::saturatedAdd);
+  }
+
+  private static long subtreeRequestedBuckets(AggregationFacetDefinition facet) {
+    return LongMath.saturatedMultiply(
+        requestedBucketCount(facet), Math.max(1, totalRequestedBuckets(facet.facets())));
+  }
+
+  /** The largest single root-to-leaf requested bucket space, over every top-level tree. */
+  private static long maxPathRequestedBuckets(Map<String, AggregationFacetDefinition> facets) {
+    return facets.values().stream()
+        .mapToLong(QueryMetricsRecorder::maxSubtreePathBuckets)
+        .max()
+        .orElse(0);
+  }
+
+  private static long maxSubtreePathBuckets(AggregationFacetDefinition facet) {
+    return LongMath.saturatedMultiply(
+        requestedBucketCount(facet), Math.max(1, maxPathRequestedBuckets(facet.facets())));
+  }
+
+  /**
+   * The node's own requested bucket count, read off its grouping payload by the same helper the
+   * legacy {@code totalFacetBucketsPerQuery} metric uses, so the two metrics count a grouping the
+   * same way.
+   */
+  private static long requestedBucketCount(AggregationFacetDefinition facet) {
+    return FacetCollector.requestedBucketCount(facet.group());
   }
 
   private Stream<Counter> getOperatorCounters(Operator operator) {
@@ -300,9 +475,20 @@ public class QueryMetricsRecorder {
         Stream.of(
             this.queryFeaturesMetricsUpdater.getVectorSearchQueryTypeCounter(
                 criteria.getVectorSearchType()));
+    // Auto-embedding queries carry a text query instead of a queryVector at record time, so they
+    // contribute no encoding sample; the embedded vector mongot generates is not a user-supplied
+    // encoding.
+    Stream<Counter> vectorSearchQueryVectorEncodingCounter =
+        criteria
+            .queryVector()
+            .map(
+                vector ->
+                    this.queryFeaturesMetricsUpdater.getVectorSearchQueryVectorEncodingCounter(
+                        vector.getBsonEncoding()))
+            .stream();
     Optional<VectorSearchFilter> maybeFilter = criteria.filter();
     if (maybeFilter.isEmpty()) {
-      return vectorSearchTypeCounter;
+      return Stream.concat(vectorSearchTypeCounter, vectorSearchQueryVectorEncodingCounter);
     }
 
     var vectorSearchWithFilterCounter =
@@ -329,7 +515,10 @@ public class QueryMetricsRecorder {
         };
 
     return Streams.concat(
-        vectorSearchTypeCounter, filterTypeCounters, vectorSearchWithFilterCounter);
+        vectorSearchTypeCounter,
+        vectorSearchQueryVectorEncodingCounter,
+        filterTypeCounters,
+        vectorSearchWithFilterCounter);
   }
 
   private Stream<Counter> getCompoundStatCounters(CompoundOperator compoundOperator) {

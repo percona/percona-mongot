@@ -5,11 +5,15 @@ import com.xgen.mongot.index.IndexMetricsUpdater.ReplicationMetricsUpdater.Initi
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoClient;
+import com.xgen.mongot.replication.mongodb.common.CollectionSamplingMongoClient;
 import com.xgen.mongot.replication.mongodb.common.CollectionScanMongoClient;
+import com.xgen.mongot.replication.mongodb.common.CollectionStatsMongoClient;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncException;
+import com.xgen.mongot.replication.mongodb.common.PartitionPlanningMongoClient;
 import com.xgen.mongot.util.mongodb.ChangeStreamAggregateCommand;
 import com.xgen.mongot.util.mongodb.CollectionScanAggregateCommand;
 import com.xgen.mongot.util.mongodb.CollectionScanFindCommand;
+import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import java.util.Optional;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
@@ -23,8 +27,17 @@ interface InitialSyncMongoClient {
   void ensureCollectionNameUnchanged(IndexDefinition indexDefinition, String expectedCollectionName)
       throws InitialSyncException;
 
-  String resolveAndUpdateCollectionName(IndexDefinition indexDefinition)
+  MongoDbCollectionInfo resolveAndUpdateCollectionName(IndexDefinition indexDefinition)
       throws InitialSyncException;
+
+  /** Returns the collection statistics client used by partition planning to size the collection. */
+  CollectionStatsMongoClient getCollectionStatsMongoClient();
+
+  /** Returns the client issuing the source-side reads used by partition planning. */
+  PartitionPlanningMongoClient getPartitionPlanningMongoClient();
+
+  /** Returns the sampling client used by partition planning. */
+  CollectionSamplingMongoClient getCollectionSamplingMongoClient();
 
   /**
    * Retrieves the majority-committed operation time from the mongod. See mongod documentation at

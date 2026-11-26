@@ -5,6 +5,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.Appender;
 import ch.qos.logback.core.ConsoleAppender;
 import ch.qos.logback.core.FileAppender;
 import org.slf4j.LoggerFactory;
@@ -57,8 +58,7 @@ public class Logging {
         && LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) instanceof Logger logger
         && logger.iteratorForAppenders().next() instanceof AsyncAppender asyncAppender
         && asyncAppender.iteratorForAppenders().next()
-        instanceof ConsoleAppender<ILoggingEvent> consoleAppender
-    ) {
+            instanceof ConsoleAppender<ILoggingEvent> consoleAppender) {
 
       // Create a file appender with the existing encoder.
       var encoder = consoleAppender.getEncoder();
@@ -78,5 +78,24 @@ public class Logging {
       newAsyncAppender.start();
       logger.addAppender(newAsyncAppender);
     }
+  }
+
+  /**
+   * Attaches an additional appender to the root logger, appending after any existing appenders.
+   *
+   * <p>Call this after {@link #enableFileAppender(String)}: that method calls {@code
+   * detachAndStopAllAppenders()} and installs a fresh {@link AsyncAppender}, so an appender
+   * attached before it would be detached. Appending (never prepending) also keeps {@code
+   * enableFileAppender}'s assumption that the root's first appender is the async console appender.
+   */
+  public static void attachRootAppender(Appender<ILoggingEvent> appender) {
+    Logger root = (Logger) LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
+    if (appender.getContext() == null) {
+      appender.setContext(root.getLoggerContext());
+    }
+    if (!appender.isStarted()) {
+      appender.start();
+    }
+    root.addAppender(appender);
   }
 }

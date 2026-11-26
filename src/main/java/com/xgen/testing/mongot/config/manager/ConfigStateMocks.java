@@ -21,6 +21,7 @@ import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.config.backup.ConfigJournalV1;
 import com.xgen.mongot.config.backup.JournalWriter;
 import com.xgen.mongot.config.manager.ConfigState;
+import com.xgen.mongot.config.manager.IncompatibleIndexes;
 import com.xgen.mongot.config.manager.IndexActions;
 import com.xgen.mongot.config.manager.PhasingOutIndexes;
 import com.xgen.mongot.config.manager.StagedIndexes;
@@ -43,12 +44,14 @@ import com.xgen.mongot.index.analyzer.definition.OverriddenBaseAnalyzerDefinitio
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexFactory;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.lifecycle.DefaultLifecycleManager;
 import com.xgen.mongot.lifecycle.LifecycleConfig;
 import com.xgen.mongot.lifecycle.LifecycleManager;
 import com.xgen.mongot.metrics.MetricsFactory;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.ReplicationManager;
@@ -75,7 +78,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.rules.TemporaryFolder;
+import org.mockito.Answers;
 import org.mockito.Mockito;
+import org.mockito.stubbing.Answer;
 
 /** Spied versions of all the dependencies of the config.manager package. */
 public class ConfigStateMocks {
@@ -107,7 +112,10 @@ public class ConfigStateMocks {
               Optional.of(1024),
               Optional.of(EmbeddingServiceConfig.TruncationOption.NONE),
               Optional.of(100),
-              Optional.of(120_000)),
+              Optional.of(120_000),
+              Optional.of("text"),
+              Optional.of(VectorAutoEmbedQuantization.FLOAT),
+              Optional.empty()),
           new EmbeddingServiceConfig.ErrorHandlingConfig(3, 100L, 200L, 0.1),
           new EmbeddingServiceConfig.VoyageEmbeddingCredentials(
               "token123", "2024-10-15T22:32:20.925Z"),
@@ -130,6 +138,7 @@ public class ConfigStateMocks {
   public final StagedIndexes staged;
   public final IndexCatalog indexCatalog;
   public final PhasingOutIndexes phasingOut;
+  public final IncompatibleIndexes incompatibleIndexes;
   public final InitializedIndexCatalog initializedIndexCatalog;
 
   public final MongotCursorManager cursorManager;
@@ -182,6 +191,7 @@ public class ConfigStateMocks {
     this.lifecycleManager = lifecycleManager;
     this.staged = spy(new StagedIndexes());
     this.phasingOut = spy(new PhasingOutIndexes());
+    this.incompatibleIndexes = spy(new IncompatibleIndexes(this.meterRegistry));
     this.dynamicFeatureFlagRegistry = dynamicFeatureFlagRegistry;
     this.embeddingServiceManagerSupplier =
         Suppliers.ofInstance(
@@ -197,6 +207,7 @@ public class ConfigStateMocks {
             ConfigState.create(
                 this.staged,
                 this.indexCatalog,
+                this.incompatibleIndexes,
                 this.phasingOut,
                 this.initializedIndexCatalog,
                 this.cursorManager,
@@ -213,11 +224,7 @@ public class ConfigStateMocks {
   }
 
   public static ConfigStateMocks create() throws Exception {
-    ConfigStateMocks configStateMocks = create(getConfigJournalPath(), true);
-    Condition.await()
-        .atMost(Duration.ofSeconds(10))
-        .until(() -> configStateMocks.lifecycleManager.isInitialized());
-    return configStateMocks;
+    return create(getConfigJournalPath(), true);
   }
 
   public static ConfigStateMocks create(Path configJournalPath, boolean waitUntilInitialized)
@@ -256,9 +263,19 @@ public class ConfigStateMocks {
     AtomicReference<IndexStatus> statusForCreatedIndexes =
         new AtomicReference<>(IndexStatus.steady());
     IndexFactory indexFactory = mockIndexFactory(createdIndexes::add, statusForCreatedIndexes::get);
+    Answer<?> materializedViewFactoryDefaultAnswer =
+        invocation -> {
+          if (invocation.getMethod().getName().equals("createAutoEmbeddingGenerationMetrics")) {
+            return Mockito.mock(invocation.getMethod().getReturnType());
+          }
+          return Answers.RETURNS_DEFAULTS.answer(invocation);
+        };
     MaterializedViewIndexFactory materializedViewFactory =
         mockIndexFactory(
-            MaterializedViewIndexFactory.class, createdIndexes::add, statusForCreatedIndexes::get);
+            MaterializedViewIndexFactory.class,
+            createdIndexes::add,
+            statusForCreatedIndexes::get,
+            materializedViewFactoryDefaultAnswer);
     AnalyzerRegistryFactory analyzerRegistryFactory = spy(AnalyzerRegistry.factory());
     ToggleGate replicationGate = ToggleGate.opened();
     LifecycleManager lifecycleManager =
@@ -273,7 +290,8 @@ public class ConfigStateMocks {
                 new SimpleMeterRegistry(),
                 replicationGate,
                 DEFAULT_LIFECYCLE_CONFIG,
-                false));
+                false,
+                new ThreadPoolResourceMetrics.Bindings()));
 
     return new ConfigStateMocks(
         indexCatalog,
@@ -659,6 +677,7 @@ public class ConfigStateMocks {
         this.staged,
         this.indexCatalog,
         this.phasingOut,
+        this.incompatibleIndexes,
         this.cursorManager,
         this.lifecycleManager,
         this.analyzerRegistryFactory,

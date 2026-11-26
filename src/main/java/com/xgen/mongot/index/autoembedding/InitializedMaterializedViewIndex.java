@@ -6,13 +6,16 @@ import static com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGe
 
 import com.xgen.mongot.cursor.batch.BatchSizeStrategy;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
+import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewNonTransientException;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.index.EncodedUserData;
+import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetrics;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.InitializedAutoEmbedIndex;
 import com.xgen.mongot.index.MetaResults;
@@ -29,12 +32,14 @@ import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.MaterializedViewGenerationId;
+import io.micrometer.core.instrument.Tags;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.bson.BsonArray;
 import org.bson.BsonTimestamp;
 import org.slf4j.Logger;
@@ -68,12 +73,35 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
     this.materializedViewWriter = materializedViewWriter;
     this.statusRef = statusRef;
     this.leaseManager = leaseManager;
-    this.wasQueryable = new AtomicBoolean(
-        statusRef.get().canServiceQueries() || isCurrentVersionQueryablePerLease());
+    this.wasQueryable =
+        new AtomicBoolean(
+            statusRef.get().canServiceQueries() || isCurrentVersionQueryablePerLease());
     this.schemaMetadata = schemaMetadata;
     this.matViewDatabaseName = matViewDatabaseName;
     this.leaderStatusGauge =
         indexMetricsUpdater.getMetricsFactory().perIndexNumGauge("leaderStatus");
+  }
+
+  /**
+   * Registers one-hot status gauges for on-call RCA.
+   *
+   * <p>These gauges are not a canonical source of truth. Multiple index instances can share one
+   * materialized-view generation and gauge identity, so the latest registration wins.
+   */
+  void registerStatusGauges() {
+    Tags indexTypeTags =
+        Tags.of(
+            IndexTypeData.INDEX_TYPE_TAG_NAME,
+            IndexTypeData.getIndexTypeTag(this.indexDefinition).tagValue);
+    for (IndexStatus.StatusCode statusCode : IndexStatus.StatusCode.values()) {
+      this.indexMetricsUpdater
+          .getMetricsFactory()
+          .perIndexObjectValueGauge(
+              IndexMetricValuesSupplier.MetricNames.INDEX_STATUS_CODE,
+              this,
+              index -> index.getStatus().getStatusCode() == statusCode ? 1 : 0,
+              Tags.of("status", statusCode.name()).and(indexTypeTags));
+    }
   }
 
   @Override
@@ -106,6 +134,25 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
         .log("Set leaderStatus gauge");
   }
 
+  /**
+   * Re-registers the per-index {@code leaderStatus} gauge if it has been evicted from the registry
+   * while this generation is still live. Invoked from the leader heartbeat so a healthy leader's
+   * gauge self-heals within one beat instead of staying absent until process restart.
+   */
+  public void ensureLeaderStatusGaugeRegistered() {
+    boolean reRegistered =
+        this.indexMetricsUpdater
+            .getMetricsFactory()
+            .ensurePerIndexObjectValueGaugeRegistered(
+                "leaderStatus", this.leaderStatusGauge, Number::doubleValue);
+    if (reRegistered) {
+      LOG.atWarn()
+          .addKeyValue("generationId", this.generationId)
+          .addKeyValue("stateObjectIdentity", System.identityHashCode(this.leaderStatusGauge))
+          .log("Re-registered missing leaderStatus gauge");
+    }
+  }
+
   @Override
   public IndexMetrics getMetrics() {
     return this.indexMetricsUpdater.getMetrics();
@@ -136,17 +183,28 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
 
   @Override
   public void setStatus(IndexStatus status) {
+    setStatus(status, Runnable::run);
+  }
+
+  /**
+   * {@code publishGate} runs the write to the status reference, which generations sharing a
+   * materialized view collection share. Callers that can race a generator replacement pass a gate
+   * that runs the write only while their generator is still the installed one, so a displaced
+   * generator cannot overwrite its successor's status. The lease update stays outside the gate: it
+   * is a remote call, and the gate serializes against generator installation.
+   */
+  public void setStatus(IndexStatus status, Consumer<Runnable> publishGate) {
     try {
       this.leaseManager.updateReplicationStatus(
           this.generationId,
-          this.indexDefinition
-              .getDefinitionVersion()
-              .orElse(DEFAULT_INDEX_DEFINITION_VERSION),
+          this.indexDefinition.getDefinitionVersion().orElse(DEFAULT_INDEX_DEFINITION_VERSION),
           status);
     } catch (MaterializedViewNonTransientException e) {
       // Raw message; AutoEmbeddingCompositeIndex adds the failure prefix and stage
       // label when it surfaces this component's status.
-      this.statusRef.set(IndexStatus.failed("Corrupted Lease documents for this index."));
+      publishGate.accept(
+          () ->
+              this.statusRef.set(IndexStatus.failed("Corrupted Lease documents for this index.")));
       return;
     } catch (MaterializedViewTransientException ignored) {
       // TODO(CLOUDP-371153): Revisit this to decide how to handle committing error.
@@ -154,7 +212,7 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
     if (status.canServiceQueries()) {
       this.wasQueryable.set(true);
     }
-    this.statusRef.set(status);
+    publishGate.accept(() -> this.statusRef.set(status));
   }
 
   @Override
@@ -203,16 +261,14 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
 
   /**
    * Returns true if the current definition version has ever been queryable, as persisted in the
-   * lease. Used to seed both this index's in-memory {@code wasQueryable} ratchet and the
-   * {@code AutoEmbeddingCompositeIndex} ratchet across restarts so the leader's effective status
-   * matches followers (which read the lease directly via {@code StatusResolutionUtils}).
+   * lease. Used to seed both this index's in-memory {@code wasQueryable} ratchet and the {@code
+   * AutoEmbeddingCompositeIndex} ratchet across restarts so the leader's effective status matches
+   * followers (which read the lease directly via {@code StatusResolutionUtils}).
    */
   public boolean isCurrentVersionQueryablePerLease() {
     return this.leaseManager.isCurrentVersionQueryable(
         this.generationId,
-        this.indexDefinition
-            .getDefinitionVersion()
-            .orElse(DEFAULT_INDEX_DEFINITION_VERSION));
+        this.indexDefinition.getDefinitionVersion().orElse(DEFAULT_INDEX_DEFINITION_VERSION));
   }
 
   public UUID getMaterializedViewCollectionUuid() {
@@ -221,6 +277,19 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
 
   public MaterializedViewSchemaMetadata getSchemaMetadata() {
     return this.schemaMetadata;
+  }
+
+  /**
+   * The materialized view's immutable collection metadata (UUID, collection name, schema).
+   * Persisted into the derived Lucene commit so the derived index definition can be rebuilt when
+   * mongod is unreachable; the mongod-assigned collection UUID and MV-sourced schema in particular
+   * cannot be recovered offline any other way.
+   */
+  public MaterializedViewCollectionMetadata getMaterializedViewCollectionMetadata() {
+    return new MaterializedViewCollectionMetadata(
+        this.schemaMetadata,
+        this.materializedViewWriter.getCollectionUuid(),
+        this.materializedViewWriter.getNamespace().getCollectionName());
   }
 
   public String getMaterializedViewDatabaseName() {
@@ -254,10 +323,5 @@ public class InitializedMaterializedViewIndex implements InitializedAutoEmbedInd
 
     @Override
     public void close() {}
-
-    @Override
-    public long getRequiredMemoryForVectorData() throws ReaderClosedException {
-      return 0;
-    }
   }
 }

@@ -29,6 +29,8 @@ js_test(
     chdir = package_name(),
     data = [":scripts_lib"],
     entry_point = "scripts/compile.js",
+    # Percona: manual -- scripts/ is not in the published upstream sources.
+    tags = ["manual"],
 )
 
 js_binary(
@@ -43,12 +45,24 @@ js_test(
     chdir = package_name(),
     data = [":scripts_lib"],
     entry_point = "scripts/validate.js",
+    # Percona: manual -- scripts/ is not in the published upstream sources.
+    tags = ["manual"],
 )
 
 js_binary(
     name = "bundle_bin",
     data = [":scripts_lib"],
     entry_point = "scripts/bundle.js",
+)
+
+js_test(
+    name = "validate_bundled_schemas",
+    size = "small",
+    chdir = package_name(),
+    data = [":scripts_lib"],
+    entry_point = "scripts/validate_bundled.js",
+    # Percona: manual -- scripts/ is not in the published upstream sources.
+    tags = ["manual"],
 )
 
 genrule(
@@ -166,7 +180,11 @@ js_test(
     chdir = package_name(),
     data = [":format_check_lib"],
     entry_point = "scripts/format_check.js",
-    tags = ["lint"],
+    # Percona: manual -- scripts/ is not in the published upstream sources.
+    tags = [
+        "lint",
+        "manual",
+    ],
 )
 
 js_library(

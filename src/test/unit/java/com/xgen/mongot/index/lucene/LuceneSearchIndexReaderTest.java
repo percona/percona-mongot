@@ -1,5 +1,6 @@
 package com.xgen.mongot.index.lucene;
 
+import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_NAME;
@@ -38,6 +39,7 @@ import com.xgen.mongot.index.lucene.field.FieldName;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.quantization.BinaryQuantizedVectorRescorer;
 import com.xgen.mongot.index.lucene.query.LuceneSearchQueryFactoryDistributor;
+import com.xgen.mongot.index.lucene.query.util.DisableBulkScorerQuery;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherFactory;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
@@ -95,7 +97,10 @@ import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetField;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.NoMergePolicy;
-import org.apache.lucene.index.TieredMergePolicy;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.TermQuery;
 import org.bson.BsonArray;
 import org.bson.BsonDocument;
 import org.bson.BsonDouble;
@@ -189,13 +194,16 @@ public class LuceneSearchIndexReaderTest {
             LuceneConfigBuilder.builder().dataPath(indexPath).build(),
             featureFlags,
             new InstrumentedConcurrentMergeScheduler(meterRegistry),
-            new TieredMergePolicy(),
+            // Lucene 10.4 raises TieredMergePolicy's default floor segment size from 2MB to 16MB,
+            // so a TieredMergePolicy would merge the 10 single-doc segments this test creates back
+            // into one and break the slice-split assertion. Keep the segments separate.
+            NoMergePolicy.INSTANCE,
             new QueryCacheProvider.DefaultQueryCacheProvider(),
             mock(NamedScheduledExecutorService.class),
             Optional.of(this.concurrentSearchExecutor),
             Optional.of(this.concurrentRescoringExecutor),
             MOCK_INDEX_DEFINITION_GENERATION.getIndexDefinition(),
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
             AnalyzerRegistryBuilder.empty(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             metricsFactory,
@@ -204,7 +212,7 @@ public class LuceneSearchIndexReaderTest {
         spy(
             LuceneSearchQueryFactoryDistributor.create(
                 MOCK_INDEX_DEFINITION,
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion,
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene(),
                 AnalyzerRegistryBuilder.empty(),
                 SynonymRegistryBuilder.empty(),
                 indexMetricsUpdater.getQueryingMetricsUpdater(),
@@ -228,7 +236,7 @@ public class LuceneSearchIndexReaderTest {
 
     var fieldDefinitionResolver =
         MOCK_INDEX_DEFINITION.createFieldDefinitionResolver(
-            MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion);
+            MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene());
 
     this.searcherFactory =
         spy(
@@ -264,6 +272,7 @@ public class LuceneSearchIndexReaderTest {
                 new BinaryQuantizedVectorRescorer(Optional.of(this.concurrentRescoringExecutor)),
                 indexMetricsUpdater.getQueryingMetricsUpdater()),
             Optional.of(this.concurrentSearchExecutor),
+            Optional.empty(),
             0,
             featureFlags,
             new DynamicFeatureFlagRegistry(
@@ -282,6 +291,7 @@ public class LuceneSearchIndexReaderTest {
                 new BinaryQuantizedVectorRescorer(Optional.of(this.concurrentRescoringExecutor)),
                 indexMetricsUpdater.getQueryingMetricsUpdater()),
             Optional.of(this.concurrentSearchExecutor),
+            Optional.empty(),
             0,
             featureFlags,
             drillSidewaysEnabledRegistry());
@@ -295,12 +305,60 @@ public class LuceneSearchIndexReaderTest {
         .thenAnswer(invocation -> invocation.getArgument(1));
 
     // Always enable drill-sideways, regardless of default
-    Mockito.when(registry.evaluateClusterInvariant(
-            eq(DynamicFeatureFlags.DRILL_SIDEWAYS_FACETING.getName()),
-            anyBoolean()))
+    Mockito.when(
+            registry.evaluateClusterInvariant(
+                eq(DynamicFeatureFlags.DRILL_SIDEWAYS_FACETING.getName()), anyBoolean()))
         .thenReturn(true);
 
     return registry;
+  }
+
+  @Test
+  public void maybeDisableBulkScorerForSortWrapsQueryWhenSortPresentAndFlagEnabled() {
+    org.apache.lucene.search.Query query = new TermQuery(new Term("field", "value"));
+    DynamicFeatureFlagRegistry registry = mock(DynamicFeatureFlagRegistry.class);
+    Mockito.when(
+            registry.evaluateClusterInvariant(
+                DynamicFeatureFlags.DISABLE_BULK_SCORER_QUERY_FOR_SORT))
+        .thenReturn(true);
+
+    org.apache.lucene.search.Query result =
+        LuceneSearchIndexReader.maybeDisableBulkScorerForSort(
+            query, Optional.of(new Sort(SortField.FIELD_DOC)), registry);
+
+    assertThat(result).isInstanceOf(DisableBulkScorerQuery.class);
+    assertThat(((DisableBulkScorerQuery) result).innerQuery()).isEqualTo(query);
+  }
+
+  @Test
+  public void maybeDisableBulkScorerForSortDoesNotWrapWhenNoSortPresent() {
+    org.apache.lucene.search.Query query = new TermQuery(new Term("field", "value"));
+    DynamicFeatureFlagRegistry registry = mock(DynamicFeatureFlagRegistry.class);
+    Mockito.when(
+            registry.evaluateClusterInvariant(
+                DynamicFeatureFlags.DISABLE_BULK_SCORER_QUERY_FOR_SORT))
+        .thenReturn(true);
+
+    org.apache.lucene.search.Query result =
+        LuceneSearchIndexReader.maybeDisableBulkScorerForSort(query, Optional.empty(), registry);
+
+    assertThat(result).isSameInstanceAs(query);
+  }
+
+  @Test
+  public void maybeDisableBulkScorerForSortDoesNotWrapWhenFlagDisabled() {
+    org.apache.lucene.search.Query query = new TermQuery(new Term("field", "value"));
+    DynamicFeatureFlagRegistry registry = mock(DynamicFeatureFlagRegistry.class);
+    Mockito.when(
+            registry.evaluateClusterInvariant(
+                DynamicFeatureFlags.DISABLE_BULK_SCORER_QUERY_FOR_SORT))
+        .thenReturn(false);
+
+    org.apache.lucene.search.Query result =
+        LuceneSearchIndexReader.maybeDisableBulkScorerForSort(
+            query, Optional.of(new Sort(SortField.FIELD_DOC)), registry);
+
+    assertThat(result).isSameInstanceAs(query);
   }
 
   @Theory
@@ -562,8 +620,7 @@ public class LuceneSearchIndexReaderTest {
     doReturn(mock(SearchProducerAndMetaResults.class))
         .when(readerSpy)
         .genericDrillSidewaysQuery(
-            any(), any(), any(), any(), any(), any(), any(),
-            any(), any(), any(), any(), any());
+            any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     doThrow(new AssertionError("unexpected method call"))
         .when(readerSpy)
@@ -584,8 +641,7 @@ public class LuceneSearchIndexReaderTest {
     doReturn(mock(SearchProducerAndMetaResults.class))
         .when(readerSpy)
         .optimizedDrillSidewaysFacetCollectorQuery(
-            any(), any(), any(), any(), any(), any(),
-            any(), any(), any(), any(), any(), any());
+            any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     doThrow(new AssertionError("unexpected method call"))
         .when(readerSpy)
@@ -598,20 +654,20 @@ public class LuceneSearchIndexReaderTest {
   public void testQuery_WhenDrillSidewaysInfoGenericButFlagDisabled_ExecutesFacetCollectorFlow()
       throws Exception {
     Optional<DrillSidewaysInfo> drillSidewaysInfo =
-        Optional.of(new DrillSidewaysInfo(Map.of(), QueryOptimizationStatus.GENERIC,
-            Optional.empty()));
+        Optional.of(
+            new DrillSidewaysInfo(Map.of(), QueryOptimizationStatus.GENERIC, Optional.empty()));
 
     LuceneSearchIndexReader readerSpy = spy(this.reader); // flag disabled by default
 
     doThrow(new AssertionError("unexpected method call"))
         .when(readerSpy)
-        .genericDrillSidewaysQuery(any(), any(), any(), any(), any(), any(), any(), any(), any(),
-            any(), any(), any());
+        .genericDrillSidewaysQuery(
+            any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     doThrow(new AssertionError("unexpected method call"))
         .when(readerSpy)
-        .optimizedDrillSidewaysFacetCollectorQuery(any(), any(), any(), any(), any(), any(), any(),
-            any(), any(), any(), any(), any());
+        .optimizedDrillSidewaysFacetCollectorQuery(
+            any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     doReturn(mock(SearchProducerAndMetaResults.class))
         .when(readerSpy)
@@ -626,8 +682,7 @@ public class LuceneSearchIndexReaderTest {
 
     Optional<DrillSidewaysInfo> drillSidewaysInfo =
         Optional.of(
-            new DrillSidewaysInfo(
-                Map.of(), QueryOptimizationStatus.OPTIMIZABLE, Optional.empty()));
+            new DrillSidewaysInfo(Map.of(), QueryOptimizationStatus.OPTIMIZABLE, Optional.empty()));
 
     // Use reader with default registry (drill-sideways flag disabled)
     LuceneSearchIndexReader readerSpy = spy(this.reader);
@@ -646,8 +701,7 @@ public class LuceneSearchIndexReaderTest {
     // Facet collector path should be taken
     doReturn(mock(SearchProducerAndMetaResults.class))
         .when(readerSpy)
-        .facetCollectorQuery(
-            any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        .facetCollectorQuery(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     executeCollectorQueryOnSpy(drillSidewaysInfo, readerSpy);
   }
@@ -1096,17 +1150,18 @@ public class LuceneSearchIndexReaderTest {
             indexDefinitionGeneration
                 .getIndexDefinition()
                 .createFieldDefinitionResolver(
-                    indexDefinitionGeneration.generation().indexFormatVersion),
+                    indexDefinitionGeneration.generation().formatVersion.asLucene()),
             analyzer);
     LuceneFacetContext facetContext =
         new LuceneFacetContext(
             indexDefinitionGeneration
                 .getIndexDefinition()
                 .createFieldDefinitionResolver(
-                    indexDefinitionGeneration.generation().indexFormatVersion),
+                    indexDefinitionGeneration.generation().formatVersion.asLucene()),
             indexDefinitionGeneration
                 .getIndexDefinition()
-                .getIndexCapabilities(indexDefinitionGeneration.generation().indexFormatVersion));
+                .getIndexCapabilities(
+                    indexDefinitionGeneration.generation().formatVersion.asLucene()));
 
     return LuceneSearchIndexReader.create(
         this.queryFactory,
@@ -1119,10 +1174,11 @@ public class LuceneSearchIndexReaderTest {
             indexDefinitionGeneration
                 .getIndexDefinition()
                 .createFieldDefinitionResolver(
-                    indexDefinitionGeneration.generation().indexFormatVersion),
+                    indexDefinitionGeneration.generation().formatVersion.asLucene()),
             new BinaryQuantizedVectorRescorer(Optional.of(this.concurrentRescoringExecutor)),
             indexMetricsUpdater.getQueryingMetricsUpdater()),
         Optional.of(this.concurrentSearchExecutor),
+        Optional.empty(),
         0,
         featureFlags,
         new DynamicFeatureFlagRegistry(

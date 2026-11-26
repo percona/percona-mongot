@@ -16,9 +16,9 @@ import com.mongodb.ConnectionString;
 import com.mongodb.MongoException;
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.catalogservice.AuthoritativeIndexCatalog;
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
 import com.xgen.mongot.config.manager.ConfigManager;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
@@ -150,7 +150,8 @@ public class CommunityConfigUpdaterTest {
     verify(this.mongoDbMetadataClient).maybeUpdateSyncSource(this.syncSourceConfig);
     verify(this.configManager).handleReplicationAndSyncSourceUpdate(this.syncSourceConfig);
     verify(this.configManager)
-        .update(List.of(), List.of(SearchIndex.MOCK_INDEX_DEFINITION), List.of(), Set.of());
+        .update(
+            List.of(), List.of(SearchIndex.MOCK_INDEX_DEFINITION), List.of(), Set.of(), Set.of());
     verify(this.authoritativeIndexCatalog, never()).updateIndex(any(), any(), any());
     verify(this.authoritativeIndexCatalog, never()).deleteIndex(any());
   }
@@ -167,6 +168,7 @@ public class CommunityConfigUpdaterTest {
             List.of(VectorIndex.MOCK_VECTOR_DEFINITION),
             List.of(SearchIndex.MOCK_INDEX_DEFINITION),
             List.of(),
+            Set.of(),
             Set.of());
     verify(this.authoritativeIndexCatalog, never()).updateIndex(any(), any(), any());
     verify(this.authoritativeIndexCatalog, never()).deleteIndex(any());
@@ -212,7 +214,8 @@ public class CommunityConfigUpdaterTest {
 
     this.communityConfigUpdater.update();
 
-    verify(this.configManager).update(List.of(), List.of(newIndexDefinition), List.of(), Set.of());
+    verify(this.configManager)
+        .update(List.of(), List.of(newIndexDefinition), List.of(), Set.of(), Set.of());
     verify(this.authoritativeIndexCatalog)
         .updateIndexDefinition(AuthoritativeIndexKey.from(indexDefinition), newIndexDefinition);
     verify(this.authoritativeIndexCatalog, never()).deleteIndex(any());
@@ -258,7 +261,8 @@ public class CommunityConfigUpdaterTest {
 
     this.communityConfigUpdater.update();
 
-    verify(this.configManager).update(List.of(newIndexDefinition), List.of(), List.of(), Set.of());
+    verify(this.configManager)
+        .update(List.of(newIndexDefinition), List.of(), List.of(), Set.of(), Set.of());
     verify(this.authoritativeIndexCatalog)
         .updateIndexDefinition(AuthoritativeIndexKey.from(indexDefinition), newIndexDefinition);
     verify(this.authoritativeIndexCatalog, never()).deleteIndex(any());
@@ -300,7 +304,7 @@ public class CommunityConfigUpdaterTest {
 
     this.communityConfigUpdater.update();
 
-    verify(this.configManager).update(List.of(), List.of(), List.of(), Set.of());
+    verify(this.configManager).update(List.of(), List.of(), List.of(), Set.of(), Set.of());
     verify(this.authoritativeIndexCatalog, never()).updateIndexDefinition(any(), any());
     verify(this.authoritativeIndexCatalog).deleteIndex(AuthoritativeIndexKey.from(indexDefinition));
   }
@@ -361,7 +365,8 @@ public class CommunityConfigUpdaterTest {
             this.catalogAccessGuard);
 
     communityConfigUpdater.update();
-    verify(mockConfigManager).update(List.of(), List.of(), List.of(), Set.of(collectionUuid));
+    verify(mockConfigManager)
+        .update(List.of(), List.of(), List.of(), Set.of(collectionUuid), Set.of());
 
     // Verify no updates were issued to the AuthoritativeIndexCatalog
     verify(mockAuthoritativeIndexCatalog, never()).updateIndexDefinition(any(), any());
@@ -564,8 +569,7 @@ public class CommunityConfigUpdaterTest {
     var captor = ArgumentCaptor.forClass(SyncSourceConfig.class);
     verify(this.mongoDbMetadataClient, times(5)).maybeUpdateSyncSource(captor.capture());
     for (int i = 0; i < 4; i++) {
-      assertThat(
-              captor.getAllValues().get(i).mongosSingleHostReplicationUri.get().uri().getHosts())
+      assertThat(captor.getAllValues().get(i).mongosSingleHostReplicationUri.get().uri().getHosts())
           .containsExactly("mongos.local:27019");
     }
     assertThat(captor.getAllValues().get(4).mongosSingleHostReplicationUri.get().uri().getHosts())
@@ -668,12 +672,12 @@ public class CommunityConfigUpdaterTest {
     when(this.initialSyncHostProvider.isMongodHostStillValid(any())).thenReturn(true);
     when(this.initialSyncHostProvider.isMongosHostStillValid(any())).thenReturn(false);
     when(this.initialSyncHostProvider.getMongosInitialSyncConnection())
-        .thenReturn(Optional.empty())          // calls 1–4: no fresh host
+        .thenReturn(Optional.empty()) // calls 1–4: no fresh host
         .thenReturn(Optional.empty())
         .thenReturn(Optional.empty())
         .thenReturn(Optional.empty())
         .thenReturn(Optional.of(MONGOS_HOST_2)) // call 5: threshold reached, fresh host found
-        .thenReturn(Optional.empty());          // call 6: single miss after reset
+        .thenReturn(Optional.empty()); // call 6: single miss after reset
     var updater =
         new CommunityConfigUpdater(
             this.authoritativeIndexCatalog,
@@ -740,7 +744,7 @@ public class CommunityConfigUpdaterTest {
     verify(this.mongoDbMetadataClient).maybeUpdateSyncSource(any());
     verify(this.configManager).handleReplicationAndSyncSourceUpdate(any());
     verify(this.authoritativeIndexCatalog, never()).listIndexDefinitions();
-    verify(this.configManager, never()).update(any(), any(), any(), any());
+    verify(this.configManager, never()).update(any(), any(), any(), any(), any());
   }
 
   @Test
@@ -754,6 +758,6 @@ public class CommunityConfigUpdaterTest {
     verify(this.mongoDbMetadataClient).maybeUpdateSyncSource(any());
     verify(this.configManager).handleReplicationAndSyncSourceUpdate(any());
     verify(this.authoritativeIndexCatalog, never()).listIndexDefinitions();
-    verify(this.configManager, never()).update(any(), any(), any(), any());
+    verify(this.configManager, never()).update(any(), any(), any(), any(), any());
   }
 }

@@ -1,7 +1,6 @@
 package com.xgen.mongot.server.command.search;
 
 import static com.xgen.mongot.index.definition.IndexDefinition.Type.VECTOR_SEARCH;
-import static com.xgen.mongot.index.definition.IndexDefinitionGeneration.Type.AUTO_EMBEDDING;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
@@ -9,6 +8,7 @@ import com.google.common.flogger.FluentLogger;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.config.manager.QuarantinedIndexLookup;
 import com.xgen.mongot.cursor.CursorQuery;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.cursor.MongotCursorNotFoundException;
@@ -18,34 +18,25 @@ import com.xgen.mongot.cursor.QueryBatchTimerRecorder;
 import com.xgen.mongot.cursor.batch.QueryCursorOptions;
 import com.xgen.mongot.cursor.serialization.MongotCursorBatch;
 import com.xgen.mongot.cursor.serialization.MongotCursorResult;
-import com.xgen.mongot.embedding.EmbeddingRequestContext;
-import com.xgen.mongot.embedding.VectorOrError;
-import com.xgen.mongot.embedding.exceptions.EmbeddingProviderNonTransientException;
-import com.xgen.mongot.embedding.exceptions.EmbeddingProviderTransientException;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
-import com.xgen.mongot.embedding.providers.configs.EmbeddingModelCatalog;
-import com.xgen.mongot.embedding.providers.configs.EmbeddingServiceConfig;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.DynamicFeatureFlagsMetricsRecorder;
 import com.xgen.mongot.index.EmptyExplainInformation;
+import com.xgen.mongot.index.IndexClosedException;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.InitializedVectorIndex;
+import com.xgen.mongot.index.QuarantinedIndexException;
 import com.xgen.mongot.index.ReaderClosedException;
 import com.xgen.mongot.index.Variables;
 import com.xgen.mongot.index.VectorIndexReader;
-import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
 import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.IndexNamespaceDefinition;
 import com.xgen.mongot.index.definition.StoredSourceDefinition;
-import com.xgen.mongot.index.definition.VectorAutoEmbedFieldDefinition;
-import com.xgen.mongot.index.definition.VectorAutoEmbedFieldSpecification;
-import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
-import com.xgen.mongot.index.definition.VectorIndexFieldDefinition;
-import com.xgen.mongot.index.definition.quantization.VectorAutoEmbedQuantization;
 import com.xgen.mongot.index.lucene.explain.explainers.MetadataFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
 import com.xgen.mongot.index.lucene.explain.tracing.ExplainQueryState;
@@ -57,8 +48,11 @@ import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.QueryExecutionContext;
 import com.xgen.mongot.index.query.QueryOptimizationFlags;
 import com.xgen.mongot.index.query.VectorSearchQuery;
+import com.xgen.mongot.index.query.operators.ApproximateVectorSearchCriteria;
+import com.xgen.mongot.index.query.operators.IndexNamespaceFilter;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchQueryInput;
+import com.xgen.mongot.index.version.IndexEngine;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
@@ -66,11 +60,11 @@ import com.xgen.mongot.server.command.CommandFactory;
 import com.xgen.mongot.server.command.search.definition.request.CursorOptionsDefinition;
 import com.xgen.mongot.server.command.search.definition.request.ExplainDefinition;
 import com.xgen.mongot.server.command.search.definition.request.VectorSearchCommandDefinition;
+import com.xgen.mongot.server.executors.LoadSheddingRejectedException;
 import com.xgen.mongot.server.message.MessageUtils;
 import com.xgen.mongot.trace.Tracing;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.Bytes;
-import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.ErrorType;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.UserFacingException;
@@ -87,12 +81,13 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.bson.BsonArray;
@@ -106,20 +101,13 @@ public class VectorSearchCommand implements Command {
 
   private static final Logger LOG = LoggerFactory.getLogger(VectorSearchCommand.class);
 
-  /**
-   * Bundles the resolved embedding model name together with the raw (source) auto-embedding index
-   * definition. The source definition carries the original user-facing database name which is
-   * needed by {@link EmbeddingRequestContext} for multi-tenant credential lookup.
-   */
-  @VisibleForTesting
-  record EmbedRequestInfo(Optional<String> modelName, IndexDefinition sourceDefinition) {}
-
   private static final FluentLogger FLOGGER = FluentLogger.forEnclosingClass();
 
   private final MetricsFactory metricsFactory;
   private final VectorSearchCommandDefinition definition;
   private final IndexCatalog indexCatalog;
   private final InitializedIndexCatalog initializedIndexCatalog;
+  private final QuarantinedIndexLookup quarantinedIndexLookup;
   private final SearchCommandsRegister.BootstrapperMetadata metadata;
   private final Metrics metrics;
 
@@ -128,12 +116,13 @@ public class VectorSearchCommand implements Command {
   private final List<Long> createdCursorIds;
 
   private @Var Optional<SearchEnvoyMetadata> searchEnvoyMetadata;
-  private final Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier;
+  private final VectorQueryEmbedder embedder;
 
   VectorSearchCommand(
       VectorSearchCommandDefinition definition,
       IndexCatalog indexCatalog,
       InitializedIndexCatalog initializedIndexCatalog,
+      QuarantinedIndexLookup quarantinedIndexLookup,
       SearchCommandsRegister.BootstrapperMetadata metadata,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
       Metrics metrics,
@@ -146,10 +135,17 @@ public class VectorSearchCommand implements Command {
     this.definition = definition;
     this.indexCatalog = indexCatalog;
     this.initializedIndexCatalog = initializedIndexCatalog;
+    this.quarantinedIndexLookup = quarantinedIndexLookup;
     this.metadata = metadata;
     this.metrics = metrics;
     this.searchEnvoyMetadata = Optional.empty();
-    this.embeddingServiceManagerSupplier = embeddingServiceManagerSupplier;
+    this.embedder =
+        new VectorQueryEmbedder(
+            indexCatalog,
+            embeddingServiceManagerSupplier,
+            definition.db(),
+            definition.collectionUuid(),
+            definition.viewName());
   }
 
   @Override
@@ -255,6 +251,11 @@ public class VectorSearchCommand implements Command {
       validateQueryAndCursorOptions(query, queryCursorOptions);
 
       VectorSearchCriteria criteria = query.criteria();
+      if (criteria instanceof ApproximateVectorSearchCriteria approx
+          && approx.isAutoNumCandidates()
+          && !this.metadata.featureFlags().isEnabled(Feature.AUTO_NUM_CANDIDATES)) {
+        throw new InvalidQueryException("numCandidates is required for approximate vector search");
+      }
       if (criteria.queryVector().isPresent()) {
         // AutoEmbedding query should already pass counter updating method since they are all
         // native floats.
@@ -292,6 +293,9 @@ public class VectorSearchCommand implements Command {
       this.metrics.vectorQueriesTimedOut.increment();
       return MessageUtils.createError(
           Errors.MAX_TIME_MS_EXPIRED, Objects.requireNonNull(e.getMessage()));
+    } catch (LoadSheddingRejectedException e) {
+      // Let the server handler return the overload error code and retry labels.
+      throw e;
     } catch (Exception e) {
       // Unwrap RuntimeExceptions to check if they mask a user-facing InvalidQueryException.
       if (e instanceof RuntimeException && e.getCause() instanceof InvalidQueryException) {
@@ -303,17 +307,18 @@ public class VectorSearchCommand implements Command {
       }
 
       boolean isUserFacing = UserFacingException.isUserFacing(e);
-      this.metricsFactory
-          .counter(
-              "vectorSearchCommandInternalFailures",
-              Tags.of(
-                  "exceptionName",
-                  e.getClass().getSimpleName(),
-                  ErrorType.METRIC_TAG_KEY,
-                  isUserFacing
-                      ? ErrorType.USER_FACING_ERROR.toString()
-                      : ErrorType.INTERNAL_ERROR.toString()))
-          .increment();
+      this.metrics.recordInternalFailure(e);
+
+      QuarantinedIndexException.rethrowIfEnvoyCanRetry(e, this.searchEnvoyMetadata.isPresent());
+
+      if (e instanceof IndexUnavailableException
+          && this.searchEnvoyMetadata.isPresent()
+          && this.metadata
+              .dynamicFeatureFlagRegistry()
+              .evaluateClusterInvariant(DynamicFeatureFlags.INDEX_UNAVAILABLE_RETRY)) {
+        // Preserve the failure for gRPC to choose a peer retry or the final BSON error.
+        throw new CompletionException(e);
+      }
 
       if (!isUserFacing) {
         // Mongot internal processing error should be rare, log with a low limit. We still need a
@@ -323,13 +328,6 @@ public class VectorSearchCommand implements Command {
       }
 
       return MessageUtils.createErrorBody(e);
-    } catch (Throwable e) {
-      this.metricsFactory
-          .counter(
-              "vectorSearchCommandInternalFailures",
-              Tags.of("throwableName", e.getClass().getSimpleName()))
-          .increment();
-      throw e;
     } finally {
       queryTypeOptional.ifPresent(this::decreaseConcurrentQueriesGauge);
     }
@@ -419,40 +417,44 @@ public class VectorSearchCommand implements Command {
           IOException,
           MongotCursorNotFoundException,
           InterruptedException {
-    if (optionalIndex.isEmpty()) {
-      // the index does not exist, respond with empty information. The result is not cached,
-      // so when this index does get created, we will answer queries correctly.
-      return createExhaustedCursorBatch(new BsonArray()).toBson();
-    }
-
-    // Compute once and reuse for both the counter and the latency metric tag.
-    boolean isNested = isNestedVectorSearch(vectorSearchQuery, optionalIndex.get().getDefinition());
-
-    // Record nested vector search query counter at command receipt, consistent with other counters.
-    if (isNested) {
-      this.metrics.nestedVectorSearchQueries.increment();
-      recordNestedVectorSearchTags(vectorSearchQuery);
-    }
-
-    if (isEnvoyMetadataPresent()) {
-      LOG.atTrace()
-          .addKeyValue("envoyMetadata", this.searchEnvoyMetadata.get())
-          .log("Returning empty batch because of envoy metadata");
-      if (Explain.isEnabled()) {
-        return new EmptyExplainInformation().toBson();
-      } else {
+    try (var guard = Tracing.vectorSearchSpanGuard("VectorSearchCommand.getSearchResults")) {
+      if (optionalIndex.isEmpty()) {
+        // the index does not exist, respond with empty information. The result is not cached,
+        // so when this index does get created, we will answer queries correctly.
         return createExhaustedCursorBatch(new BsonArray()).toBson();
       }
-    }
 
-    try (var guard =
-        Tracing.simpleSpanGuard("VectorSearchCommand.getSearchResults", Tracing.TOGGLE_OFF)) {
+      validateIndexNamespace(vectorSearchQuery, optionalIndex.get().getDefinition());
+
+      // Compute once and reuse for both the counter and the latency metric tag.
+      boolean isNested =
+          isNestedVectorSearch(vectorSearchQuery, optionalIndex.get().getDefinition());
+
+      // Record nested vector search query counter at command receipt, consistent with other
+      // counters.
+      if (isNested) {
+        this.metrics.nestedVectorSearchQueries.increment();
+        recordNestedVectorSearchTags(vectorSearchQuery);
+      }
+
+      if (isEnvoyMetadataPresent()) {
+        LOG.atTrace()
+            .addKeyValue("envoyMetadata", this.searchEnvoyMetadata.get())
+            .log("Returning empty batch because of envoy metadata");
+        if (Explain.isEnabled()) {
+          return new EmptyExplainInformation().toBson();
+        } else {
+          return createExhaustedCursorBatch(new BsonArray()).toBson();
+        }
+      }
+
       var timer = Timer.start();
       var commandTimer = Timer.start();
       var materializedQuery =
-          maybeEmbed(
+          this.embedder.materializeQuery(
               vectorSearchQuery,
-              findEmbedRequestInfo(optionalIndex.get().getDefinition(), vectorSearchQuery));
+              this.embedder.findEmbedRequestInfo(
+                  optionalIndex.get().getDefinition(), vectorSearchQuery));
       var context = buildQueryExecutionContext();
       if (vectorSearchQuery.returnStoredSource()) {
         return getBatch(
@@ -486,76 +488,79 @@ public class VectorSearchCommand implements Command {
           IOException,
           InterruptedException,
           ReaderClosedException {
-    boolean populateCursorResult =
-        SearchCommand.determinePopulateCursor(
-            Explain.getExplainQueryState(),
-            this.metadata
-                .mongoDbServerInfoProvider()
-                .getCachedMongoDbServerInfo()
-                .mongoDbVersion());
+    try (var guard = Tracing.simpleSpanGuard("VectorSearchCommand.getBatch")) {
+      boolean populateCursorResult =
+          SearchCommand.determinePopulateCursor(
+              Explain.getExplainQueryState(),
+              this.metadata
+                  .mongoDbServerInfoProvider()
+                  .getCachedMongoDbServerInfo()
+                  .mongoDbVersion());
 
-    try (var cursorGuard = new CursorGuard(this.createdCursorIds, this.cursorManager)) {
-      var sample = Timer.start();
+      try (var cursorGuard = new CursorGuard(this.createdCursorIds, this.cursorManager)) {
+        var sample = Timer.start();
 
-      var cursorInfo =
-          this.cursorManager.newCursor(
-              this.definition.db(),
-              this.definition.collectionName(),
-              this.definition.collectionUuid(),
-              this.definition.viewName(),
-              new CursorQuery.Vector(materializedQuery, context),
-              queryCursorOptions,
-              QueryOptimizationFlags.DEFAULT_OPTIONS,
-              this.searchEnvoyMetadata);
+        var cursorInfo =
+            this.cursorManager.newCursor(
+                this.definition.db(),
+                this.definition.collectionName(),
+                this.definition.collectionUuid(),
+                this.definition.viewName(),
+                new CursorQuery.Vector(materializedQuery, context),
+                queryCursorOptions,
+                QueryOptimizationFlags.DEFAULT_OPTIONS,
+                this.searchEnvoyMetadata);
 
-      long cursorId = cursorInfo.cursorId;
-      this.createdCursorIds.add(cursorId);
+        long cursorId = cursorInfo.cursorId;
+        this.createdCursorIds.add(cursorId);
 
-      // Get the timer consumer first, as the cursor may be killed when the next batch is
-      // retrieved.
-      QueryBatchTimerRecorder queryBatchTimerRecorder =
-          this.cursorManager.getIndexQueryBatchTimerRecorder(cursorId);
+        // Get the timer consumer first, as the cursor may be killed when the next batch is
+        // retrieved.
+        QueryBatchTimerRecorder queryBatchTimerRecorder =
+            this.cursorManager.getIndexQueryBatchTimerRecorder(cursorId);
 
-      Optional<BsonValue> variables =
-          Optional.of(new Variables(cursorInfo.metaResults).toRawBson());
-      MongotCursorResultInfo cursorResultInfo =
-          this.cursorManager.getNextBatch(
-              cursorId,
-              this.bsonSizeSoftLimit.subtract(
-                  MongotCursorBatch.calculateEmptyBatchSize(variables, Optional.empty())),
-              queryCursorOptions);
+        Optional<BsonValue> variables =
+            Optional.of(new Variables(cursorInfo.metaResults).toRawBson());
+        MongotCursorResultInfo cursorResultInfo =
+            this.cursorManager.getNextBatch(
+                cursorId,
+                this.bsonSizeSoftLimit.subtract(
+                    MongotCursorBatch.calculateEmptyBatchSize(variables, Optional.empty())),
+                queryCursorOptions);
 
-      Optional<MongotCursorResult> cursorResult =
-          populateCursorResult
-              ? Optional.of(cursorResultInfo.toCursorResult(cursorId, Optional.empty()))
-              : Optional.empty();
+        Optional<MongotCursorResult> cursorResult =
+            populateCursorResult
+                ? Optional.of(cursorResultInfo.toCursorResult(cursorId, Optional.empty()))
+                : Optional.empty();
 
-      MongotCursorBatch batch =
-          new MongotCursorBatch(
-              cursorResult,
-              cursorResultInfo.explainResult,
-              populateCursorResult ? variables : Optional.empty());
+        MongotCursorBatch batch =
+            new MongotCursorBatch(
+                cursorResult,
+                cursorResultInfo.explainResult,
+                populateCursorResult ? variables : Optional.empty());
 
-      queryBatchTimerRecorder.recordSample(sample);
-      var serializedBatch = batch.toBson();
-      var metrics = index.getMetricsUpdater().getQueryingMetricsUpdater();
-      timer.stop(metrics.getVectorResultLatencyTimer());
-      metrics.getVectorCommandCounter().increment();
+        queryBatchTimerRecorder.recordSample(sample);
+        var serializedBatch = batch.toBson();
+        var metrics = index.getMetricsUpdater().getQueryingMetricsUpdater();
+        timer.stop(metrics.getVectorResultLatencyTimer());
+        metrics.getVectorCommandCounter().increment();
 
-      // Record command-level latency with index size, quantization, and nested tags
-      recordVectorSearchCommandLatency(
-          commandTimer, index, materializedQuery.materializedCriteria(), isNested);
+        // Record command-level latency with index size, quantization, and nested tags
+        recordVectorSearchCommandLatency(
+            commandTimer, index, materializedQuery.materializedCriteria(), isNested);
 
-      if (Explain.isEnabled() && BsonUtils.isOversized(serializedBatch)) {
-        // Explain must be the problem since cursor output should not have been oversized
-        // (CLOUDP-264685)
-        throw new ExplainTooLargeException("Explain is too large in vector search query response");
+        if (Explain.isEnabled() && BsonUtils.isOversized(serializedBatch)) {
+          // Explain must be the problem since cursor output should not have been oversized
+          // (CLOUDP-264685)
+          throw new ExplainTooLargeException(
+              "Explain is too large in vector search query response");
+        }
+
+        if (populateCursorResult) {
+          cursorGuard.keepCursors();
+        }
+        return serializedBatch;
       }
-
-      if (populateCursorResult) {
-        cursorGuard.keepCursors();
-      }
-      return serializedBatch;
     }
   }
 
@@ -568,121 +573,53 @@ public class VectorSearchCommand implements Command {
       Timer.Sample commandTimer,
       boolean isNested)
       throws IOException, InvalidQueryException, ReaderClosedException {
-    VectorIndexReader reader;
-    if (index instanceof InitializedVectorIndex vectorIndex) {
-      reader = vectorIndex.getReader();
-    } else if (index instanceof InitializedMaterializedViewIndex matViewIndex) {
-      // TODO(CLOUDP-353553): split when MV can hold a SearchIndexDefinition.
-      reader = matViewIndex.getReader();
-    } else {
-      throw new InvalidQueryException(
-          "Cannot execute $vectorSearch over search index '%s'"
-              .formatted(materializedQuery.vectorSearchQuery().index()),
-          InvalidQueryException.Type.STRICT);
+    try (var guard = Tracing.simpleSpanGuard("VectorSearchCommand.getExhaustedBatch")) {
+      VectorIndexReader reader;
+      try {
+        if (index instanceof InitializedVectorIndex vectorIndex) {
+          reader = vectorIndex.getReader();
+        } else if (index instanceof InitializedMaterializedViewIndex matViewIndex) {
+          // TODO(CLOUDP-353553): split when MV can hold a SearchIndexDefinition.
+          reader = matViewIndex.getReader();
+        } else {
+          throw new InvalidQueryException(
+              "Cannot execute $vectorSearch over search index '%s'"
+                  .formatted(materializedQuery.vectorSearchQuery().index()),
+              InvalidQueryException.Type.STRICT);
+        }
+      } catch (IndexClosedException e) {
+        // The index was swapped out and closed after we pulled it from the catalog (auto-embed
+        // queries widen this window with the query embedding call). Surface it as
+        // ReaderClosedException so run() retries against the new generation.
+        throw ReaderClosedException.create("getReader");
+      }
+      var results = reader.query(materializedQuery, context);
+      var serializedBatch = createExhaustedCursorBatch(results).toBson();
+
+      var metrics = index.getMetricsUpdater().getQueryingMetricsUpdater();
+      var durationNs = timer.stop(metrics.getVectorResultLatencyTimer());
+      metrics.recordDynamicFeatureFlagLatencyTimer(durationNs);
+      metrics.getVectorCommandCounter().increment();
+
+      // Record command-level latency with index size and quantization tags
+      recordVectorSearchCommandLatency(
+          commandTimer, index, materializedQuery.materializedCriteria(), isNested);
+
+      if (Explain.isEnabled() && BsonUtils.isOversized(serializedBatch)) {
+        // Explain must be the problem since results are capped at 10k for vector search
+        // (CLOUDP-264685)
+        throw new ExplainTooLargeException("Explain is too large in vector search query response");
+      }
+
+      return serializedBatch;
     }
-    var results = reader.query(materializedQuery, context);
-    var serializedBatch = createExhaustedCursorBatch(results).toBson();
-
-    var metrics = index.getMetricsUpdater().getQueryingMetricsUpdater();
-    var durationNs = timer.stop(metrics.getVectorResultLatencyTimer());
-    metrics.recordDynamicFeatureFlagLatencyTimer(durationNs);
-    metrics.getVectorCommandCounter().increment();
-
-    // Record command-level latency with index size and quantization tags
-    recordVectorSearchCommandLatency(
-        commandTimer, index, materializedQuery.materializedCriteria(), isNested);
-
-    if (Explain.isEnabled() && BsonUtils.isOversized(serializedBatch)) {
-      // Explain must be the problem since results are capped at 10k for vector search
-      // (CLOUDP-264685)
-      throw new ExplainTooLargeException("Explain is too large in vector search query response");
-    }
-
-    return serializedBatch;
   }
 
-  // Returns EmbeddingRequestInfo if embedding request is needed, for queryVector on autoEmbed
-  // index, we also return empty here.
   @VisibleForTesting
-  Optional<EmbedRequestInfo> findEmbedRequestInfo(
+  Optional<VectorQueryEmbedder.EmbedRequestInfo> findEmbedRequestInfo(
       IndexDefinition regularIndexDefinition, VectorSearchQuery vectorSearchQuery)
       throws InvalidQueryException {
-    if (vectorSearchQuery.criteria().query().isEmpty()) {
-      // No need to find model for queryVector and source definition for request context.
-      return Optional.empty();
-    }
-    // TODO(CLOUDP-353553): Handle search index with autoEmbed field.
-    if (regularIndexDefinition.getType() != VECTOR_SEARCH) {
-      return Optional.empty();
-    }
-    @Var var vectorIndexDef = regularIndexDefinition.asVectorDefinition();
-    // For the EmbedRequestInfo we need the source definition that carries the original
-    // user-facing database name. For direct auto-embedding indexes (e.g., legacy type:text
-    // index) this is regularIndexDefinition itself; for mat-view derived indexes it is the
-    // raw auto-embedding definition looked up from the catalog. In both cases vectorIndexDef
-    // tracks the correct source definition.
-    // This is a non-autoembedding index but has query string, could be a derived index definition
-    // from auto-embedding index.
-    if (!regularIndexDefinition.isAutoEmbeddingIndex()) {
-      // For mat view based index, needs to use raw index definition to look up model names.
-      Optional<IndexDefinition> rawAutoEmbeddingDefinition =
-          this.indexCatalog
-              .getIndex(
-                  this.definition.db(),
-                  this.definition.collectionUuid(),
-                  this.definition.viewName(),
-                  vectorSearchQuery.index())
-              .map(IndexGeneration::getDefinition)
-              .filter(IndexDefinition::isAutoEmbeddingIndex);
-      if (rawAutoEmbeddingDefinition.isPresent()) {
-        vectorIndexDef = rawAutoEmbeddingDefinition.get().asVectorDefinition();
-      } else {
-        return Optional.empty();
-      }
-    }
-    var fieldPath = vectorSearchQuery.criteria().path();
-    if (!vectorIndexDef.getModelNamePerPath().containsKey(fieldPath)) {
-      throw new InvalidQueryException(
-          "Path '%s' is not defined in Automated Embedding index '%s'"
-              .formatted(fieldPath, vectorSearchQuery.index()));
-    }
-    String indexModelName = vectorIndexDef.getModelNamePerPath().get(fieldPath);
-
-    Optional<String> queryModel =
-        vectorSearchQuery.criteria().query().flatMap(VectorSearchQueryInput::getModel);
-
-    // If the user didn't specify a model, use the indexing model.
-    if (queryModel.isEmpty()) {
-      LOG.atDebug()
-          .addKeyValue("indexModel", indexModelName)
-          .addKeyValue("fieldPath", fieldPath.toString())
-          .log("Using indexing model for embedding query (no query model specified)");
-      return Optional.of(new EmbedRequestInfo(Optional.of(indexModelName), vectorIndexDef));
-    }
-
-    // Check if the query model is allowed
-    if (!EmbeddingModelCatalog.isQueryModelAllowed(queryModel.get())) {
-      throw new InvalidQueryException(
-          String.format(
-              "model '%s' is not allowed. Allowed models are: %s",
-              queryModel.get(), EmbeddingModelCatalog.getAllowedQueryModels()));
-    }
-
-    // Then, check if the query model is compatible with the index's model
-    Set<String> compatibleIndexModels =
-        EmbeddingModelCatalog.getCompatibleIndexModels(queryModel.get());
-    if (!compatibleIndexModels.contains(indexModelName)) {
-      throw new InvalidQueryException(
-          String.format(
-              "query model '%s' is not compatible with the index model '%s'",
-              queryModel.get(), indexModelName));
-    }
-    LOG.atDebug()
-        .addKeyValue("queryModel", queryModel.get())
-        .addKeyValue("indexModel", indexModelName)
-        .addKeyValue("fieldPath", fieldPath.toString())
-        .log("Using user-specified model for embedding (compatible with indexing model)");
-    return Optional.of(new EmbedRequestInfo(queryModel, vectorIndexDef));
+    return this.embedder.findEmbedRequestInfo(regularIndexDefinition, vectorSearchQuery);
   }
 
   private MongotCursorBatch createExhaustedCursorBatch(BsonArray results)
@@ -723,18 +660,30 @@ public class VectorSearchCommand implements Command {
             query.index());
 
     if (indexGeneration.isEmpty()) {
+      // An index whose journal entry could not be parsed has no catalog entry, and reporting it as
+      // nonexistent would hide why it is unavailable.
+      this.quarantinedIndexLookup.throwIfQuarantined(
+          this.definition.db(), this.definition.collectionUuid(), query.index());
+      this.metrics.nonexistentIndexQueries.increment();
       return Optional.empty();
     }
     var index = indexGeneration.get();
-    index.getIndex().throwIfUnavailableForQuerying();
+
+    try {
+      index.getIndex().throwIfUnavailableForQuerying();
+    } catch (IndexUnavailableException e) {
+      this.metrics.recordUnavailableIndex(index.getDefinition().engine());
+      throw e;
+    }
     InitializedIndex initializedIndex =
         this.initializedIndexCatalog
             .getIndex(index.getGenerationId())
             .orElseThrow(
-                () ->
-                    new IndexUnavailableException(
-                        String.format(
-                            "Index %s not initialized", index.getDefinition().getName())));
+                () -> {
+                  this.metrics.recordUnavailableIndex(index.getDefinition().engine());
+                  return new IndexUnavailableException(
+                      String.format("Index %s not initialized", index.getDefinition().getName()));
+                });
     if (initializedIndex.getDefinition().getView().isPresent()) {
       if (this.definition.viewName().isPresent()) {
         this.metrics.queriesAgainstView.increment(); // GA version
@@ -773,6 +722,7 @@ public class VectorSearchCommand implements Command {
           this.metrics.bsonFloatVectorQueries.increment();
         }
       }
+      case FLOAT16 -> this.metrics.bsonFloat16VectorQueries.increment();
       case BYTE -> this.metrics.bsonByteVectorQueries.increment();
       case BIT -> this.metrics.bsonBitVectorQueries.increment();
     }
@@ -786,152 +736,6 @@ public class VectorSearchCommand implements Command {
             ? this.definition.deadlineTimestampMs()
             : Optional.empty();
     return QueryExecutionContext.withDeadline(deadlineTimestampMs);
-  }
-
-  private MaterializedVectorSearchQuery maybeEmbed(
-      VectorSearchQuery vectorSearchQuery, Optional<EmbedRequestInfo> embedRequestInfo)
-      throws InvalidQueryException,
-          EmbeddingProviderTransientException,
-          EmbeddingProviderNonTransientException {
-    VectorSearchCriteria criteria = vectorSearchQuery.criteria();
-    Optional<String> textToEmbed = criteria.query().flatMap(VectorSearchQueryInput::getText);
-
-    // No auto-embedding source from findEmbedRequestInfo: BYOV or plain vector (other teams: this
-    // gate). Anything else needs queryVector, including empty `query` on a regular vector index.
-    if (embedRequestInfo.filter(info -> info.sourceDefinition().isAutoEmbeddingIndex()).isEmpty()) {
-      if (criteria.queryVector().isPresent()) {
-        return new MaterializedVectorSearchQuery(
-            vectorSearchQuery,
-            criteria.queryVector().get(),
-            findAutoEmbeddingFieldsMapping(vectorSearchQuery));
-      }
-      throw new InvalidQueryException("queryVector must be present");
-    }
-
-    // Text query path: requires a valid text query.
-    if (criteria.query().isPresent() && textToEmbed.isEmpty()) {
-      throw new InvalidQueryException(
-          "'query' field cannot be empty when querying Automated Embedding index");
-    }
-
-    // Text query path: requires an auto-embedding-capable index and a resolvable model.
-    Optional<String> canonicalModel = embedRequestInfo.flatMap(EmbedRequestInfo::modelName);
-    if (canonicalModel.isEmpty()) {
-      throw new InvalidQueryException(
-          "Automated Embedding index query is invalid due to missing model");
-    }
-    if (this.embeddingServiceManagerSupplier.get() == null) {
-      throw new EmbeddingProviderTransientException(
-          "Embedding service not initialized.",
-          EmbeddingProviderTransientException.Reason.SERVICE_NOT_INITIALIZED);
-    }
-
-    // Use the raw (source) auto-embedding index definition for the embedding context.
-    // This carries the original user-facing database name needed for multi-tenant credential
-    // lookup, as opposed to the derived definition whose database is __mdb_internal_search.
-    IndexDefinition sourceDefinition = embedRequestInfo.get().sourceDefinition();
-    EmbeddingRequestContext context =
-        // TODO(CLOUDP-353553): Handle search index with autoEmbed field.
-        prepareEmbeddingRequestContext(vectorSearchQuery, sourceDefinition.asVectorDefinition());
-    List<VectorOrError> results;
-    try {
-      results =
-          this.embeddingServiceManagerSupplier
-              .get()
-              .embed(
-                  List.of(textToEmbed.get()),
-                  EmbeddingModelCatalog.getModelConfig(canonicalModel.get()),
-                  EmbeddingServiceConfig.ServiceTier.QUERY,
-                  context);
-    } catch (Exception e) {
-      LOG.atError()
-          .addKeyValue("model", canonicalModel.get())
-          .addKeyValue("errorType", e.getClass().getSimpleName())
-          .addKeyValue("errorMessage", e.getMessage())
-          .log("Failed to embed query text");
-      throw e;
-    }
-    var result = Check.hasSingleElement(results, "vectorized query");
-    if (result.errorMessage.isPresent()) {
-      LOG.atError()
-          .addKeyValue("model", canonicalModel.get())
-          .addKeyValue("errorMessage", result.errorMessage.get())
-          .log("Embedding service returned error for query");
-    }
-    Check.checkState(
-        result.errorMessage.isEmpty(), "Got error when embedding query: %s", result.errorMessage);
-
-    return new MaterializedVectorSearchQuery(
-        vectorSearchQuery,
-        Check.isPresent(result.vector, "vector"),
-        findAutoEmbeddingFieldsMapping(vectorSearchQuery));
-  }
-
-  private EmbeddingRequestContext prepareEmbeddingRequestContext(
-      VectorSearchQuery vectorSearchQuery, VectorIndexDefinition sourceIndexDefinition)
-      throws InvalidQueryException {
-    // Get autoEmbed field definition to resolve numDimensions & providerOutputDataType
-    FieldPath sourcePath = vectorSearchQuery.criteria().path();
-    Optional<VectorAutoEmbedFieldDefinition> autoEmbedField =
-        sourceIndexDefinition
-            .getMappings()
-            .getFieldDefinition(sourcePath)
-            .filter(fieldDef -> fieldDef.getType() == VectorIndexFieldDefinition.Type.AUTO_EMBED)
-            .map(VectorIndexFieldDefinition::asVectorAutoEmbedField);
-    if (autoEmbedField.isPresent()) {
-      // MV-based auto-embedding index: use provider quantization from auto-embed spec.
-      VectorAutoEmbedFieldSpecification spec = autoEmbedField.get().specification();
-      return new EmbeddingRequestContext(
-          sourceIndexDefinition.getDatabase(),
-          sourceIndexDefinition.getName(),
-          sourceIndexDefinition.getLastObservedCollectionName(),
-          spec.numDimensions(),
-          spec.autoEmbedQuantization());
-    }
-    // Type-text index: provider dtype is always float.
-    VectorFieldSpecification spec =
-        sourceIndexDefinition
-            .getMappings()
-            .getFieldDefinition(sourcePath)
-            .filter(VectorIndexFieldDefinition::isVectorField)
-            .map(def -> def.asVectorField().specification())
-            .orElseThrow(
-                () ->
-                    new InvalidQueryException(
-                        ("Error when preparing embedding request context: path '%s' is not defined "
-                                + "in Automated Embedding index")
-                            .formatted(sourcePath)));
-
-    return new EmbeddingRequestContext(
-        sourceIndexDefinition.getDatabase(),
-        sourceIndexDefinition.getName(),
-        sourceIndexDefinition.getLastObservedCollectionName(),
-        spec.numDimensions(),
-        VectorAutoEmbedQuantization.FLOAT // type:TEXT → always float32 provider output
-        );
-  }
-
-  private Map<FieldPath, FieldPath> findAutoEmbeddingFieldsMapping(
-      VectorSearchQuery vectorSearchQuery) {
-    // For mat view based index, needs to use raw index definition to find out fields mapping
-    return resolveMaterializedViewIndex(vectorSearchQuery)
-        .map(
-            materializedViewIndex ->
-                materializedViewIndex.getSchemaMetadata().autoEmbeddingFieldsMapping())
-        .orElse(Map.of());
-  }
-
-  private Optional<InitializedMaterializedViewIndex> resolveMaterializedViewIndex(
-      VectorSearchQuery vectorSearchQuery) {
-    return this.indexCatalog
-        .getIndex(
-            this.definition.db(),
-            this.definition.collectionUuid(),
-            this.definition.viewName(),
-            vectorSearchQuery.index())
-        .filter(indexGeneration -> indexGeneration.getType() == AUTO_EMBEDDING)
-        .map(indexGeneration -> (AutoEmbeddingIndexGeneration) indexGeneration)
-        .map(it -> it.getMaterializedViewIndexGeneration().getIndex());
   }
 
   private void updateVectorSearchQueryCounters(VectorSearchCriteria criteria) {
@@ -1007,6 +811,39 @@ public class VectorSearchCommand implements Command {
         this.metricsFactory.timer(
             "vectorSearchCommandTotalLatencyByIndexSize", tags, 0.5, 0.75, 0.9, 0.99);
     timer.stop(commandTimer);
+  }
+
+  /**
+   * An index defined with an indexNamespace requires every query to select a namespace with a
+   * matching indexNamespace equality; an index without one must not receive it.
+   */
+  @VisibleForTesting
+  static void validateIndexNamespace(
+      VectorSearchQuery vectorSearchQuery, IndexDefinition definition)
+      throws InvalidQueryException {
+    Optional<IndexNamespaceDefinition> indexNamespace =
+        definition.getType() == VECTOR_SEARCH
+            ? definition.asVectorDefinition().getIndexNamespace()
+            : Optional.empty();
+    Optional<IndexNamespaceFilter> queryNamespace = vectorSearchQuery.indexNamespace();
+    if (indexNamespace.isPresent()) {
+      if (queryNamespace.isEmpty()) {
+        throw new InvalidQueryException(
+            String.format(
+                "index is defined with indexNamespace; the query must supply"
+                    + " indexNamespace: { %s: { $eq: <value> } }",
+                indexNamespace.get().path()));
+      }
+      if (!queryNamespace.get().path().equals(indexNamespace.get().path())) {
+        throw new InvalidQueryException(
+            String.format(
+                "indexNamespace field '%s' does not match the index definition's"
+                    + " indexNamespace path '%s'",
+                queryNamespace.get().path(), indexNamespace.get().path()));
+      }
+    } else if (queryNamespace.isPresent()) {
+      throw new InvalidQueryException("index is not defined with indexNamespace");
+    }
   }
 
   /**
@@ -1119,6 +956,7 @@ public class VectorSearchCommand implements Command {
 
     private final IndexCatalog indexCatalog;
     private final InitializedIndexCatalog initializedIndexCatalog;
+    private final QuarantinedIndexLookup quarantinedIndexLookup;
     private final SearchCommandsRegister.BootstrapperMetadata metadata;
     private final Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier;
     private final Metrics metrics;
@@ -1129,6 +967,7 @@ public class VectorSearchCommand implements Command {
         MongotCursorManager cursorManager,
         IndexCatalog indexCatalog,
         InitializedIndexCatalog initializedIndexCatalog,
+        QuarantinedIndexLookup quarantinedIndexLookup,
         Bytes bsonSizeSoftLimit,
         Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
         SearchCommandsRegister.BootstrapperMetadata metadata,
@@ -1136,6 +975,7 @@ public class VectorSearchCommand implements Command {
       this.cursorManager = cursorManager;
       this.indexCatalog = indexCatalog;
       this.initializedIndexCatalog = initializedIndexCatalog;
+      this.quarantinedIndexLookup = quarantinedIndexLookup;
       this.bsonSizeSoftLimit = bsonSizeSoftLimit;
       this.embeddingServiceManagerSupplier = embeddingServiceManagerSupplier;
       this.metrics = new Metrics(metricsFactory);
@@ -1152,6 +992,7 @@ public class VectorSearchCommand implements Command {
             definition,
             this.indexCatalog,
             this.initializedIndexCatalog,
+            this.quarantinedIndexLookup,
             this.metadata,
             this.embeddingServiceManagerSupplier,
             this.metrics,
@@ -1169,11 +1010,24 @@ public class VectorSearchCommand implements Command {
           definition,
           this.indexCatalog,
           this.initializedIndexCatalog,
+          this.quarantinedIndexLookup,
           this.metadata,
           this.embeddingServiceManagerSupplier,
           this.metrics,
           this.cursorManager,
           this.bsonSizeSoftLimit);
+    }
+
+    /**
+     * Counts a query rejected because its index is defined but unavailable, for callers that reject
+     * it before a {@link VectorSearchCommand} is created.
+     */
+    void recordUnavailableIndex(IndexEngine engine) {
+      this.metrics.recordUnavailableIndex(engine);
+    }
+
+    void recordNonexistentIndex() {
+      this.metrics.nonexistentIndexQueries.increment();
     }
   }
 
@@ -1186,6 +1040,7 @@ public class VectorSearchCommand implements Command {
     private final Counter totalCount;
     private final Counter invalidQueries;
     private final Counter wrappedInvalidQueryExceptions;
+    private final Counter nonexistentIndexQueries;
     private final Counter queriesAgainstView;
     private final Counter queriesAgainstViewSourceCollection;
     private final Counter exactVectorSearchQueries;
@@ -1194,6 +1049,7 @@ public class VectorSearchCommand implements Command {
     private final Counter autoEmbeddingTextQueries;
     private final Counter autoEmbeddingMultiModalQueries;
     private final Counter bsonFloatVectorQueries;
+    private final Counter bsonFloat16VectorQueries;
     private final Counter bsonByteVectorQueries;
     private final Counter bsonBitVectorQueries;
     private final Counter vectorStoredSourceQueries;
@@ -1203,6 +1059,7 @@ public class VectorSearchCommand implements Command {
     private final AtomicLong concurrentExactQueries;
     private final AtomicLong concurrentApproximateQueries;
     private final AtomicLong concurrentAutoEmbeddingQueries;
+    private final Map<IndexEngine, Counter> unavailableIndexQueries;
     private final MetricsFactory metricsFactory;
 
     Metrics(MetricsFactory metricsFactory) {
@@ -1211,6 +1068,7 @@ public class VectorSearchCommand implements Command {
       this.invalidQueries = metricsFactory.counter("vectorSearchCommandInvalidQueries");
       this.wrappedInvalidQueryExceptions =
           metricsFactory.counter("vectorSearchCommandWrappedInvalidQueryException");
+      this.nonexistentIndexQueries = metricsFactory.counter("vectorSearchCommandNonexistentIndex");
       this.queriesAgainstView = metricsFactory.counter("queriesAgainstView");
       this.queriesAgainstViewSourceCollection =
           metricsFactory.counter("queriesAgainstViewSourceCollection");
@@ -1226,6 +1084,7 @@ public class VectorSearchCommand implements Command {
       this.autoEmbeddingMultiModalQueries =
           metricsFactory.counter("autoEmbeddingMultiModalVectorSearchQueries");
       this.bsonFloatVectorQueries = metricsFactory.counter("bsonFloatVectorQueries");
+      this.bsonFloat16VectorQueries = metricsFactory.counter("bsonFloat16VectorQueries");
       this.bsonByteVectorQueries = metricsFactory.counter("bsonByteVectorQueries");
       this.bsonBitVectorQueries = metricsFactory.counter("bsonBitVectorQueries");
       this.vectorStoredSourceQueries = metricsFactory.counter("vectorStoredSourceQueries");
@@ -1236,7 +1095,38 @@ public class VectorSearchCommand implements Command {
       this.concurrentApproximateQueries = metricsFactory.numGauge("concurrentApproximateQueries");
       this.concurrentAutoEmbeddingQueries =
           metricsFactory.numGauge("concurrentAutoEmbeddingQueries");
+      // Registered for every engine up front so each series exists from process start; increase()
+      // over a series that first appears mid-range undercounts.
+      this.unavailableIndexQueries = new EnumMap<>(IndexEngine.class);
+      for (IndexEngine engine : IndexEngine.values()) {
+        this.unavailableIndexQueries.put(
+            engine,
+            metricsFactory.counter(
+                "vectorSearchCommandUnavailableIndex", Tags.of("indexEngine", engine.name())));
+      }
       this.metricsFactory = metricsFactory;
+    }
+
+    /** Counts a query rejected because its index is defined but not available for querying. */
+    void recordUnavailableIndex(IndexEngine engine) {
+      this.unavailableIndexQueries.get(engine).increment();
+    }
+
+    /** Emit failure metrics with the same set of label keys. */
+    void recordInternalFailure(Throwable throwable) {
+      ErrorType errorType =
+          UserFacingException.isUserFacing(throwable)
+              ? ErrorType.USER_FACING_ERROR
+              : ErrorType.INTERNAL_ERROR;
+      this.metricsFactory
+          .counter(
+              "vectorSearchCommandInternalFailures",
+              Tags.of(
+                  "exceptionName",
+                  throwable.getClass().getSimpleName(),
+                  ErrorType.METRIC_TAG_KEY,
+                  errorType.toString()))
+          .increment();
     }
   }
 }

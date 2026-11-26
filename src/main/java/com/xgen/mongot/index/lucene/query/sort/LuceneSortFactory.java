@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.lucene.query.sort;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Streams;
 import com.xgen.mongot.index.lucene.explain.explainers.SortFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
@@ -10,6 +11,7 @@ import com.xgen.mongot.index.lucene.query.sort.common.ExplainSortField;
 import com.xgen.mongot.index.lucene.query.sort.mixed.MqlMixedSort;
 import com.xgen.mongot.index.lucene.searcher.FieldToSortableTypesMapping;
 import com.xgen.mongot.index.query.InvalidQueryException;
+import com.xgen.mongot.index.query.sort.EmbeddedSortScope;
 import com.xgen.mongot.index.query.sort.MetaSortOptions;
 import com.xgen.mongot.index.query.sort.MongotSortField;
 import com.xgen.mongot.index.query.sort.SequenceToken;
@@ -22,6 +24,7 @@ import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.FieldPath;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.SortField;
@@ -55,8 +58,20 @@ public class LuceneSortFactory {
     }
   }
 
+  private static Optional<FieldPath> scopedSortPath(MongotSortField field) {
+    return field.options() instanceof UserFieldSortOptions userOptions
+        ? userOptions.embeddedScope().map(EmbeddedSortScope::path)
+        : Optional.empty();
+  }
+
   private void validate(MongotSortField sortField, Optional<FieldPath> embeddedRoot)
       throws InvalidQueryException {
+    // An embeddedDoc-scoped sort key is validated at the query layer against its own scope path
+    // (see LuceneSearchQueryFactoryDistributor#buildScopedSortOverrides), not the query-level
+    // embeddedRoot, so skip it here.
+    if (scopedSortPath(sortField).isPresent()) {
+      return;
+    }
     if (sortField.options() instanceof MetaSortOptions
         || this.context.getTokenFieldDefinition(sortField.field(), embeddedRoot).isPresent()) {
       return;
@@ -127,7 +142,7 @@ public class LuceneSortFactory {
   private record ExpandedSortFields(
       List<MongotSortField> fields, ImmutableSet<Long> nullnessFieldIndexes) {}
 
-  @SuppressWarnings("checkstyle:MissingJavadocMethod")
+  /** Overload for callers with no embeddedDoc-scoped sort keys (no block-join overrides). */
   public org.apache.lucene.search.Sort createLuceneSort(
       SortSpec sortSpec,
       Optional<SequenceToken> sequenceToken,
@@ -135,9 +150,21 @@ public class LuceneSortFactory {
       Optional<FieldPath> embeddedRoot,
       Optional<org.apache.lucene.search.Sort> indexSort)
       throws InvalidQueryException {
+    return createLuceneSort(
+        sortSpec, sequenceToken, fieldsToSortableTypesMapping, embeddedRoot, indexSort, Map.of());
+  }
 
-    ExpandedSortFields expandedSortFields =
-        expandWithNullnessFields(sortSpec, indexSort);
+  @SuppressWarnings("checkstyle:MissingJavadocMethod")
+  public org.apache.lucene.search.Sort createLuceneSort(
+      SortSpec sortSpec,
+      Optional<SequenceToken> sequenceToken,
+      FieldToSortableTypesMapping fieldsToSortableTypesMapping,
+      Optional<FieldPath> embeddedRoot,
+      Optional<org.apache.lucene.search.Sort> indexSort,
+      Map<FieldPath, SortField> scopedOverrides)
+      throws InvalidQueryException {
+
+    ExpandedSortFields expandedSortFields = expandWithNullnessFields(sortSpec, indexSort);
     List<MongotSortField> expandedFields = expandedSortFields.fields();
 
     if (sequenceToken.isPresent()) {
@@ -161,8 +188,8 @@ public class LuceneSortFactory {
                         () ->
                             new SortFeatureExplainer(
                                 sortSpec,
-                                fieldsToSortableTypesMapping.getFieldToSortableTypes(
-                                    embeddedRoot))));
+                                sortableTypesIncludingScoped(
+                                    sortSpec, fieldsToSortableTypesMapping, embeddedRoot))));
 
     Optional<FieldDoc> after = sequenceToken.map(SequenceToken::fieldDoc);
 
@@ -172,17 +199,19 @@ public class LuceneSortFactory {
         Streams.mapWithIndex(
                 expandedFields.stream(),
                 (field, idx) ->
-                    expandedSortFields.nullnessFieldIndexes().contains(idx)
-                        ? createNullnessSortField(field)
-                        : createLuceneSortField(
-                            field,
-                            Optional.of(
-                                fieldsToSortableTypesMapping
-                                    .getFieldToSortableTypes(embeddedRoot)
-                                    .get(field.field())),
-                            after.map(fieldDoc -> fieldDoc.fields[(int) idx]),
-                            embeddedRoot,
-                            hasIndexSort))
+                    scopedOverrides.containsKey(field.field())
+                        ? scopedOverrides.get(field.field())
+                        : expandedSortFields.nullnessFieldIndexes().contains(idx)
+                            ? createNullnessSortField(field)
+                            : createLuceneSortField(
+                                field,
+                                Optional.of(
+                                    fieldsToSortableTypesMapping
+                                        .getFieldToSortableTypes(embeddedRoot)
+                                        .get(field.field())),
+                                after.map(fieldDoc -> fieldDoc.fields[(int) idx]),
+                                embeddedRoot,
+                                hasIndexSort))
             .map(
                 sortField ->
                     Explain.isEnabled()
@@ -196,10 +225,30 @@ public class LuceneSortFactory {
           is ->
               sortFeatureExplainer
                   .get()
-                  .setUsesIndexSort(
-                      IndexSortUtils.usesIndexSort(luceneSort, is)));
+                  .setUsesIndexSort(IndexSortUtils.usesIndexSort(luceneSort, is)));
     }
     return luceneSort;
+  }
+
+  /**
+   * Sortable types for the explain {@code fieldInfos}, resolving each embeddedDoc-scoped sort key
+   * under its own scope path (rather than the query-level {@code embeddedRoot}, which would drop it
+   * from the map). Unscoped fields resolve under {@code embeddedRoot} as before.
+   */
+  private static ImmutableSetMultimap<FieldPath, FieldName.TypeField> sortableTypesIncludingScoped(
+      SortSpec sortSpec,
+      FieldToSortableTypesMapping fieldsToSortableTypesMapping,
+      Optional<FieldPath> embeddedRoot) {
+    ImmutableSetMultimap.Builder<FieldPath, FieldName.TypeField> builder =
+        ImmutableSetMultimap.builder();
+    for (MongotSortField field : sortSpec.getSortFields()) {
+      Optional<FieldPath> fieldRoot = scopedSortPath(field).or(() -> embeddedRoot);
+      // A scoped key replaces the root-level entry, even when its scope has no indexed values.
+      builder.putAll(
+          field.field(),
+          fieldsToSortableTypesMapping.getFieldToSortableTypes(fieldRoot).get(field.field()));
+    }
+    return builder.build();
   }
 
   /**
@@ -211,12 +260,10 @@ public class LuceneSortFactory {
    * unnecessary {@link org.apache.lucene.search.Pruning#NONE} overhead on the nullness comparator.
    */
   private ExpandedSortFields expandWithNullnessFields(
-      SortSpec sortSpec,
-      Optional<org.apache.lucene.search.Sort> indexSort) {
+      SortSpec sortSpec, Optional<org.apache.lucene.search.Sort> indexSort) {
     var mongotFields = sortSpec.getSortFields();
     if (indexSort.isEmpty()
-        || !IndexSortUtils.expandedSortAlignsWithIndexSort(
-            mongotFields, indexSort.get())) {
+        || !IndexSortUtils.expandedSortAlignsWithIndexSort(mongotFields, indexSort.get())) {
       return new ExpandedSortFields(mongotFields, ImmutableSet.of());
     }
 
@@ -224,7 +271,9 @@ public class LuceneSortFactory {
     ImmutableSet.Builder<Long> nullnessFieldIndexes = ImmutableSet.builder();
 
     for (MongotSortField field : mongotFields) {
-      if (needsNullnessField(indexSort, field)) {
+      // Scoped sort keys derive their value from matching children, not the root's own stored
+      // value, so the $nullness companion field (read from the root's value) does not apply.
+      if (scopedSortPath(field).isEmpty() && needsNullnessField(indexSort, field)) {
         FieldPath nullnessPath = FieldPath.newRoot(FieldName.getNullnessFieldName(field.field()));
         nullnessFieldIndexes.add((long) expanded.size());
         expanded.add(new MongotSortField(nullnessPath, field.options()));
@@ -238,8 +287,8 @@ public class LuceneSortFactory {
 
   /**
    * Creates a $nullness query sort field that matches the corresponding field in the index sort.
-   * This enables {@link IndexSortUtils#usesIndexSort} prefix matching for early
-   * termination and sort pruning optimizations.
+   * This enables {@link IndexSortUtils#usesIndexSort} prefix matching for early termination and
+   * sort pruning optimizations.
    */
   public static SortField createNullnessSortField(MongotSortField mongotSortField) {
     return new MqlNullnessSortField(mongotSortField);
@@ -251,8 +300,7 @@ public class LuceneSortFactory {
       Optional<Object> afterFieldValue,
       Optional<FieldPath> embeddedRoot,
       boolean indexSorted) {
-    ImmutableSet<FieldName.TypeField> rawTypeFields =
-        typeFields.orElseGet(ImmutableSet::of);
+    ImmutableSet<FieldName.TypeField> rawTypeFields = typeFields.orElseGet(ImmutableSet::of);
     return mongotSortField.options() instanceof MetaSortOptions metaOptions
         ? metaOptions.getMetaSort()
         : createOptimizedSortField(
@@ -299,6 +347,45 @@ public class LuceneSortFactory {
       Optional<FieldPath> embeddedRoot,
       IndexCapabilities indexCapabilities,
       boolean indexSorted) {
+    // Since this is a query-time sort field, isIndexWriterConfigSortField is false.
+    return createSortField(
+        mongotSortField,
+        typeFields,
+        afterFieldValue,
+        embeddedRoot,
+        indexCapabilities,
+        indexSorted,
+        false);
+  }
+
+  /** Same as the above createOptimizedSortField method but for index sort fields. */
+  public static Optional<SortField> createIndexSortField(
+      MongotSortField mongotSortField,
+      ImmutableSet<FieldName.TypeField> typeFields,
+      Optional<Object> afterFieldValue,
+      Optional<FieldPath> embeddedRoot,
+      IndexCapabilities indexCapabilities,
+      boolean indexSorted) {
+    // Note: signal numeric / date sort fields that they will be used in IndexWriterConfig's index
+    // sort and range query will use the long-based Lucene comparators correctly.
+    return createSortField(
+        mongotSortField,
+        typeFields,
+        afterFieldValue,
+        embeddedRoot,
+        indexCapabilities,
+        indexSorted,
+        true);
+  }
+
+  private static Optional<SortField> createSortField(
+      MongotSortField mongotSortField,
+      ImmutableSet<FieldName.TypeField> typeFields,
+      Optional<Object> afterFieldValue,
+      Optional<FieldPath> embeddedRoot,
+      IndexCapabilities indexCapabilities,
+      boolean indexSorted,
+      boolean isIndexWriterConfigSortField) {
     if (typeFields.size() != 1) {
       return Optional.empty();
     }
@@ -316,7 +403,12 @@ public class LuceneSortFactory {
         return afterFieldValue.isEmpty() || afterFieldValue.get() instanceof BsonDateTime
             ? Optional.of(
                 new MqlDateSort(
-                    FieldName.TypeField.DATE_V2, mongotSortField, true, embeddedRoot, indexSorted))
+                    FieldName.TypeField.DATE_V2,
+                    mongotSortField,
+                    true,
+                    embeddedRoot,
+                    indexSorted,
+                    isIndexWriterConfigSortField))
             : Optional.empty();
       }
       case NUMBER_DOUBLE_V2 -> {
@@ -327,7 +419,8 @@ public class LuceneSortFactory {
                     mongotSortField,
                     true,
                     embeddedRoot,
-                    indexSorted))
+                    indexSorted,
+                    isIndexWriterConfigSortField))
             : Optional.empty();
       }
       case NUMBER_INT64_V2 -> {
@@ -338,7 +431,8 @@ public class LuceneSortFactory {
                     mongotSortField,
                     true,
                     embeddedRoot,
-                    indexSorted))
+                    indexSorted,
+                    isIndexWriterConfigSortField))
             : Optional.empty();
       }
       case UUID -> {
@@ -381,6 +475,7 @@ public class LuceneSortFactory {
                 mongotSortField,
                 false,
                 Optional.empty(),
+                false,
                 false));
       }
       case SORTABLE_NUMBER_BETA_V1 -> {
@@ -391,6 +486,7 @@ public class LuceneSortFactory {
                 mongotSortField,
                 false,
                 Optional.empty(),
+                false,
                 false));
       }
       case SORTABLE_STRING_BETA_V1 -> {
@@ -414,6 +510,7 @@ public class LuceneSortFactory {
           KNN_BIT,
           KNN_F32_Q7,
           KNN_F32_Q1,
+          KNN_BYTE_Q1,
           NUMBER_DOUBLE,
           NUMBER_DOUBLE_MULTIPLE,
           NUMBER_DOUBLE_FACET,

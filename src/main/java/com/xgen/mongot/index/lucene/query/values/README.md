@@ -2,7 +2,7 @@
 
 The `values` package contains subclasses of Lucene's [DoubleValuesSource](https://lucene.apache.org/core/8_1_1/core/org/apache/lucene/search/DoubleValuesSource.html) 
 and [DoubleValues](https://lucene.apache.org/core/6_4_0/core/org/apache/lucene/search/DoubleValues.html) classes.
-Each of the classes in the `values` package represents a type of [Function Score Expression](https://github.com/mongodb/mongot/blob/master/docs/syntax/query.md#expressions).
+Each of the classes in the `values` package represents a type of [Function Score Expression](https://github.com/10gen/mongot-public-preview/blob/master/docs/syntax/query.md#expressions).
 
 ## How Undefined Behavior is Handled
 

@@ -4,7 +4,9 @@
       "description": "simple",
       "json": {
         "generationId": {
-          "indexId": "507f191e810c19729de860ea",
+          "indexId": {
+            "$oid": "507f191e810c19729de860ea"
+          },
           "userVersion": 0,
           "formatVersion": 6,
           "attemptNumber": 0
@@ -30,6 +32,8 @@
         "vectorFieldSizeBytes": 0,
         "requiredMemoryBytes": 500000000,
         "numNestedVectorFields": 0,
+        "coldStorageSizeBytes": 0,
+        "warmCacheSizeBytes": 0,
         "numFields": 20,
         "numFieldsPerDatatype": {
           "autocomplete": 0.0,
@@ -45,6 +49,7 @@
           "knnBit": 0.0,
           "knnF32Q7": 0.0,
           "knnF32Q1": 0.0,
+          "knnByteQ1": 0.0,
           "null": 0.0,
           "numberDouble": 0.0,
           "numberDoubleV2": 0.0,
@@ -120,6 +125,8 @@
               "99th": 3.0
             }
           },
+          "warmQueriesCount": 0,
+          "coldQueriesCount": 0,
           "synonymCount": 6.0,
           "textSynonymCount": 4.0,
           "textSynonymsWithoutMatchCriteriaCount": 3.0,
@@ -136,6 +143,8 @@
           "sortCount": 3.0,
           "trackingCount": 11.0,
           "returnScopeCount": 12.0,
+          "embeddedScopedFacetCount": 0.0,
+          "embeddedScopedSortCount": 0.0,
           "facetDrillSidewaysOptimizableCount": 0.0,
           "facetDrillSidewaysGenericCount": 0.0,
           "operatorTypeCount": {
@@ -185,6 +194,7 @@
           },
           "collectorTypeCount": {
             "facet": 0.0,
+            "aggregation": 0.0,
             "metrics": 0.0
           },
           "vectorQueryTypeCount": {
@@ -273,7 +283,26 @@
             "text": 0.0,
             "vectorSearch": 0.0,
             "wildcard": 0.0
-          }
+          },
+          "vectorSearchFilterOperatorCategoryCount": {
+            "lowerBound": 0.0,
+            "upperBound": 0.0,
+            "closedRange": 0.0,
+            "exists": 0.0,
+            "eq": 0.0,
+            "ne": 0.0,
+            "in": 0.0,
+            "nin": 0.0,
+            "not": 0.0
+          },
+          "vectorSearchQueryVectorEncodingCount": {
+            "array": 0.0,
+            "binDataFloat32": 0.0,
+            "binDataFloat16": 0.0,
+            "binDataInt8": 0.0,
+            "binDataBit": 0.0
+          },
+          "vectorSearchFilterCount": 0.0
         }
       },
       "bson": {
@@ -320,6 +349,8 @@
           "$numberLong": "500000000"
         },
         "numNestedVectorFields": 0,
+        "coldStorageSizeBytes": {"$numberLong": "0"},
+        "warmCacheSizeBytes": {"$numberLong": "0"},
         "numFields": 20,
         "numFieldsPerDatatype": {
           "autocomplete": 0.0,
@@ -335,6 +366,7 @@
           "knnBit": 0.0,
           "knnF32Q7": 0.0,
           "knnF32Q1": 0.0,
+          "knnByteQ1": 0.0,
           "null": 0.0,
           "numberDouble": 0.0,
           "numberDoubleV2": 0.0,
@@ -418,6 +450,8 @@
               "99th": 3.0
             }
           },
+          "warmQueriesCount": {"$numberLong": "0"},
+          "coldQueriesCount": {"$numberLong": "0"},
           "synonymCount": 6.0,
           "textSynonymCount": 4.0,
           "textSynonymsWithoutMatchCriteriaCount": 3.0,
@@ -434,6 +468,8 @@
           "sortCount": 3.0,
           "trackingCount": 11.0,
           "returnScopeCount": 12.0,
+          "embeddedScopedFacetCount": 0.0,
+          "embeddedScopedSortCount": 0.0,
           "facetDrillSidewaysOptimizableCount": 0.0,
           "facetDrillSidewaysGenericCount": 0.0,
           "operatorTypeCount": {
@@ -483,6 +519,7 @@
           },
           "collectorTypeCount": {
             "facet": 0.0,
+            "aggregation": 0.0,
             "metrics": 0.0
           },
           "vectorQueryTypeCount": {
@@ -571,7 +608,26 @@
             "text": 0.0,
             "vectorSearch": 0.0,
             "wildcard": 0.0
-          }
+          },
+          "vectorSearchFilterOperatorCategoryCount": {
+            "lowerBound": 0.0,
+            "upperBound": 0.0,
+            "closedRange": 0.0,
+            "exists": 0.0,
+            "eq": 0.0,
+            "ne": 0.0,
+            "in": 0.0,
+            "nin": 0.0,
+            "not": 0.0
+          },
+          "vectorSearchQueryVectorEncodingCount": {
+            "array": 0.0,
+            "binDataFloat32": 0.0,
+            "binDataFloat16": 0.0,
+            "binDataInt8": 0.0,
+            "binDataBit": 0.0
+          },
+          "vectorSearchFilterCount": 0.0
         }
       }
     }

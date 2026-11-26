@@ -263,9 +263,7 @@ public class OperatorEmbeddedRootValidator {
       }
       case InOperator inOperator ->
           validateLeafOperatorPaths(
-              inOperator.paths(),
-              inOperator.score().getChildPaths(),
-              context.of(inOperator));
+              inOperator.paths(), inOperator.score().getChildPaths(), context.of(inOperator));
       case VectorSearchOperator vectorSearchOperator ->
           validateLeafOperatorPaths(
               List.of(vectorSearchOperator.criteria().path()),
@@ -336,5 +334,16 @@ public class OperatorEmbeddedRootValidator {
         embeddedRoot.isPresent() ? Optional.of(EmbeddedRootSource.RETURN_SCOPE) : Optional.empty();
     validate(
         operator, new ValidatorContext(0, embeddedRoot, operator.getType(), embeddedRootSource));
+  }
+
+  /** Validates an operator relative to its inline embedded-document scope. */
+  public void validate(EmbeddedDocumentScope scope) throws BsonParseException {
+    validate(
+        scope.operator(),
+        new ValidatorContext(
+            0,
+            Optional.of(scope.path()),
+            scope.operator().getType(),
+            Optional.of(EmbeddedRootSource.EMBEDDED_DOCUMENT)));
   }
 }

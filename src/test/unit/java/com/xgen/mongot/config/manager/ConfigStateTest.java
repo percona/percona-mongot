@@ -1,8 +1,14 @@
 package com.xgen.mongot.config.manager;
 
 import com.xgen.mongot.config.backup.ConfigJournalV1;
+import com.xgen.mongot.config.backup.JournalEntryIdentity;
 import com.xgen.mongot.config.util.Invariants;
+import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
+import com.xgen.mongot.index.autoembedding.UnresolvedAutoEmbeddingIndexGeneration;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
+import com.xgen.mongot.index.definition.VectorIndexDefinitionGeneration;
+import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.index.version.IndexFormatVersion;
@@ -14,6 +20,7 @@ import com.xgen.mongot.util.mongodb.ConnectionStringUtil;
 import com.xgen.mongot.util.mongodb.SyncSourceConfig;
 import com.xgen.testing.mongot.config.backup.ConfigJournalV1Builder;
 import com.xgen.testing.mongot.config.manager.ConfigStateMocks;
+import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.version.GenerationIdBuilder;
 import com.xgen.testing.mongot.mock.index.IndexGeneration;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
@@ -25,8 +32,11 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.bson.BsonBoolean;
+import org.bson.BsonDocument;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
@@ -90,6 +100,61 @@ public class ConfigStateTest {
             .get()
             .equals(newSyncSourceConfig));
     Assert.assertFalse(mocks.configState.getLifecycleManager().isReplicationSupported());
+  }
+
+  @Test
+  public void testUpdateSyncSourceResetsTransientUnresolvedButKeepsCollectionNotFound()
+      throws Exception {
+    var mocks = ConfigStateMocks.create();
+
+    // Transient resolution failure: should be reset to AUTO_EMBEDDING_RESOLUTION_RETRY so
+    // IndexRecoveryStager retries it.
+    UnresolvedAutoEmbeddingIndexGeneration transientGen =
+        UnresolvedAutoEmbeddingIndexGeneration.createFailed(
+            autoEmbedVectorGen(),
+            MaterializedViewTransientException.Reason.MONGO_CLIENT_NOT_AVAILABLE);
+    // Source collection absent on this shard: must stay a quiet COLLECTION_NOT_FOUND.
+    UnresolvedAutoEmbeddingIndexGeneration collectionNotFoundGen =
+        UnresolvedAutoEmbeddingIndexGeneration.createCollectionNotFound(autoEmbedVectorGen());
+    mocks.indexCatalog.addIndex(transientGen);
+    mocks.staged.addIndex(collectionNotFoundGen);
+
+    SyncSourceConfig newSyncSourceConfig =
+        SyncSourceConfig.builder()
+            .mongodSingleHostReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://newString"))
+            .mongodClusterReplicationUri(
+                ConnectionStringUtil.toConnectionInfo("mongodb://newString"))
+            .mongodClusterReadWriteUri(ConnectionStringUtil.toConnectionInfo("mongodb://newString"))
+            .build();
+    mocks.configState.updateSyncSource(newSyncSourceConfig);
+
+    // The transient failure is reset so the recovery stager retries it.
+    Assert.assertEquals(
+        IndexStatus.StatusCode.FAILED, transientGen.getIndex().getStatus().getStatusCode());
+    Assert.assertEquals(
+        Optional.of(IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY),
+        transientGen.getIndex().getStatus().getReason());
+    // The collection-not-found generation is left untouched (no spurious failure overwrite).
+    Assert.assertEquals(
+        IndexStatus.StatusCode.DOES_NOT_EXIST,
+        collectionNotFoundGen.getIndex().getStatus().getStatusCode());
+    Assert.assertEquals(
+        Optional.of(IndexStatus.Reason.COLLECTION_NOT_FOUND),
+        collectionNotFoundGen.getIndex().getStatus().getReason());
+  }
+
+  private static VectorIndexDefinitionGeneration autoEmbedVectorGen() {
+    VectorIndexDefinition def =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(new ObjectId())
+            .name("mock")
+            .database("mock")
+            .lastObservedCollectionName("mock")
+            .collectionUuid(UUID.randomUUID())
+            .withAutoEmbedField("title")
+            .build();
+    return new VectorIndexDefinitionGeneration(def, Generation.CURRENT);
   }
 
   @Test
@@ -438,6 +503,80 @@ public class ConfigStateTest {
     Assert.assertThrows(RuntimeException.class, () -> mocks.phasingOut.addIndex(sameGenerationId));
     // allowed, we don't care about the identity of these indexes, as they are scheduled to drop.
     mocks.phasingOut.addIndex(sameIndexId);
+  }
+
+  /**
+   * A quarantined index has no {@link com.xgen.mongot.index.IndexGeneration} to be derived from, so
+   * unless the journal folds it back in it would be missing from every journal written after
+   * startup and deleted by the first persist.
+   */
+  @Test
+  public void currentJournal_carriesQuarantinedLiveIndexes() throws Exception {
+    var mocks = ConfigStateMocks.create();
+    var quarantined = quarantinedIndex(new ObjectId("012345678901234567890123"), "foo");
+    mocks.configState.incompatibleIndexes.addLiveIndex(quarantined);
+
+    ConfigJournalV1 journal = mocks.configState.currentJournal();
+
+    Assert.assertEquals(List.of(quarantined.asJournalEntry()), journal.getLiveEntries());
+    Assert.assertTrue(journal.getLiveIndexes().isEmpty());
+  }
+
+  @Test
+  public void currentJournal_carriesQuarantinedStagedIndexes() throws Exception {
+    var mocks = ConfigStateMocks.create();
+    var quarantined = quarantinedIndex(new ObjectId("012345678901234567890123"), "foo");
+    mocks.configState.incompatibleIndexes.addStagedIndex(quarantined);
+
+    ConfigJournalV1 journal = mocks.configState.currentJournal();
+
+    Assert.assertEquals(List.of(quarantined.asJournalEntry()), journal.getStagedEntries());
+    Assert.assertTrue(journal.getStagedIndexes().isEmpty());
+  }
+
+  /** Quarantined entries sit alongside the indexes mongot does hold, rather than replacing them. */
+  @Test
+  public void currentJournal_carriesQuarantinedAndHealthyLiveIndexesTogether() throws Exception {
+    var mocks = ConfigStateMocks.create();
+    var healthy = IndexGeneration.mockIndexGeneration(new ObjectId("012345678901234567890124"), 0);
+    mocks.indexCatalog.addIndex(healthy);
+    var quarantined = quarantinedIndex(new ObjectId("012345678901234567890123"), "foo");
+    mocks.configState.incompatibleIndexes.addLiveIndex(quarantined);
+
+    ConfigJournalV1 journal = mocks.configState.currentJournal();
+
+    Assert.assertEquals(2, journal.getLiveEntries().size());
+    Assert.assertEquals(List.of(healthy.getDefinitionGeneration()), journal.getLiveIndexes());
+    Assert.assertEquals(List.of(quarantined.asJournalEntry()), journal.getQuarantinedEntries());
+  }
+
+  /** The entry is written back byte for byte, which is the point of quarantining it. */
+  @Test
+  public void currentJournal_writesQuarantinedEntryVerbatim() throws Exception {
+    var mocks = ConfigStateMocks.create();
+    var quarantined = quarantinedIndex(new ObjectId("012345678901234567890123"), "foo");
+    mocks.configState.incompatibleIndexes.addLiveIndex(quarantined);
+
+    ConfigJournalV1 journal = mocks.configState.currentJournal();
+
+    Assert.assertEquals(
+        quarantined.rawConfigJournalEntry(), journal.toBson().getArray("indexes").get(0));
+  }
+
+  private static QuarantinedIndex quarantinedIndex(ObjectId indexId, String name) {
+    var identity =
+        new JournalEntryIdentity(
+            indexId,
+            "db",
+            UUID.fromString("00000000-1111-2222-3333-444444444444"),
+            name,
+            new Generation(new UserIndexVersion(1), IndexFormatVersion.CURRENT));
+
+    return new QuarantinedIndex(
+        identity,
+        IndexDefinitionGeneration.Type.SEARCH,
+        "field is required",
+        new BsonDocument("fieldFromTheFuture", new BsonBoolean(true)));
   }
 
   private void assertJournalForCurrentState(ConfigStateMocks mocks, ConfigJournalV1 expected) {

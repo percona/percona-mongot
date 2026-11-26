@@ -15,6 +15,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
+import com.google.common.truth.Truth;
 import com.google.errorprone.annotations.Var;
 import com.xgen.mongot.cursor.CursorConfig;
 import com.xgen.mongot.cursor.batch.BatchCursorOptions;
@@ -64,6 +65,8 @@ import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import com.xgen.testing.TestUtils;
 import com.xgen.testing.mongot.cursor.batch.BatchCursorOptionsBuilder;
 import com.xgen.testing.mongot.index.analyzer.AnalyzerRegistryBuilder;
@@ -259,7 +262,7 @@ public class MultiLuceneSearchIndexReaderTest {
             Optional.of(concurrentSearchExecutor),
             Optional.of(concurrentRescoringExecutor),
             defGeneration.getIndexDefinition(),
-            defGeneration.generation().indexFormatVersion,
+            defGeneration.generation().formatVersion.asLucene(),
             AnalyzerRegistryBuilder.empty(),
             new AtomicDirectoryRemover(TestUtils.getTempFolder().getRoot().toPath()),
             metricsFactory,
@@ -1097,9 +1100,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     // Verify all document IDs are present (0 through numDocs-1)
     Set<Integer> returnedIds =
-        results.stream()
-            .map(doc -> doc.getInt32("_id").getValue())
-            .collect(Collectors.toSet());
+        results.stream().map(doc -> doc.getInt32("_id").getValue()).collect(Collectors.toSet());
     for (int i = 0; i < numDocs; i++) {
       assertTrue("Result should contain document with _id " + i, returnedIds.contains(i));
     }
@@ -1276,9 +1277,7 @@ public class MultiLuceneSearchIndexReaderTest {
     index.getWriter().updateIndex(docEvent);
   }
 
-  /**
-   * Helper method to execute a query with a specific query definition and return all results.
-   */
+  /** Helper method to execute a query with a specific query definition and return all results. */
   private List<BsonDocument> queryWithDefinition(
       InitializedSearchIndex index, OperatorQuery queryDefinition)
       throws IOException, InvalidQueryException, InterruptedException, ReaderClosedException {
@@ -1314,7 +1313,7 @@ public class MultiLuceneSearchIndexReaderTest {
     INTERMEDIATE,
     NON_INTERMEDIATE,
   }
-  
+
   @Test
   public void testConcurrentFacetQueryUsesExecutor() throws Exception {
     // Add some documents with facet values to ensure there are results
@@ -1430,8 +1429,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     // Both should return the same count
     assertEquals(
-        concurrentResults.count().getTotalOrLower(),
-        sequentialResults.count().getTotalOrLower());
+        concurrentResults.count().getTotalOrLower(), sequentialResults.count().getTotalOrLower());
     assertEquals(1000L, concurrentResults.count().getTotalOrLower().longValue());
 
     // Both should return the same facet buckets
@@ -1541,6 +1539,71 @@ public class MultiLuceneSearchIndexReaderTest {
   // Exception Handling Tests for Concurrent Partition Execution
   // ============================================================================
 
+  @Theory
+  public void query_concurrentRegexLimit_preservesExceptionType(
+      @FromDataPoints("allQueryTypes") QueryType queryType) throws Exception {
+    var first = new RegexLimitExceededException();
+    var second = new RegexLimitExceededException();
+
+    var thrown =
+        concurrentRegexFailure(queryType, first, second, RegexLimitExceededException.class);
+
+    Truth.assertThat(thrown).isAnyOf(first, second);
+    Assert.assertEquals(1, thrown.getSuppressed().length);
+  }
+
+  @Theory
+  public void query_concurrentRegexInterruption_preservesExceptionType(
+      @FromDataPoints("allQueryTypes") QueryType queryType) throws Exception {
+    var first = new RegexInterruptedException();
+    var second = new RegexInterruptedException();
+
+    var thrown = concurrentRegexFailure(queryType, first, second, RegexInterruptedException.class);
+
+    Truth.assertThat(thrown).isAnyOf(first, second);
+    Assert.assertEquals(1, thrown.getSuppressed().length);
+  }
+
+  private RuntimeException concurrentRegexFailure(
+      QueryType queryType,
+      RuntimeException first,
+      RuntimeException second,
+      Class<? extends RuntimeException> exceptionType)
+      throws Exception {
+    LuceneSearchIndexReader firstReader = mock(LuceneSearchIndexReader.class);
+    LuceneSearchIndexReader secondReader = mock(LuceneSearchIndexReader.class);
+    Mockito.when(firstReader.query(any(), any(), any(), any())).thenThrow(first);
+    Mockito.when(secondReader.query(any(), any(), any(), any())).thenThrow(second);
+    Mockito.when(firstReader.intermediateQuery(any(), any(), any(), any())).thenThrow(first);
+    Mockito.when(secondReader.intermediateQuery(any(), any(), any(), any())).thenThrow(second);
+    var multiReader =
+        new MultiLuceneSearchIndexReader(
+            List.of(firstReader, secondReader),
+            drillSidewaysEnabledRegistry(),
+            Optional.of(this.concurrentSearchExecutor));
+    var batchSizeStrategy =
+        BatchSizeStrategySelector.forQuery(QUERY_DEFINITION, QueryCursorOptions.empty());
+
+    return Assert.assertThrows(
+        exceptionType,
+        () -> {
+          switch (queryType) {
+            case NON_INTERMEDIATE ->
+                multiReader.query(
+                    QUERY_DEFINITION,
+                    QueryCursorOptions.empty(),
+                    batchSizeStrategy,
+                    QueryOptimizationFlags.DEFAULT_OPTIONS);
+            case INTERMEDIATE ->
+                multiReader.intermediateQuery(
+                    QUERY_DEFINITION,
+                    QueryCursorOptions.empty(),
+                    batchSizeStrategy,
+                    QueryOptimizationFlags.DEFAULT_OPTIONS);
+          }
+        });
+  }
+
   /**
    * Tests that IOException thrown by a partition reader is correctly propagated through the
    * concurrent query path without being wrapped or modified.
@@ -1555,8 +1618,7 @@ public class MultiLuceneSearchIndexReaderTest {
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     // Second reader would succeed but exception should propagate first
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     MultiLuceneSearchIndexReader multiReader =
         new MultiLuceneSearchIndexReader(
@@ -1592,8 +1654,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     MultiLuceneSearchIndexReader multiReader =
         new MultiLuceneSearchIndexReader(
@@ -1629,8 +1690,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     MultiLuceneSearchIndexReader multiReader =
         new MultiLuceneSearchIndexReader(
@@ -1804,8 +1864,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     // Pass Optional.empty() for executor to get sequential processing
     MultiLuceneSearchIndexReader multiReader =
@@ -1840,8 +1899,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     MultiLuceneSearchIndexReader multiReader =
         new MultiLuceneSearchIndexReader(
@@ -1875,8 +1933,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     MultiLuceneSearchIndexReader multiReader =
         new MultiLuceneSearchIndexReader(
@@ -1911,8 +1968,7 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Mockito.when(mockReader1.query(any(), any(), any(), any())).thenThrow(originalException);
     Mockito.when(mockReader2.query(any(), any(), any(), any()))
-        .thenReturn(
-            new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
+        .thenReturn(new SearchProducerAndMetaResults(mock(BatchProducer.class), MetaResults.EMPTY));
 
     MultiLuceneSearchIndexReader multiReader =
         new MultiLuceneSearchIndexReader(
@@ -1933,5 +1989,4 @@ public class MultiLuceneSearchIndexReaderTest {
 
     Assert.assertSame(originalException, thrown);
   }
-
 }

@@ -4,6 +4,7 @@ java_library(
     name = "definition",
     srcs = [
         "AnalyzerBoundSearchIndexDefinition.java",
+        "AutoEmbedFieldSet.java",
         "AutocompleteFieldDefinition.java",
         "BooleanFieldDefinition.java",
         "DateFacetFieldDefinition.java",
@@ -23,6 +24,7 @@ java_library(
         "IndexDefinition.java",
         "IndexDefinitionGeneration.java",
         "IndexDefinitionGenerationProducer.java",
+        "IndexNamespaceDefinition.java",
         "IndexSortValidator.java",
         "InvalidIndexDefinitionException.java",
         "InvalidViewDefinitionException.java",
@@ -66,6 +68,7 @@ java_library(
         "VectorIndexFilterFieldDefinition.java",
         "VectorIndexVectorFieldDefinition.java",
         "VectorIndexingAlgorithm.java",
+        "VectorMemoryEstimator.java",
         "VectorSearchEngine.java",
         "VectorSimilarity.java",
         "VectorTextFieldDefinition.java",

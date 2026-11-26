@@ -1,12 +1,13 @@
 package com.xgen.mongot.config.provider.community;
 
-import com.xgen.mongot.catalogservice.AuthoritativeIndexKey;
 import com.xgen.mongot.catalogservice.CatalogAccessGuard;
-import com.xgen.mongot.catalogservice.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.IndexStatusMapper;
 import com.xgen.mongot.catalogservice.MetadataService;
 import com.xgen.mongot.catalogservice.MetadataServiceException;
-import com.xgen.mongot.catalogservice.ServerStateEntry;
 import com.xgen.mongot.catalogservice.TopologyMismatchException;
+import com.xgen.mongot.catalogservice.schema.AuthoritativeIndexKey;
+import com.xgen.mongot.catalogservice.schema.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.schema.ServerStateEntry;
 import com.xgen.mongot.index.IndexInformation;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.util.mongodb.CheckedMongoException;
@@ -62,8 +63,7 @@ class DroppedCollectionIndexCleaner {
     try {
       this.catalogAccessGuard.requireTopologyMatch();
     } catch (TopologyMismatchException e) {
-      LOG.error(
-          "Skipping dropped-collection index cleanup due to cluster topology mismatch.", e);
+      LOG.error("Skipping dropped-collection index cleanup due to cluster topology mismatch.", e);
       return;
     } catch (CheckedMongoException e) {
       LOG.warn(
@@ -156,7 +156,8 @@ class DroppedCollectionIndexCleaner {
 
   private static boolean indexDoesNotExist(Optional<IndexStatsEntry.DetailedIndexStats> detail) {
     return detail.isEmpty()
-        || detail.get().status().getStatusCode() == IndexStatus.StatusCode.DOES_NOT_EXIST;
+        || IndexStatusMapper.fromPersisted(detail.get().status().statusCode())
+            == IndexStatus.StatusCode.DOES_NOT_EXIST;
   }
 
   /**

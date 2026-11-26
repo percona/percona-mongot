@@ -36,7 +36,7 @@ public class MetaResultsBuilder {
   public MetaResults build() {
     Check.isPresent(this.count, "count");
 
-    return new MetaResults(this.count.get(), this.facet, this.metrics);
+    return new MetaResults(this.count.get(), this.facet, Optional.empty(), this.metrics);
   }
 
   /** Create a MetaResults with the given lowerBound count. */

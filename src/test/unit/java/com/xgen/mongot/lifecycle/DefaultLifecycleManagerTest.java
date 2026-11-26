@@ -11,17 +11,15 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.Var;
-import com.xgen.mongot.blobstore.BlobstoreException;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.blobstore.BlobstoreSnapshotterManager;
@@ -29,6 +27,7 @@ import com.xgen.mongot.index.blobstore.IndexBlobstoreSnapshotter;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.version.GenerationId;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.monitor.Gate;
 import com.xgen.mongot.monitor.ToggleGate;
 import com.xgen.mongot.replication.ReplicationManager;
@@ -51,7 +50,6 @@ import java.util.ArrayList;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bson.types.ObjectId;
@@ -117,7 +115,8 @@ public class DefaultLifecycleManagerTest {
                 this.initExecutor,
                 this.lifecycleExecutor,
                 this.blobstoreExecutor,
-                false);
+                false,
+                new ThreadPoolResourceMetrics.Bindings());
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -197,6 +196,45 @@ public class DefaultLifecycleManagerTest {
     future.get();
     verify(mocks.lifecycleManager.getReplicationManager()).dropIndex(generationId);
     verify(mocks.snapshotterManager).drop(generationId);
+  }
+
+  @Test
+  public void contains_falseBeforeAdd_trueAfter_falseAfterDrop() throws Exception {
+    Mocks mocks = Mocks.create();
+    IndexGeneration generation = mockIndexGeneration(new ObjectId());
+    GenerationId generationId = generation.getGenerationId();
+
+    assertFalse(mocks.lifecycleManager.contains(generationId));
+
+    mocks.lifecycleManager.add(generation);
+    assertTrue(mocks.lifecycleManager.contains(generationId));
+
+    mocks.lifecycleManager.dropIndex(generationId).get();
+    assertFalse(mocks.lifecycleManager.contains(generationId));
+  }
+
+  @Test
+  public void contains_autoEmbeddingGeneration_resolvesViaDerivedGenerationId() {
+    Mocks mocks = Mocks.create();
+
+    IndexGeneration derived = mockIndexGeneration(uniqueMockGenerationDefinition());
+    GenerationId derivedId = derived.getGenerationId();
+    GenerationId rawId = GenerationIdBuilder.create();
+    assertNotEquals(rawId, derivedId);
+
+    var autoEmbedding =
+        mock(com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration.class);
+    when(autoEmbedding.getType())
+        .thenReturn(com.xgen.mongot.index.definition.IndexDefinitionGeneration.Type.AUTO_EMBEDDING);
+    when(autoEmbedding.getDerivedIndexGeneration()).thenReturn(derived);
+    when(autoEmbedding.getGenerationId()).thenReturn(rawId);
+    when(autoEmbedding.getIndex()).thenReturn(derived.getIndex());
+    when(autoEmbedding.getDefinitionGeneration()).thenReturn(derived.getDefinitionGeneration());
+
+    mocks.lifecycleManager.add(autoEmbedding);
+
+    assertTrue(mocks.lifecycleManager.contains(derivedId));
+    assertFalse(mocks.lifecycleManager.contains(rawId));
   }
 
   @Test
@@ -354,98 +392,25 @@ public class DefaultLifecycleManagerTest {
     verify(mocks.snapshotterManager, times(0)).drop(gen2);
   }
 
-  @Test
-  public void testLifecycleManagerInitialized() {
-    Mocks mocks = Mocks.create();
-    var index1 = mockIndexGeneration(MOCK_INDEX_GENERATION_ID);
-    CountDownLatch latch = new CountDownLatch(1);
-    doAnswer(
-            x -> {
-              latch.await();
-              return doCallRealMethod();
-            })
-        .when(mocks.lifecycleManager.getReplicationManager())
-        .add(index1);
-    mocks.lifecycleManager.add(index1);
-    IndexLifecycleManager indexLifecycleManager =
-        mocks.lifecycleManager.getIndexLifecycleManager(MOCK_INDEX_GENERATION_ID);
-    assertFalse(mocks.lifecycleManager.isInitialized());
-    when(mocks.lifecycleManager.getReplicationManager().isInitialized()).thenReturn(true);
-    assertFalse(mocks.lifecycleManager.isInitialized());
-    latch.countDown();
-    waitForState(indexLifecycleManager, IndexLifecycleManager.State.RUNNING);
-    assertTrue(mocks.lifecycleManager.isInitialized());
-    verify(mocks.snapshotterManager, timeout(10000)).scheduleUpload(index1);
-  }
-
-  @Test
-  public void testGetReplicationInitStateNoIndexes() {
-    Mocks mocks = Mocks.create();
-    assertFalse(mocks.lifecycleManager.isInitialized());
-    when(mocks.lifecycleManager.getReplicationManager().isInitialized()).thenReturn(true);
-    assertTrue(mocks.lifecycleManager.isInitialized());
-  }
-
-  @Test
-  public void testLifecycleManagerAllInitialized() {
-    Mocks mocks = Mocks.create();
-    var index1 = mockIndexGeneration(MOCK_INDEX_GENERATION_ID);
-    var index2 = mockIndexGeneration(uniqueMockGenerationDefinition());
-    mocks.lifecycleManager.add(index1);
-    mocks.lifecycleManager.add(index2);
-    IndexLifecycleManager indexLifecycleManager =
-        mocks.lifecycleManager.getIndexLifecycleManager(MOCK_INDEX_GENERATION_ID);
-    waitForState(indexLifecycleManager, IndexLifecycleManager.State.RUNNING);
-    waitForState(
-        mocks.lifecycleManager.getIndexLifecycleManager(index2.getGenerationId()),
-        IndexLifecycleManager.State.RUNNING);
-    assertFalse(mocks.lifecycleManager.isInitialized());
-    when(mocks.lifecycleManager.getReplicationManager().isInitialized()).thenReturn(true);
-    assertTrue(mocks.lifecycleManager.isInitialized());
-    // Once initialized, should be considered initialized after new indexes are added.
-    mocks.lifecycleManager.add(mockIndexGeneration(uniqueMockGenerationDefinition()));
-    assertTrue(mocks.lifecycleManager.isInitialized());
-    verify(mocks.snapshotterManager, timeout(10000)).scheduleUpload(index1);
-  }
-
-  @Test
-  public void testLifecycleManagerInitializedWithIndexDownloading() throws BlobstoreException {
-    Mocks mocks = Mocks.create();
-    var index1 = mockIndexGeneration(MOCK_INDEX_GENERATION_ID);
-    var index2 = mockIndexGeneration(uniqueMockGenerationDefinition());
-    CountDownLatch latch = new CountDownLatch(1);
-    IndexBlobstoreSnapshotter snapshotter = mock(IndexBlobstoreSnapshotter.class);
-    when(snapshotter.shouldDownloadIndex()).thenReturn(true);
-
-    when(mocks.snapshotterManager.get(index2.getGenerationId()))
-        .thenAnswer(x -> Optional.of(snapshotter));
-    doAnswer(
-            x -> {
-              latch.await();
-              return null;
-            })
-        .when(snapshotter)
-        .downloadIndex();
-
-    mocks.lifecycleManager.add(index1);
-    mocks.lifecycleManager.add(index2);
-    IndexLifecycleManager indexLifecycleManager =
-        mocks.lifecycleManager.getIndexLifecycleManager(MOCK_INDEX_GENERATION_ID);
-    waitForState(indexLifecycleManager, IndexLifecycleManager.State.RUNNING);
-    waitForState(
-        mocks.lifecycleManager.getIndexLifecycleManager(index2.getGenerationId()),
-        IndexLifecycleManager.State.DOWNLOADING);
-    assertFalse(mocks.lifecycleManager.isInitialized());
-    when(mocks.lifecycleManager.getReplicationManager().isInitialized()).thenReturn(true);
-    assertTrue(mocks.lifecycleManager.isInitialized());
-    latch.countDown();
-    verify(mocks.snapshotterManager, timeout(10000)).scheduleUpload(index1);
-  }
-
   // ==================== MaterializedViewManager Propagation Tests ====================
 
   private DefaultLifecycleManager createLifecycleManagerWithMatViewManager(
       MaterializedViewManager matViewManager) throws Exception {
+    return createLifecycleManagerWithMatViewManager(
+        matViewManager, ToggleGate.opened(), ToggleGate.opened());
+  }
+
+  private DefaultLifecycleManager createLifecycleManagerWithMatViewManager(
+      MaterializedViewManager matViewManager, Gate autoEmbeddingReplicationGate) throws Exception {
+    return createLifecycleManagerWithMatViewManager(
+        matViewManager, ToggleGate.opened(), autoEmbeddingReplicationGate);
+  }
+
+  private DefaultLifecycleManager createLifecycleManagerWithMatViewManager(
+      MaterializedViewManager matViewManager,
+      Gate replicationGate,
+      Gate autoEmbeddingReplicationGate)
+      throws Exception {
     MeterRegistry meterRegistry = new SimpleMeterRegistry();
     ReplicationManagerFactory replicationManagerFactory =
         (Optional<SyncSourceConfig> syncSourceConfig) -> {
@@ -465,11 +430,13 @@ public class DefaultLifecycleManagerTest {
         Optional.empty(),
         (syncConfig) -> Optional.of(matViewManager),
         meterRegistry,
-        ToggleGate.opened(),
+        replicationGate,
+        autoEmbeddingReplicationGate,
         Executors.fixedSizeThreadPool("init", 1, meterRegistry),
         Executors.fixedSizeThreadPool("lifecycle", 1, meterRegistry),
         Executors.fixedSizeThreadPool("blobstore", 1, meterRegistry),
-        false);
+        false,
+        new ThreadPoolResourceMetrics.Bindings());
   }
 
   @Test
@@ -494,6 +461,86 @@ public class DefaultLifecycleManagerTest {
     lifecycleManager.restartReplication();
 
     verify(matViewManager).restartReplication();
+  }
+
+  @Test
+  public void testRestartReplication_skipsMaterializedViewManagerWhenReplicationGateClosed()
+      throws Exception {
+    MaterializedViewManager matViewManager = mock(MaterializedViewManager.class);
+    DefaultLifecycleManager lifecycleManager =
+        createLifecycleManagerWithMatViewManager(
+            matViewManager, ToggleGate.closed(), ToggleGate.opened());
+
+    lifecycleManager.restartReplication();
+
+    verify(matViewManager, never()).restartReplication();
+  }
+
+  @Test
+  public void testRestartReplication_skipsMaterializedViewManagerWhenAutoEmbeddingGateClosed()
+      throws Exception {
+    MaterializedViewManager matViewManager = mock(MaterializedViewManager.class);
+    DefaultLifecycleManager lifecycleManager =
+        createLifecycleManagerWithMatViewManager(matViewManager, ToggleGate.closed());
+
+    lifecycleManager.restartReplication();
+
+    verify(matViewManager, never()).restartReplication();
+  }
+
+  @Test
+  public void testShutdownAutoEmbeddingReplication_onlyShutsDownMaterializedViewManager()
+      throws Exception {
+    MaterializedViewManager matViewManager = mock(MaterializedViewManager.class);
+    when(matViewManager.shutdownReplication()).thenReturn(CompletableFuture.completedFuture(null));
+    DefaultLifecycleManager lifecycleManager =
+        createLifecycleManagerWithMatViewManager(matViewManager);
+    ReplicationManager replicationManager = lifecycleManager.getReplicationManager();
+
+    lifecycleManager.shutdownAutoEmbeddingReplication().get(5, TimeUnit.SECONDS);
+
+    verify(matViewManager).shutdownReplication();
+    verify(replicationManager, never()).shutdown();
+  }
+
+  @Test
+  public void testRestartAutoEmbeddingReplication_updatesSyncSourceAndRestarts() throws Exception {
+    MaterializedViewManager matViewManager = mock(MaterializedViewManager.class);
+    when(matViewManager.updateSyncSource(MOCK_SYNC_SOURCE_CONFIG)).thenReturn(true);
+    DefaultLifecycleManager lifecycleManager =
+        createLifecycleManagerWithMatViewManager(matViewManager);
+
+    lifecycleManager.restartAutoEmbeddingReplication(MOCK_SYNC_SOURCE_CONFIG);
+
+    verify(matViewManager).updateSyncSource(MOCK_SYNC_SOURCE_CONFIG);
+    verify(matViewManager).restartReplication();
+  }
+
+  @Test
+  public void testRestartAutoEmbeddingReplication_skipsWhenReplicationGateClosed()
+      throws Exception {
+    MaterializedViewManager matViewManager = mock(MaterializedViewManager.class);
+    DefaultLifecycleManager lifecycleManager =
+        createLifecycleManagerWithMatViewManager(
+            matViewManager, ToggleGate.closed(), ToggleGate.opened());
+
+    lifecycleManager.restartAutoEmbeddingReplication(MOCK_SYNC_SOURCE_CONFIG);
+
+    verify(matViewManager, never()).updateSyncSource(any());
+    verify(matViewManager, never()).restartReplication();
+  }
+
+  @Test
+  public void testRestartAutoEmbeddingReplication_skipsWhenAutoEmbeddingGateClosed()
+      throws Exception {
+    MaterializedViewManager matViewManager = mock(MaterializedViewManager.class);
+    DefaultLifecycleManager lifecycleManager =
+        createLifecycleManagerWithMatViewManager(matViewManager, ToggleGate.closed());
+
+    lifecycleManager.restartAutoEmbeddingReplication(MOCK_SYNC_SOURCE_CONFIG);
+
+    verify(matViewManager, never()).updateSyncSource(any());
+    verify(matViewManager, never()).restartReplication();
   }
 
   @Test

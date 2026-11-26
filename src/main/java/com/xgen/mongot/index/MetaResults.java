@@ -1,5 +1,6 @@
 package com.xgen.mongot.index;
 
+import com.xgen.mongot.index.query.aggregation.AggregationResult;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
@@ -27,6 +28,7 @@ import org.bson.BsonValue;
 public record MetaResults(
     CountResult count,
     Optional<Map<String, FacetInfo>> facet,
+    Optional<AggregationResult> aggregation,
     Optional<Map<String, BsonValue>> metrics)
     implements DocumentEncodable {
 
@@ -53,8 +55,11 @@ public record MetaResults(
     this(count, Optional.empty(), Optional.empty());
   }
 
-  public MetaResults(CountResult count, Optional<Map<String, FacetInfo>> facet) {
-    this(count, facet, Optional.empty());
+  public MetaResults(
+      CountResult count,
+      Optional<Map<String, FacetInfo>> facet,
+      Optional<AggregationResult> aggregation) {
+    this(count, facet, aggregation, Optional.empty());
   }
 
   /**
@@ -81,9 +86,11 @@ public record MetaResults(
   }
 
   public static MetaResults fromBson(DocumentParser parser) throws BsonParseException {
+    // TODO(CLOUDP-413102) provide AggregationResult fromBson
     return new MetaResults(
         parser.getField(Fields.COUNT_RESULT).unwrap(),
         parser.getField(Fields.FACET_RESULTS).unwrap(),
+        Optional.empty(),
         parser.getField(Fields.METRIC_RESULTS).unwrap().map(LinkedHashMap::new));
   }
 
@@ -93,8 +100,36 @@ public record MetaResults(
     return document;
   }
 
+  /**
+   * Return a copy with the aggregation's per-node numBuckets top-N applied. Call this ONLY on a
+   * fully-merged, non-sharded / non-partitioned (standalone) result: top-N-by-count is not
+   * associative across shard/partition merges, so it must be applied exactly once at the outermost
+   * merge point (see {@link AggregationResult#applyLimit}). Intentionally NOT folded into {@link
+   * #toBson}, so serializing a per-partition / per-shard (not-yet-fully-merged) {@code MetaResults}
+   * can never truncate on partial counts.
+   */
+  public MetaResults applyAggregationLimit() {
+    return this.aggregation()
+        .map(
+            agg ->
+                new MetaResults(
+                    this.count, this.facet, Optional.of(agg.applyLimit()), this.metrics))
+        .orElse(this);
+  }
+
   @Override
   public BsonDocument toBson() {
+    if (this.aggregation().isPresent()) {
+      BsonDocument result =
+          BsonDocumentBuilder.builder().field(Fields.COUNT_RESULT, this.count).build();
+
+      // TODO(CLOUDP-413102) provide aggregation result toBson
+      // Serialize verbatim -- the numBuckets top-N is applied by applyAggregationLimit() at the
+      // standalone (non-intermediate) terminal, NOT here, so this never truncates a partial result.
+      result.append("facet", this.aggregation().get().toStandaloneBson());
+      return result;
+    }
+
     return BsonDocumentBuilder.builder()
         .field(Fields.COUNT_RESULT, this.count)
         .field(Fields.FACET_RESULTS, this.facet)

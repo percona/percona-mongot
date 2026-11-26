@@ -29,11 +29,24 @@ import org.junit.Test;
  *
  * <p>The fork is resolved via a separate maven_install ("lucene_fork") and wired into the main
  * dependency graph via override_targets in deps.bzl. If this test fails, check that configuration.
+ *
+ * <p>This is one of three layered guards enforcing mongot's codec rollback-safety contract, each
+ * locking a different axis:
+ *
+ * <ul>
+ *   <li>{@code LuceneForkVersionTest} — which jar each Lucene module loads from.
+ *   <li>{@code CodecSubformatChangeDetectorTest} — per-field dispatch and the class of every
+ *       sub-format slot.
+ *   <li>{@code OnDiskFormatVersionsTest} — the on-disk version each format writes.
+ * </ul>
+ *
+ * <p>See the codec sub-format rollout policy:
+ * docs/internal/development/codec-subformat-rollout-policy.md.
  */
 public class LuceneForkVersionTest {
 
-  private static final String UPSTREAM_VERSION = "10.1.0";
-  private static final String FORK_VERSION = "10.1.0-4";
+  private static final String UPSTREAM_VERSION = "10.4.0";
+  private static final String FORK_VERSION = "10.4.0-5";
 
   @Test
   public void luceneCore_fromFork() {
@@ -54,6 +67,13 @@ public class LuceneForkVersionTest {
     String jarPath = jarLocationOf(DefaultBloomFilterFactory.class);
     Truth.assertThat(jarPath).contains("lucene-codecs-" + FORK_VERSION + ".jar");
     Truth.assertThat(jarPath).doesNotContain("lucene-codecs-" + UPSTREAM_VERSION + ".jar");
+  }
+
+  @Test
+  public void luceneJoin_fromFork() {
+    String jarPath = jarLocationOf(BitSetProducer.class);
+    Truth.assertThat(jarPath).contains("lucene-join-" + FORK_VERSION + ".jar");
+    Truth.assertThat(jarPath).doesNotContain("lucene-join-" + UPSTREAM_VERSION + ".jar");
   }
 
   @Test
@@ -131,13 +151,6 @@ public class LuceneForkVersionTest {
     String jarPath = jarLocationOf(Highlighter.class);
     Truth.assertThat(jarPath).contains("lucene-highlighter-" + UPSTREAM_VERSION + ".jar");
     Truth.assertThat(jarPath).doesNotContain("lucene-highlighter-" + FORK_VERSION + ".jar");
-  }
-
-  @Test
-  public void luceneJoin_fromUpstream() {
-    String jarPath = jarLocationOf(BitSetProducer.class);
-    Truth.assertThat(jarPath).contains("lucene-join-" + UPSTREAM_VERSION + ".jar");
-    Truth.assertThat(jarPath).doesNotContain("lucene-join-" + FORK_VERSION + ".jar");
   }
 
   @Test

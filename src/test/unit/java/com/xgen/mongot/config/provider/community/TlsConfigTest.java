@@ -5,8 +5,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.bson.parser.BsonDocumentParser;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
+import com.xgen.mongot.util.bson.parser.PermissiveBsonParseContext;
 import java.nio.file.Path;
 import java.util.Optional;
 import org.bson.BsonBoolean;
@@ -21,7 +23,10 @@ public class TlsConfigTest {
   public void parse_valid_defaultEnabled() throws BsonParseException {
     BsonDocument doc = new BsonDocument();
 
-    try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)), doc)
+            .build()) {
       TlsConfig parsed = TlsConfig.fromBson(parser);
       assertFalse("enabled should default to false when omitted", parsed.enabled());
       assertTrue(
@@ -40,7 +45,10 @@ public class TlsConfigTest {
             .append("enabled", BsonBoolean.TRUE)
             .append("tlsCertificateKeyFile", new BsonString("/etc/tls/client.pem"));
 
-    try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)), doc)
+            .build()) {
       TlsConfig parsed = TlsConfig.fromBson(parser);
       assertTrue(parsed.enabled());
       assertTrue(parsed.tlsCertificateKeyFile().isPresent());
@@ -55,17 +63,18 @@ public class TlsConfigTest {
         new BsonDocument()
             .append("enabled", BsonBoolean.TRUE)
             .append("tlsCertificateKeyFile", new BsonString("/etc/tls/client.pem"))
-            .append(
-                "tlsCertificateKeyFilePasswordFile", new BsonString("/etc/tls/cert-pass"));
+            .append("tlsCertificateKeyFilePasswordFile", new BsonString("/etc/tls/cert-pass"));
 
-    try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)), doc)
+            .build()) {
       TlsConfig parsed = TlsConfig.fromBson(parser);
       assertTrue(parsed.enabled());
       assertTrue(parsed.tlsCertificateKeyFile().isPresent());
       assertEquals(Path.of("/etc/tls/client.pem"), parsed.tlsCertificateKeyFile().get());
       assertTrue(parsed.tlsCertificateKeyFilePasswordFile().isPresent());
-      assertEquals(
-          Path.of("/etc/tls/cert-pass"), parsed.tlsCertificateKeyFilePasswordFile().get());
+      assertEquals(Path.of("/etc/tls/cert-pass"), parsed.tlsCertificateKeyFilePasswordFile().get());
     }
   }
 
@@ -75,14 +84,20 @@ public class TlsConfigTest {
         new BsonDocument()
             .append("enabled", BsonBoolean.TRUE)
             .append("tlsCertificateKeyFile", new BsonString("/etc/tls/client.pem"))
-            .append(
-                "tlsCertificateKeyFilePasswordFile", new BsonString("/etc/tls/cert-pass"));
+            .append("tlsCertificateKeyFilePasswordFile", new BsonString("/etc/tls/cert-pass"));
 
-    try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)), doc)
+            .build()) {
       TlsConfig parsed = TlsConfig.fromBson(parser);
       BsonDocument encoded = parsed.toBson();
 
-      try (var parser2 = BsonDocumentParser.fromRoot(encoded).build()) {
+      try (var parser2 =
+          BsonDocumentParser.withContext(
+                  PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)),
+                  encoded)
+              .build()) {
         TlsConfig roundTripped = TlsConfig.fromBson(parser2);
         assertEquals(parsed.enabled(), roundTripped.enabled());
         assertEquals(parsed.tlsCertificateKeyFile(), roundTripped.tlsCertificateKeyFile());
@@ -97,11 +112,18 @@ public class TlsConfigTest {
   public void roundTrip_defaultEnabled_preservesValue() throws BsonParseException {
     BsonDocument doc = new BsonDocument();
 
-    try (var parser = BsonDocumentParser.fromRoot(doc).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)), doc)
+            .build()) {
       TlsConfig parsed = TlsConfig.fromBson(parser);
       BsonDocument encoded = parsed.toBson();
 
-      try (var parser2 = BsonDocumentParser.fromRoot(encoded).build()) {
+      try (var parser2 =
+          BsonDocumentParser.withContext(
+                  PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)),
+                  encoded)
+              .build()) {
         TlsConfig roundTripped = TlsConfig.fromBson(parser2);
         assertFalse(roundTripped.enabled());
         assertTrue(roundTripped.tlsCertificateKeyFile().isEmpty());
@@ -119,7 +141,11 @@ public class TlsConfigTest {
             Optional.of(Path.of("/etc/tls/cert-pass")),
             Optional.empty());
 
-    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)),
+                new BsonDocument())
+            .build()) {
       tls.validate(parser);
     }
   }
@@ -130,7 +156,11 @@ public class TlsConfigTest {
         new TlsConfig(
             false, Optional.of(Path.of("/etc/tls/client.pem")), Optional.empty(), Optional.empty());
 
-    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)),
+                new BsonDocument())
+            .build()) {
       BsonParseException e = assertThrows(BsonParseException.class, () -> tls.validate(parser));
       assertEquals("tls must be enabled when tlsCertificateKeyFile is configured", e.getMessage());
     }
@@ -142,7 +172,11 @@ public class TlsConfigTest {
         new TlsConfig(
             false, Optional.empty(), Optional.empty(), Optional.of(Path.of("/etc/tls/client.pem")));
 
-    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)),
+                new BsonDocument())
+            .build()) {
       BsonParseException e = assertThrows(BsonParseException.class, () -> tls.validate(parser));
       assertEquals("tls must be enabled when caFile is configured", e.getMessage());
     }
@@ -152,12 +186,13 @@ public class TlsConfigTest {
   public void validate_passwordFile_withoutCertKeyFile_throws() throws BsonParseException {
     TlsConfig tls =
         new TlsConfig(
-            true,
-            Optional.empty(),
-            Optional.of(Path.of("/etc/tls/cert-pass")),
-            Optional.empty());
+            true, Optional.empty(), Optional.of(Path.of("/etc/tls/cert-pass")), Optional.empty());
 
-    try (var parser = BsonDocumentParser.fromRoot(new BsonDocument()).build()) {
+    try (var parser =
+        BsonDocumentParser.withContext(
+                PermissiveBsonParseContext.root(Optional.of(DeploymentEnvironment.COMMUNITY)),
+                new BsonDocument())
+            .build()) {
       BsonParseException e = assertThrows(BsonParseException.class, () -> tls.validate(parser));
       assertEquals(
           "tlsCertificateKeyFile is required when tlsCertificateKeyFilePasswordFile is provided",

@@ -128,6 +128,8 @@ public class FieldName {
     KNN_F32_Q7("knnF32Q7"),
     /** KNN Float Vector field with binary quantization */
     KNN_F32_Q1("knnF32Q1"),
+    /** KNN Byte Vector field with binary quantization */
+    KNN_BYTE_Q1("knnByteQ1"),
     /**
      * Indexes array and non-array fields as StringField and SortedDocValuesField.
      *
@@ -601,8 +603,7 @@ public class FieldName {
     return MetaField.NULLNESS.getLuceneFieldName() + "/" + path;
   }
 
-  private static final String NULLNESS_FIELD_PREFIX =
-      MetaField.NULLNESS.getLuceneFieldName() + "/";
+  private static final String NULLNESS_FIELD_PREFIX = MetaField.NULLNESS.getLuceneFieldName() + "/";
 
   /**
    * Returns true if the given Lucene field name identifies a {@code $meta/nullness} sort field

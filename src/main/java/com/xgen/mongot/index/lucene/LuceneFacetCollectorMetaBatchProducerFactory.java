@@ -2,15 +2,20 @@ package com.xgen.mongot.index.lucene;
 
 import static com.xgen.mongot.util.Check.checkState;
 
+import com.xgen.mongot.index.IntermediateFacetBucket;
 import com.xgen.mongot.index.definition.FieldTypeDefinition;
 import com.xgen.mongot.index.lucene.explain.explainers.FacetFeatureExplainer;
 import com.xgen.mongot.index.lucene.explain.timing.ExplainTimings;
 import com.xgen.mongot.index.lucene.explain.tracing.Explain;
+import com.xgen.mongot.index.lucene.facet.ParentDedupedLongRangeFacetCounts;
+import com.xgen.mongot.index.lucene.facet.TokenFacetSparseRouting;
 import com.xgen.mongot.index.lucene.field.FieldName;
+import com.xgen.mongot.index.lucene.query.LuceneSearchQueryFactoryDistributor;
 import com.xgen.mongot.index.lucene.searcher.LuceneIndexSearcher;
 import com.xgen.mongot.index.query.CollectorQuery;
 import com.xgen.mongot.index.query.InvalidQueryException;
 import com.xgen.mongot.index.query.ReturnScope;
+import com.xgen.mongot.index.query.collectors.AggregationCollector;
 import com.xgen.mongot.index.query.collectors.FacetCollector;
 import com.xgen.mongot.index.query.collectors.FacetDefinition;
 import com.xgen.mongot.index.query.collectors.MetricsCollector;
@@ -20,6 +25,7 @@ import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.timers.InvocationCountingTimer;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +38,7 @@ import org.apache.lucene.facet.sortedset.ConcurrentSortedSetDocValuesFacetCounts
 import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetCounts;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
+import org.bson.BsonString;
 
 public class LuceneFacetCollectorMetaBatchProducerFactory {
 
@@ -41,7 +48,9 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
       LuceneIndexSearcherReference searcherReference,
       TopDocs topDocs,
       FacetsCollector facetsCollector,
-      Optional<NamedExecutorService> concurrentSearchExecutor)
+      Optional<NamedExecutorService> concurrentSearchExecutor,
+      LuceneSearchQueryFactoryDistributor queryFactory,
+      boolean embeddedScopedFacetsEnabled)
       throws IOException, InterruptedException, InvalidQueryException {
     // Ensure that we have an exact count.
     checkState(
@@ -53,19 +62,41 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
         Map<FacetDefinition.Type, Map<String, FacetDefinition>> typeToFacetToDefinition =
             facetCollector.getFacetDefinitionsByType();
 
+        // Partition string facets into document-indexed (unscoped) and embeddedDocument-scoped.
+        Map<String, FacetDefinition> unscopedStringDefs = new HashMap<>();
+        Map<String, FacetDefinition.StringFacetDefinition> scopedStringDefs = new HashMap<>();
+        for (Map.Entry<String, FacetDefinition> entry :
+            typeToFacetToDefinition.get(FacetDefinition.Type.STRING).entrySet()) {
+          if (entry.getValue() instanceof FacetDefinition.StringFacetDefinition stringDef
+              && stringDef.embeddedDocument().isPresent()) {
+            scopedStringDefs.put(entry.getKey(), stringDef);
+          } else {
+            unscopedStringDefs.put(entry.getKey(), entry.getValue());
+          }
+        }
+
+        // Partition number/date (boundary) facets into document-indexed and scoped, as above.
+        Map<String, FacetDefinition> unscopedBoundaryDefs = new HashMap<>();
+        Map<String, FacetDefinition.BoundaryFacetDefinition<?>> scopedBoundaryDefs =
+            new HashMap<>();
+        for (FacetDefinition.Type type :
+            List.of(FacetDefinition.Type.NUMBER, FacetDefinition.Type.DATE)) {
+          for (Map.Entry<String, FacetDefinition> entry :
+              typeToFacetToDefinition.get(type).entrySet()) {
+            if (entry.getValue() instanceof FacetDefinition.BoundaryFacetDefinition<?> boundaryDef
+                && boundaryDef.embeddedDocument().isPresent()) {
+              scopedBoundaryDefs.put(entry.getKey(), boundaryDef);
+            } else {
+              unscopedBoundaryDefs.put(entry.getKey(), entry.getValue());
+            }
+          }
+        }
+
         Queue<LuceneMetaBucketProducer> bucketProducers = new LinkedList<>();
         // Add bucket producers for number, date, and string facets.
         bucketProducers.addAll(
             getBoundaryBucketProducers(
-                typeToFacetToDefinition.get(FacetDefinition.Type.NUMBER),
-                facetContext,
-                facetsCollector,
-                topDocs.totalHits.value(),
-                returnScopePath));
-
-        bucketProducers.addAll(
-            getBoundaryBucketProducers(
-                typeToFacetToDefinition.get(FacetDefinition.Type.DATE),
+                unscopedBoundaryDefs,
                 facetContext,
                 facetsCollector,
                 topDocs.totalHits.value(),
@@ -73,18 +104,134 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
 
         bucketProducers.addAll(
             getStringBucketProducers(
-                typeToFacetToDefinition.get(FacetDefinition.Type.STRING),
+                unscopedStringDefs,
                 facetContext,
                 searcherReference,
                 facetsCollector,
+                topDocs.totalHits.value(),
                 returnScopePath,
                 concurrentSearchExecutor));
+
+        bucketProducers.addAll(
+            getScopedStringBucketProducers(
+                scopedStringDefs,
+                searcherReference,
+                facetsCollector,
+                queryFactory,
+                embeddedScopedFacetsEnabled));
+
+        bucketProducers.addAll(
+            getScopedBoundaryBucketProducers(
+                scopedBoundaryDefs,
+                facetContext,
+                searcherReference,
+                facetsCollector,
+                queryFactory,
+                embeddedScopedFacetsEnabled));
 
         return new LuceneFacetCollectorMetaBatchProducer(
             topDocs.totalHits.value(), bucketProducers, facetCollector);
       case MetricsCollector ignored:
         return Check.unreachable("metrics collector queries do not produce facet buckets");
+      case AggregationCollector aggregationCollector:
+        throw new UnsupportedOperationException(
+            "Aggregation is not supported for intermediate query yet");
     }
+  }
+
+  /**
+   * Intermediate (cross-partition) bucket producers for embeddedDocument-scoped string facets. Each
+   * facet runs its own child query and counts matching children deduplicated to the root; buckets
+   * are emitted via {@code getAllChildren} so the final top-N is applied after cross-partition
+   * merge, matching the unscoped token-facet path.
+   */
+  private static List<LuceneMetaBucketProducer> getScopedStringBucketProducers(
+      Map<String, FacetDefinition.StringFacetDefinition> definitions,
+      LuceneIndexSearcherReference searcherReference,
+      FacetsCollector resultParentHits,
+      LuceneSearchQueryFactoryDistributor queryFactory,
+      boolean embeddedScopedFacetsEnabled)
+      throws IOException, InvalidQueryException {
+    if (definitions.isEmpty()) {
+      return List.of();
+    }
+    if (!embeddedScopedFacetsEnabled) {
+      throw new InvalidQueryException(
+          "embeddedDocument-scoped facets are not enabled. Please contact support.");
+    }
+    LuceneIndexSearcher searcher = searcherReference.getIndexSearcher();
+    List<LuceneMetaBucketProducer> result = new ArrayList<>();
+    for (Map.Entry<String, FacetDefinition.StringFacetDefinition> entry : definitions.entrySet()) {
+      Optional<EmbeddedScopedStringFacetCounter.ScopedCounts> scopedCounts =
+          EmbeddedScopedStringFacetCounter.count(
+              searcher, queryFactory, entry.getValue(), resultParentHits);
+      if (scopedCounts.isEmpty()) {
+        continue;
+      }
+      FacetResult facetResult =
+          scopedCounts.get().counts().getAllChildren(scopedCounts.get().lucenePath());
+      if (facetResult != null) {
+        result.add(LuceneStringFacetMetaBucketProducer.create(facetResult, entry.getKey()));
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Intermediate (cross-partition) bucket producers for embeddedDocument-scoped number/date facets.
+   * Each facet runs its own child query and counts matching children bucketed by boundaries and
+   * deduplicated to the root. Buckets (and the default bucket) are emitted directly from the
+   * per-root-deduped counts — the document-indexed {@code totalCount - sum} default-bucket
+   * derivation is invalid under dedup, since a root can land in several buckets.
+   */
+  private static List<LuceneMetaBucketProducer> getScopedBoundaryBucketProducers(
+      Map<String, FacetDefinition.BoundaryFacetDefinition<?>> definitions,
+      LuceneFacetContext facetContext,
+      LuceneIndexSearcherReference searcherReference,
+      FacetsCollector resultParentHits,
+      LuceneSearchQueryFactoryDistributor queryFactory,
+      boolean embeddedScopedFacetsEnabled)
+      throws IOException, InvalidQueryException {
+    if (definitions.isEmpty()) {
+      return List.of();
+    }
+    if (!embeddedScopedFacetsEnabled) {
+      throw new InvalidQueryException(
+          "embeddedDocument-scoped facets are not enabled. Please contact support.");
+    }
+    LuceneIndexSearcher searcher = searcherReference.getIndexSearcher();
+    List<LuceneMetaBucketProducer> result = new ArrayList<>();
+    for (Map.Entry<String, FacetDefinition.BoundaryFacetDefinition<?>> entry :
+        definitions.entrySet()) {
+      String facetName = entry.getKey();
+      FacetDefinition.BoundaryFacetDefinition<?> definition = entry.getValue();
+      ParentDedupedLongRangeFacetCounts counts =
+          EmbeddedScopedBoundaryFacetCounter.count(
+                  searcher, queryFactory, facetContext, definition, resultParentHits)
+              .counts();
+
+      List<IntermediateFacetBucket> buckets = new ArrayList<>();
+      int[] rangeCounts = counts.counts();
+      for (int i = 0; i < rangeCounts.length; i++) {
+        buckets.add(
+            new IntermediateFacetBucket(
+                IntermediateFacetBucket.Type.FACET,
+                facetName,
+                definition.boundaries().get(i),
+                rangeCounts[i]));
+      }
+      Optional<IntermediateFacetBucket> defaultBucket =
+          definition.defaultBucketName().isPresent()
+              ? Optional.of(
+                  new IntermediateFacetBucket(
+                      IntermediateFacetBucket.Type.FACET,
+                      facetName,
+                      new BsonString(definition.defaultBucketName().get()),
+                      counts.defaultCount()))
+              : Optional.empty();
+      result.add(new LuceneBoundaryFacetMetaBucketProducer(buckets, defaultBucket));
+    }
+    return result;
   }
 
   private static List<LuceneMetaBucketProducer> getBoundaryBucketProducers(
@@ -117,6 +264,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
       LuceneFacetContext facetContext,
       LuceneIndexSearcherReference searcherReference,
       FacetsCollector collector,
+      long totalHits,
       Optional<FieldPath> returnScope,
       Optional<NamedExecutorService> concurrentSearchExecutor)
       throws IOException, InterruptedException, InvalidQueryException {
@@ -151,6 +299,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
             facetableStringTypeToNameToDefinition.get(FieldTypeDefinition.Type.TOKEN),
             searcher,
             collector,
+            totalHits,
             returnScope,
             concurrentSearchExecutor);
 
@@ -209,6 +358,7 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
       Map<String, FacetDefinition.StringFacetDefinition> facetDefinitions,
       LuceneIndexSearcher searcher,
       FacetsCollector collector,
+      long totalHits,
       Optional<FieldPath> returnScope,
       Optional<NamedExecutorService> concurrentSearchExecutor)
       throws IOException, InterruptedException, InvalidQueryException {
@@ -219,7 +369,8 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
     if (facetDefinitions.isEmpty()) {
       return result;
     }
-    // If cache optional is empty, then FF enabling token facets is not enabled
+    // The cache optional is empty when token faceting is disabled. That gate applies even when
+    // the query-time path will not read the cache.
     if (searcher.getTokenFacetsStateCache().isEmpty()) {
       throw new InvalidQueryException(
           String.format(
@@ -228,12 +379,31 @@ public class LuceneFacetCollectorMetaBatchProducerFactory {
               facetDefinitions.keySet()));
     }
 
+    var indexReader = searcher.getIndexReader();
     var tokenFacetsStateCache = searcher.getTokenFacetsStateCache().get();
 
     for (var entry : facetDefinitions.entrySet()) {
       var lucenePath =
           FieldName.TypeField.TOKEN.getLuceneFieldName(
               FieldPath.parse(entry.getValue().path()), returnScope);
+      // Explain stays on the dense path: query-time counting cannot report whole-index
+      // cardinality, and CLOUDP-430031 still needs a durable explain field for which route ran.
+      if (facetFeatureExplainer.isEmpty()
+          && TokenFacetSparseRouting.isSparse(
+              totalHits, indexReader.maxDoc(), indexReader, lucenePath)) {
+        Facets counts;
+        try (var unused =
+            new InvocationCountingTimer.AutocloseableOptional<>(
+                facetTimings.map(t -> t.split(ExplainTimings.Type.GENERATE_FACET_COUNTS)))) {
+          counts = TokenFacetSparseRouting.count(lucenePath, collector, concurrentSearchExecutor);
+        }
+        Optional<FacetResult> facetResult = Optional.ofNullable(counts.getAllChildren(lucenePath));
+        if (facetResult.isPresent()) {
+          result.add(LuceneStringFacetMetaBucketProducer.create(facetResult.get(), entry.getKey()));
+        }
+        continue;
+      }
+
       var fieldState = tokenFacetsStateCache.get(lucenePath);
       facetFeatureExplainer.ifPresent(
           explainer ->

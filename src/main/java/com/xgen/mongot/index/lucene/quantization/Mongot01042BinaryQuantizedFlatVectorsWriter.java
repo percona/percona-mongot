@@ -19,6 +19,7 @@
 
 package com.xgen.mongot.index.lucene.quantization;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.xgen.mongot.index.lucene.quantization.Mongot01042BinaryQuantizedFlatVectorsFormat.DYNAMIC_CONFIDENCE_INTERVAL;
 import static com.xgen.mongot.index.lucene.quantization.Mongot01042BinaryQuantizedFlatVectorsFormat.QUANTIZED_VECTOR_COMPONENT;
 import static com.xgen.mongot.index.lucene.quantization.Mongot01042BinaryQuantizedFlatVectorsFormat.calculateDefaultConfidenceInterval;
@@ -27,6 +28,8 @@ import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 import static org.apache.lucene.util.RamUsageEstimator.shallowSizeOfInstance;
 
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.index.lucene.abortable.AbortableRandomVectorScorerSupplier;
+import com.xgen.mongot.index.lucene.abortable.MergeCancellationContext;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -40,6 +43,7 @@ import org.apache.lucene.codecs.hnsw.FlatFieldVectorsWriter;
 import org.apache.lucene.codecs.hnsw.FlatVectorsScorer;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.lucene95.OrdToDocDISIReaderConfiguration;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DocIDMerger;
 import org.apache.lucene.index.DocsWithFieldSet;
 import org.apache.lucene.index.FieldInfo;
@@ -58,14 +62,15 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
-import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
+import org.apache.lucene.util.hnsw.UpdateableRandomVectorScorer;
 import org.apache.lucene.util.quantization.QuantizedByteVectorValues;
 import org.apache.lucene.util.quantization.ScalarQuantizer;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Writes quantized vector values and metadata to index segments.
+ * Writes binary-quantized vector values and metadata to index segments. Supports both {@code
+ * float32} and {@code byte} encoded vector fields.
  *
  * @lucene.experimental
  */
@@ -79,7 +84,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
 
   private final SegmentWriteState segmentWriteState;
 
-  private final List<FieldWriter> fields = new ArrayList<>();
+  private final List<FieldWriter<?>> fields = new ArrayList<>();
   private final IndexOutput meta;
   private final IndexOutput quantizedVectorData;
   private final Optional<Float> confidenceInterval;
@@ -157,10 +162,13 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
   @SuppressWarnings("unchecked")
   public FlatFieldVectorsWriter<?> addField(FieldInfo fieldInfo) throws IOException {
     FlatFieldVectorsWriter<?> delegate = this.rawVectorDelegate.addField(fieldInfo);
-    if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)) {
+    if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)
+        || fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
       // [Changed from Lucene] removed a check for even dimension from here, no longer required
-      FieldWriter quantizedWriter =
-          new FieldWriter(fieldInfo, (FlatFieldVectorsWriter<float[]>) delegate);
+      FieldWriter<?> quantizedWriter =
+          fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)
+              ? new FloatFieldWriter(fieldInfo, (FlatFieldVectorsWriter<float[]>) delegate)
+              : new ByteFieldWriter(fieldInfo, (FlatFieldVectorsWriter<byte[]>) delegate);
       this.fields.add(quantizedWriter);
     }
     return delegate;
@@ -172,11 +180,10 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     // Since we know we will not be searching for additional indexing, we can just write the
     // the vectors directly to the new segment.
     // No need to use temporary file as we don't have to re-open for reading
-    if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)) {
-      ScalarQuantizer mergedQuantizationState = new BinaryQuantizer();
+    if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)
+        || fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
       MergedQuantizedVectorValues byteVectorValues =
-          MergedQuantizedVectorValues.mergeQuantizedByteVectorValues(
-              fieldInfo, mergeState, mergedQuantizationState);
+          MergedQuantizedVectorValues.mergeQuantizedByteVectorValues(fieldInfo, mergeState);
       long vectorDataOffset = this.quantizedVectorData.alignFilePointer(Float.BYTES);
       DocsWithFieldSet docsWithField =
           writeQuantizedVectorData(this.quantizedVectorData, byteVectorValues);
@@ -196,7 +203,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
   @Override
   public void flush(int maxDoc, Sorter.DocMap sortMap) throws IOException {
     this.rawVectorDelegate.flush(maxDoc, sortMap);
-    for (FieldWriter field : this.fields) {
+    for (FieldWriter<?> field : this.fields) {
       if (sortMap == null) {
         writeField(field, maxDoc);
       } else {
@@ -226,13 +233,13 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
   @Override
   public long ramBytesUsed() {
     @Var long total = SHALLOW_RAM_BYTES_USED;
-    for (FieldWriter field : this.fields) {
+    for (FieldWriter<?> field : this.fields) {
       total += field.ramBytesUsed();
     }
     return total;
   }
 
-  private void writeField(FieldWriter fieldData, int maxDoc) throws IOException {
+  private void writeField(FieldWriter<?> fieldData, int maxDoc) throws IOException {
     // write vector values
     long vectorDataOffset = this.quantizedVectorData.alignFilePointer(Float.BYTES);
     writeQuantizedVectors(fieldData);
@@ -296,23 +303,24 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
         docsWithField);
   }
 
-  private void writeQuantizedVectors(FieldWriter fieldData) throws IOException {
-    ScalarQuantizer scalarQuantizer = new BinaryQuantizer();
+  private void writeQuantizedVectors(FieldWriter<?> fieldData) throws IOException {
     byte[] vector = new byte[fieldData.fieldInfo.getVectorDimension()];
     byte[] compressedVector = compressedArray(fieldData.fieldInfo.getVectorDimension());
     ByteBuffer offsetBuffer = ByteBuffer.allocate(Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-    for (float[] v : fieldData.getVectors()) {
-      float offsetCorrection =
-          scalarQuantizer.quantize(v, vector, fieldData.fieldInfo.getVectorSimilarityFunction());
+    int count = fieldData.getVectors().size();
+    for (int ordinal = 0; ordinal < count; ordinal++) {
+      float offsetCorrection = fieldData.quantize(ordinal, vector);
       BinaryQuantizationUtils.compressBytes(vector, compressedVector);
       this.quantizedVectorData.writeBytes(compressedVector, compressedVector.length);
+      // BinaryQuantizer always returns 0f regardless of path (no score correction), use the
+      // quantizer's return value to honor ScalarQuantizer contract and match upstream.
       offsetBuffer.putFloat(offsetCorrection);
       this.quantizedVectorData.writeBytes(offsetBuffer.array(), offsetBuffer.array().length);
       offsetBuffer.rewind();
     }
   }
 
-  private void writeSortingField(FieldWriter fieldData, int maxDoc, Sorter.DocMap sortMap)
+  private void writeSortingField(FieldWriter<?> fieldData, int maxDoc, Sorter.DocMap sortMap)
       throws IOException {
     int[] docIdOffsets = new int[sortMap.size()];
     @Var int offset = 1; // 0 means no vector for this (field, document)
@@ -351,15 +359,13 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
         newDocsWithField);
   }
 
-  private void writeSortedQuantizedVectors(FieldWriter fieldData, int[] ordMap) throws IOException {
-    ScalarQuantizer scalarQuantizer = new BinaryQuantizer();
+  private void writeSortedQuantizedVectors(FieldWriter<?> fieldData, int[] ordMap)
+      throws IOException {
     byte[] vector = new byte[fieldData.fieldInfo.getVectorDimension()];
     byte[] compressedVector = compressedArray(fieldData.fieldInfo.getVectorDimension());
     ByteBuffer offsetBuffer = ByteBuffer.allocate(Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
     for (int ordinal : ordMap) {
-      float[] v = fieldData.getVectors().get(ordinal);
-      float offsetCorrection =
-          scalarQuantizer.quantize(v, vector, fieldData.fieldInfo.getVectorSimilarityFunction());
+      float offsetCorrection = fieldData.quantize(ordinal, vector);
       BinaryQuantizationUtils.compressBytes(vector, compressedVector);
       this.quantizedVectorData.writeBytes(compressedVector, compressedVector.length);
       offsetBuffer.putFloat(offsetCorrection);
@@ -372,17 +378,34 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
   @Override
   public CloseableRandomVectorScorerSupplier mergeOneFieldToIndex(
       FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-    if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)) {
+    CloseableRandomVectorScorerSupplier supplier;
+    if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)
+        || fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
       // Simply merge the underlying delegate, which just copies the raw vector data to a new
       // segment file
       this.rawVectorDelegate.mergeOneField(fieldInfo, mergeState);
-      ScalarQuantizer mergedQuantizationState = new BinaryQuantizer();
-      return mergeOneFieldToIndex(
-          this.segmentWriteState, fieldInfo, mergeState, mergedQuantizationState);
+      ScalarQuantizer mergedQuantizationState = BinaryQuantizer.INSTANCE;
+      supplier =
+          mergeOneFieldToIndex(
+              this.segmentWriteState, fieldInfo, mergeState, mergedQuantizationState);
+    } else {
+      // We only merge the delegate, since the field type isn't float32, quantization wasn't
+      // supported, so bypass it.
+      supplier = this.rawVectorDelegate.mergeOneFieldToIndex(fieldInfo, mergeState);
     }
-    // We only merge the delegate, since the field type isn't float32, quantization wasn't
-    // supported, so bypass it.
-    return this.rawVectorDelegate.mergeOneFieldToIndex(fieldInfo, mergeState);
+    // Do not remove. Wires score-level merge cancellation (CLOUDP-394015) into the HNSW graph
+    // build phase. Without this wrap the in-memory phase ignores merge aborts until the next IO.
+    // Relies on this method running on the merge thread where InstrumentedConcurrentMergeScheduler
+    // sets MergeCancellationContext. This holds in production because the HNSW format is
+    // constructed with numMergeWorkers == 1 and no merge executor, so Lucene's
+    // Lucene99HnswVectorsWriter runs graph construction synchronously on the caller's thread.
+    // If the format is ever reconfigured to use multiple merge workers, currentMerge() will be
+    // null on worker threads and wrapIfEnabled will log a warning and fall back to IO-level
+    // abort detection only.
+    return AbortableRandomVectorScorerSupplier.wrapIfEnabled(
+        supplier,
+        MergeCancellationContext.currentMerge(),
+        MergeCancellationContext.isCancelMergeEnabled());
   }
 
   private ScalarQuantizedCloseableRandomVectorScorerSupplier mergeOneFieldToIndex(
@@ -410,8 +433,7 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     @Var boolean success = false;
     try {
       MergedQuantizedVectorValues byteVectorValues =
-          MergedQuantizedVectorValues.mergeQuantizedByteVectorValues(
-              fieldInfo, mergeState, mergedQuantizationState);
+          MergedQuantizedVectorValues.mergeQuantizedByteVectorValues(fieldInfo, mergeState);
       DocsWithFieldSet docsWithField =
           writeQuantizedVectorData(tempQuantizedVectorData, byteVectorValues);
       CodecUtil.writeFooter(tempQuantizedVectorData);
@@ -506,14 +528,18 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     IOUtils.close(this.meta, this.quantizedVectorData, this.rawVectorDelegate);
   }
 
-  static class FieldWriter extends FlatFieldVectorsWriter<float[]> {
+  /**
+   * Buffers a single field's raw vectors during indexing by delegating to the underlying {@link
+   * FlatFieldVectorsWriter}, so this writer's outer class can later read {@link #getVectors()} and
+   * quantize them at flush/merge time.
+   */
+  abstract static class FieldWriter<T> extends FlatFieldVectorsWriter<T> {
     private static final long SHALLOW_SIZE = shallowSizeOfInstance(FieldWriter.class);
-    private final FieldInfo fieldInfo;
+    final FieldInfo fieldInfo;
     private boolean finished;
-    private final FlatFieldVectorsWriter<float[]> flatFieldVectorsWriter;
+    final FlatFieldVectorsWriter<T> flatFieldVectorsWriter;
 
-    @SuppressWarnings("unchecked")
-    FieldWriter(FieldInfo fieldInfo, FlatFieldVectorsWriter<float[]> indexWriter) {
+    FieldWriter(FieldInfo fieldInfo, FlatFieldVectorsWriter<T> indexWriter) {
       super();
       this.fieldInfo = fieldInfo;
       this.flatFieldVectorsWriter = Objects.requireNonNull(indexWriter);
@@ -525,14 +551,15 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     }
 
     @Override
-    public List<float[]> getVectors() {
-      return this.flatFieldVectorsWriter.getVectors();
-    }
-
-    @Override
     public DocsWithFieldSet getDocsWithFieldSet() {
       return this.flatFieldVectorsWriter.getDocsWithFieldSet();
     }
+
+    /**
+     * Quantizes the vector at the given {@code ordinal} into {@code dest} and returns the offset
+     * correction to apply when scoring.
+     */
+    abstract float quantize(int ordinal, byte[] dest);
 
     @Override
     public void finish() throws IOException {
@@ -547,6 +574,14 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     public long ramBytesUsed() {
       return SHALLOW_SIZE + this.flatFieldVectorsWriter.ramBytesUsed();
     }
+  }
+
+  /** A {@link FieldWriter} for a field whose vectors are ingested as {@code float[]}. */
+  static class FloatFieldWriter extends FieldWriter<float[]> {
+
+    FloatFieldWriter(FieldInfo fieldInfo, FlatFieldVectorsWriter<float[]> indexWriter) {
+      super(fieldInfo, indexWriter);
+    }
 
     @Override
     public void addValue(int docID, float[] vectorValue) throws IOException {
@@ -554,8 +589,48 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     }
 
     @Override
+    public List<float[]> getVectors() {
+      return this.flatFieldVectorsWriter.getVectors();
+    }
+
+    @Override
     public float[] copyValue(float[] vectorValue) {
       throw new UnsupportedOperationException();
+    }
+
+    @Override
+    float quantize(int ordinal, byte[] dest) {
+      return BinaryQuantizer.INSTANCE.quantize(
+          getVectors().get(ordinal), dest, this.fieldInfo.getVectorSimilarityFunction());
+    }
+  }
+
+  /** A {@link FieldWriter} for a field whose vectors are ingested as {@code byte[]}. */
+  static class ByteFieldWriter extends FieldWriter<byte[]> {
+
+    ByteFieldWriter(FieldInfo fieldInfo, FlatFieldVectorsWriter<byte[]> indexWriter) {
+      super(fieldInfo, indexWriter);
+    }
+
+    @Override
+    public void addValue(int docID, byte[] vectorValue) throws IOException {
+      this.flatFieldVectorsWriter.addValue(docID, vectorValue);
+    }
+
+    @Override
+    public List<byte[]> getVectors() {
+      return this.flatFieldVectorsWriter.getVectors();
+    }
+
+    @Override
+    public byte[] copyValue(byte[] vectorValue) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    float quantize(int ordinal, byte[] dest) {
+      BinaryQuantizer.quantizeBytes(getVectors().get(ordinal), dest);
+      return 0f; // binary quantization of byte vectors has no offset correction
     }
   }
 
@@ -583,21 +658,13 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
   /** Returns a merged view over all the segment's {@link QuantizedByteVectorValues}. */
   static class MergedQuantizedVectorValues extends QuantizedByteVectorValues {
     public static MergedQuantizedVectorValues mergeQuantizedByteVectorValues(
-        FieldInfo fieldInfo, MergeState mergeState, ScalarQuantizer scalarQuantizer)
-        throws IOException {
+        FieldInfo fieldInfo, MergeState mergeState) throws IOException {
       assert fieldInfo != null && fieldInfo.hasVectorValues();
-
+      VectorEncoding vectorEncoding = fieldInfo.getVectorEncoding();
       List<QuantizedByteVectorValueSub> subs = new ArrayList<>();
       for (int i = 0; i < mergeState.knnVectorsReaders.length; i++) {
         if (hasVectorValues(mergeState.fieldInfos[i], fieldInfo.name)) {
-          FloatVectorValues toQuantize =
-              mergeState.knnVectorsReaders[i].getFloatVectorValues(fieldInfo.name);
-          QuantizedByteVectorValueSub sub =
-              new QuantizedByteVectorValueSub(
-                  mergeState.docMaps[i],
-                  new QuantizedFloatVectorValues(
-                      toQuantize, fieldInfo.getVectorSimilarityFunction(), scalarQuantizer));
-          subs.add(sub);
+          subs.add(createSub(mergeState, i, vectorEncoding, fieldInfo));
         }
       }
       return new MergedQuantizedVectorValues(subs, mergeState);
@@ -651,6 +718,24 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
       return new CompositeIterator();
     }
 
+    private static QuantizedByteVectorValueSub createSub(
+        MergeState mergeState, int i, VectorEncoding vectorEncoding, FieldInfo fieldInfo)
+        throws IOException {
+      if (vectorEncoding == VectorEncoding.FLOAT32) {
+        FloatVectorValues toQuantize =
+            checkNotNull(mergeState.knnVectorsReaders[i].getFloatVectorValues(fieldInfo.name));
+        return new QuantizedByteVectorValueSub(
+            mergeState.docMaps[i],
+            new BinaryQuantizedFloatVectorValues(
+                toQuantize, fieldInfo.getVectorSimilarityFunction()));
+      } else {
+        ByteVectorValues toQuantize =
+            checkNotNull(mergeState.knnVectorsReaders[i].getByteVectorValues(fieldInfo.name));
+        return new QuantizedByteVectorValueSub(
+            mergeState.docMaps[i], new BinaryQuantizedByteVectorValues(toQuantize));
+      }
+    }
+
     private class CompositeIterator extends DocIndexIterator {
       private int docId;
       private int ord;
@@ -696,7 +781,12 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     }
   }
 
-  static class QuantizedFloatVectorValues extends QuantizedByteVectorValues {
+  /**
+   * Merge-time adapter that quantizes {@code float32} vectors on demand into 1-bit binary
+   * representation. Used by {@link MergedQuantizedVectorValues} during segment merges to produce
+   * quantized output without a separate quantization pass.
+   */
+  static class BinaryQuantizedFloatVectorValues extends QuantizedByteVectorValues {
     private final FloatVectorValues values;
     private final ScalarQuantizer quantizer;
     private final byte[] quantizedVector;
@@ -704,12 +794,10 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
 
     private final VectorSimilarityFunction vectorSimilarityFunction;
 
-    public QuantizedFloatVectorValues(
-        FloatVectorValues values,
-        VectorSimilarityFunction vectorSimilarityFunction,
-        ScalarQuantizer quantizer) {
+    public BinaryQuantizedFloatVectorValues(
+        FloatVectorValues values, VectorSimilarityFunction vectorSimilarityFunction) {
       this.values = values;
-      this.quantizer = quantizer;
+      this.quantizer = BinaryQuantizer.INSTANCE;
       this.quantizedVector = new byte[values.dimension()];
       this.vectorSimilarityFunction = vectorSimilarityFunction;
     }
@@ -751,6 +839,57 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     }
   }
 
+  /**
+   * Merge-time adapter that quantizes {@code byte} vectors on demand into 1-bit binary
+   * representation. Used by {@link MergedQuantizedVectorValues} during segment merges to produce
+   * quantized output without a separate quantization pass. Unlike the float variant, there is no
+   * offset correction since binary quantization of byte vectors is stateless.
+   */
+  static class BinaryQuantizedByteVectorValues extends QuantizedByteVectorValues {
+    private final ByteVectorValues values;
+    private final byte[] quantizedVector;
+
+    public BinaryQuantizedByteVectorValues(ByteVectorValues values) {
+      this.values = values;
+      this.quantizedVector = new byte[values.dimension()];
+    }
+
+    @Override
+    public int dimension() {
+      return this.values.dimension();
+    }
+
+    @Override
+    public int size() {
+      return this.values.size();
+    }
+
+    @Override
+    public VectorScorer scorer(byte[] target) throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    private void quantize(byte[] raw) throws IOException {
+      BinaryQuantizer.quantizeBytes(raw, this.quantizedVector);
+    }
+
+    @Override
+    public float getScoreCorrectionConstant(int ord) throws IOException {
+      return 0f;
+    }
+
+    @Override
+    public byte[] vectorValue(int ord) throws IOException {
+      quantize(this.values.vectorValue(ord));
+      return this.quantizedVector;
+    }
+
+    @Override
+    public DocIndexIterator iterator() {
+      return this.values.iterator();
+    }
+  }
+
   static final class ScalarQuantizedCloseableRandomVectorScorerSupplier
       implements CloseableRandomVectorScorerSupplier {
 
@@ -766,8 +905,8 @@ public final class Mongot01042BinaryQuantizedFlatVectorsWriter extends FlatVecto
     }
 
     @Override
-    public RandomVectorScorer scorer(int ord) throws IOException {
-      return this.supplier.scorer(ord);
+    public UpdateableRandomVectorScorer scorer() throws IOException {
+      return this.supplier.scorer();
     }
 
     @Override

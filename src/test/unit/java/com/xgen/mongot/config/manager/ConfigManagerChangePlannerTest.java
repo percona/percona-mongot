@@ -35,6 +35,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -58,6 +59,52 @@ public class ConfigManagerChangePlannerTest {
     assertNoAddedIndexes(plan);
     assertNoUnmodifiedIndexes(plan);
     assertNoModifiedIndexes(plan);
+    assertNoDroppedIndexes(plan);
+    Assert.assertFalse(plan.hasChanges());
+  }
+
+  @Test
+  public void testExistingIndexWhoseDesiredDefinitionIsUnreadableIsNotDropped() throws Exception {
+    var indexDefinition =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(INDEX_ID)
+            .dynamicMapping()
+            .build();
+    var mocks = Mocks.withIndexes(indexDefinition);
+
+    // The index is still desired, but its definition could not be read, so it has no producer.
+    var plan = mocks.planWithUnreadableDesired(emptyList(), emptyList(), Set.of(INDEX_ID));
+
+    assertNoDroppedIndexes(plan);
+    assertNoAddedIndexes(plan);
+    assertNoModifiedIndexes(plan);
+    Assert.assertFalse(plan.hasChanges());
+  }
+
+  @Test
+  public void testExistingIndexAbsentFromBothDesiredAndIncompatibleIsDropped() throws Exception {
+    var indexDefinition =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(INDEX_ID)
+            .dynamicMapping()
+            .build();
+    var mocks = Mocks.withIndexes(indexDefinition);
+
+    // A different index is unreadable; this one was genuinely deleted.
+    var plan = mocks.planWithUnreadableDesired(emptyList(), emptyList(), Set.of(new ObjectId()));
+
+    assertIndexDropped(INDEX_ID, plan);
+  }
+
+  @Test
+  public void testUnreadableDesiredIndexThatWasNeverBuiltIsNotAdded() throws Exception {
+    var mocks = new Mocks();
+
+    var plan = mocks.planWithUnreadableDesired(emptyList(), emptyList(), Set.of(INDEX_ID));
+
+    assertNoAddedIndexes(plan);
     assertNoDroppedIndexes(plan);
     Assert.assertFalse(plan.hasChanges());
   }
@@ -904,6 +951,141 @@ public class ConfigManagerChangePlannerTest {
   }
 
   @Test
+  public void
+      testSingleVectorIndexExistsModifiedAutoEmbeddingDefinitionVersionProducesModification()
+          throws Exception {
+    var indexId = new ObjectId();
+
+    var originalDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withCosineVectorField("vector", 1024)
+            .autoEmbeddingDefinitionVersion(1L)
+            .build();
+
+    var mocks = Mocks.withIndexes(originalDefinition);
+
+    // Bump only the autoEmbeddingDefinitionVersion.
+    var desiredDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withCosineVectorField("vector", 1024)
+            .autoEmbeddingDefinitionVersion(2L)
+            .build();
+
+    var plan = mocks.plan(singletonList(desiredDefinition), emptyList(), emptyList());
+
+    assertNoAddedIndexes(plan);
+    assertNoUnmodifiedIndexes(plan);
+    assertNoDroppedIndexes(plan);
+    var modified = assertIndexModified(desiredDefinition, plan);
+
+    Assert.assertEquals(
+        ModifiedIndexInformation.Type.DIFFERENT_FROM_LIVE_NO_STAGED, modified.getType());
+    TestUtils.assertContains(modified.getReasons(), "autoEmbeddingDefinitionVersion has changed");
+  }
+
+  @Test
+  public void testSingleVectorIndexExistsFirstAutoEmbeddingDefinitionVersionProducesModification()
+      throws Exception {
+    var indexId = new ObjectId();
+
+    // The existing index has no autoEmbeddingDefinitionVersion set.
+    var originalDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withCosineVectorField("vector", 1024)
+            .build();
+
+    var mocks = Mocks.withIndexes(originalDefinition);
+
+    var desiredDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withCosineVectorField("vector", 1024)
+            .autoEmbeddingDefinitionVersion(1L)
+            .build();
+
+    var plan = mocks.plan(singletonList(desiredDefinition), emptyList(), emptyList());
+
+    assertNoAddedIndexes(plan);
+    assertNoUnmodifiedIndexes(plan);
+    assertNoDroppedIndexes(plan);
+    var modified = assertIndexModified(desiredDefinition, plan);
+
+    Assert.assertEquals(
+        ModifiedIndexInformation.Type.DIFFERENT_FROM_LIVE_NO_STAGED, modified.getType());
+    TestUtils.assertContains(modified.getReasons(), "autoEmbeddingDefinitionVersion has changed");
+  }
+
+  @Test
+  public void
+      testSingleVectorIndexExistsDesiredAutoEmbeddingDefinitionVersionZeroProducesNoChanges()
+          throws Exception {
+    var indexId = new ObjectId();
+
+    // The existing index has no autoEmbeddingDefinitionVersion set; an explicit 0 is equivalent.
+    var originalDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withCosineVectorField("vector", 1024)
+            .build();
+
+    var mocks = Mocks.withIndexes(originalDefinition);
+
+    var desiredDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .indexId(indexId)
+            .withCosineVectorField("vector", 1024)
+            .autoEmbeddingDefinitionVersion(0L)
+            .build();
+
+    var plan = mocks.plan(singletonList(desiredDefinition), emptyList(), emptyList());
+
+    assertNoAddedIndexes(plan);
+    assertIndexUnmodified(indexId, plan);
+    assertNoModifiedIndexes(plan);
+    assertNoDroppedIndexes(plan);
+    Assert.assertFalse(plan.hasChanges());
+  }
+
+  @Test
+  public void
+      testSingleSearchIndexExistsModifiedAutoEmbeddingDefinitionVersionProducesModification()
+          throws Exception {
+    var indexId = new ObjectId();
+
+    var originalDefinition =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(indexId)
+            .dynamicMapping()
+            .autoEmbeddingDefinitionVersion(1L)
+            .build();
+    var mocks = Mocks.withIndexes(originalDefinition);
+
+    // Bump only the autoEmbeddingDefinitionVersion.
+    var desiredDefinition =
+        SearchIndexDefinitionBuilder.builder()
+            .defaultMetadata()
+            .indexId(indexId)
+            .dynamicMapping()
+            .autoEmbeddingDefinitionVersion(2L)
+            .build();
+
+    var plan = mocks.plan(emptyList(), singletonList(desiredDefinition), emptyList());
+
+    assertNoAddedIndexes(plan);
+    assertNoUnmodifiedIndexes(plan);
+    assertNoDroppedIndexes(plan);
+    var modified = assertIndexModified(desiredDefinition, plan);
+
+    Assert.assertEquals(
+        ModifiedIndexInformation.Type.DIFFERENT_FROM_LIVE_NO_STAGED, modified.getType());
+    TestUtils.assertContains(modified.getReasons(), "autoEmbeddingDefinitionVersion has changed");
+  }
+
+  @Test
   public void testSingleSearchIndexExistsNoIndexesDesiredProducesDrop() throws Exception {
     var indexId = new ObjectId();
 
@@ -1544,7 +1726,19 @@ public class ConfigManagerChangePlannerTest {
       List<IndexDefinitionGenerationProducer> producers =
           IndexDefinitionGenerationProducer.createProducers(
               desiredVectorIndexes, desiredSearchIndexes, desiredAnalyzers);
-      return ConfigManagerChangePlanner.plan(this.configStateMocks.configState, producers);
+      return ConfigManagerChangePlanner.plan(
+          this.configStateMocks.configState, producers, Set.of());
+    }
+
+    ConfigManagerChangePlan planWithUnreadableDesired(
+        List<VectorIndexDefinition> desiredVectorIndexes,
+        List<SearchIndexDefinition> desiredSearchIndexes,
+        Set<ObjectId> unreadableDesiredIds) {
+      List<IndexDefinitionGenerationProducer> producers =
+          IndexDefinitionGenerationProducer.createProducers(
+              desiredVectorIndexes, desiredSearchIndexes, emptyList());
+      return ConfigManagerChangePlanner.plan(
+          this.configStateMocks.configState, producers, unreadableDesiredIds);
     }
   }
 

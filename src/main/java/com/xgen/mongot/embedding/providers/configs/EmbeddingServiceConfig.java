@@ -126,7 +126,12 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
   public enum ServiceTier {
     COLLECTION_SCAN,
     CHANGE_STREAM,
-    QUERY
+    QUERY;
+
+    /** Coarse index/query phase for AutoEmbedding metrics: QUERY -&gt; "query", else "index". */
+    public String phase() {
+      return this == QUERY ? "query" : "index";
+    }
   }
 
   public static class TenantWorkloadCredentials implements DocumentEncodable {
@@ -1035,8 +1040,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           .build();
     }
 
-    public static HuggingFaceModelConfig fromBson(DocumentParser parser)
-        throws BsonParseException {
+    public static HuggingFaceModelConfig fromBson(DocumentParser parser) throws BsonParseException {
       return new HuggingFaceModelConfig(
           parser.getField(Fields.MODEL_ID).unwrap(),
           parser.getField(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS).unwrap(),

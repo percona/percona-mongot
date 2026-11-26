@@ -62,16 +62,18 @@ import org.slf4j.LoggerFactory;
  *     Intended to be set on shared tier clusters.
  * @param maxDocumentsPerSynonymCollection Maximum number of documents allowed in a single synonyms
  *     collection. Intended to be set on shared tier clusters.
- * @param disableMaxClauseLimit Deprecated. Use {@link #maxClauseLimit} instead. When true,
- *     disables the clause limit entirely (Integer.MAX_VALUE). Takes precedence over maxClauseLimit.
+ * @param disableMaxClauseLimit Deprecated. Use {@link #maxClauseLimit} instead. When true, disables
+ *     the clause limit entirely (Integer.MAX_VALUE). Takes precedence over maxClauseLimit.
  * @param deletesPctAllowed The maximum percentage of deleted documents allowed in the index before
  *     triggering merges to reclaim space.
  * @param forceMergeDeletesPctAllowed Percentage threshold of deleted documents that triggers
  *     segment merging during forceMergeDeletes operations. Only segments with a deletion percentage
  *     above this threshold will be considered for merging to reclaim space from deleted documents.
- * @param floorSegmentMB Segments smaller than this size are merged more aggressively. This helps
- *     prevent frequent flushing of tiny segments to create a long tail of small segments in the
- *     index.
+ * @param vectorFloorSegmentMB In vector indexes, segments smaller than this size are merged more
+ *     aggressively. This helps prevent frequent flushing of tiny segments to create a long tail of
+ *     small segments in the index.
+ * @param aggregationMaxBuckets The upper bound on a search aggregation query's estimated total
+ *     bucket count.
  */
 public record LuceneConfig(
     Path dataPath,
@@ -98,9 +100,10 @@ public record LuceneConfig(
     Optional<VectorMergePolicyConfig> vectorMergePolicyConfig,
     boolean enableTextOperatorNewSynonymsSyntax,
     Optional<Integer> tokenFacetingCardinalityLimit,
+    Optional<Integer> aggregationMaxBuckets,
     Optional<Double> deletesPctAllowed,
     Optional<Double> forceMergeDeletesPctAllowed,
-    Optional<Double> floorSegmentMB,
+    Optional<Double> vectorFloorSegmentMB,
     Optional<HysteresisConfig> mergePolicyDiskUtilizationConfig,
     Optional<Long> cancelMergePerThreadTimeoutMs,
     Optional<Long> cancelAllMergesPerThreadTimeoutMs)
@@ -167,16 +170,15 @@ public record LuceneConfig(
     private static final Field.Optional<Double> FORCE_MERGE_DELETES_PCT_ALLOWED =
         Field.builder("forceMergeDeletesPctAllowed").doubleField().optional().noDefault();
 
-    private static final Field.Optional<Double> FLOOR_SEGMENT_MB =
+    private static final Field.Optional<Double> VECTOR_FLOOR_SEGMENT_MB =
         Field.builder("floorSegmentMB").doubleField().optional().noDefault();
 
-    private static final Field.Optional<HysteresisConfig>
-        MERGE_POLICY_DISK_UTILIZATION_CONFIG =
-            Field.builder("mergePolicyDiskUtilizationConfig")
-                .classField(HysteresisConfig::fromBson)
-                .disallowUnknownFields()
-                .optional()
-                .noDefault();
+    private static final Field.Optional<HysteresisConfig> MERGE_POLICY_DISK_UTILIZATION_CONFIG =
+        Field.builder("mergePolicyDiskUtilizationConfig")
+            .classField(HysteresisConfig::fromBson)
+            .disallowUnknownFields()
+            .optional()
+            .noDefault();
 
     private static final Field.Optional<Long> CANCEL_MERGE_PER_THREAD_TIMEOUT_MS =
         Field.builder("cancelMergePerThreadTimeoutMs")
@@ -214,6 +216,13 @@ public record LuceneConfig(
   /** Max allowed number of documents per index */
   public static final int MAX_DOCS_LIMIT = 2_100_000_000;
 
+  /**
+   * Default upper bound on a search aggregation query's estimated total bucket count, applied when
+   * {@code aggregationMaxBuckets} is not configured. At the heap-cost formula's worst case this
+   * bounds a single admitted query to roughly 510 MB — at most ~25% of heap from S30 up.
+   */
+  public static final int DEFAULT_AGGREGATION_MAX_BUCKETS = 1_000_000;
+
   public LuceneConfig {
     LOG.info("using Lucene Version {}.", Version.LATEST);
   }
@@ -244,9 +253,10 @@ public record LuceneConfig(
       Optional<VectorMergePolicyConfig> vectorMergePolicy,
       Optional<Boolean> optionalEnableTextOperatorNewSynonymsSyntax,
       Optional<Integer> tokenFacetingCardinalityLimit,
+      Optional<Integer> aggregationMaxBuckets,
       Optional<Double> deletesPctAllowed,
       Optional<Double> forceMergeDeletesPctAllowed,
-      Optional<Double> floorSegmentMB,
+      Optional<Double> vectorFloorSegmentMB,
       Optional<HysteresisConfig> mergePolicyDiskUtilizationConfig,
       Optional<Long> cancelMergePerThreadTimeoutMs,
       Optional<Long> cancelAllMergesPerThreadTimeoutMs) {
@@ -276,9 +286,10 @@ public record LuceneConfig(
         vectorMergePolicy,
         optionalEnableTextOperatorNewSynonymsSyntax,
         tokenFacetingCardinalityLimit,
+        aggregationMaxBuckets,
         deletesPctAllowed,
         forceMergeDeletesPctAllowed,
-        floorSegmentMB,
+        vectorFloorSegmentMB,
         mergePolicyDiskUtilizationConfig,
         cancelMergePerThreadTimeoutMs,
         cancelAllMergesPerThreadTimeoutMs);
@@ -311,9 +322,10 @@ public record LuceneConfig(
       Optional<VectorMergePolicyConfig> vectorMergePolicy,
       Optional<Boolean> optionalEnableTextOperatorNewSynonymsSyntax,
       Optional<Integer> tokenFacetingCardinalityLimit,
+      Optional<Integer> aggregationMaxBuckets,
       Optional<Double> deletesPctAllowed,
       Optional<Double> forceMergeDeletesPctAllowed,
-      Optional<Double> floorSegmentMB,
+      Optional<Double> vectorFloorSegmentMB,
       Optional<HysteresisConfig> mergePolicyDiskUtilizationConfig,
       Optional<Long> cancelMergePerThreadTimeoutMs,
       Optional<Long> cancelAllMergesPerThreadTimeoutMs) {
@@ -361,9 +373,11 @@ public record LuceneConfig(
 
     validateForceMergeDeletesPctAllowed(forceMergeDeletesPctAllowed);
 
-    validateFloorSegmentMB(floorSegmentMB);
+    validateVectorFloorSegmentMB(vectorFloorSegmentMB);
 
     validateMaxClauseLimit(maxClauseLimit);
+
+    validateAggregationMaxBuckets(aggregationMaxBuckets);
 
     boolean disableMaxClauseLimit = optionalDisableMaxClauseLimit.orElse(false);
     boolean enableConcurrentSearch = optionalEnableConcurrentSearch.orElse(false);
@@ -408,9 +422,10 @@ public record LuceneConfig(
         vectorMergePolicy,
         enableTextOperatorNewSynonymsSyntax,
         tokenFacetingCardinalityLimit,
+        aggregationMaxBuckets,
         deletesPctAllowed,
         forceMergeDeletesPctAllowed,
-        floorSegmentMB,
+        vectorFloorSegmentMB,
         mergePolicyDiskUtilizationConfig,
         cancelMergePerThreadTimeoutMs,
         cancelAllMergesPerThreadTimeoutMs);
@@ -444,12 +459,11 @@ public record LuceneConfig(
             this.enableTextOperatorNewSynonymsSyntax)
         .field(Fields.DELETES_PCT_ALLOWED, this.deletesPctAllowed)
         .field(Fields.FORCE_MERGE_DELETES_PCT_ALLOWED, this.forceMergeDeletesPctAllowed)
-        .field(Fields.FLOOR_SEGMENT_MB, this.floorSegmentMB)
+        .field(Fields.VECTOR_FLOOR_SEGMENT_MB, this.vectorFloorSegmentMB)
         .field(Fields.MERGE_POLICY_DISK_UTILIZATION_CONFIG, this.mergePolicyDiskUtilizationConfig)
         .field(Fields.CANCEL_MERGE_PER_THREAD_TIMEOUT_MS, this.cancelMergePerThreadTimeoutMs)
         .field(
-            Fields.CANCEL_ALL_MERGES_PER_THREAD_TIMEOUT_MS,
-            this.cancelAllMergesPerThreadTimeoutMs)
+            Fields.CANCEL_ALL_MERGES_PER_THREAD_TIMEOUT_MS, this.cancelAllMergesPerThreadTimeoutMs)
         .build();
   }
 
@@ -650,11 +664,11 @@ public record LuceneConfig(
         });
   }
 
-  private static void validateFloorSegmentMB(Optional<Double> floorSegmentMB) {
-    floorSegmentMB.ifPresent(
+  private static void validateVectorFloorSegmentMB(Optional<Double> vectorFloorSegmentMB) {
+    vectorFloorSegmentMB.ifPresent(
         value -> {
-          Check.argIsPositive(value, "floorSegmentMB");
-          LOG.atInfo().addKeyValue("floorSegmentMB", value).log("floorSegmentMB set");
+          Check.argIsPositive(value, "vectorFloorSegmentMB");
+          LOG.atInfo().addKeyValue("vectorFloorSegmentMB", value).log("vectorFloorSegmentMB set");
         });
   }
 
@@ -663,6 +677,14 @@ public record LuceneConfig(
         limit -> {
           Check.argIsPositive(limit, "maxClauseLimit");
           LOG.atInfo().addKeyValue("maxClauseLimit", limit).log("maxClauseLimit set");
+        });
+  }
+
+  private static void validateAggregationMaxBuckets(Optional<Integer> aggregationMaxBuckets) {
+    aggregationMaxBuckets.ifPresent(
+        limit -> {
+          Check.argIsPositive(limit, "aggregationMaxBuckets");
+          LOG.atInfo().addKeyValue("aggregationMaxBuckets", limit).log("aggregationMaxBuckets set");
         });
   }
 

@@ -1,6 +1,7 @@
 package com.xgen.mongot.index.query;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.xgen.mongot.index.query.operators.IndexNamespaceFilter;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchFilter;
 import com.xgen.mongot.trace.Tracing;
@@ -25,7 +26,12 @@ public record VectorSearchQuery(
     String index,
     VectorSearchCriteria criteria,
     boolean userReturnStoredSource, // NOTE(corecursion): this field is not visible to users
-    boolean vectorStoredSourceEnabled) // NOTE(corecursion): this field is not visible to users
+    boolean vectorStoredSourceEnabled, // NOTE(corecursion): this field is not visible to users
+    // Per-query override for Lucene concurrent segment search; absent means "engine default".
+    Optional<Boolean> concurrentOverride,
+    // Namespace equality selecting the sub-index to search; required iff the index definition
+    // declares an indexNamespace.
+    Optional<IndexNamespaceFilter> indexNamespace)
     implements Query {
 
   public VectorSearchQuery {
@@ -41,6 +47,15 @@ public record VectorSearchQuery(
 
     static final Field.WithDefault<Boolean> STORED_SOURCE =
         Field.builder("returnStoredSource").booleanField().optional().withDefault(false);
+
+    static final Field.Optional<Boolean> CONCURRENT =
+        Field.builder("concurrent").booleanField().optional().noDefault();
+
+    static final Field.Optional<IndexNamespaceFilter> INDEX_NAMESPACE =
+        Field.builder("indexNamespace")
+            .classField(IndexNamespaceFilter::fromBson)
+            .optional()
+            .noDefault();
   }
 
   public static VectorSearchQuery fromBson(DocumentParser parser, boolean vectorStoredSourceEnabled)
@@ -53,7 +68,9 @@ public record VectorSearchQuery(
         VectorSearchCriteria.fromBson(
             parser, parser.getField(Fields.PATH).unwrap(), VectorSearchFilter.Type.CLAUSE),
         parser.getField(Fields.STORED_SOURCE).unwrap(), // userReturnStoredSource!
-        vectorStoredSourceEnabled);
+        vectorStoredSourceEnabled,
+        parser.getField(Fields.CONCURRENT).unwrap(),
+        parser.getField(Fields.INDEX_NAMESPACE).unwrap());
   }
 
   // Only used for testing.
@@ -73,13 +90,15 @@ public record VectorSearchQuery(
         .field(Fields.INDEX, this.index())
         .field(Fields.PATH, this.criteria().path())
         .field(Fields.STORED_SOURCE, this.userReturnStoredSource()) // TODO(CLOUDP-368066) see above
+        .field(Fields.CONCURRENT, this.concurrentOverride())
+        .field(Fields.INDEX_NAMESPACE, this.indexNamespace())
         .join(criteriaBson)
         .build();
   }
 
   @Override
   public boolean concurrent() {
-    return true;
+    return this.concurrentOverride.orElse(true);
   }
 
   @Override

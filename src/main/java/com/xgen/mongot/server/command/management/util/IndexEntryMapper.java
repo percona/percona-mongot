@@ -1,6 +1,8 @@
 package com.xgen.mongot.server.command.management.util;
 
-import com.xgen.mongot.catalogservice.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.IndexStatusMapper;
+import com.xgen.mongot.catalogservice.schema.IndexStatsEntry;
+import com.xgen.mongot.catalogservice.schema.IndexStatusP;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.SynonymStatus;
@@ -44,6 +46,7 @@ public class IndexEntryMapper {
     return new ListSearchIndexesResponseDefinition.IndexEntry(
         definition.getIndexId(),
         definition.getName(),
+        IndexMapper.toExternalType(definition.getType()),
         IndexMapper.toExternalStatus(
             computeConsolidatedIndexStatus(
                 indexStatsPerServer.values(),
@@ -84,16 +87,20 @@ public class IndexEntryMapper {
    */
   private static ListSearchIndexesResponseDefinition.HostIndexStatusDetail toHostIndexStatusDetail(
       IndexStatsEntry.DetailedIndexStats detailedIndexStats) {
+    // Reads statusCode/message directly off the persisted IndexStatusP rather than reconstructing
+    // a full (validated) IndexStatus, which this response only ever needed statusCode/message from.
+    IndexStatus.StatusCode statusCode =
+        IndexStatusMapper.fromPersisted(detailedIndexStats.status().statusCode());
     return new ListSearchIndexesResponseDefinition.HostIndexStatusDetail(
-        IndexMapper.toExternalStatus(detailedIndexStats.status().getStatusCode()),
-        detailedIndexStats.status().canServiceQueries(),
+        IndexMapper.toExternalStatus(statusCode),
+        IndexStatus.canServiceQueries(statusCode),
         computeSynonymStatus(detailedIndexStats).map(IndexMapper::toExternalSynonymStatus),
         toSynonymStatusDetails(detailedIndexStats),
         toDefinitionVersion(
             detailedIndexStats.definition().getDefinitionVersion(),
             detailedIndexStats.definition().getDefinitionVersionCreatedAt()),
         IndexMapper.toExternal(detailedIndexStats.definition()),
-        detailedIndexStats.status().getMessage());
+        detailedIndexStats.status().message());
   }
 
   /** Generates the DefinitionVersion object. */
@@ -132,12 +139,14 @@ public class IndexEntryMapper {
       return IndexStatus.StatusCode.UNKNOWN;
     }
 
-    IndexStatus.StatusCode mainIndexStatus = entry.mainIndex().get().status().getStatusCode();
+    IndexStatus.StatusCode mainIndexStatus =
+        IndexStatusMapper.fromPersisted(entry.mainIndex().get().status().statusCode());
     IndexStatus.StatusCode stagedIndexStatus =
         entry
             .stagedIndex()
             .map(IndexStatsEntry.DetailedIndexStats::status)
-            .map(IndexStatus::getStatusCode)
+            .map(IndexStatusP::statusCode)
+            .map(IndexStatusMapper::fromPersisted)
             .orElse(IndexStatus.StatusCode.DOES_NOT_EXIST);
 
     boolean isMainIndexLatestVersion =
@@ -173,7 +182,8 @@ public class IndexEntryMapper {
             .filter(
                 i ->
                     i.mainIndex().isPresent()
-                        && i.mainIndex().get().status().getStatusCode()
+                        && IndexStatusMapper.fromPersisted(
+                                i.mainIndex().get().status().statusCode())
                             != IndexStatus.StatusCode.DOES_NOT_EXIST)
             .toList();
 
@@ -184,7 +194,9 @@ public class IndexEntryMapper {
   /** Checks that a given index is queryable. */
   private static boolean isIndexQueryable(IndexStatsEntry indexStatsEntry) {
     return indexStatsEntry.mainIndex().isPresent()
-        && indexStatsEntry.mainIndex().get().status().canServiceQueries();
+        && IndexStatus.canServiceQueries(
+            IndexStatusMapper.fromPersisted(
+                indexStatsEntry.mainIndex().get().status().statusCode()));
   }
 
   /**

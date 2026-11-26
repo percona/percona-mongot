@@ -9,6 +9,8 @@ import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.FieldDefinitionResolver;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
+import com.xgen.mongot.index.lucene.LuceneAggregationPlanResolver.AggregationPlan;
+import com.xgen.mongot.index.lucene.LuceneAggregationSearchManager.AggregationQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneFacetCollectorSearchManager.FacetCollectorQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneFacetGenericDrillSidewaysSearchManager.GenericDrillSidewaysResultFacetCollectorQueryInfo;
 import com.xgen.mongot.index.lucene.LuceneMetricsCollectorSearchManager.MetricsCollectorQueryInfo;
@@ -48,8 +50,28 @@ class LuceneSearchManagerFactory {
   LuceneSearchManager<FacetCollectorQueryInfo> newFacetCollectorManager(
       Query query, Optional<Sort> luceneSort, Optional<SequenceToken> searchAfter) {
     return new MeteredLuceneSearchManager<>(
+        this.metricsUpdater, new LuceneFacetCollectorSearchManager(query, luceneSort, searchAfter));
+  }
+
+  LuceneSearchManager<AggregationQueryInfo> newAggregationManager(
+      Query query,
+      Optional<Sort> luceneSort,
+      Optional<Sort> invertedLuceneSort,
+      Optional<SequenceToken> searchAfter,
+      AggregationPlan aggregationPlan,
+      int indexPartitionId,
+      boolean applyLimitOnReduce) {
+    return new MeteredLuceneSearchManager<>(
         this.metricsUpdater,
-        new LuceneFacetCollectorSearchManager(query, luceneSort, searchAfter));
+        new LuceneAggregationSearchManager(
+            query,
+            luceneSort,
+            invertedLuceneSort,
+            searchAfter,
+            aggregationPlan,
+            indexPartitionId,
+            applyLimitOnReduce,
+            this.metricsUpdater.getSearchAggregationMetricsReporter()));
   }
 
   LuceneSearchManager<MetricsCollectorQueryInfo> newMetricsCollectorManager(
@@ -75,8 +97,7 @@ class LuceneSearchManagerFactory {
 
     return new MeteredLuceneSearchManager<>(
         this.metricsUpdater,
-        new LuceneOperatorSearchManager(
-            luceneQuery, count, luceneSort, searchAfter));
+        new LuceneOperatorSearchManager(luceneQuery, count, luceneSort, searchAfter));
   }
 
   private LuceneSearchManager<QueryInfo> newCachingVectorQueryManager(
@@ -120,7 +141,8 @@ class LuceneSearchManagerFactory {
     Vector vector =
         Check.isPresent(criteria.queryVector(), "criteria has to be materialized up to this point");
     return quantization == VectorQuantization.BINARY
-        && vector.getVectorType() == Vector.VectorType.FLOAT
+        && (vector.getVectorType() == Vector.VectorType.FLOAT
+            || vector.getVectorType() == Vector.VectorType.BYTE)
         && criteria.getVectorSearchType() == VectorSearchCriteria.Type.APPROXIMATE;
   }
 
@@ -161,11 +183,7 @@ class LuceneSearchManagerFactory {
     return new MeteredLuceneSearchManager<>(
         this.metricsUpdater,
         new LuceneFacetGenericDrillSidewaysSearchManager(
-            query,
-            facetToDrillSidewaysFacetQueries,
-            luceneSort,
-            searchAfter,
-            validExecutor));
+            query, facetToDrillSidewaysFacetQueries, luceneSort, searchAfter, validExecutor));
   }
 
   LuceneSearchManager<OptimizedDrillSidewaysFacetCollectorQueryInfo>

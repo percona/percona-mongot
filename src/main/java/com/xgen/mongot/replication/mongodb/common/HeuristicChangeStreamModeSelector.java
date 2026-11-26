@@ -3,6 +3,7 @@ package com.xgen.mongot.replication.mongodb.common;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.mongodb.MongoNamespace;
+import com.mongodb.ReadConcern;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
@@ -187,7 +188,8 @@ public class HeuristicChangeStreamModeSelector implements ChangeStreamModeSelect
 
       // A $match stage before $sample forces a full collection scan because MongoDB cannot use
       // the fast pseudo-random sampling path. Skip sampling and fall back to ALL_FIELDS.
-      if (context.definition
+      if (context
+          .definition
           .getView()
           .filter(view -> view.exists() && ViewPipeline.hasMatchStage(view))
           .isPresent()) {
@@ -212,7 +214,11 @@ public class HeuristicChangeStreamModeSelector implements ChangeStreamModeSelect
 
       var samplingBatch =
           this.samplingClient.getSamples(
-              context.namespace, COLLECTION_SAMPLING_LIMIT, viewDefinedStages, projection);
+              context.namespace,
+              ReadConcern.LOCAL,
+              COLLECTION_SAMPLING_LIMIT,
+              viewDefinedStages,
+              projection);
 
       var avgObjSizeAfterProject = getAvgBsonSize(samplingBatch);
 

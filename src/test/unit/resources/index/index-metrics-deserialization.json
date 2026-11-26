@@ -37,6 +37,7 @@
           "knnBit": 0.0,
           "knnF32Q7": 0.0,
           "knnF32Q1": 0.0,
+          "knnByteQ1": 0.0,
           "null": 0.0,
           "numberDouble": 0.0,
           "numberDoubleV2": 0.0,
@@ -122,6 +123,7 @@
           "concurrentCount": 10.0,
           "returnStoredSourceCount": 2.0,
           "returnScopeCount": 12.0,
+          "embeddedScopedFacetCount": 0.0,
           "facetDrillSidewaysOptimizableCount": 0.0,
           "facetDrillSidewaysGenericCount": 0.0,
           "sequenceTokenCount": 4.0,
@@ -177,6 +179,7 @@
           },
           "collectorTypeCount": {
             "facet": 0.0,
+            "aggregation": 0.0,
             "metrics": 0.0
           },
           "vectorQueryTypeCount": {

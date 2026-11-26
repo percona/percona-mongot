@@ -281,8 +281,7 @@ public class EmbeddingServiceManagerConfigTest {
     return "configs:\n" + String.join("\n", block) + "\n";
   }
 
-  private static Optional<EmbeddingServiceManagerConfig> loadCatalog(String yaml)
-      throws Exception {
+  private static Optional<EmbeddingServiceManagerConfig> loadCatalog(String yaml) throws Exception {
     Path catalogFile = Files.createTempFile("embedding-service-configs-hf", ".yml");
     try {
       Files.writeString(catalogFile, yaml, StandardCharsets.UTF_8);
@@ -503,8 +502,7 @@ public class EmbeddingServiceManagerConfigTest {
     assertTrue(result.isPresent());
     EmbeddingServiceConfig hf = result.get().configs().get(0);
     assertEquals(Optional.of("http://tei:80/embed"), hf.embeddingConfig.providerEndpoint);
-    assertFalse(
-        ((HuggingFaceEmbeddingCredentials) hf.embeddingConfig.credentialsBase).hasToken());
+    assertFalse(((HuggingFaceEmbeddingCredentials) hf.embeddingConfig.credentialsBase).hasToken());
     // per-tier overrides get the provider discriminator too
     EmbeddingServiceConfig.WorkloadParams query = hf.embeddingConfig.queryParams.orElseThrow();
     assertEquals(

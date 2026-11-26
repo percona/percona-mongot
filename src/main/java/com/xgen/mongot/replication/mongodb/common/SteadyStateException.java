@@ -5,6 +5,8 @@ import static com.xgen.mongot.util.Check.checkState;
 import com.mongodb.MongoException;
 import com.xgen.mongot.index.FieldExceededLimitsException;
 import com.xgen.mongot.util.mongodb.Errors;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import org.bson.codecs.configuration.CodecConfigurationException;
@@ -13,9 +15,9 @@ import org.jetbrains.annotations.Nullable;
 public class SteadyStateException extends Exception {
 
   public static final String BSON_TOO_LARGE_MESSAGE =
-      "Unrecoverable replication error due to change stream payload exceeding 16MB BSON limit. "
-          + "Scheduling index for rebuild, existing index may be stale but will remain queryable "
-          + "until rebuild completes. To avoid the issue see: "
+      "Unrecoverable replication error due to change stream payload exceeding 16MB BSON limit."
+          + " Scheduling index for rebuild, existing index may be stale but will remain queryable"
+          + " until rebuild completes. To avoid the issue see: "
           + "https://www.mongodb.com/docs/atlas/atlas-search/manage-indexes/#disk--memory--and-resource-usage.";
 
   private final Type type;
@@ -84,6 +86,10 @@ public class SteadyStateException extends Exception {
     return new SteadyStateException(Type.FIELD_EXCEEDED, message);
   }
 
+  public static SteadyStateException createAnalysisLimitExceeded(String message) {
+    return new SteadyStateException(Type.ANALYSIS_LIMIT_EXCEEDED, message);
+  }
+
   public static SteadyStateException createDocsExceeded(Throwable cause) {
     return new SteadyStateException(Type.DOCS_EXCEEDED, cause);
   }
@@ -130,8 +136,10 @@ public class SteadyStateException extends Exception {
   public static <T> T wrapIfThrows(Callable<T> callable) throws SteadyStateException {
     try {
       return callable.call();
-    } catch (InterruptedException e) {
+    } catch (InterruptedException | RegexInterruptedException e) {
       throw createShutDown();
+    } catch (RegexLimitExceededException e) {
+      throw createAnalysisLimitExceeded(e.getMessage());
     } catch (MongoException e) {
       throw wrapMongoException(e);
     } catch (ChangeStreamCursorClientException e) {
@@ -238,6 +246,9 @@ public class SteadyStateException extends Exception {
 
     /** Index has exceeded a usage limit of fields. */
     FIELD_EXCEEDED,
+
+    /** Custom analyzer regex matching exhausted its resource budget. */
+    ANALYSIS_LIMIT_EXCEEDED,
 
     /** Index has reached the limit of documents it is able to index. */
     DOCS_EXCEEDED,

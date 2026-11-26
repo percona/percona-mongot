@@ -17,7 +17,7 @@ public sealed interface IndexDefinitionGeneration extends DocumentEncodable
         MaterializedViewIndexDefinitionGeneration {
 
   class Fields {
-    static final Field.Required<Generation> GENERATION =
+    public static final Field.Required<Generation> GENERATION =
         Field.builder("generation")
             .classField(Generation::fromBson)
             .disallowUnknownFields()
@@ -39,6 +39,18 @@ public sealed interface IndexDefinitionGeneration extends DocumentEncodable
   IndexDefinition getIndexDefinition();
 
   IndexDefinitionGeneration upgradeToCurrentFormatVersion();
+
+  /** Whether this generation is at the definition's engine and its current format version. */
+  default boolean hasCurrentFormatVersion() {
+    return generation().formatVersion.engine() == getIndexDefinition().engine()
+        && generation().formatVersion.isCurrent();
+  }
+
+  /** Whether this mongot can open this generation for the definition's engine. */
+  default boolean hasSupportedFormatVersion() {
+    return generation().formatVersion.engine() == getIndexDefinition().engine()
+        && generation().formatVersion.isSupported();
+  }
 
   IndexDefinitionGeneration incrementAttempt();
 

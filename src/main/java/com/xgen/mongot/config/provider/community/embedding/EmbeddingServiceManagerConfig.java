@@ -73,8 +73,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
    * still soft-falls back to the bundled resource when that shipped file is missing or bad.
    *
    * <p>Without Voyage credentials, {@code VOYAGE} entries are dropped while keyless providers
-   * ({@code OPENAI_COMPATIBLE}) still load. {@code HUGGINGFACE_INFERENCE} entries without an
-   * {@code apiToken} (and without a custom {@code providerEndpoint}) are dropped too.
+   * ({@code OPENAI_COMPATIBLE}) still load. {@code HUGGINGFACE_INFERENCE} entries without an {@code
+   * apiToken} (and without a custom {@code providerEndpoint}) are dropped too.
    *
    * @param credentials optional Voyage API credentials (query and indexing keys)
    * @param modelConfigFileOverride explicit on-disk catalog path from the community config
@@ -318,8 +318,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
    * entries get the loaded keys (so the bundled YAML stays credential-free); other providers keep
    * their own YAML credentials. {@code isDedicatedCluster: true} is set for all.
    *
-   * <p>Also tags nested {@code modelConfig} / {@code credentials} / {@code tenantCredentials}
-   * under per-workload overrides ({@code query}, {@code collectionScan}, {@code changeStream}) so
+   * <p>Also tags nested {@code modelConfig} / {@code credentials} / {@code tenantCredentials} under
+   * per-workload overrides ({@code query}, {@code collectionScan}, {@code changeStream}) so
    * operators can write those blocks in an on-disk catalog without knowing about the internal
    * discriminator.
    */
@@ -363,8 +363,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   }
 
   /**
-   * Tag polymorphic nested docs inside a workload override block ({@code query} /
-   * {@code collectionScan} / {@code changeStream}).
+   * Tag polymorphic nested docs inside a workload override block ({@code query} / {@code
+   * collectionScan} / {@code changeStream}).
    */
   private static void tagWorkloadProviderFields(
       BsonDocument configField, String workloadKey, String provider) {

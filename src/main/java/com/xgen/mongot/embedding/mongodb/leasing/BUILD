@@ -3,10 +3,13 @@ load("//bazel/java:package.bzl", "java_library")
 java_library(
     name = "leasing",
     srcs = [
+        "CheckpointCommitRiskTracker.java",
         "DynamicLeaderLeaseManager.java",
         "Lease.java",
         "LeaseManager.java",
         "LeaseManagerOpsCommands.java",
+        "LeaseRepairUtil.java",
+        "LeaseStoreCircuitBreaker.java",
         "StaticLeaderLeaseManager.java",
         "StatusResolutionUtils.java",
     ],
@@ -17,6 +20,7 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/status",
         "//src/main/java/com/xgen/mongot/index/version",
         "@maven//:org_mongodb_bson",
+        "@maven//:org_mongodb_mongodb_driver_core",
     ],
     deps = [
         "//src/main/java/com/xgen/mongot/embedding/config",

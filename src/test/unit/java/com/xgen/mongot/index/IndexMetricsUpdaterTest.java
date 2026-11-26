@@ -2,6 +2,7 @@ package com.xgen.mongot.index;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.xgen.mongot.index.IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater.KNN_BETA_FILTER_TAG_PREFIX;
+import static com.xgen.mongot.index.IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater.QUERY_VECTOR_ENCODING_TAG_PREFIX;
 import static com.xgen.mongot.index.IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater.SEARCH_VECTOR_SEARCH_FILTER_TAG_PREFIX;
 import static com.xgen.mongot.index.IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater.SORT_NO_DATA_NAME_TAG_PREFIX;
 import static com.xgen.mongot.index.IndexTypeData.INDEX_TYPE_TAG_NAME;
@@ -22,12 +23,15 @@ import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.operators.TextOperator;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
+import com.xgen.mongot.index.query.operators.mql.MqlFilterOperator;
 import com.xgen.mongot.index.query.scores.Score;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
+import com.xgen.mongot.metrics.ServerStatusDataExtractor;
 import com.xgen.mongot.util.Enums;
+import com.xgen.mongot.util.bson.Vector;
 import com.xgen.testing.mongot.index.IndexMetricsBuilder;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
@@ -39,15 +43,18 @@ import com.xgen.testing.mongot.index.query.collectors.FacetDefinitionBuilder;
 import com.xgen.testing.mongot.index.query.operators.OperatorBuilder;
 import com.xgen.testing.mongot.index.query.scores.ScoreBuilder;
 import com.xgen.testing.mongot.index.version.GenerationIdBuilder;
+import com.xgen.testing.mongot.metrics.FilteredCompositeRegistry;
 import com.xgen.testing.mongot.metrics.micrometer.PercentilesBuilder;
 import com.xgen.testing.mongot.metrics.micrometer.SerializableTimerBuilder;
 import com.xgen.testing.mongot.mock.index.IndexMetricsSupplier;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.search.MeterNotFoundException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -65,6 +72,7 @@ import org.mockito.Mockito;
     value = {
       IndexMetricsUpdaterTest.TestClass.class,
       IndexMetricsUpdaterTest.TestClass.TestIndexingMetricsUpdater.class,
+      IndexMetricsUpdaterTest.TestClass.TestReplicationMetricsUpdater.class,
       IndexMetricsUpdaterTest.TestClass.TestQueryingMetricsUpdater.class,
       IndexMetricsUpdaterTest.TestClass.TestQueryingMetricsUpdater.TestQueryFeaturesMetricsUpdater
           .class,
@@ -129,6 +137,31 @@ public class IndexMetricsUpdaterTest {
     }
 
     @Test
+    public void getMetrics_compositeWithDeniedChildren_reportsRecordedCounts() {
+      var indexMetricsUpdater =
+          IndexMetricsUpdaterBuilder.builder()
+              .metricsFactory(
+                  new PerIndexMetricsFactory(
+                      IndexMetricsUpdater.NAMESPACE,
+                      FilteredCompositeRegistry.create(),
+                      GenerationIdBuilder.create()))
+              .indexDefinition(
+                  SearchIndexDefinitionBuilder.builder().defaultMetadata().dynamicMapping().build())
+              .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
+              .build();
+      indexMetricsUpdater
+          .getIndexingMetricsUpdater()
+          .getDocumentEventTypeCounter(DocumentEvent.EventType.INSERT)
+          .increment(3);
+      indexMetricsUpdater.getQueryingMetricsUpdater().getTotalQueryCounter().increment(5);
+      var metrics = indexMetricsUpdater.getMetrics();
+
+      assertThat(metrics.indexingMetrics().appliedDocumentEventTypeCountMap())
+          .containsEntry(DocumentEvent.EventType.INSERT, 3.0);
+      assertThat(metrics.queryingMetrics().totalQueryCount()).isEqualTo(5.0);
+    }
+
+    @Test
     public void testNumNestedVectorFieldsIsZeroForSearchIndex() {
       var indexDefinition =
           SearchIndexDefinitionBuilder.builder().defaultMetadata().dynamicMapping().build();
@@ -139,16 +172,14 @@ public class IndexMetricsUpdaterTest {
               .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
               .build();
 
-      Assert.assertEquals(0,
-          indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+      Assert.assertEquals(
+          0, indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
     }
 
     @Test
     public void testNumNestedVectorFieldsIsZeroForVectorIndexWithoutNestedRoot() {
       var indexDefinition =
-          VectorIndexDefinitionBuilder.builder()
-              .withCosineVectorField("embedding", 128)
-              .build();
+          VectorIndexDefinitionBuilder.builder().withCosineVectorField("embedding", 128).build();
       var indexMetricsUpdater =
           IndexMetricsUpdaterBuilder.builder()
               .metricsFactory(mockMetricsFactory(IndexMetricsUpdater.NAMESPACE))
@@ -156,8 +187,8 @@ public class IndexMetricsUpdaterTest {
               .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
               .build();
 
-      Assert.assertEquals(0,
-          indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+      Assert.assertEquals(
+          0, indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
     }
 
     @Test
@@ -179,8 +210,45 @@ public class IndexMetricsUpdaterTest {
               .indexMetricsSupplier(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier())
               .build();
 
-      Assert.assertEquals(2,
-          indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+      Assert.assertEquals(
+          2, indexMetricsUpdater.getMetrics().indexingMetrics().numNestedVectorFields());
+    }
+
+    @Test
+    public void getMetrics_copiesVectorliteIndexMetricsFromSupplier() {
+      var supplier = IndexMetricsSupplier.mockEmptyIndexMetricsSupplier();
+      Mockito.doReturn(
+              new VectorliteIndexMetrics(
+                  new VectorliteIndexMetrics.TieredStorageMetrics(1, 2, 3, 4), 5))
+          .when(supplier)
+          .getVectorliteIndexMetrics();
+      IndexMetrics result = buildUpdater(supplier).getMetrics();
+
+      Assert.assertEquals(1, result.indexingMetrics().coldStorageSizeBytes());
+      Assert.assertEquals(2, result.indexingMetrics().warmCacheSizeBytes());
+      Assert.assertEquals(3, result.queryingMetrics().warmQueriesCount());
+      Assert.assertEquals(4, result.queryingMetrics().coldQueriesCount());
+    }
+
+    @Test
+    public void getMetrics_nullVectorliteIndexMetrics_defaultsToZero() {
+      var supplier = IndexMetricsSupplier.mockEmptyIndexMetricsSupplier();
+      Assert.assertNull(supplier.getVectorliteIndexMetrics());
+      IndexMetrics result = buildUpdater(supplier).getMetrics();
+
+      Assert.assertEquals(0, result.indexingMetrics().coldStorageSizeBytes());
+      Assert.assertEquals(0, result.indexingMetrics().warmCacheSizeBytes());
+      Assert.assertEquals(0, result.queryingMetrics().warmQueriesCount());
+      Assert.assertEquals(0, result.queryingMetrics().coldQueriesCount());
+    }
+
+    private static IndexMetricsUpdater buildUpdater(IndexMetricValuesSupplier supplier) {
+      return IndexMetricsUpdaterBuilder.builder()
+          .metricsFactory(mockMetricsFactory(IndexMetricsUpdater.NAMESPACE))
+          .indexDefinition(
+              SearchIndexDefinitionBuilder.builder().defaultMetadata().dynamicMapping().build())
+          .indexMetricsSupplier(supplier)
+          .build();
     }
 
     public static class TestIndexingMetricsUpdater {
@@ -207,7 +275,9 @@ public class IndexMetricsUpdaterTest {
             .when(mockedIndexingMetricsUpdater)
             .getReplicationOpTimeInfo();
 
-        var result = mockedIndexingMetricsUpdater.getMetrics(mockedIndexMetricsSupplier, 0);
+        var result =
+            mockedIndexingMetricsUpdater.getMetrics(
+                mockedIndexMetricsSupplier, 0, VectorliteIndexMetrics.TieredStorageMetrics.ZERO);
         var expected =
             IndexMetricsBuilder.IndexingMetricsBuilder.builder()
                 .replicationOpTime(new BsonTimestamp(10L))
@@ -238,7 +308,10 @@ public class IndexMetricsUpdaterTest {
 
         Assert.assertTrue(
             indexingMetricsUpdater
-                .getMetrics(IndexMetricsSupplier.mockEmptyIndexMetricsSupplier(), 0)
+                .getMetrics(
+                    IndexMetricsSupplier.mockEmptyIndexMetricsSupplier(),
+                    0,
+                    VectorliteIndexMetrics.TieredStorageMetrics.ZERO)
                 .replicationLagMs()
                 .isPresent());
         // it should also be reported to the meter registry
@@ -248,6 +321,34 @@ public class IndexMetricsUpdaterTest {
                 .tag(INDEX_TYPE_TAG_NAME, "search")
                 .gauge();
         Assert.assertEquals(1000, gauge.value(), 0.1d);
+      }
+
+      @Test
+      public void testSourceCollectionDocCountGaugesReportThePairTogether() {
+        var factory = mockMetricsFactory(IndexingMetricsUpdater.NAMESPACE);
+        var indexingMetricsUpdater =
+            IndexMetricsUpdaterBuilder.IndexingMetricsUpdaterBuilder.builder()
+                .metricsFactory(factory)
+                .build();
+        Gauge collectionDocs =
+            factory.get(IndexingMetricsUpdater.SOURCE_COLLECTION_DOC_COUNT_NAME).gauge();
+        Gauge indexedDocs =
+            factory
+                .get(IndexingMetricsUpdater.SOURCE_COLLECTION_CHECK_INDEXED_DOC_COUNT_NAME)
+                .gauge();
+        Assert.assertTrue(Double.isNaN(collectionDocs.value()));
+        Assert.assertTrue(Double.isNaN(indexedDocs.value()));
+
+        indexingMetricsUpdater.setSourceCollectionDocCounts(
+            Optional.of(new IndexingMetricsUpdater.SourceCollectionDocCounts(1_000, 870)));
+
+        Assert.assertEquals(1_000, collectionDocs.value(), 0.1d);
+        Assert.assertEquals(870, indexedDocs.value(), 0.1d);
+
+        indexingMetricsUpdater.setSourceCollectionDocCounts(Optional.empty());
+
+        Assert.assertTrue(Double.isNaN(collectionDocs.value()));
+        Assert.assertTrue(Double.isNaN(indexedDocs.value()));
       }
 
       @Test
@@ -360,6 +461,45 @@ public class IndexMetricsUpdaterTest {
       }
 
       @Test
+      @SuppressWarnings("unused")
+      public void testLuceneVisibleOpTimeGaugeNaNBeforeUpdate() {
+        var factory = mockMetricsFactory(IndexingMetricsUpdater.NAMESPACE);
+        var indexingMetricsUpdater =
+            IndexMetricsUpdaterBuilder.IndexingMetricsUpdaterBuilder.builder()
+                .metricsFactory(factory)
+                .build();
+
+        Assert.assertTrue(
+            Double.isNaN(
+                factory
+                    .get(IndexingMetricsUpdater.LUCENE_VISIBLE_OPTIME_NAME)
+                    .tag(INDEX_TYPE_TAG_NAME, "search")
+                    .gauge()
+                    .value()));
+      }
+
+      @Test
+      public void testLuceneVisibleOpTimeGaugeAfterUpdate() {
+        var factory = mockMetricsFactory(IndexingMetricsUpdater.NAMESPACE);
+        var indexingMetricsUpdater =
+            IndexMetricsUpdaterBuilder.IndexingMetricsUpdaterBuilder.builder()
+                .metricsFactory(factory)
+                .build();
+
+        long opTime = new BsonTimestamp(42, 0).getValue();
+        indexingMetricsUpdater.getReplicationOpTimeInfo().updateVisible(opTime);
+
+        Assert.assertEquals(
+            (double) opTime,
+            factory
+                .get(IndexingMetricsUpdater.LUCENE_VISIBLE_OPTIME_NAME)
+                .tag(INDEX_TYPE_TAG_NAME, "search")
+                .gauge()
+                .value(),
+            0.0);
+      }
+
+      @Test
       public void testRecordDocumentSizeBytes() {
         int mb = 1024 * 1024;
         var metricsFactory = mockMetricsFactory(IndexingMetricsUpdater.NAMESPACE);
@@ -410,6 +550,118 @@ public class IndexMetricsUpdaterTest {
                 .count(),
             0);
       }
+
+      @Test
+      public void searchAutoEmbeddingIndexTagsBasicIndexingMetrics() {
+        var metricsFactory = mockMetricsFactory(IndexingMetricsUpdater.NAMESPACE);
+        IndexingMetricsUpdater metricsUpdater =
+            new IndexingMetricsUpdater(
+                metricsFactory,
+                IndexDefinition.Type.SEARCH,
+                IndexTypeData.IndexTypeTag.TAG_SEARCH_AUTO_EMBEDDING,
+                SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
+                true);
+
+        metricsUpdater.getDocumentEventTypeCounter(DocumentEvent.EventType.INSERT).increment();
+        metricsUpdater.getBatchIndexingTimer().record(Duration.ofMillis(10));
+
+        String indexType = IndexTypeData.IndexTypeTag.TAG_SEARCH_AUTO_EMBEDDING.tagValue;
+        assertThat(
+                metricsFactory
+                    .get(
+                        Enums.convertNameTo(CaseFormat.LOWER_CAMEL, DocumentEvent.EventType.INSERT))
+                    .tag(INDEX_TYPE_TAG_NAME, indexType)
+                    .counter()
+                    .count())
+            .isEqualTo(1);
+        assertThat(
+                metricsFactory
+                    .get(
+                        ServerStatusDataExtractor.ReplicationMeterData.IndexingMeterData
+                            .INDEXING_BATCH_DURATIONS)
+                    .tag(INDEX_TYPE_TAG_NAME, indexType)
+                    .timer()
+                    .count())
+            .isEqualTo(1);
+      }
+    }
+
+    public static class TestReplicationMetricsUpdater {
+      private static final String ID_FIELD_TYPE_GAUGE = "idFieldType";
+      private static final String BSON_TYPE_TAG = "bsonType";
+
+      @Test
+      public void initialSyncIdFieldTypeReportsOneThenResetsToZero() {
+        var factory =
+            mockMetricsFactory(
+                IndexMetricsUpdater.ReplicationMetricsUpdater.InitialSyncMetrics.NAMESPACE);
+        var initialSyncMetrics =
+            new IndexMetricsUpdater.ReplicationMetricsUpdater.InitialSyncMetrics(
+                factory, Tags.empty());
+
+        initialSyncMetrics.reportIdKeyFieldType("OBJECT_ID");
+        assertThat(gaugeValue(factory, "OBJECT_ID")).isEqualTo(1.0);
+
+        initialSyncMetrics.resetIdKeyFieldType();
+        assertThat(gaugeValue(factory, "OBJECT_ID")).isEqualTo(0.0);
+      }
+
+      @Test
+      public void steadyStateIdFieldTypeReportsOneThenResetsToZero() {
+        var factory =
+            mockMetricsFactory(
+                IndexMetricsUpdater.ReplicationMetricsUpdater.SteadyStateMetrics.NAMESPACE);
+        var steadyStateMetrics =
+            new IndexMetricsUpdater.ReplicationMetricsUpdater.SteadyStateMetrics(
+                factory, Tags.empty());
+
+        steadyStateMetrics.reportIdKeyFieldType("STRING");
+        assertThat(gaugeValue(factory, "STRING")).isEqualTo(1.0);
+
+        steadyStateMetrics.resetIdKeyFieldType();
+        assertThat(gaugeValue(factory, "STRING")).isEqualTo(0.0);
+      }
+
+      @Test
+      public void resetBeforeReportIsNoOpAndLaterReportStillRegistersGauge() {
+        var factory =
+            mockMetricsFactory(
+                IndexMetricsUpdater.ReplicationMetricsUpdater.InitialSyncMetrics.NAMESPACE);
+        var initialSyncMetrics =
+            new IndexMetricsUpdater.ReplicationMetricsUpdater.InitialSyncMetrics(
+                factory, Tags.empty());
+
+        // Reset before any document is observed must not register a gauge or throw.
+        initialSyncMetrics.resetIdKeyFieldType();
+        Assert.assertThrows(
+            MeterNotFoundException.class, () -> factory.get(ID_FIELD_TYPE_GAUGE).gauge());
+
+        // A subsequent report still lazily registers the gauge at 1.
+        initialSyncMetrics.reportIdKeyFieldType("OBJECT_ID");
+        assertThat(gaugeValue(factory, "OBJECT_ID")).isEqualTo(1.0);
+      }
+
+      @Test
+      public void reportAfterResetFlipsSameGaugeBackToOne() {
+        var factory =
+            mockMetricsFactory(
+                IndexMetricsUpdater.ReplicationMetricsUpdater.SteadyStateMetrics.NAMESPACE);
+        var steadyStateMetrics =
+            new IndexMetricsUpdater.ReplicationMetricsUpdater.SteadyStateMetrics(
+                factory, Tags.empty());
+
+        steadyStateMetrics.reportIdKeyFieldType("OBJECT_ID");
+        steadyStateMetrics.resetIdKeyFieldType();
+        assertThat(gaugeValue(factory, "OBJECT_ID")).isEqualTo(0.0);
+
+        // Re-entering the phase reports again and flips the same series back to 1.
+        steadyStateMetrics.reportIdKeyFieldType("OBJECT_ID");
+        assertThat(gaugeValue(factory, "OBJECT_ID")).isEqualTo(1.0);
+      }
+
+      private static double gaugeValue(PerIndexMetricsFactory factory, String bsonType) {
+        return factory.get(ID_FIELD_TYPE_GAUGE).tag(BSON_TYPE_TAG, bsonType).gauge().value();
+      }
     }
 
     public static class TestQueryingMetricsUpdater {
@@ -419,7 +671,8 @@ public class IndexMetricsUpdaterTest {
         var queryingMetricsUpdater = new IndexMetricsUpdater.QueryingMetricsUpdater(metricsFactory);
         queryingMetricsUpdater.getFailedQueryCounter().increment();
 
-        var result = queryingMetricsUpdater.getMetrics();
+        var result =
+            queryingMetricsUpdater.getMetrics(VectorliteIndexMetrics.TieredStorageMetrics.ZERO);
         var expected =
             IndexMetricsBuilder.QueryingMetricsBuilder.builder().failedQueryCount(1).build();
 
@@ -447,8 +700,7 @@ public class IndexMetricsUpdaterTest {
                         .build())
                 .returnStoredSource(false)
                 .build();
-        long countBefore =
-            metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
+        long countBefore = metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
         queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(query, () -> false);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().count())
             .isEqualTo(countBefore);
@@ -506,8 +758,7 @@ public class IndexMetricsUpdaterTest {
                         .build())
                 .returnStoredSource(false)
                 .build();
-        long countBefore =
-            metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
+        long countBefore = metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
         queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(query, () -> true);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().count())
             .isEqualTo(countBefore + 1L);
@@ -536,8 +787,7 @@ public class IndexMetricsUpdaterTest {
                         .build())
                 .returnStoredSource(false)
                 .build();
-        long countBefore =
-            metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
+        long countBefore = metricsFactory.get("totalFacetBucketsPerQuery").summary().count();
         queryingMetricsUpdater.recordTotalFacetBucketsIfApplicable(query, () -> true);
         assertThat(metricsFactory.get("totalFacetBucketsPerQuery").summary().count())
             .isEqualTo(countBefore + 1L);
@@ -577,13 +827,65 @@ public class IndexMetricsUpdaterTest {
                 metricsFactory,
                 IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH,
                 VectorIndexCapabilities.CURRENT_FEATURE_VERSION,
-                true);
+                true,
+                /* isSearchAggregationEnabled= */ true);
         vectorIndexQueryingMetricsUpdater
             .getVectorResultLatencyTimer()
             .record(Duration.ofMillis(100));
         var vectorBatchLatencies =
-            metricsFactory.get("vectorResultLatencies").tag("indexFeatureVersion", "4").timer();
+            metricsFactory.get("vectorResultLatencies").tag("indexType", "vector_search").timer();
         assertThat(vectorBatchLatencies.totalTime(TimeUnit.MILLISECONDS)).isEqualTo(100);
+      }
+
+      @Test
+      public void searchAutoEmbeddingIndexTagsBasicQueryMetrics() {
+        ObjectId indexId = new ObjectId();
+        var metricsFactory =
+            new PerIndexMetricsFactory(
+                IndexMetricsUpdater.QueryingMetricsUpdater.NAMESPACE,
+                MeterAndFtdcRegistry.createWithSimpleRegistries(),
+                GenerationIdBuilder.create(indexId));
+        var queryingMetricsUpdater =
+            new IndexMetricsUpdater.QueryingMetricsUpdater(
+                metricsFactory,
+                IndexTypeData.IndexTypeTag.TAG_SEARCH_AUTO_EMBEDDING,
+                SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
+                true,
+                /* isSearchAggregationEnabled= */ true);
+
+        queryingMetricsUpdater.getTotalQueryCounter().increment();
+        queryingMetricsUpdater.getFailedQueryCounter().increment();
+        queryingMetricsUpdater.getSearchAndGetMoreCommandCounter().increment();
+        queryingMetricsUpdater.getSearchResultBatchLatencyTimer().record(Duration.ofMillis(100));
+
+        Tags perIndexTags = Tags.of("indexId logString", indexId.toHexString());
+        assertThat(
+                metricsFactory
+                    .get("totalQueries")
+                    .tags(perIndexTags)
+                    .tag(INDEX_TYPE_TAG_NAME, "search_auto_embedding")
+                    .counter()
+                    .count())
+            .isEqualTo(1);
+        assertThat(
+                metricsFactory
+                    .get("failedQueries")
+                    .tags(perIndexTags)
+                    .tag(INDEX_TYPE_TAG_NAME, "search_auto_embedding")
+                    .counter()
+                    .count())
+            .isEqualTo(1);
+        assertThat(
+                metricsFactory
+                    .get("getMoreCommandCalls")
+                    .tags(perIndexTags)
+                    .tag(INDEX_TYPE_TAG_NAME, "search_auto_embedding")
+                    .counter()
+                    .count())
+            .isEqualTo(1);
+        assertThat(
+                metricsFactory.get("searchResultBatchLatencies").tags(perIndexTags).timer().count())
+            .isEqualTo(1);
       }
 
       @Test
@@ -594,7 +896,8 @@ public class IndexMetricsUpdaterTest {
                 metricsFactory,
                 IndexTypeData.IndexTypeTag.TAG_SEARCH,
                 SearchIndexCapabilities.CURRENT_FEATURE_VERSION,
-                false);
+                false,
+                /* isSearchAggregationEnabled= */ true);
         queryingMetricsUpdater.getFailedQueryCounter().increment();
         assertThrows(
             "No meters have the required tag 'indexFeatureVersion'.",
@@ -632,7 +935,8 @@ public class IndexMetricsUpdaterTest {
                 metricsFactory,
                 IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH,
                 VectorIndexCapabilities.CURRENT_FEATURE_VERSION,
-                false);
+                false,
+                /* isSearchAggregationEnabled= */ true);
         vectorIndexQueryingMetricsUpdater
             .getVectorResultLatencyTimer()
             .record(Duration.ofMillis(100));
@@ -748,7 +1052,7 @@ public class IndexMetricsUpdaterTest {
           var metricsFactory = SearchIndex.mockMetricsFactory();
           var metricsUpdater =
               new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
-                  metricsFactory);
+                  metricsFactory, /* aggregationEnabled= */ true);
           metricsUpdater.getCollectorTypeCounter(Collector.Type.FACET).increment();
 
           var result = metricsUpdater.getMetrics();
@@ -765,7 +1069,7 @@ public class IndexMetricsUpdaterTest {
           var metricsFactory = SearchIndex.mockMetricsFactory();
           IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater metricsUpdater =
               new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
-                  metricsFactory);
+                  metricsFactory, /* aggregationEnabled= */ true);
           metricsUpdater.getCollectorTypeCounter(Collector.Type.FACET).increment();
 
           var counter =
@@ -895,7 +1199,7 @@ public class IndexMetricsUpdaterTest {
           var metricsFactory = SearchIndex.mockMetricsFactory();
           var metricsUpdater =
               new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
-                  metricsFactory);
+                  metricsFactory, /* aggregationEnabled= */ true);
           metricsUpdater
               .getVectorSearchQueryTypeCounter(VectorSearchCriteria.Type.APPROXIMATE)
               .increment();
@@ -918,7 +1222,7 @@ public class IndexMetricsUpdaterTest {
           var metricsFactory = SearchIndex.mockMetricsFactory();
           IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater metricsUpdater =
               new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
-                  metricsFactory);
+                  metricsFactory, /* aggregationEnabled= */ true);
           metricsUpdater
               .getSearchVectorSearchFilterOperatorTypeCounterMap(Operator.Type.GEO_WITHIN)
               .increment();
@@ -943,7 +1247,7 @@ public class IndexMetricsUpdaterTest {
           var metricsFactory = SearchIndex.mockMetricsFactory();
           IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater metricsUpdater =
               new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
-                  metricsFactory);
+                  metricsFactory, /* aggregationEnabled= */ true);
           metricsUpdater
               .getKnnBetaFilterOperatorTypeCounterMap(Operator.Type.GEO_WITHIN)
               .increment();
@@ -961,6 +1265,58 @@ public class IndexMetricsUpdaterTest {
                   .counter();
 
           Assert.assertEquals(1, counter.count(), 0);
+        }
+
+        @Test
+        public void
+            getVectorSearchQueryVectorEncodingCounter_increment_registersPrefixedFeatureCounter() {
+          var metricsFactory = SearchIndex.mockMetricsFactory();
+          IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater metricsUpdater =
+              new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
+                  metricsFactory, /* aggregationEnabled= */ true);
+          metricsUpdater
+              .getVectorSearchQueryVectorEncodingCounter(Vector.BsonEncoding.BIN_DATA_FLOAT32)
+              .increment();
+
+          var counter =
+              metricsFactory
+                  .get(
+                      IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater
+                          .METRIC_NAME)
+                  .tag(
+                      IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater
+                          .NAME_TAG,
+                      QUERY_VECTOR_ENCODING_TAG_PREFIX
+                          + Enums.convertNameTo(
+                              CaseFormat.LOWER_CAMEL, Vector.BsonEncoding.BIN_DATA_FLOAT32))
+                  .counter();
+
+          Assert.assertEquals(1, counter.count(), 0);
+        }
+
+        @Test
+        public void getMetrics_vectorSearchTelemetryCounters_arePopulated() {
+          var metricsFactory = SearchIndex.mockMetricsFactory();
+          var metricsUpdater =
+              new IndexMetricsUpdater.QueryingMetricsUpdater.QueryFeaturesMetricsUpdater(
+                  metricsFactory, /* aggregationEnabled= */ true);
+          metricsUpdater.getFilteredVectorSearchCounter().increment(2.0);
+          metricsUpdater
+              .getVectorSearchFilterOperatorTypeCounterMap(MqlFilterOperator.Category.EQ)
+              .increment();
+          metricsUpdater
+              .getVectorSearchQueryVectorEncodingCounter(Vector.BsonEncoding.BIN_DATA_FLOAT32)
+              .increment(3.0);
+
+          var result = metricsUpdater.getMetrics();
+
+          var expected =
+              IndexMetricsBuilder.QueryingMetricsBuilder.QueryFeaturesMetricsBuilder.builder()
+                  .vectorSearchFilterCount(2)
+                  .vectorSearchFilterOperatorCategoryCount(MqlFilterOperator.Category.EQ, 1)
+                  .vectorSearchQueryVectorEncodingCount(Vector.BsonEncoding.BIN_DATA_FLOAT32, 3)
+                  .build();
+          Assert.assertEquals(expected, result);
         }
       }
     }

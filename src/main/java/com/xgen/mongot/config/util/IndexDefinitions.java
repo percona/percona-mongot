@@ -37,17 +37,8 @@ public class IndexDefinitions {
   }
 
   /** generation ids for all the indexes. */
-  public static List<GenerationId> generationIds(List<IndexDefinitionGeneration> definitions) {
-    return definitions.stream()
-        .map(IndexDefinitionGeneration::getGenerationId)
-        .collect(Collectors.toList());
-  }
-
-  /** generation ids for all the indexes. */
   public static List<GenerationId> indexesGenerationIds(List<IndexGeneration> indexes) {
-    return indexes.stream()
-        .map(i -> i.getGenerationId())
-        .collect(Collectors.toList());
+    return indexes.stream().map(i -> i.getGenerationId()).collect(Collectors.toList());
   }
 
   /** index definitions for generations. */

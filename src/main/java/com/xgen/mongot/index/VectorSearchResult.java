@@ -1,6 +1,7 @@
 package com.xgen.mongot.index;
 
 import com.google.errorprone.annotations.Var;
+import com.xgen.mongot.index.lucene.query.pushdown.MqlComparator;
 import com.xgen.mongot.index.query.sort.SequenceToken;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.bson.parser.BsonDocumentBuilder;
@@ -23,9 +24,12 @@ public record VectorSearchResult(
    * The vector search results are first compared by the scores in descending order. Then id is used
    * for tie-breaking.
    */
+  private static final Comparator<BsonValue> BSON_VALUE_COMPARATOR =
+      MqlComparator.MIN_SELECTING_COMPARATOR;
+
   public static final Comparator<VectorSearchResult> VECTOR_SEARCH_RESULT_COMPARATOR =
       Comparator.comparingDouble((VectorSearchResult v) -> -v.vectorSearchScore())
-          .thenComparingInt(v -> v.id().asInt32().getValue());
+          .thenComparing(v -> v.id(), BSON_VALUE_COMPARATOR);
 
   private static class Fields {
     private static final Field.Required<BsonValue> ID =

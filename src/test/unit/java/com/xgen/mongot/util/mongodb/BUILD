@@ -5,6 +5,8 @@ java_test_suite(
     srcs = [
         "BatchMongoClientTest.java",
         "ChangeStreamResponseTest.java",
+        "CollectionScanFindCommandTest.java",
+        "ConnectionInfoTest.java",
         "ConnectionStringBuilderTest.java",
         "ConnectionStringUtilTest.java",
         "FindCommandResponseTest.java",
@@ -13,6 +15,7 @@ java_test_suite(
         "MongoClientBuilderTest.java",
         "MongoCredentialsTest.java",
         "MongoDbMetadataClientTest.java",
+        "MongoDbOplogTest.java",
         "SslContextFactoryTest.java",
         "SyncSourceConfigTest.java",
     ],

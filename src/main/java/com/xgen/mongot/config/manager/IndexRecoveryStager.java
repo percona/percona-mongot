@@ -8,6 +8,7 @@ import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.analyzer.InvalidAnalyzerDefinitionException;
+import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.status.IndexStatus;
 import java.io.IOException;
@@ -48,8 +49,24 @@ class IndexRecoveryStager {
 
   private boolean isRecoveringIndex(IndexGeneration indexGeneration) {
     IndexStatus indexStatus = indexGeneration.getIndex().getStatus();
-    return indexStatus.getStatusCode() == IndexStatus.StatusCode.RECOVERING_NON_TRANSIENT
-        || indexStatus.canBeRecovered();
+    boolean isOnline =
+        !AutoEmbeddingIndexGenerationFactory.isAutoEmbeddingResolutionFailed(indexGeneration);
+    boolean hasRecoverableStatus =
+        indexStatus.getStatusCode() == IndexStatus.StatusCode.RECOVERING_NON_TRANSIENT
+            || indexStatus.canBeRecovered();
+    boolean isOnlineCandidate = isOnline && hasRecoverableStatus;
+    boolean isOfflineCandidate =
+        !isOnline
+            && (hasRecoverableStatus || indexStatus.getStatusCode() == IndexStatus.StatusCode.STALE)
+            && canStageAutoEmbedIndexRecovery();
+    return isOnlineCandidate || isOfflineCandidate;
+  }
+
+  private boolean canStageAutoEmbedIndexRecovery() {
+    return this.configState
+        .materializedViewIndexFactory
+        .map(factory -> factory.isMongodReachableFromCachedTopology())
+        .orElse(false);
   }
 
   private static void logIndexIds(List<IndexGeneration> indexes, String logMessage) {
@@ -183,6 +200,11 @@ class IndexRecoveryStager {
                                   || reason == IndexStatus.Reason.AUTO_EMBEDDING_RESOLUTION_RETRY)
                       .orElse(false);
             })
+        .filter(
+            indexGeneration ->
+                !AutoEmbeddingIndexGenerationFactory.isAutoEmbeddingResolutionFailed(
+                        indexGeneration)
+                    || canStageAutoEmbedIndexRecovery())
         .collect(Collectors.toList());
   }
 

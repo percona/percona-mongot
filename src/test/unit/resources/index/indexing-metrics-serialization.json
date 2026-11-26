@@ -19,6 +19,8 @@
         "vectorFieldSizeBytes": 0,
         "requiredMemoryBytes": 500000000,
         "numNestedVectorFields": 0,
+        "coldStorageSizeBytes": 0,
+        "warmCacheSizeBytes": 0,
         "numFields": 30,
         "numFieldsPerDatatype": {
           "autocomplete": 0.0,
@@ -34,6 +36,7 @@
           "knnBit": 0.0,
           "knnF32Q7": 0.0,
           "knnF32Q1": 0.0,
+          "knnByteQ1": 0.0,
           "null": 0.0,
           "numberDouble": 0.0,
           "numberDoubleV2": 0.0,
@@ -103,6 +106,8 @@
           "$numberLong": "500000000"
         },
         "numNestedVectorFields": 0,
+        "coldStorageSizeBytes": {"$numberLong": "0"},
+        "warmCacheSizeBytes": {"$numberLong": "0"},
         "numFields": 30,
         "numFieldsPerDatatype": {
           "autocomplete": 0.0,
@@ -118,6 +123,7 @@
           "knnBit": 0.0,
           "knnF32Q7": 0.0,
           "knnF32Q1": 0.0,
+          "knnByteQ1": 0.0,
           "null": 0.0,
           "numberDouble": 0.0,
           "numberDoubleV2": 0.0,

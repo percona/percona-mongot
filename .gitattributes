@@ -1,0 +1,2 @@
+# Percona: RPM spec files are not Python, but aspect_rules_lint maps *.spec to ruff.
+percona-packaging/**/*.spec rules-lint-ignored=true

@@ -3,6 +3,7 @@ package com.xgen.mongot.replication.mongodb.steadystate.changestream;
 import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.index.IndexMetricsUpdater;
@@ -10,24 +11,32 @@ import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
-import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingMaterializedViewConfig;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector.ChangeStreamMode;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamPartition;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.CollectionSamplingMongoClient;
 import com.xgen.mongot.replication.mongodb.common.CollectionStatsMongoClient;
+import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.HeuristicChangeStreamModeSelector;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
+import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamProgressTracker;
 import com.xgen.mongot.replication.mongodb.common.SessionRefresher;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
+import com.xgen.mongot.replication.mongodb.common.SteadyStateSchedulingMethod;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.concurrent.Executors;
+import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import com.xgen.mongot.util.concurrent.NamedScheduledExecutorService;
 import com.xgen.mongot.util.mongodb.BatchMongoClient;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +44,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import org.bson.BsonDocument;
 import org.jetbrains.annotations.TestOnly;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,24 +62,56 @@ public class ChangeStreamManager {
   private final IndexingWorkSchedulerFactory indexingWorkSchedulerFactory;
   private final ChangeStreamIndexManagerFactory indexManagerFactory;
   private final ChangeStreamDispatcher dispatcher;
+  private final Optional<NamedExecutorService> partitionReaderExecutor;
   private final ChangeStreamModeSelector modeSelector;
+  private final Optional<ActivityObserverFactory> activityObserverFactory;
+  private final PartitionTrackerFactory partitionTrackerFactory;
 
   @GuardedBy("this")
   private final Map<GenerationId, ChangeStreamIndexManager> indexManagers;
 
+  /** The per-database activity observers, present only when the observer feature is enabled. */
+  @GuardedBy("this")
+  private final Map<String, ChangeStreamActivityObserver> observersByDatabase;
+
+  /** The observer database each index registered with, so stop can find its observer. */
+  @GuardedBy("this")
+  private final Map<GenerationId, String> observerDatabaseByIndex;
+
   @GuardedBy("this")
   private boolean shutdown;
+
+  /** Creates the activity observer for one database when its first index is added. */
+  @FunctionalInterface
+  interface ActivityObserverFactory {
+    ChangeStreamActivityObserver create(String databaseName);
+  }
+
+  /** Creates the generation's tracker when parallel readers are enabled; empty otherwise. */
+  @FunctionalInterface
+  interface PartitionTrackerFactory {
+    Optional<PartitionedChangeStreamProgressTracker> create(
+        ChangeStreamResumeInfo initialResumeInfo);
+  }
 
   private ChangeStreamManager(
       IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
       ChangeStreamIndexManagerFactory indexManagerFactory,
       ChangeStreamDispatcher dispatcher,
-      ChangeStreamModeSelector modeSelector) {
+      Optional<NamedExecutorService> partitionReaderExecutor,
+      ChangeStreamModeSelector modeSelector,
+      Optional<ActivityObserverFactory> activityObserverFactory,
+      PartitionTrackerFactory partitionTrackerFactory) {
     this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
     this.indexManagerFactory = indexManagerFactory;
     this.dispatcher = dispatcher;
+    this.partitionReaderExecutor = partitionReaderExecutor;
     this.modeSelector = modeSelector;
+    this.activityObserverFactory = activityObserverFactory;
+    this.partitionTrackerFactory = partitionTrackerFactory;
     this.indexManagers = new HashMap<>();
+    this.observersByDatabase = new HashMap<>();
+    this.observerDatabaseByIndex = new HashMap<>();
     this.shutdown = false;
   }
 
@@ -81,7 +123,9 @@ public class ChangeStreamManager {
       IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
       DecodingWorkScheduler decodingScheduler,
       SteadyStateReplicationConfig replicationConfig,
-      boolean enableLifecycleAttributionMetrics) {
+      boolean enableLifecycleAttributionMetrics,
+      boolean enableChangeStreamPriorityScheduling,
+      boolean enableChangeStreamActivityObserver) {
     Check.argIsPositive(
         replicationConfig.getChangeStreamQueryMaxTimeMs(), "changeStreamQueryMaxTimeMs");
     Check.argIsPositive(
@@ -108,10 +152,25 @@ public class ChangeStreamManager {
             new MetricsFactory("indexing.changeStreamModeSelector", meterRegistry));
 
     if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create(
-              replicationConfig.getReplicationType().resourceAttributionSubsystem)
+      meterAndFtdcRegistry
+          .threadPoolResourceBindings()
+          .forSubsystem(replicationConfig.getReplicationType().resourceAttributionSubsystem)
           .register(modeSelectorExecutor, meterRegistry);
     }
+
+    Optional<ActivityObserverFactory> activityObserverFactory =
+        enableChangeStreamActivityObserver
+            ? Optional.of(
+                databaseName ->
+                    ChangeStreamActivityObserver.create(
+                        databaseName,
+                        syncMongoClient,
+                        sessionRefresher,
+                        meterAndFtdcRegistry,
+                        Duration.ofSeconds(
+                            replicationConfig.getChangeStreamInactivityThresholdSec()),
+                        replicationConfig.getReplicationType()))
+            : Optional.empty();
 
     return getSyncChangeStreamManager(
         meterAndFtdcRegistry,
@@ -121,7 +180,9 @@ public class ChangeStreamManager {
         decodingScheduler,
         modeSelector,
         replicationConfig,
-        enableLifecycleAttributionMetrics);
+        enableLifecycleAttributionMetrics,
+        enableChangeStreamPriorityScheduling,
+        activityObserverFactory);
   }
 
   private static ChangeStreamManager getSyncChangeStreamManager(
@@ -132,27 +193,37 @@ public class ChangeStreamManager {
       DecodingWorkScheduler decodingScheduler,
       ChangeStreamModeSelector modeSelector,
       SteadyStateReplicationConfig replicationConfig,
-      boolean enableLifecycleAttributionMetrics) {
+      boolean enableLifecycleAttributionMetrics,
+      boolean enableChangeStreamPriorityScheduling,
+      Optional<ActivityObserverFactory> activityObserverFactory) {
 
-    ChangeStreamMongoClientFactory syncMongoClientFactory =
+    // Create the pool first so we can pass it directly to the factory.
+    Optional<NamedExecutorService> partitionReaderExecutor =
+        createPartitionReaderExecutor(
+            meterAndFtdcRegistry, replicationConfig, enableLifecycleAttributionMetrics);
+    ChangeStreamMongoClientFactory mongoClientFactory =
         ChangeStreamMongoClientFactory.create(
             sessionRefresher,
             syncBatchMongoClient,
             modeSelector,
             meterAndFtdcRegistry,
-            replicationConfig);
+            replicationConfig,
+            partitionReaderExecutor.map(executor -> executor));
 
     return createSync(
         meterAndFtdcRegistry,
-        syncMongoClientFactory,
+        mongoClientFactory,
+        partitionReaderExecutor,
         modeSelector,
         indexingWorkSchedulerFactory,
         replicationConfig,
-        indexManagerFactoryWithDecodingScheduler(decodingScheduler),
-        enableLifecycleAttributionMetrics);
+        indexManagerFactoryWithDecodingScheduler(
+            decodingScheduler, replicationConfig.getAutoEmbeddingMaterializedViewConfig()),
+        enableLifecycleAttributionMetrics,
+        enableChangeStreamPriorityScheduling,
+        activityObserverFactory);
   }
 
-  // TODO(CLOUDP-405327): remove test-only overload once LIFECYCLE_ATTRIBUTION_METRICS rolls out.
   @VisibleForTesting
   static ChangeStreamManager createSync(
       MeterAndFtdcRegistry meterAndFtdcRegistry,
@@ -164,21 +235,72 @@ public class ChangeStreamManager {
     return createSync(
         meterAndFtdcRegistry,
         syncMongoClientFactory,
+        createPartitionReaderExecutor(meterAndFtdcRegistry, replicationConfig, true),
         modeSelector,
         indexingWorkSchedulerFactory,
         replicationConfig,
         indexManagerFactory,
-        false);
+        true,
+        false,
+        Optional.empty());
   }
 
-  private static ChangeStreamManager createSync(
+  @VisibleForTesting
+  static ChangeStreamManager createSync(
       MeterAndFtdcRegistry meterAndFtdcRegistry,
       ChangeStreamMongoClientFactory syncMongoClientFactory,
       ChangeStreamModeSelector modeSelector,
       IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
       SteadyStateReplicationConfig replicationConfig,
       ChangeStreamIndexManagerFactory indexManagerFactory,
-      boolean enableLifecycleAttributionMetrics) {
+      Optional<ActivityObserverFactory> activityObserverFactory) {
+    return createSync(
+        meterAndFtdcRegistry,
+        syncMongoClientFactory,
+        createPartitionReaderExecutor(meterAndFtdcRegistry, replicationConfig, true),
+        modeSelector,
+        indexingWorkSchedulerFactory,
+        replicationConfig,
+        indexManagerFactory,
+        true,
+        false,
+        activityObserverFactory);
+  }
+
+  @VisibleForTesting
+  static ChangeStreamManager createSync(
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      ChangeStreamMongoClientFactory syncMongoClientFactory,
+      ChangeStreamModeSelector modeSelector,
+      IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
+      SteadyStateReplicationConfig replicationConfig,
+      ChangeStreamIndexManagerFactory indexManagerFactory,
+      boolean enableChangeStreamPriorityScheduling) {
+    return createSync(
+        meterAndFtdcRegistry,
+        syncMongoClientFactory,
+        createPartitionReaderExecutor(meterAndFtdcRegistry, replicationConfig, true),
+        modeSelector,
+        indexingWorkSchedulerFactory,
+        replicationConfig,
+        indexManagerFactory,
+        true,
+        enableChangeStreamPriorityScheduling,
+        Optional.empty());
+  }
+
+  @VisibleForTesting
+  static ChangeStreamManager createSync(
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      ChangeStreamMongoClientFactory mongoClientFactory,
+      Optional<NamedExecutorService> partitionReaderExecutor,
+      ChangeStreamModeSelector modeSelector,
+      IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
+      SteadyStateReplicationConfig replicationConfig,
+      ChangeStreamIndexManagerFactory indexManagerFactory,
+      boolean enableLifecycleAttributionMetrics,
+      boolean enableChangeStreamPriorityScheduling,
+      Optional<ActivityObserverFactory> activityObserverFactory) {
     Check.argIsPositive(
         replicationConfig.getNumConcurrentChangeStreams(), "numConcurrentChangeStreams");
     Check.argIsPositive(
@@ -186,38 +308,219 @@ public class ChangeStreamManager {
 
     LOG.info("Creating with sync-batch client.");
 
-    NamedScheduledExecutorService executorService =
+    ChangeStreamTaskExecutor taskExecutor =
+        createTaskExecutor(
+            meterAndFtdcRegistry,
+            replicationConfig,
+            enableLifecycleAttributionMetrics,
+            enableChangeStreamPriorityScheduling);
+
+    ChangeStreamDispatcher syncDispatcher =
+        new SyncChangeStreamDispatcher(
+            meterAndFtdcRegistry.meterRegistry(),
+            mongoClientFactory,
+            taskExecutor,
+            replicationConfig.getReplicationType(),
+            replicationConfig.getRetryThrottledGetMoreOnSameCursor());
+
+    PartitionTrackerFactory partitionTrackerFactory =
+        resumeInfo -> createPartitionTracker(replicationConfig, resumeInfo);
+
+    return new ChangeStreamManager(
+        indexingWorkSchedulerFactory,
+        indexManagerFactory,
+        syncDispatcher,
+        partitionReaderExecutor,
+        modeSelector,
+        activityObserverFactory,
+        partitionTrackerFactory);
+  }
+
+  /** Creates the shared reader pool only when parallel readers are enabled. */
+  @VisibleForTesting
+  static Optional<NamedExecutorService> createPartitionReaderExecutor(
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      SteadyStateReplicationConfig replicationConfig,
+      boolean enableLifecycleAttributionMetrics) {
+    // Sized to numConcurrentChangeStreams so in-flight getMores never exceed the sync client's
+    // connection pool, which uses the same value.
+    Optional<NamedExecutorService> partitionReaderExecutor =
+        replicationConfig.getEnableParallelChangeStreamReaders()
+            ? Optional.of(
+                Executors.fixedSizeThreadPool(
+                    replicationConfig.getReplicationType().metricsNamespacePrefix
+                        + "partitioned-change-stream-reader",
+                    replicationConfig.getNumConcurrentChangeStreams(),
+                    meterAndFtdcRegistry.meterRegistry()))
+            : Optional.empty();
+    if (enableLifecycleAttributionMetrics) {
+      partitionReaderExecutor.ifPresent(
+          executor ->
+              meterAndFtdcRegistry
+                  .threadPoolResourceBindings()
+                  .forSubsystem(replicationConfig.getReplicationType().resourceAttributionSubsystem)
+                  .register(executor, meterAndFtdcRegistry.meterRegistry()));
+    }
+
+    return partitionReaderExecutor;
+  }
+
+  /**
+   * Creates a generation's partition progress tracker when parallel readers are enabled, seeding
+   * every partition at the index's initial resume position. Must use the same partition count as
+   * {@link ChangeStreamMongoClientFactory} does.
+   */
+  @VisibleForTesting
+  static Optional<PartitionedChangeStreamProgressTracker> createPartitionTracker(
+      SteadyStateReplicationConfig config, ChangeStreamResumeInfo initialResumeInfo) {
+    if (!config.getEnableParallelChangeStreamReaders()) {
+      return Optional.empty();
+    }
+    int numReaders = config.getNumParallelChangeStreamReaders();
+    Map<ChangeStreamPartition, BsonDocument> seedPositions = new HashMap<>();
+    for (int id = 0; id < numReaders; id++) {
+      seedPositions.put(
+          new ChangeStreamPartition(id, numReaders), initialResumeInfo.getResumeToken());
+    }
+    return Optional.of(new PartitionedChangeStreamProgressTracker(seedPositions));
+  }
+
+  /**
+   * Builds the {@link ChangeStreamTaskExecutor} that determines how getMore tasks are scheduled.
+   *
+   * <p>Priority scheduling ({@code enableChangeStreamPriorityScheduling}) only changes behavior for
+   * {@link CommonReplicationConfig.Type#DEFAULT} when {@link
+   * SteadyStateReplicationConfig#getSteadyStateSchedulingMethod()} selects a variant other than
+   * {@link SteadyStateSchedulingMethod#FIFO}, where it swaps the plain scheduled executor for a
+   * {@link ChangeStreamDualQueueExecutor}. Otherwise (including for {@link
+   * CommonReplicationConfig.Type#AUTO_EMBEDDING}) the scheduled-executor path below is used, which
+   * yields an {@link AutoEmbeddingExecutor} when a max-in-flight-embedding-getMores cap applies and
+   * a {@link FifoExecutor} when it does not.
+   *
+   * <p>Known gap: {@link ChangeStreamDualQueueExecutor} has no concept of the
+   * max-in-flight-embedding-getMores cap. Legacy, non-materialized-view auto-embedding indexes
+   * ({@code type:TEXT}) still run on this {@link CommonReplicationConfig.Type#DEFAULT} path today,
+   * tracked for removal under CLOUDP-426030), so enabling {@code
+   * enableChangeStreamPriorityScheduling} on a {@code DEFAULT} deployment that still has one of
+   * these indexes will silently remove the concurrency cap on its embedding getMores.
+   */
+  private static ChangeStreamTaskExecutor createTaskExecutor(
+      MeterAndFtdcRegistry meterAndFtdcRegistry,
+      SteadyStateReplicationConfig replicationConfig,
+      boolean enableLifecycleAttributionMetrics,
+      boolean enableChangeStreamPriorityScheduling) {
+    String executorName =
+        replicationConfig.getReplicationType().metricsNamespacePrefix
+            + "change-stream-sync-dispatcher";
+
+    SteadyStateSchedulingMethod schedulingMethod =
+        replicationConfig.getSteadyStateSchedulingMethod();
+    if (enableChangeStreamPriorityScheduling
+        && replicationConfig.getReplicationType() == CommonReplicationConfig.Type.DEFAULT
+        && schedulingMethod != SteadyStateSchedulingMethod.FIFO) {
+      registerSchedulingConfigGauge(
+          meterAndFtdcRegistry.meterRegistry(),
+          replicationConfig,
+          schedulingMethod,
+          enableChangeStreamPriorityScheduling);
+      ChangeStreamDualQueueExecutor dualQueueExecutor =
+          new ChangeStreamDualQueueExecutor(
+              executorName,
+              replicationConfig.getNumConcurrentChangeStreams(),
+              meterAndFtdcRegistry.meterRegistry(),
+              createPriorityStrategy(
+                  schedulingMethod, replicationConfig, meterAndFtdcRegistry.meterRegistry()),
+              schedulingMethod,
+              replicationConfig.getSteadyStatePriorityRatio());
+      if (enableLifecycleAttributionMetrics) {
+        meterAndFtdcRegistry
+            .threadPoolResourceBindings()
+            .forSubsystem(replicationConfig.getReplicationType().resourceAttributionSubsystem)
+            .register(dualQueueExecutor.getDelegate(), meterAndFtdcRegistry.meterRegistry());
+      }
+      return dualQueueExecutor;
+    }
+
+    // Report FIFO as the scheduling method for non-dualQueue tasks
+    registerSchedulingConfigGauge(
+        meterAndFtdcRegistry.meterRegistry(),
+        replicationConfig,
+        SteadyStateSchedulingMethod.FIFO,
+        enableChangeStreamPriorityScheduling);
+
+    NamedScheduledExecutorService scheduledExecutor =
         Executors.fixedSizeThreadScheduledExecutor(
-            replicationConfig.getReplicationType().metricsNamespacePrefix
-                + "change-stream-sync-dispatcher",
+            executorName,
             replicationConfig.getNumConcurrentChangeStreams(),
             meterAndFtdcRegistry.meterRegistry());
-
     if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create(
-              replicationConfig.getReplicationType().resourceAttributionSubsystem)
-          .register(executorService, meterAndFtdcRegistry.meterRegistry());
+      meterAndFtdcRegistry
+          .threadPoolResourceBindings()
+          .forSubsystem(replicationConfig.getReplicationType().resourceAttributionSubsystem)
+          .register(scheduledExecutor, meterAndFtdcRegistry.meterRegistry());
     }
 
     boolean shouldLimitMaxInFlightEmbeddingGetMores =
         replicationConfig.getMaxInFlightEmbeddingGetMores()
             < replicationConfig.getNumConcurrentChangeStreams();
-
-    SyncChangeStreamDispatcher syncDispatcher =
-        new SyncChangeStreamDispatcher(
+    return shouldLimitMaxInFlightEmbeddingGetMores
+        ? new AutoEmbeddingExecutor(
             meterAndFtdcRegistry.meterRegistry(),
-            syncMongoClientFactory,
-            executorService,
-            // Pass in an empty optional if maxInFlightEmbeddingGetMores is greater than or equal to
-            // numConcurrentChangeStreams, since this is the same as not limiting the number of
-            // in-flight getMores.
-            shouldLimitMaxInFlightEmbeddingGetMores
-                ? Optional.of(replicationConfig.getMaxInFlightEmbeddingGetMores())
-                : Optional.empty(),
-            replicationConfig.getReplicationType());
+            scheduledExecutor,
+            Optional.of(replicationConfig.getMaxInFlightEmbeddingGetMores()))
+        : new FifoExecutor(scheduledExecutor);
+  }
 
-    return new ChangeStreamManager(
-        indexingWorkSchedulerFactory, indexManagerFactory, syncDispatcher, modeSelector);
+  /**
+   * Registers an info gauge surfacing the steady-state scheduling settings this process is running.
+   */
+  private static void registerSchedulingConfigGauge(
+      MeterRegistry meterRegistry,
+      SteadyStateReplicationConfig replicationConfig,
+      SteadyStateSchedulingMethod effectiveSchedulingMethod,
+      boolean prioritySchedulingFeatureFlag) {
+    String namespace =
+        replicationConfig.getReplicationType().metricsNamespacePrefix + "replication.steadyState";
+    new MetricsFactory(namespace, meterRegistry)
+        .numGauge(
+            "schedulingConfig",
+            Tags.of(
+                "steadyStateSchedulingMethod",
+                effectiveSchedulingMethod.name(),
+                "steadyStatePriorityRatio",
+                String.valueOf(replicationConfig.getSteadyStatePriorityRatio()),
+                "steadyStatePriorityOptimeThresholdSeconds",
+                String.valueOf(replicationConfig.getSteadyStatePriorityOptimeThresholdSeconds()),
+                "prioritySchedulingFeatureFlag",
+                prioritySchedulingFeatureFlag ? "enabled" : "disabled"))
+        .set(1);
+  }
+
+  /**
+   * Builds the {@link ChangeStreamPriorityStrategy} for the given {@link
+   * SteadyStateSchedulingMethod}. Only called when {@code schedulingMethod} is not {@link
+   * SteadyStateSchedulingMethod#FIFO}.
+   */
+  private static ChangeStreamPriorityStrategy createPriorityStrategy(
+      SteadyStateSchedulingMethod schedulingMethod,
+      SteadyStateReplicationConfig replicationConfig,
+      MeterRegistry meterRegistry) {
+    switch (schedulingMethod) {
+      case OPTIME_LAG:
+        return new OptimeLagPriorityStrategy(
+            replicationConfig.getSteadyStatePriorityOptimeThresholdSeconds());
+      case TOP_K_WORST_LAG:
+        return new TopKWorstLagPriorityStrategy(
+            replicationConfig.getSteadyStatePriorityRatio(),
+            TopKWorstLagPriorityStrategy.DEFAULT_RECOMPUTE_INTERVAL_SECONDS,
+            replicationConfig.getSteadyStatePriorityOptimeThresholdSeconds(),
+            meterRegistry);
+      case FIFO:
+        throw new IllegalStateException(
+            "createPriorityStrategy should not be called for scheduling method: "
+                + schedulingMethod);
+    }
+    throw new AssertionError("unreachable: " + schedulingMethod);
   }
 
   /**
@@ -226,23 +529,38 @@ public class ChangeStreamManager {
    * @return a future that completes when the ChangeStreamManager has completed shutting down. The
    *     future will only ever complete successfully.
    */
-  public synchronized CompletableFuture<Void> shutdown() {
+  public CompletableFuture<Void> shutdown() {
     LOG.info("Shutting down.");
 
-    this.shutdown = true;
+    List<ChangeStreamActivityObserver> observersToClose;
+    CompletableFuture<Void> result;
+    synchronized (this) {
+      this.shutdown = true;
 
-    // First shut down the dispatcher thread so no more work gets scheduled.
-    this.dispatcher.shutdown();
+      // First shut down the dispatcher thread so no more work gets scheduled.
+      this.dispatcher.shutdown();
+      // The dispatcher has drained and closed its clients; no readers can be submitted now.
+      this.partitionReaderExecutor.ifPresent(Executors::shutdownOrFail);
 
-    List<CompletableFuture<?>> futures =
-        this.indexManagers.values().stream()
-            .map(ChangeStreamIndexManager::shutdown)
-            .collect(Collectors.toList());
+      List<CompletableFuture<?>> futures =
+          this.indexManagers.values().stream()
+              .map(ChangeStreamIndexManager::shutdown)
+              .collect(Collectors.toList());
 
-    this.modeSelector.shutdown();
+      this.modeSelector.shutdown();
 
-    return Crash.because("failed shutting down change stream managers")
-        .ifCompletesExceptionally(FutureUtils.allOf(futures));
+      // Snapshot the observers so they can be closed after releasing the monitor: close() blocks
+      // on the read loop draining, so it must not run while the manager lock is held.
+      observersToClose = List.copyOf(this.observersByDatabase.values());
+      this.observersByDatabase.clear();
+      this.observerDatabaseByIndex.clear();
+
+      result =
+          Crash.because("failed shutting down change stream managers")
+              .ifCompletesExceptionally(FutureUtils.allOf(futures));
+    }
+    observersToClose.forEach(ChangeStreamActivityObserver::close);
+    return result;
   }
 
   /** Add an index to be managed by the ChangeStreamManager and begin indexing. */
@@ -293,12 +611,32 @@ public class ChangeStreamManager {
             resumeInfoUpdater,
             indexMetricsUpdater,
             lifecycleFuture,
-            generationId);
+            generationId,
+            this.partitionTrackerFactory.create(resumeInfo));
 
     this.indexManagers.put(generationId, indexManager);
     this.modeSelector.register(generationId, indexDefinition, namespace);
     this.dispatcher.add(
         indexDefinition, generationId, resumeInfo, indexManager, removeMatchCollectionUuid);
+
+    if (this.activityObserverFactory.isPresent()) {
+      try {
+        String databaseName = namespace.getDatabaseName();
+        ChangeStreamActivityObserver observer =
+            this.observersByDatabase.computeIfAbsent(
+                databaseName, this.activityObserverFactory.get()::create);
+        observer.register(generationId, namespace, indexDefinition.getCollectionUuid());
+        this.observerDatabaseByIndex.put(generationId, databaseName);
+      } catch (RuntimeException e) {
+        // The observer is purely observational; a failure to create or register it must never
+        // fail the index add. The index simply runs unobserved.
+        LOG.atWarn()
+            .addKeyValue("indexId", generationId.indexId)
+            .addKeyValue("generationId", generationId)
+            .setCause(e)
+            .log("Failed to register index with the activity observer; continuing without it");
+      }
+    }
 
     return lifecycleFuture;
   }
@@ -310,14 +648,34 @@ public class ChangeStreamManager {
    * @return a future that completes when the scheduled work for the index has completed. The future
    *     will only ever complete successfully.
    */
-  public synchronized CompletableFuture<Void> stop(GenerationId generationId) {
-    checkState(
-        this.indexManagers.containsKey(generationId),
-        "ChangeStreamManager does not contain index %s",
-        generationId);
-    ChangeStreamIndexManager manager = this.indexManagers.remove(generationId);
-    this.modeSelector.remove(generationId);
-    return manager.shutdown();
+  public CompletableFuture<Void> stop(GenerationId generationId) {
+    @Var ChangeStreamActivityObserver observerToClose = null;
+    CompletableFuture<Void> result;
+    synchronized (this) {
+      checkState(
+          this.indexManagers.containsKey(generationId),
+          "ChangeStreamManager does not contain index %s",
+          generationId);
+      ChangeStreamIndexManager manager = this.indexManagers.remove(generationId);
+      this.modeSelector.remove(generationId);
+      this.dispatcher.removeIndex(generationId.indexId);
+
+      String observerDatabase = this.observerDatabaseByIndex.remove(generationId);
+      if (observerDatabase != null) {
+        ChangeStreamActivityObserver observer = this.observersByDatabase.get(observerDatabase);
+        if (observer != null && observer.deregister(generationId)) {
+          // The database has no managed indexes left, so its observer is no longer needed. It is
+          // closed after releasing the monitor, because close blocks on the read loop draining.
+          this.observersByDatabase.remove(observerDatabase);
+          observerToClose = observer;
+        }
+      }
+      result = manager.shutdown();
+    }
+    if (observerToClose != null) {
+      observerToClose.close();
+    }
+    return result;
   }
 
   @TestOnly
@@ -330,8 +688,24 @@ public class ChangeStreamManager {
     }
   }
 
+  @TestOnly
+  @VisibleForTesting
+  Optional<Class<? extends ChangeStreamTaskExecutor>> getTaskExecutorClass() {
+    if (this.dispatcher instanceof SyncChangeStreamDispatcher syncChangeStreamDispatcher) {
+      return Optional.of(syncChangeStreamDispatcher.getTaskExecutorClass());
+    } else {
+      return Optional.empty();
+    }
+  }
+
   public static ChangeStreamIndexManagerFactory indexManagerFactoryWithDecodingScheduler(
       DecodingWorkScheduler decodingScheduler) {
+    return indexManagerFactoryWithDecodingScheduler(decodingScheduler, Optional.empty());
+  }
+
+  private static ChangeStreamIndexManagerFactory indexManagerFactoryWithDecodingScheduler(
+      DecodingWorkScheduler decodingScheduler,
+      Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig) {
     return (indexDefinition,
         indexingWorkScheduler,
         documentIndexer,
@@ -339,7 +713,8 @@ public class ChangeStreamManager {
         resumeInfoUpdater,
         indexMetricsUpdater,
         externalFuture,
-        generationId) ->
+        generationId,
+        partitionTracker) ->
         DecodingExecutorChangeStreamIndexManager.createWithDecodingScheduler(
             indexDefinition,
             indexingWorkScheduler,
@@ -349,6 +724,8 @@ public class ChangeStreamManager {
             indexMetricsUpdater,
             externalFuture,
             generationId,
-            decodingScheduler);
+            decodingScheduler,
+            autoEmbeddingMaterializedViewConfig,
+            partitionTracker);
   }
 }

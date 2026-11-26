@@ -20,6 +20,9 @@ import com.google.common.truth.Truth;
 import com.xgen.mongot.catalog.DefaultIndexCatalog;
 import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
+import com.xgen.mongot.config.backup.JournalEntryIdentity;
+import com.xgen.mongot.config.manager.IncompatibleIndexes;
+import com.xgen.mongot.config.manager.QuarantinedIndex;
 import com.xgen.mongot.cursor.CursorConfig;
 import com.xgen.mongot.cursor.MongotCursorManager;
 import com.xgen.mongot.cursor.MongotCursorNotFoundException;
@@ -29,15 +32,20 @@ import com.xgen.mongot.cursor.SearchCursorInfo;
 import com.xgen.mongot.cursor.serialization.MongotCursorBatch;
 import com.xgen.mongot.cursor.serialization.MongotCursorResult;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagConfig;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.CountResult;
 import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.IndexMetricValuesSupplier;
 import com.xgen.mongot.index.IndexMetricsUpdater;
+import com.xgen.mongot.index.IndexUnavailableException;
 import com.xgen.mongot.index.InitializedSearchIndex;
 import com.xgen.mongot.index.InitializedVectorIndex;
 import com.xgen.mongot.index.MetaResults;
+import com.xgen.mongot.index.QuarantinedIndexException;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.lucene.explain.information.LuceneQuerySpecification;
 import com.xgen.mongot.index.lucene.explain.information.MetadataExplainInformation;
 import com.xgen.mongot.index.lucene.explain.information.SearchExplainInformation;
@@ -47,8 +55,13 @@ import com.xgen.mongot.index.query.Query;
 import com.xgen.mongot.index.query.operators.VectorSearchFilter;
 import com.xgen.mongot.index.query.operators.mql.Clause;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.index.version.Generation;
+import com.xgen.mongot.index.version.IndexEngine;
+import com.xgen.mongot.index.version.IndexFormatVersion;
+import com.xgen.mongot.index.version.UserIndexVersion;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
+import com.xgen.mongot.searchenvoy.grpc.SearchEnvoyMetadata;
 import com.xgen.mongot.server.command.Command;
 import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.Vector;
@@ -65,6 +78,7 @@ import com.xgen.testing.mongot.index.query.VectorQueryBuilder;
 import com.xgen.testing.mongot.index.query.operators.mql.ClauseBuilder;
 import com.xgen.testing.mongot.index.query.operators.mql.MqlFilterOperatorBuilder;
 import com.xgen.testing.mongot.index.query.operators.mql.ValueBuilder;
+import com.xgen.testing.mongot.metrics.TestMeterRegistry;
 import com.xgen.testing.mongot.mock.index.VectorIndex;
 import com.xgen.testing.mongot.server.command.search.definition.request.ExplainDefinitionBuilder;
 import com.xgen.testing.mongot.server.command.search.definition.request.VectorSearchCommandDefinitionBuilder;
@@ -73,10 +87,13 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
+import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.experimental.theories.DataPoints;
@@ -169,6 +186,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
@@ -206,6 +224,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
@@ -231,6 +250,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
@@ -263,6 +283,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             new InitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
@@ -311,6 +332,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             new SearchCommandsRegister.BootstrapperMetadata(
                 "local",
@@ -380,6 +402,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
@@ -429,6 +452,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             new DefaultIndexCatalog(),
             getInitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             new SearchCommandsRegister.BootstrapperMetadata(
                 "1.0",
@@ -496,6 +520,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             catalog,
             initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             anotherCommandFactory,
             BOOTSTRAPPER_METADATA);
 
@@ -557,6 +582,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             catalog,
             initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             anotherCommandFactory,
             BOOTSTRAPPER_METADATA);
 
@@ -589,7 +615,8 @@ public class DeprecatedVectorSearchCommandTest {
         new PerIndexMetricsFactory(
             "testNamespace", meterAndFtdcRegistry, "testGenerationId", "testId");
     var indexMetricsUpdaterBuilder =
-        new IndexMetricsUpdater.Builder(indexGeneration.getDefinition(), metricsFactory, true);
+        new IndexMetricsUpdater.Builder(
+            indexGeneration.getDefinition(), metricsFactory, true, true);
     var indexMetricsSupplier = Mockito.mock(IndexMetricValuesSupplier.class);
     IndexMetricsUpdater indexMetricsUpdater =
         indexMetricsUpdaterBuilder.build(indexMetricsSupplier);
@@ -630,6 +657,7 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             catalog,
             initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
@@ -641,14 +669,104 @@ public class DeprecatedVectorSearchCommandTest {
 
   @Test
   public void testIndexNotInitializedReturnsErrorResponse() throws Exception {
+    var factory = mock(VectorSearchCommand.Factory.class);
+    BsonDocument result =
+        runAgainstUninitializedIndex(
+            VectorIndexDefinitionBuilder.builder()
+                .name(INDEX_NAME)
+                .withDotProductVectorField(PATH.toString(), 1024)
+                .build(),
+            factory);
+
+    Assert.assertEquals(0, result.getInt32("ok").getValue());
+    Assert.assertTrue(result.containsKey("errmsg"));
+    Assert.assertEquals(
+        String.format("Index %s not initialized", INDEX_NAME),
+        result.getString("errmsg").getValue());
+    verify(factory).recordUnavailableIndex(IndexEngine.LUCENE);
+    verify(factory, never()).recordUnavailableIndex(IndexEngine.VECTORLITE);
+    Assert.assertEquals(
+        result,
+        runAgainstUninitializedIndex(
+            VectorIndexDefinitionBuilder.builder()
+                .name(INDEX_NAME)
+                .withDotProductVectorField(PATH.toString(), 1024)
+                .build(),
+            factory,
+            true,
+            false));
+    var failure =
+        Assert.assertThrows(
+            CompletionException.class,
+            () ->
+                runAgainstUninitializedIndex(
+                    VectorIndexDefinitionBuilder.builder()
+                        .name(INDEX_NAME)
+                        .withDotProductVectorField(PATH.toString(), 1024)
+                        .build(),
+                    factory,
+                    true));
+    Truth.assertThat(failure.getCause()).isInstanceOf(IndexUnavailableException.class);
+    verify(factory, never()).recordNonexistentIndex();
+  }
+
+  @Test
+  public void testVectorliteIndexNotInitializedRecordsUnavailableIndex() throws Exception {
+    var factory = mock(VectorSearchCommand.Factory.class);
+    BsonDocument result =
+        runAgainstUninitializedIndex(
+            VectorIndexDefinitionBuilder.builder()
+                .name(INDEX_NAME)
+                .withCustomEngineVectorField(PATH.toString(), 1024)
+                .build(),
+            factory);
+
+    Assert.assertEquals(
+        String.format("Index %s not initialized", INDEX_NAME),
+        result.getString("errmsg").getValue());
+    verify(factory).recordUnavailableIndex(IndexEngine.VECTORLITE);
+    verify(factory, never()).recordUnavailableIndex(IndexEngine.LUCENE);
+  }
+
+  private BsonDocument runAgainstUninitializedIndex(
+      VectorIndexDefinition vectorIndexDefinition, VectorSearchCommand.Factory factory)
+      throws Exception {
+    return runAgainstUninitializedIndex(vectorIndexDefinition, factory, false);
+  }
+
+  private BsonDocument runAgainstUninitializedIndex(
+      VectorIndexDefinition vectorIndexDefinition,
+      VectorSearchCommand.Factory factory,
+      boolean grpc)
+      throws Exception {
+    return runAgainstUninitializedIndex(vectorIndexDefinition, factory, grpc, true);
+  }
+
+  private BsonDocument runAgainstUninitializedIndex(
+      VectorIndexDefinition vectorIndexDefinition,
+      VectorSearchCommand.Factory factory,
+      boolean grpc,
+      boolean retryEnabled)
+      throws Exception {
+    var retryRegistry =
+        new DynamicFeatureFlagRegistry(
+            Optional.of(
+                List.of(
+                    new DynamicFeatureFlagConfig(
+                        DynamicFeatureFlags.INDEX_UNAVAILABLE_RETRY.getName(),
+                        retryEnabled
+                            ? DynamicFeatureFlagConfig.Phase.ENABLED
+                            : DynamicFeatureFlagConfig.Phase.DISABLED,
+                        List.of(),
+                        List.of(),
+                        0,
+                        DynamicFeatureFlagConfig.Scope.MONGOT_CLUSTER))),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(new ObjectId()));
     var catalog = Mockito.mock(IndexCatalog.class);
     var initializedIndexCatalog = Mockito.mock(InitializedIndexCatalog.class);
 
-    var vectorIndexDefinition =
-        VectorIndexDefinitionBuilder.builder()
-            .name(INDEX_NAME)
-            .withDotProductVectorField(PATH.toString(), 1024)
-            .build();
     var definitionGeneration = mockDefinitionGeneration(vectorIndexDefinition);
     com.xgen.mongot.index.VectorIndex mockVectorIndex = VectorIndex.mockIndex(definitionGeneration);
     // Set status to STEADY so throwIfUnavailableForQuerying() won't throw
@@ -687,15 +805,113 @@ public class DeprecatedVectorSearchCommandTest {
             CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
             catalog,
             initializedIndexCatalog,
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            factory,
+            new SearchCommandsRegister.BootstrapperMetadata(
+                BOOTSTRAPPER_METADATA.mongotVersion(),
+                BOOTSTRAPPER_METADATA.mongotHostName(),
+                BOOTSTRAPPER_METADATA.mongoDbServerInfoProvider(),
+                BOOTSTRAPPER_METADATA.featureFlags(),
+                retryRegistry));
+
+    if (grpc) {
+      command.handleSearchEnvoyMetadata(SearchEnvoyMetadata.getDefaultInstance());
+    }
+    return command.run();
+  }
+
+  /**
+   * The wire $vectorSearch command is this one, and a catalog miss never reaches the delegation to
+   * VectorSearchCommand - so the quarantine must be reported from here.
+   */
+  @Test
+  public void testQuarantinedIndexReturnsParseErrorResponse() throws Exception {
+    var incompatibleIndexes = new IncompatibleIndexes(TestMeterRegistry.get());
+    incompatibleIndexes.addLiveIndex(
+        new QuarantinedIndex(
+            new JournalEntryIdentity(
+                new ObjectId(),
+                DATABASE_NAME,
+                COLLECTION_UUID,
+                INDEX_NAME,
+                new Generation(new UserIndexVersion(1), IndexFormatVersion.CURRENT)),
+            IndexDefinitionGeneration.Type.VECTOR,
+            "unsupported field 'fieldFromTheFuture'",
+            new BsonDocument("fieldFromTheFuture", new BsonBoolean(true))));
+
+    DeprecatedVectorSearchCommand command =
+        new DeprecatedVectorSearchCommand(
+            getCursorManager(),
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index(INDEX_NAME)
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .build())
+                        .build())
+                .build(),
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
+            new DefaultIndexCatalog(),
+            new InitializedIndexCatalog(),
+            incompatibleIndexes,
             mock(VectorSearchCommand.Factory.class),
             BOOTSTRAPPER_METADATA);
 
     BsonDocument result = command.run();
+
     Assert.assertEquals(0, result.getInt32("ok").getValue());
-    Assert.assertTrue(result.containsKey("errmsg"));
     Assert.assertEquals(
-        String.format("Index %s not initialized", INDEX_NAME),
+        "Index 'default' is unavailable: its definition cannot be parsed (unsupported field"
+            + " 'fieldFromTheFuture').",
         result.getString("errmsg").getValue());
+    command.handleSearchEnvoyMetadata(SearchEnvoyMetadata.getDefaultInstance());
+
+    var failure = Assert.assertThrows(CompletionException.class, command::run);
+    Assert.assertTrue(failure.getCause() instanceof QuarantinedIndexException);
+  }
+
+  @Test
+  public void run_nonexistentIndexBehindEnvoy_recordsMetricAndReturnsSuccess() throws Exception {
+    var factory = mock(VectorSearchCommand.Factory.class);
+    var command =
+        new DeprecatedVectorSearchCommand(
+            getCursorManager(),
+            VectorSearchCommandDefinitionBuilder.builder()
+                .db(DATABASE_NAME)
+                .collectionName(COLLECTION_NAME)
+                .collectionUuid(COLLECTION_UUID)
+                .vectorSearchQuery(
+                    VectorQueryBuilder.builder()
+                        .index("nonexistent")
+                        .criteria(
+                            ApproximateVectorQueryCriteriaBuilder.builder()
+                                .limit(LIMIT)
+                                .numCandidates(NUM_CANDIDATES)
+                                .queryVector(QUERY_VECTOR)
+                                .path(PATH)
+                                .build())
+                        .build())
+                .build(),
+            CursorConfig.DEFAULT_BSON_SIZE_SOFT_LIMIT,
+            new DefaultIndexCatalog(),
+            new InitializedIndexCatalog(),
+            new IncompatibleIndexes(TestMeterRegistry.get()),
+            factory,
+            BOOTSTRAPPER_METADATA);
+    command.handleSearchEnvoyMetadata(SearchEnvoyMetadata.getDefaultInstance());
+
+    var result = command.run();
+
+    Truth.assertThat(result.getInt32("ok").getValue()).isEqualTo(1);
+    verify(factory).recordNonexistentIndex();
   }
 
   private static MongotCursorManager getCursorManager() throws Exception {
@@ -777,7 +993,7 @@ public class DeprecatedVectorSearchCommandTest {
             "testNamespace", meterAndFtdcRegistry, "testGenerationId", "testId");
     var indexMetricsUpdaterBuilder =
         new IndexMetricsUpdater.Builder(
-            mockVectorIndexGeneration().getDefinition(), metricsFactory, true);
+            mockVectorIndexGeneration().getDefinition(), metricsFactory, true, true);
     var indexMetricsSupplier = Mockito.mock(IndexMetricValuesSupplier.class);
     IndexMetricsUpdater indexMetricsUpdater =
         indexMetricsUpdaterBuilder.build(indexMetricsSupplier);

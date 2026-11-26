@@ -4,19 +4,23 @@ import static com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadat
 import static com.xgen.mongot.util.FutureUtils.COMPLETED_FUTURE;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewDefinitionGeneration;
 import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.mockMatViewIndexGeneration;
+import static com.xgen.testing.mongot.mock.index.MaterializedViewIndex.realMatViewIndexFactory;
 import static com.xgen.testing.mongot.mock.replication.mongodb.common.SessionRefresher.mockSessionRefresher;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -24,6 +28,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -31,8 +36,15 @@ import static org.mockito.Mockito.when;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import com.google.errorprone.annotations.Keep;
+import com.mongodb.MongoNamespace;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.xgen.mongot.catalog.IndexCatalog;
 import com.xgen.mongot.catalog.InitializedIndexCatalog;
 import com.xgen.mongot.cursor.MongotCursorManager;
+import com.xgen.mongot.embedding.cache.EmbeddingRetryCache;
+import com.xgen.mongot.embedding.cache.EmbeddingRetryCache.ReleaseTrigger;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadata;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
 import com.xgen.mongot.embedding.exceptions.MaterializedViewTransientException;
@@ -42,8 +54,12 @@ import com.xgen.mongot.embedding.mongodb.leasing.Lease;
 import com.xgen.mongot.embedding.mongodb.leasing.LeaseManager;
 import com.xgen.mongot.embedding.mongodb.leasing.StaticLeaderLeaseManager;
 import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.InitializedSearchIndex;
+import com.xgen.mongot.index.ReplicationOpTimeInfo;
 import com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGeneration;
 import com.xgen.mongot.index.autoembedding.InitializedMaterializedViewIndex;
 import com.xgen.mongot.index.autoembedding.MaterializedViewIndexGeneration;
@@ -81,16 +97,29 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LongSummaryStatistics;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.LongStream;
+import org.bson.BsonDocument;
+import org.bson.BsonInt64;
+import org.bson.BsonTimestamp;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
@@ -98,6 +127,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
+import org.mockito.stubbing.Answer;
 import org.slf4j.LoggerFactory;
 
 public class MaterializedViewManagerTest {
@@ -108,6 +138,12 @@ public class MaterializedViewManagerTest {
       MOCK_INDEX_DEFINITION_GENERATION.getGenerationId();
   private static final GenerationId MOCK_GENERATION_ID =
       new GenerationId(INDEX_ID, Generation.CURRENT);
+  private static final UUID STALE_MV_UUID =
+      UUID.nameUUIDFromBytes("stale".getBytes(StandardCharsets.UTF_8));
+  private static final UUID CURRENT_MV_UUID =
+      UUID.nameUUIDFromBytes("current".getBytes(StandardCharsets.UTF_8));
+  private static final GenerationId USER_VERSION_1_GENERATION_ID =
+      new GenerationId(INDEX_ID, MOCK_GENERATION_ID.generation.incrementUser());
 
   @Test
   public void testAddIndex() throws Exception {
@@ -150,6 +186,38 @@ public class MaterializedViewManagerTest {
     verify(mocks.leaseManager).add(newIndexGeneration, false);
   }
 
+  /**
+   * A superseded generation must hand over its lease even when its own drain fails, or it stays
+   * leader forever on a materialized view nothing writes to while the live generation is never
+   * registered and so can never be elected.
+   */
+  @Test
+  public void testUpdateExistingIndex_oldGeneratorShutdownFails_stillSwapsLease() throws Exception {
+    Mocks mocks = Mocks.create();
+
+    var gen1 = MOCK_MAT_VIEW_GENERATION_ID;
+    var oldIndexGeneration = mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(gen1));
+    MaterializedViewGenerator oldGenerator =
+        mocks.mockMaterializedViewGenerator(oldIndexGeneration);
+    mocks.addIndexForReplication(oldIndexGeneration);
+
+    doReturn(CompletableFuture.failedFuture(new RuntimeException("drain failed")))
+        .when(oldGenerator)
+        .shutdown();
+
+    var gen2 =
+        new MaterializedViewGenerationId(
+            MOCK_MAT_VIEW_GENERATION_ID.indexId,
+            MOCK_MAT_VIEW_GENERATION_ID.generation.incrementUser());
+    var newIndexGeneration = mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(gen2, 1));
+    mocks.mockMaterializedViewGenerator(newIndexGeneration);
+    mocks.addIndexForReplication(newIndexGeneration);
+
+    verify(oldGenerator).shutdown();
+    verify(mocks.leaseManager).drop(gen1);
+    verify(mocks.leaseManager).add(newIndexGeneration, false);
+  }
+
   @Test
   public void testUpdateExistingIndexSameDefinitionVersion() throws Exception {
     Mocks mocks = Mocks.create();
@@ -179,6 +247,79 @@ public class MaterializedViewManagerTest {
     verify(oldGenerator).shutdown();
     verify(mocks.materializedViewGeneratorFactory).create(any());
     verify(mocks.leaseManager).add(newIndexGeneration, true);
+  }
+
+  /**
+   * Two generations of one index resolve to the same materialized view collection, so the second
+   * add() replaces the first's generator. Only the surviving generator's index is written to, so
+   * the displaced generation must read status through the same reference. Regression test for the
+   * composite that stayed pinned at UNKNOWN until its generation was dropped.
+   */
+  @Test
+  public void add_secondGenerationOnSameMatViewCollection_displacedGenerationTracksSurvivor()
+      throws Exception {
+    Mocks mocks = Mocks.create();
+    // Both generations resolve to one materialized view collection, as they do in production
+    // when the definition change is Lucene-only.
+    UUID matViewCollectionUuid = UUID.randomUUID();
+    var matViewIndexFactory = realMatViewIndexFactory(ignored -> matViewCollectionUuid);
+
+    var userGeneration1 = MOCK_MAT_VIEW_GENERATION_ID;
+    var definition1 = mockMatViewDefinitionGeneration(userGeneration1);
+    var displacedGeneration =
+        new MaterializedViewIndexGeneration(matViewIndexFactory.getIndex(definition1), definition1);
+    mocks.mockMaterializedViewGenerator(displacedGeneration);
+    mocks.addIndexForReplication(displacedGeneration);
+
+    var userGeneration2 =
+        new MaterializedViewGenerationId(
+            userGeneration1.indexId, userGeneration1.generation.incrementUser());
+    var definition2 = mockMatViewDefinitionGeneration(userGeneration2);
+    var survivingGeneration =
+        new MaterializedViewIndexGeneration(matViewIndexFactory.getIndex(definition2), definition2);
+    mocks.mockMaterializedViewGenerator(survivingGeneration);
+    mocks.addIndexForReplication(survivingGeneration);
+
+    // No materialized view schema change, so the replacement resumes from the existing commit.
+    verify(mocks.leaseManager).add(survivingGeneration, true);
+
+    // MaterializedViewStatusUpdater writes only to the index of the installed generator.
+    survivingGeneration.getIndex().setStatus(IndexStatus.steady());
+
+    assertEquals(
+        "Displaced generation must report the surviving generator's status",
+        IndexStatus.StatusCode.STEADY,
+        displacedGeneration.getIndex().getStatus().getStatusCode());
+  }
+
+  /**
+   * Journal attempt replay stages a second attempt of the same user generation. Both attempts carry
+   * one materialized view generation id, so the replacement takes the same-genId branch, which
+   * keeps the lease and never closes the displaced index. Status must still track the survivor.
+   */
+  @Test
+  public void add_secondAttemptOfSameGeneration_displacedAttemptTracksSurvivor() throws Exception {
+    Mocks mocks = Mocks.create();
+    UUID matViewCollectionUuid = UUID.randomUUID();
+    var matViewIndexFactory = realMatViewIndexFactory(ignored -> matViewCollectionUuid);
+
+    var definition = mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID);
+    var attempt0 =
+        new MaterializedViewIndexGeneration(matViewIndexFactory.getIndex(definition), definition);
+    mocks.mockMaterializedViewGenerator(attempt0);
+    mocks.addIndexForReplicationWithAttempt(attempt0, 0);
+
+    var attempt1 =
+        new MaterializedViewIndexGeneration(matViewIndexFactory.getIndex(definition), definition);
+    mocks.mockMaterializedViewGenerator(attempt1);
+    mocks.addIndexForReplicationWithAttempt(attempt1, 1);
+
+    // Same materialized view generation id: the lease is retained rather than swapped.
+    verify(mocks.leaseManager, never()).drop(any(MaterializedViewGenerationId.class));
+
+    attempt1.getIndex().setStatus(IndexStatus.steady());
+
+    assertEquals(IndexStatus.StatusCode.STEADY, attempt0.getIndex().getStatus().getStatusCode());
   }
 
   /**
@@ -280,16 +421,416 @@ public class MaterializedViewManagerTest {
     mocks.addIndexForReplication(materializedViewindexGeneration);
 
     // Drop the index - this triggers onDrop -> leaseManager.drop -> then removeMetadata
+    mocks.markIndexDeleted();
     mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
 
     // Verify ordering: leaseManager.drop() (which untracks the generationId) must complete
     // BEFORE removeMetadata() is called. This ensures the generationId is fully untracked
     // before the metadata is cleaned up.
     InOrder inOrder = Mockito.inOrder(mocks.leaseManager, mocks.metadataCatalog);
-    inOrder.verify(mocks.leaseManager).drop(MOCK_MAT_VIEW_GENERATION_ID);
+    // drop() runs twice (eagerly in cleanUpMatViewResources, again in
+    // cleanUpGenerationIdStates); calls() consumes both without requiring them to be adjacent,
+    // since the detached deletion-cleanup chain may interleave other lease-manager calls.
+    inOrder.verify(mocks.leaseManager, Mockito.calls(2)).drop(MOCK_MAT_VIEW_GENERATION_ID);
     inOrder
         .verify(mocks.metadataCatalog)
         .removeMetadata(materializedViewindexGeneration.getGenerationId());
+  }
+
+  @Test
+  public void dropIndex_mvUuidRepairedBetweenAttempts_removesGeneratorUnderOldUuid()
+      throws Exception {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    UUID oldUuid = UUID.nameUUIDFromBytes("old".getBytes(StandardCharsets.UTF_8));
+    UUID repairedUuid = UUID.nameUUIDFromBytes("repaired".getBytes(StandardCharsets.UTF_8));
+    AtomicReference<UUID> mvUuid = new AtomicReference<>(oldUuid);
+    stubMetadataCollectionUuid(mocks, mvUuid);
+    MaterializedViewIndexGeneration attempt0Generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator leader = mocks.mockMaterializedViewGenerator(attempt0Generation);
+    mocks.addIndexForReplication(attempt0Generation);
+    assertTrue(leader.isLeader());
+    // Leadership loss replaces the leader with a follower keyed by the old UUID.
+    MaterializedViewGenerator follower = mocks.mockMaterializedViewGenerator(attempt0Generation);
+    when(mocks.leaseManager.isLeader(attempt0Generation.getGenerationId())).thenReturn(false);
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(LeaseManager.FollowerPollResult.EMPTY);
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+    // The stale MV UUID is repaired, then recovery stages attempt 1 under the repaired UUID.
+    mvUuid.set(repairedUuid);
+    MaterializedViewIndexGeneration attempt1Generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(attempt1Generation);
+    mocks.addIndexForReplicationWithAttempt(attempt1Generation, 1);
+    GenerationId attempt1 =
+        new GenerationId(
+            MOCK_GENERATION_ID.indexId,
+            new Generation(
+                MOCK_GENERATION_ID.generation.userIndexVersion, IndexFormatVersion.CURRENT, 1));
+
+    // Config drops the staged attempt 1 while the index is still live, then attempt 0.
+    mocks.manager.dropIndex(attempt1).get(5, TimeUnit.SECONDS);
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(follower).shutdown();
+    var catalog = mocks.manager.getActiveGenerationIdCatalog();
+    assertTrue(catalog.genIdByMatViewCollection.isEmpty());
+    assertTrue(catalog.latestMatViewIndexGenerationByCollection.isEmpty());
+    // Recreated generators would come from the catalog buffer; none may reappear after the drops.
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(attempt0Generation);
+    verify(mocks.materializedViewGeneratorFactory, times(1)).create(attempt1Generation);
+  }
+
+  @Test
+  public void add_mvUuidRepairedBetweenAttempts_handsOverGeneratorFromStaleUuid() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    UUID oldUuid = UUID.nameUUIDFromBytes("old".getBytes(StandardCharsets.UTF_8));
+    UUID repairedUuid = UUID.nameUUIDFromBytes("repaired".getBytes(StandardCharsets.UTF_8));
+    AtomicReference<UUID> mvUuid = new AtomicReference<>(oldUuid);
+    stubMetadataCollectionUuid(mocks, mvUuid);
+    MaterializedViewIndexGeneration attempt0Generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(attempt0Generation);
+    mocks.addIndexForReplication(attempt0Generation);
+    MaterializedViewGenerator follower = replaceLeaderWithFollower(mocks, attempt0Generation);
+    mvUuid.set(repairedUuid);
+    MaterializedViewIndexGeneration attempt1Generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(attempt1Generation);
+
+    mocks.addIndexForReplicationWithAttempt(attempt1Generation, 1);
+
+    verify(follower).shutdown();
+    var catalog = mocks.manager.getActiveGenerationIdCatalog();
+    assertEquals(Set.of(repairedUuid), catalog.genIdByMatViewCollection.keySet());
+    assertEquals(2, catalog.genIdByMatViewCollection.get(repairedUuid).size());
+    assertEquals(Set.of(repairedUuid), catalog.latestMatViewIndexGenerationByCollection.keySet());
+  }
+
+  @Test
+  public void add_mvUuidRepairedAndReplacementFails_shutsDownOldGeneratorAndRetries() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    AtomicReference<UUID> mvUuid =
+        new AtomicReference<>(UUID.nameUUIDFromBytes("old".getBytes(StandardCharsets.UTF_8)));
+    stubMetadataCollectionUuid(mocks, mvUuid);
+    MaterializedViewIndexGeneration attempt0Generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(attempt0Generation);
+    mocks.addIndexForReplication(attempt0Generation);
+    MaterializedViewGenerator follower = replaceLeaderWithFollower(mocks, attempt0Generation);
+    mvUuid.set(UUID.nameUUIDFromBytes("repaired".getBytes(StandardCharsets.UTF_8)));
+    MaterializedViewIndexGeneration attempt1Generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator attempt1Generator =
+        mocks.mockMaterializedViewGenerator(attempt1Generation);
+    when(mocks.materializedViewGeneratorFactory.create(attempt1Generation))
+        .thenThrow(new RuntimeException("injected generator creation failure"))
+        .thenReturn(attempt1Generator);
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(LeaseManager.FollowerPollResult.EMPTY);
+
+    assertThrows(
+        RuntimeException.class,
+        () -> mocks.addIndexForReplicationWithAttempt(attempt1Generation, 1));
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // The old generator is stopped, so the status refresh retries and creates the new one.
+    verify(follower).shutdown();
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(attempt1Generation);
+  }
+
+  @Test
+  public void add_mvUuidRepairedAfterFailedUserVersionReplacement_retriesNewGenerator() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    UUID repairedUuid = UUID.nameUUIDFromBytes("repaired".getBytes(StandardCharsets.UTF_8));
+    Map<String, UUID> repairedUuidByMvKey = new ConcurrentHashMap<>();
+    stubMetadataCollectionUuid(
+        mocks, id -> repairedUuidByMvKey.getOrDefault(canonicalKey(id), STALE_MV_UUID));
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(LeaseManager.FollowerPollResult.EMPTY);
+    // User version 0 runs; replacing it with user version 1 on the same UUID fails, so the
+    // user version 0 generator stays installed.
+    MaterializedViewIndexGeneration userVersion0 =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID));
+    MaterializedViewGenerator userVersion0Generator =
+        mocks.mockMaterializedViewGenerator(userVersion0);
+    mocks.addIndexForReplication(userVersion0);
+    var userVersion1Id = MaterializedViewGenerationId.from(USER_VERSION_1_GENERATION_ID);
+    MaterializedViewIndexGeneration userVersion1Attempt0 =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(userVersion1Id, 1));
+    when(mocks.materializedViewGeneratorFactory.create(userVersion1Attempt0))
+        .thenThrow(new RuntimeException("injected generator creation failure"));
+    assertThrows(RuntimeException.class, () -> mocks.addIndexForReplication(userVersion1Attempt0));
+    // User version 1's MV collection gets a new UUID and its next attempt fails once more.
+    repairedUuidByMvKey.put(userVersion1Id.uniqueString(), repairedUuid);
+    MaterializedViewIndexGeneration userVersion1Attempt1 =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(userVersion1Id, 1));
+    MaterializedViewGenerator userVersion1Generator =
+        mocks.mockMaterializedViewGenerator(userVersion1Attempt1);
+    when(mocks.materializedViewGeneratorFactory.create(userVersion1Attempt1))
+        .thenThrow(new RuntimeException("injected generator creation failure"))
+        .thenReturn(userVersion1Generator);
+
+    assertThrows(
+        RuntimeException.class,
+        () -> mocks.addIndexForReplicationWithAttempt(userVersion1Attempt1, 1));
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // The user version 0 generator is stopped and the refresh creates user version 1's generator.
+    verify(userVersion0Generator).shutdown();
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(userVersion1Attempt1);
+    assertEquals(
+        Set.of(repairedUuid),
+        mocks
+            .manager
+            .getActiveGenerationIdCatalog()
+            .latestMatViewIndexGenerationByCollection
+            .keySet());
+  }
+
+  @Test
+  public void add_mvUuidRepairedOnUuidSharedWithOtherUserVersion_movesOnlyThisMvGeneration() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    UUID oldUuid = UUID.nameUUIDFromBytes("old".getBytes(StandardCharsets.UTF_8));
+    UUID repairedUuid = UUID.nameUUIDFromBytes("repaired".getBytes(StandardCharsets.UTF_8));
+    Map<String, UUID> repairedUuidByMvKey = new ConcurrentHashMap<>();
+    stubMetadataCollectionUuid(
+        mocks, id -> repairedUuidByMvKey.getOrDefault(canonicalKey(id), oldUuid));
+    // Two user versions share the old UUID; the newer one is latest, so the generator serves it.
+    MaterializedViewIndexGeneration userVersion0 =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID));
+    mocks.mockMaterializedViewGenerator(userVersion0);
+    mocks.addIndexForReplication(userVersion0);
+    var userVersion1Id =
+        new MaterializedViewGenerationId(
+            MOCK_MAT_VIEW_GENERATION_ID.indexId,
+            MOCK_MAT_VIEW_GENERATION_ID.generation.incrementUser());
+    MaterializedViewIndexGeneration userVersion1Attempt0 =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(userVersion1Id, 1));
+    MaterializedViewGenerator userVersion1Generator =
+        mocks.mockMaterializedViewGenerator(userVersion1Attempt0);
+    mocks.addIndexForReplication(userVersion1Attempt0);
+    repairedUuidByMvKey.put(userVersion1Id.uniqueString(), repairedUuid);
+    MaterializedViewIndexGeneration userVersion1Attempt1 =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(userVersion1Id, 1));
+    mocks.mockMaterializedViewGenerator(userVersion1Attempt1);
+
+    mocks.addIndexForReplicationWithAttempt(userVersion1Attempt1, 1);
+
+    // The generator under the old UUID served user version 1, so it was handed over and replaced.
+    verify(userVersion1Generator).shutdown();
+    var catalog = mocks.manager.getActiveGenerationIdCatalog();
+    assertEquals(Set.of(MOCK_GENERATION_ID), catalog.genIdByMatViewCollection.get(oldUuid));
+    assertEquals(2, catalog.genIdByMatViewCollection.get(repairedUuid).size());
+    assertEquals(Set.of(repairedUuid), catalog.latestMatViewIndexGenerationByCollection.keySet());
+  }
+
+  @Test
+  public void moveOffStaleUuids_noOtherUuid_movesNothing() {
+    var catalog = newActiveGenerationIdCatalog();
+    register(catalog, CURRENT_MV_UUID, MOCK_GENERATION_ID);
+
+    Optional<UUID> handOverFrom =
+        catalog.moveOffStaleUuids(CURRENT_MV_UUID, canonicalKey(MOCK_GENERATION_ID));
+
+    assertEquals(Optional.empty(), handOverFrom);
+    assertEquals(
+        Map.of(CURRENT_MV_UUID, Set.of(MOCK_GENERATION_ID)), catalog.genIdByMatViewCollection);
+  }
+
+  @Test
+  public void moveOffStaleUuids_staleUuidHoldsOnlyThisMvGeneration_movesAllAndHandsOver() {
+    var catalog = newActiveGenerationIdCatalog();
+    register(catalog, STALE_MV_UUID, MOCK_GENERATION_ID);
+    catalog.latestMatViewIndexGenerationByCollection.put(
+        STALE_MV_UUID, mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION));
+
+    Optional<UUID> handOverFrom =
+        catalog.moveOffStaleUuids(CURRENT_MV_UUID, canonicalKey(MOCK_GENERATION_ID));
+
+    assertEquals(Optional.of(STALE_MV_UUID), handOverFrom);
+    assertEquals(
+        Map.of(CURRENT_MV_UUID, Set.of(MOCK_GENERATION_ID)), catalog.genIdByMatViewCollection);
+    assertTrue(catalog.latestMatViewIndexGenerationByCollection.isEmpty());
+  }
+
+  @Test
+  public void moveOffStaleUuids_sharedStaleUuidServingThisMvGeneration_movesOursAndHandsOver() {
+    var catalog = newActiveGenerationIdCatalog();
+    register(catalog, STALE_MV_UUID, MOCK_GENERATION_ID, USER_VERSION_1_GENERATION_ID);
+    catalog.latestMatViewIndexGenerationByCollection.put(
+        STALE_MV_UUID, userVersion1MatViewIndexGeneration());
+
+    Optional<UUID> handOverFrom =
+        catalog.moveOffStaleUuids(CURRENT_MV_UUID, canonicalKey(USER_VERSION_1_GENERATION_ID));
+
+    assertEquals(Optional.of(STALE_MV_UUID), handOverFrom);
+    assertEquals(
+        Map.of(
+            STALE_MV_UUID, Set.of(MOCK_GENERATION_ID),
+            CURRENT_MV_UUID, Set.of(USER_VERSION_1_GENERATION_ID)),
+        catalog.genIdByMatViewCollection);
+    assertTrue(catalog.latestMatViewIndexGenerationByCollection.isEmpty());
+  }
+
+  @Test
+  public void moveOffStaleUuids_sharedStaleUuidServingOtherMvGeneration_movesOursKeepsGenerator() {
+    var catalog = newActiveGenerationIdCatalog();
+    register(catalog, STALE_MV_UUID, MOCK_GENERATION_ID, USER_VERSION_1_GENERATION_ID);
+    MaterializedViewIndexGeneration otherLatest = userVersion1MatViewIndexGeneration();
+    catalog.latestMatViewIndexGenerationByCollection.put(STALE_MV_UUID, otherLatest);
+
+    Optional<UUID> handOverFrom =
+        catalog.moveOffStaleUuids(CURRENT_MV_UUID, canonicalKey(MOCK_GENERATION_ID));
+
+    assertEquals(Optional.empty(), handOverFrom);
+    assertEquals(
+        Map.of(
+            STALE_MV_UUID, Set.of(USER_VERSION_1_GENERATION_ID),
+            CURRENT_MV_UUID, Set.of(MOCK_GENERATION_ID)),
+        catalog.genIdByMatViewCollection);
+    assertEquals(
+        Map.of(STALE_MV_UUID, otherLatest), catalog.latestMatViewIndexGenerationByCollection);
+  }
+
+  @Test
+  public void moveOffStaleUuids_otherUuidHoldsOnlyOtherMvGeneration_leavesItUntouched() {
+    var catalog = newActiveGenerationIdCatalog();
+    register(catalog, STALE_MV_UUID, USER_VERSION_1_GENERATION_ID);
+
+    Optional<UUID> handOverFrom =
+        catalog.moveOffStaleUuids(CURRENT_MV_UUID, canonicalKey(MOCK_GENERATION_ID));
+
+    assertEquals(Optional.empty(), handOverFrom);
+    assertEquals(
+        Map.of(STALE_MV_UUID, Set.of(USER_VERSION_1_GENERATION_ID)),
+        catalog.genIdByMatViewCollection);
+  }
+
+  private static MaterializedViewManager.ActiveGenerationIdCatalog newActiveGenerationIdCatalog() {
+    return new MaterializedViewManager.ActiveGenerationIdCatalog(
+        mock(MaterializedViewCollectionMetadataCatalog.class));
+  }
+
+  private static void register(
+      MaterializedViewManager.ActiveGenerationIdCatalog catalog,
+      UUID uuid,
+      GenerationId... generationIds) {
+    Set<GenerationId> registered = ConcurrentHashMap.newKeySet();
+    registered.addAll(List.of(generationIds));
+    catalog.genIdByMatViewCollection.put(uuid, registered);
+  }
+
+  private static MaterializedViewIndexGeneration userVersion1MatViewIndexGeneration() {
+    return mockMatViewIndexGeneration(
+        mockMatViewDefinitionGeneration(
+            MaterializedViewGenerationId.from(USER_VERSION_1_GENERATION_ID), 1));
+  }
+
+  @Test
+  public void queryableMaterializedViewLagsMs_leader_reportsLag() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    addSteadyGenerationLagging(mocks, 60);
+
+    List<Long> lagsMs = mocks.manager.queryableMaterializedViewLagsMs().boxed().toList();
+
+    assertEquals(List.of(60_000L), lagsMs);
+  }
+
+  @Test
+  public void queryableMaterializedViewLagsMs_trackedFollower_reportsLag() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration generation = addSteadyGenerationLagging(mocks, 60);
+    replaceLeaderWithFollower(mocks, generation);
+    when(mocks.leaseManager.getFollowerGenerationIds())
+        .thenReturn(Set.of(generation.getGenerationId()));
+
+    List<Long> lagsMs = mocks.manager.queryableMaterializedViewLagsMs().boxed().toList();
+
+    assertEquals(List.of(60_000L), lagsMs);
+  }
+
+  @Test
+  public void queryableMaterializedViewLagsMs_followerNoLongerTrackedByLeaseManager_excluded() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration generation = addSteadyGenerationLagging(mocks, 60);
+    replaceLeaderWithFollower(mocks, generation);
+    when(mocks.leaseManager.getFollowerGenerationIds()).thenReturn(Set.of());
+
+    List<Long> lagsMs = mocks.manager.queryableMaterializedViewLagsMs().boxed().toList();
+
+    assertEquals(List.of(), lagsMs);
+  }
+
+  @Test
+  public void queryableMaterializedViewLagsMs_shutDownGenerator_excluded() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(generation);
+    mocks.addIndexForReplication(generation);
+    generation.getIndex().setStatus(IndexStatus.steady());
+    ensureReplicationOpTimeInfo(generation)
+        .update(new BsonTimestamp(1000, 1).getValue(), new BsonTimestamp(1060, 1).getValue());
+    doReturn(IndexManager.State.SHUT_DOWN).when(generator).getState();
+
+    List<Long> lagsMs = mocks.manager.queryableMaterializedViewLagsMs().boxed().toList();
+
+    assertEquals(List.of(), lagsMs);
+  }
+
+  /** Adds a STEADY leader generation whose replication optime trails the max by {@code lagSecs}. */
+  private static MaterializedViewIndexGeneration addSteadyGenerationLagging(
+      Mocks mocks, int lagSecs) {
+    MaterializedViewIndexGeneration generation =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(generation);
+    mocks.addIndexForReplication(generation);
+    generation.getIndex().setStatus(IndexStatus.steady());
+    ensureReplicationOpTimeInfo(generation)
+        .update(
+            new BsonTimestamp(1000, 1).getValue(), new BsonTimestamp(1000 + lagSecs, 1).getValue());
+    return generation;
+  }
+
+  /** Loses the lease so the heartbeat replaces the leader with a follower sharing its index. */
+  private static MaterializedViewGenerator replaceLeaderWithFollower(
+      Mocks mocks, MaterializedViewIndexGeneration generation) {
+    MaterializedViewGenerator follower = mocks.mockMaterializedViewGenerator(generation);
+    when(mocks.leaseManager.isLeader(generation.getGenerationId())).thenReturn(false);
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+    return follower;
+  }
+
+  /** Makes the metadata catalog report {@code uuid}'s current value for every generation. */
+  private static void stubMetadataCollectionUuid(Mocks mocks, AtomicReference<UUID> uuid) {
+    stubMetadataCollectionUuid(mocks, unused -> uuid.get());
+  }
+
+  /** Makes the metadata catalog report the MV collection UUID {@code uuidOf} returns. */
+  private static void stubMetadataCollectionUuid(Mocks mocks, Function<GenerationId, UUID> uuidOf) {
+    Answer<MaterializedViewCollectionMetadata> metadata =
+        invocation -> {
+          GenerationId id = invocation.getArgument(0);
+          return new MaterializedViewCollectionMetadata(
+              new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(0, Map.of()),
+              uuidOf.apply(id),
+              "test_" + id.indexId.toHexString());
+        };
+    when(mocks.metadataCatalog.getMetadata(any(GenerationId.class))).thenAnswer(metadata);
+    when(mocks.metadataCatalog.getMetadataIfPresent(any(GenerationId.class)))
+        .thenAnswer(invocation -> Optional.of(metadata.answer(invocation)));
   }
 
   @Test
@@ -599,7 +1140,7 @@ public class MaterializedViewManagerTest {
         .thenReturn(materializedViewindexGeneration.getGenerationId());
     mocks.manager.add(autoEmbeddingIndexGeneration);
     mocks.runnableCaptor.orElseThrow().getValue().run();
-    verify(materializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class));
+    verify(materializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class), any());
     assertEquals(mocks.expectedStatus, materializedViewindexGeneration.getIndex().getStatus());
   }
 
@@ -636,7 +1177,7 @@ public class MaterializedViewManagerTest {
 
     mocks.runnableCaptor.orElseThrow().getValue().run();
     // Only the new generation's status is updated (old generator was replaced)
-    verify(newMaterializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class));
+    verify(newMaterializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class), any());
     assertEquals(mocks.expectedStatus, newMaterializedViewindexGeneration.getIndex().getStatus());
   }
 
@@ -653,7 +1194,7 @@ public class MaterializedViewManagerTest {
         .thenReturn(materializedViewindexGeneration.getGenerationId());
     mocks.manager.add(autoEmbeddingIndexGeneration);
     mocks.runnableCaptor.orElseThrow().getValue().run();
-    verify(materializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class));
+    verify(materializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class), any());
     assertEquals(mocks.expectedStatus, materializedViewindexGeneration.getIndex().getStatus());
 
     mocks.manager.dropIndex(autoEmbeddingIndexGeneration.getGenerationId());
@@ -693,7 +1234,7 @@ public class MaterializedViewManagerTest {
 
     mocks.runnableCaptor.orElseThrow().getValue().run();
     // Only the new generation's status is updated (old generator was replaced)
-    verify(newMaterializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class));
+    verify(newMaterializedViewindexGeneration.getIndex()).setStatus(any(IndexStatus.class), any());
     assertEquals(mocks.expectedStatus, newMaterializedViewindexGeneration.getIndex().getStatus());
 
     mocks.manager.dropIndex(autoEmbeddingIndexGeneration.getGenerationId());
@@ -726,14 +1267,14 @@ public class MaterializedViewManagerTest {
     mocks.runnableCaptor.orElseThrow().getValue().run();
 
     // setStatus should NOT be called because the generator is a leader.
-    verify(matViewIndexGen.getIndex(), never()).setStatus(any(IndexStatus.class));
+    verify(matViewIndexGen.getIndex(), never()).setStatus(any(IndexStatus.class), any());
   }
 
   // ==================== Drop discriminator (supersession vs deletion) ====================
   //
-  // Last local user of an MV collection: another active generation for the same indexId on a
-  // different MV collection means supersession (leave collection + lease for the GC); none means
-  // deletion (drop both now).
+  // Last local user of an MV collection: the IndexCatalog decides — index still configured means
+  // retirement (leave collection + lease for the stale-lease GC), index absent means deletion
+  // (clean up the MV collections and leases now).
 
   @Test
   public void dropIndex_aevBumpSupersession_leavesMvCollectionAndLeaseForGc() throws Exception {
@@ -765,6 +1306,34 @@ public class MaterializedViewManagerTest {
     // The shared MV collection + lease are left for the stale-lease GC, not dropped here.
     verify(gen.getIndex().getWriter(), never()).dropMaterializedViewCollection();
     verify(mocks.leaseManager, never()).dropLease(any(String.class));
+    verify(mocks.leaseManager, never()).clearCheckpointCommitRisk(any());
+    verify(mocks.leaseManager, never()).clearCheckpointCommitRiskForIndex(any());
+    // The cached lease copy is evicted so it cannot outlive the document once the GC deletes
+    // it: a later re-initialization of the same definition must re-read the database (a
+    // recreated MV collection keeps its name but gets a new UUID).
+    verify(mocks.leaseManager).evictCachedLease("test_" + INDEX_ID.toHexString());
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_clearsRiskOnlyAfterGeneratorShutdown() throws Exception {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    CompletableFuture<Void> shutdownGate = new CompletableFuture<>();
+    doReturn(shutdownGate).when(generator).shutdown();
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID);
+
+    // drop() already cleared leadership, so a commit still draining inside the generator would
+    // take the !isLeader branch and re-arm the latch. Nothing may clear until it has quiesced.
+    verify(mocks.leaseManager, never()).clearCheckpointCommitRiskForIndex(any());
+
+    shutdownGate.complete(null);
+
+    verify(mocks.leaseManager, timeout(5000)).clearCheckpointCommitRiskForIndex(INDEX_ID);
   }
 
   @Test
@@ -775,13 +1344,385 @@ public class MaterializedViewManagerTest {
     MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
     mocks.addIndexForReplication(gen);
 
-    // No other active generation for this index -> genuine deletion.
+    // The index is gone from the IndexCatalog -> genuine deletion.
+    mocks.markIndexDeleted();
     mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
 
     verify(generator).shutdown();
-    // Leader drops the shared MV collection, then the lease document.
+    // The cleanup chain is detached from the future dropIndex returns, so sync on its last
+    // action (the lease delete) before the plain verifies.
+    verify(mocks.leaseManager, timeout(5000))
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
     verify(gen.getIndex().getWriter()).dropMaterializedViewCollection();
-    verify(mocks.leaseManager).dropLease("test_" + INDEX_ID.toHexString());
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+    // No manager-level eviction on the deletion branch: the by-id delete performs its own local
+    // cleanup.
+    verify(mocks.leaseManager, never()).evictCachedLease(any(String.class));
+    // matViewCollectionDrop{scenario=indexDeletion, outcome=success} is recorded for the drop.
+    assertEquals(
+        1.0,
+        collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_INDEX_DELETION, "success"),
+        0.0);
+  }
+
+  @Test
+  public void dropIndex_indexStillConfigured_noSibling_leavesSharedResourcesForGc()
+      throws Exception {
+    // The index is still in the IndexCatalog (a retirement drop, e.g. an initial-sync retry) and
+    // no sibling generation is registered locally. The old sibling-presence heuristic read this
+    // as deletion and dropped the shared MV + lease out from under the index; the catalog says
+    // the index lives on, so they must be left for the successor generation / the GC.
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    verify(generator).shutdown();
+    verify(gen.getIndex().getWriter(), never()).dropMaterializedViewCollection();
+    verify(mocks.leaseManager, never()).dropLease(any(String.class));
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any(String.class));
+    // A terminal/retired generation retains its MV collection without proving checkpoint
+    // recovery, so its conservative process-local risk latch must remain set.
+    verify(mocks.leaseManager, never()).clearCheckpointCommitRisk(any());
+    verify(mocks.leaseManager, never()).clearCheckpointCommitRiskForIndex(any());
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_dropFails_leavesLeaseForGc() throws Exception {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    // The leader's MV-collection drop fails. Deleting the lease anyway would strand the surviving
+    // collection forever (the GC scanner is lease-driven), so the lease must be left in place —
+    // the GC finds it on its own, and with the deleted-index safeguard fix it marks and deletes
+    // it after the graces.
+    when(gen.getIndex().getWriter().dropMaterializedViewCollection())
+        .thenReturn(CompletableFuture.failedFuture(new RuntimeException("drop failed")));
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    // The detached chain sweeps leftovers even after a failed MV drop; sync on that.
+    verify(mocks.leaseManager, timeout(5000))
+        .findLeasesForDeletedIndex(eq(INDEX_ID), any(String.class));
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any(String.class));
+    // Catalog deletion resolves the alertable risk even when physical cleanup is deferred to GC.
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+    assertEquals(
+        1.0,
+        collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_INDEX_DELETION, "failure"),
+        0.0);
+    assertEquals(
+        0.0,
+        collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_INDEX_DELETION, "success"),
+        0.0);
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_leaseDeleteFails_completesBestEffort() throws Exception {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    when(mocks.leaseManager.cleanupLeaseForDeletedIndex(any(String.class))).thenReturn(false);
+
+    mocks.markIndexDeleted();
+    // MV drop succeeded, lease delete failed: best effort — the drop completes normally and the
+    // lease stays where the GC scanner finds it.
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    verify(mocks.leaseManager, timeout(5000))
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    verify(gen.getIndex().getWriter()).dropMaterializedViewCollection();
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+  }
+
+  @Test
+  public void sourceCollectionDrop_leaseHolder_dropsMvThenDeletesLease() {
+    Mocks mocks = Mocks.create(); // leaseManager.isLeader() returns true by default
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    mocks.onSourceCollectionDropped().accept(gen);
+
+    // The cleanup chain is detached; sync on its last action (the lease delete).
+    verify(mocks.leaseManager, timeout(5000))
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    verify(gen.getIndex().getWriter()).dropMaterializedViewCollection();
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+    assertEquals(
+        1.0,
+        collectionDropCount(
+            mocks, MaterializedViewManager.DROP_SCENARIO_SOURCE_COLLECTION_DROP, "success"),
+        0.0);
+  }
+
+  /**
+   * The buffer {@code retryFailedGeneratorCreations} and {@code restartReplication} rebuild from.
+   */
+  private static Map<UUID, MaterializedViewIndexGeneration> bufferedGenerations(Mocks mocks) {
+    return mocks.manager.getActiveGenerationIdCatalog().latestMatViewIndexGenerationByCollection;
+  }
+
+  /** The key the catalog buffered {@code generation} under, without assuming how it derived it. */
+  private static UUID bufferedKeyOf(Mocks mocks, MaterializedViewIndexGeneration generation) {
+    return bufferedGenerations(mocks).entrySet().stream()
+        .filter(entry -> entry.getValue() == generation)
+        .map(Map.Entry::getKey)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("generation is not buffered for generator rebuilds"));
+  }
+
+  @Test
+  public void sourceCollectionDrop_deregistersGenerationSoRefreshCannotRebuildIt() {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    assertTrue(
+        "precondition: the generation is buffered for generator rebuilds",
+        bufferedGenerations(mocks).containsValue(gen));
+
+    mocks.onSourceCollectionDropped().accept(gen);
+
+    // The teardown that follows this callback shuts the generator down and closes its index, which
+    // is precisely what retryFailedGeneratorCreations rebuilds from. Leaving the generation
+    // buffered lets it rebuild a generator on the closed index.
+    assertFalse(
+        "the dropped generation must not be left for the status refresh to rebuild",
+        bufferedGenerations(mocks).containsValue(gen));
+  }
+
+  @Test
+  public void sourceCollectionDrop_notLeaseHolder_stillDeregistersGeneration() {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    when(mocks.leaseManager.isLeader(any())).thenReturn(false);
+
+    mocks.onSourceCollectionDropped().accept(gen);
+
+    // Leadership governs who cleans up the shared MV and lease, not whether this node keeps
+    // trying to replicate a collection that no longer exists.
+    assertFalse(bufferedGenerations(mocks).containsValue(gen));
+  }
+
+  @Test
+  public void sourceCollectionDrop_newerGenerationBuffered_leavesItRegistered() {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration dropped =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(dropped);
+    mocks.addIndexForReplication(dropped);
+    UUID matViewCollectionUuid = bufferedKeyOf(mocks, dropped);
+    // A definition update racing the drop: a newer generation already owns the buffer entry, and
+    // dropping the older one must not evict it.
+    MaterializedViewIndexGeneration newer =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    bufferedGenerations(mocks).put(matViewCollectionUuid, newer);
+
+    mocks.onSourceCollectionDropped().accept(dropped);
+
+    assertEquals(newer, bufferedGenerations(mocks).get(matViewCollectionUuid));
+  }
+
+  @Test
+  public void sourceCollectionDrop_notLeaseHolder_leavesEverythingForGc() {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    when(mocks.leaseManager.isLeader(any())).thenReturn(false);
+
+    mocks.onSourceCollectionDropped().accept(gen);
+
+    verify(gen.getIndex().getWriter(), never()).dropMaterializedViewCollection();
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any(String.class));
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+  }
+
+  @Test
+  public void sourceCollectionDrop_dropFails_leavesLeaseForGc() {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    // Deleting the lease after a failed drop would strand the surviving MV (the GC scanner is
+    // lease-driven), so the lease must stay in place.
+    when(gen.getIndex().getWriter().dropMaterializedViewCollection())
+        .thenReturn(CompletableFuture.failedFuture(new RuntimeException("drop failed")));
+
+    mocks.onSourceCollectionDropped().accept(gen);
+
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any(String.class));
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+    assertEquals(
+        1.0,
+        collectionDropCount(
+            mocks, MaterializedViewManager.DROP_SCENARIO_SOURCE_COLLECTION_DROP, "failure"),
+        0.0);
+  }
+
+  @Test
+  public void sourceCollectionDrop_thenIndexDeletion_stillUnwindsTheGeneration() throws Exception {
+    // Deregistering at drop time removes the generation from the rebuild buffer but deliberately
+    // leaves the rest of its bookkeeping, so the config-driven deletion that follows still finds
+    // its generator and unwinds normally -- releasing leadership rather than returning early.
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    mocks.onSourceCollectionDropped().accept(gen);
+    assertFalse(bufferedGenerations(mocks).containsValue(gen));
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    // Both only happen past the "already dropped" early return, so they distinguish a real unwind
+    // from one that bailed out because the drop-time cleanup took too much bookkeeping with it.
+    verify(generator).shutdown();
+    verify(mocks.leaseManager, atLeastOnce())
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    assertTrue(mocks.manager.getMatViewGenerator(gen.getGenerationId()).isEmpty());
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_cleansUpLeftoverSiblingLease() throws Exception {
+    // A supersession that completed before the deletion left its MV + lease behind for the GC.
+    // Cleaning them up here spares the GC's graces (days in production).
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    String leftoverKey = "test_" + INDEX_ID.toHexString() + "_leftover";
+    // Built with a random MV uuid, so no locally active generation matches and the cleanup
+    // does not skip it as mid-flip.
+    Lease leftover =
+        leaseWithExpiration(leftoverKey, Instant.now(), Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findLeasesForDeletedIndex(eq(INDEX_ID), any(String.class)))
+        .thenReturn(
+            List.of(
+                new LeaseManager.DeletedIndexLease(
+                    leftover, Optional.of(new MongoNamespace("testdb", leftoverKey)))));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("testdb")).thenReturn(database);
+    when(database.getCollection(leftoverKey)).thenReturn(collection);
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    verify(mocks.leaseManager, timeout(5000))
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    // The leftover's MV collection is dropped via the writer client, then its lease deleted.
+    verify(mocks.leaseManager).cleanupLeaseForDeletedIndex(leftoverKey);
+    // The leftover scan must run before the dropped generation's own lease delete: that delete
+    // evicts the leaseKey -> database mapping the scan resolves the lease table through.
+    InOrder inOrder = Mockito.inOrder(mocks.leaseManager);
+    inOrder.verify(mocks.leaseManager).findLeasesForDeletedIndex(eq(INDEX_ID), any(String.class));
+    inOrder
+        .verify(mocks.leaseManager)
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    // Both this generation's MV drop and the leftover's count as indexDeletion drops.
+    assertEquals(
+        2.0,
+        collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_INDEX_DELETION, "success"),
+        0.0);
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_leftoverLeaseWithoutNamespace_leavesItForGc()
+      throws Exception {
+    // The leftover lease exists but carries no usable MV namespace (missing or invalid
+    // metadata): don't delete the lease blind — leave it and let the GC sort it out.
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    String leftoverKey = "test_" + INDEX_ID.toHexString() + "_leftover";
+    Lease leftover =
+        leaseWithExpiration(leftoverKey, Instant.now(), Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findLeasesForDeletedIndex(eq(INDEX_ID), any(String.class)))
+        .thenReturn(List.of(new LeaseManager.DeletedIndexLease(leftover, Optional.empty())));
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    verify(mocks.leaseManager, timeout(5000))
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(leftoverKey);
+  }
+
+  @Test
+  public void dropIndex_indexDeletionMidFlip_dropsMvCollectionAndLease() throws Exception {
+    // An index deletion landing mid-flip: a sibling generation for the same index is still
+    // registered in the local catalog (its own MV collection), exactly the state the old
+    // sibling-presence heuristic misread as supersession and skipped. The IndexCatalog is empty
+    // for the index regardless of local siblings, so the dropped generation cleans up its MV
+    // collection + lease instead of leaking them.
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    // Sibling generation for the SAME index on a different MV collection still registered.
+    MaterializedViewGenerationId siblingGenId =
+        new MaterializedViewGenerationId(
+            MOCK_MAT_VIEW_GENERATION_ID.indexId,
+            MOCK_MAT_VIEW_GENERATION_ID.generation.incrementUser());
+    registerSiblingCollection(
+        mocks.metadataCatalog, siblingGenId, "test_" + INDEX_ID.toHexString() + "_aev1");
+    MaterializedViewIndexGeneration siblingGen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(siblingGenId));
+    mocks.mockMaterializedViewGenerator(siblingGen);
+    mocks.addIndexForReplication(siblingGen);
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    // Sibling presence no longer blocks the drop: the deleted generation's shared resources go.
+    verify(generator).shutdown();
+    verify(mocks.leaseManager, timeout(5000))
+        .cleanupLeaseForDeletedIndex("test_" + INDEX_ID.toHexString());
+    verify(gen.getIndex().getWriter()).dropMaterializedViewCollection();
+  }
+
+  @Test
+  public void dropIndex_releasesEmbeddingRetryCacheClaims() throws Exception {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    // cleanUpGenerationIdStates releases the dropped generation's claims so any embeddings it still
+    // held are evicted. The key is the generator's canonical key; assert the DROP-triggered call.
+    verify(mocks.embeddingRetryCache).releaseClaims(anyString(), eq(ReleaseTrigger.DROP));
   }
 
   @Test
@@ -846,10 +1787,11 @@ public class MaterializedViewManagerTest {
             new Generation(Generation.CURRENT.userIndexVersion, IndexFormatVersion.CURRENT, 0));
 
     // Act — drop the index while replication is disabled
+    mocks.markIndexDeleted();
     mocks.manager.dropIndex(dropGenId).get(5, TimeUnit.SECONDS);
 
-    // Assert — lease is dropped (generator==null path uses lastMaterializedViewIndexGeneration)
-    verify(mocks.leaseManager).dropLease(any(String.class));
+    // Assert — lease is deleted (generator==null path uses lastMaterializedViewIndexGeneration).
+    verify(mocks.leaseManager, timeout(5000)).cleanupLeaseForDeletedIndex(any(String.class));
     // Assert — leader drops the MV collection via lastMaterializedViewIndexGeneration's writer
     verify(matViewIndexGeneration.getIndex().getWriter()).dropMaterializedViewCollection();
     // Assert — refcounts are cleaned
@@ -857,9 +1799,11 @@ public class MaterializedViewManagerTest {
   }
 
   @Test
-  public void testDropIndex_whenReplicationDisabled_followerDropsLeaseOnly() throws Exception {
+  public void testDropIndex_whenReplicationDisabled_followerClearsRiskAndEvictsCachedLeaseOnly()
+      throws Exception {
     // Follower path of the generator==null code path in maybeDropCollectionAndLease:
-    // Follower drops the lease from memory but does NOT drop the MV collection.
+    // Follower evicts its cached lease copy but touches neither the lease document nor the MV
+    // collection.
     Mocks mocks = Mocks.createFollower();
     mocks.manager.setIsReplicationEnabled(false);
 
@@ -877,12 +1821,46 @@ public class MaterializedViewManagerTest {
             new Generation(Generation.CURRENT.userIndexVersion, IndexFormatVersion.CURRENT, 0));
 
     // Act
+    mocks.markIndexDeleted();
     mocks.manager.dropIndex(dropGenId).get(5, TimeUnit.SECONDS);
 
-    // Assert — lease is dropped from memory
-    verify(mocks.leaseManager).dropLease(any(String.class));
+    // The catalog deletion resolves this process's alertable risk even though shared-resource
+    // cleanup remains delegated to the leader or stale-lease GC.
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+    // Only the cached lease copy is evicted (non-leader half of the deletion path).
+    verify(mocks.leaseManager, timeout(5000)).evictCachedLease("test_" + INDEX_ID.toHexString());
+    verify(mocks.leaseManager, never()).dropLease(any(String.class));
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any(String.class));
     // Assert — follower does NOT drop the MV collection (not leader)
     verify(matViewIndexGeneration.getIndex().getWriter(), never()).dropMaterializedViewCollection();
+  }
+
+  @Test
+  public void dropIndex_indexDeletion_leadershipGoneWithSibling_leavesLeaseDocumentForGc()
+      throws Exception {
+    // A definition revert makes two generations share one lease; the generation that acquired
+    // leadership tears down first and takes the leadership state with it, so the last generation
+    // out reaches the deletion branch as a non-leader on the very node that still owns the lease
+    // document. Deleting the document here without having dropped the MV collection strands the
+    // collection: a lease-less MV is invisible to the lease-driven GC. The document must survive
+    // so the GC can clean the pair in drop-then-delete order.
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    when(mocks.leaseManager.isLeader(any())).thenReturn(false);
+
+    mocks.markIndexDeleted();
+    mocks.manager.dropIndex(MOCK_GENERATION_ID).get(5, TimeUnit.SECONDS);
+
+    verify(generator).shutdown();
+    // The cached copy is evicted; the lease document and the MV collection are left untouched.
+    verify(mocks.leaseManager, timeout(5000)).evictCachedLease("test_" + INDEX_ID.toHexString());
+    verify(mocks.leaseManager).clearCheckpointCommitRiskForIndex(INDEX_ID);
+    verify(mocks.leaseManager, never()).dropLease(any(String.class));
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any(String.class));
+    verify(gen.getIndex().getWriter(), never()).dropMaterializedViewCollection();
   }
 
   @Test
@@ -1018,19 +1996,544 @@ public class MaterializedViewManagerTest {
 
     // The other index still got its generator created.
     verify(mocks.materializedViewGeneratorFactory).create(succeedingGen);
-    assertTrue(
-        mocks
-            .manager
-            .getMatViewGenerator(succeedingGen.getGenerationId())
-            .isPresent());
+    assertTrue(mocks.manager.getMatViewGenerator(succeedingGen.getGenerationId()).isPresent());
     // The failing one is absent — caller (next conf push) is expected to retry.
-    assertFalse(
-        mocks.manager.getMatViewGenerator(failingGen.getGenerationId()).isPresent());
+    assertFalse(mocks.manager.getMatViewGenerator(failingGen.getGenerationId()).isPresent());
 
     // createNewGenerator's leaseManager.add() ran before the throw; the catch must roll it back
     // so refreshStatus() doesn't see a follower with no generator and log a warn every heartbeat.
     verify(mocks.leaseManager).drop(failingGen.getGenerationId());
     verify(mocks.leaseManager, never()).drop(succeedingGen.getGenerationId());
+  }
+
+  // refreshStatus periodically recreates a generator a transient failure left missing. Covers the
+  // guard no-op, a retry that fails transiently again (lease rolled back, re-attempted next tick),
+  // eventual recovery, and the no-gap no-op.
+  @Test
+  public void refreshStatus_retriesMissingGenerator_afterTransientCreateFailure() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    mocks.manager.setIsReplicationEnabled(false);
+
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen); // replication disabled: populates the catalog only
+
+    // First two create() calls throw transient (restartReplication, then the first retry); the
+    // third succeeds.
+    AtomicInteger createCalls = new AtomicInteger();
+    when(mocks.materializedViewGeneratorFactory.create(any(MaterializedViewIndexGeneration.class)))
+        .thenAnswer(
+            invocation -> {
+              if (createCalls.getAndIncrement() < 2) {
+                throw new MaterializedViewTransientException(
+                    "simulated 10107 NotPrimary",
+                    MaterializedViewTransientException.Reason.READ_LEASE_FAILED);
+              }
+              return generator;
+            });
+
+    // Transient failure during restartReplication leaves the generation active but with no
+    // generator; the lease registration is rolled back. restartReplication is not a retry, so
+    // neither retry-outcome counter moves.
+    mocks.manager.restartReplication();
+    assertFalse(mocks.manager.getMatViewGenerator(gen.getGenerationId()).isPresent());
+    verify(mocks.materializedViewGeneratorFactory, times(1)).create(gen);
+    verify(mocks.leaseManager, times(1)).drop(gen.getGenerationId());
+    assertEquals(0.0, retryCount(mocks, "failure"), 0.0);
+
+    // Guard: no retry while the factory is uninitialized.
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(false);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    verify(mocks.materializedViewGeneratorFactory, times(1)).create(gen);
+    assertEquals(0.0, retryCount(mocks, "failure"), 0.0);
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    // First retry fails transiently again: lease rolled back again, still no generator, counted as
+    // a failed retry.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    assertFalse(mocks.manager.getMatViewGenerator(gen.getGenerationId()).isPresent());
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(gen);
+    verify(mocks.leaseManager, times(2)).drop(gen.getGenerationId());
+    assertEquals(1.0, retryCount(mocks, "failure"), 0.0);
+    assertEquals(0.0, retryCount(mocks, "success"), 0.0);
+
+    // Next tick succeeds: the missing generator is recreated and counted as a successful retry.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    assertTrue(mocks.manager.getMatViewGenerator(gen.getGenerationId()).isPresent());
+    verify(mocks.materializedViewGeneratorFactory, times(3)).create(gen);
+    assertEquals(1.0, retryCount(mocks, "success"), 0.0);
+    assertEquals(1.0, retryCount(mocks, "failure"), 0.0);
+
+    // No gap remains: a further refresh does not recreate or re-count.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    verify(mocks.materializedViewGeneratorFactory, times(3)).create(gen);
+    assertEquals(1.0, retryCount(mocks, "success"), 0.0);
+    assertEquals(1.0, retryCount(mocks, "failure"), 0.0);
+  }
+
+  // The drop-time deregistration and the status refresh run on different threads without a shared
+  // lock, so a weakly consistent iteration can carry an entry that was deregistered in the
+  // meantime -- modelled here by deregistering on the state read that decides the rebuild.
+  // Rebuilding then would resurrect a generation whose index the drop teardown closed, which is
+  // what crashed mongot; the rebuild path re-reads the buffer and refuses.
+  @Test
+  public void refreshStatus_doesNotRebuildGenerationDeregisteredMidIteration() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator shutDownGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    UUID matViewCollectionUuid = bufferedKeyOf(mocks, gen);
+
+    doAnswer(
+            invocation -> {
+              bufferedGenerations(mocks).remove(matViewCollectionUuid, gen);
+              return IndexManager.State.SHUT_DOWN;
+            })
+        .when(shutDownGenerator)
+        .getState();
+
+    MaterializedViewGenerator rebuilt = mock(MaterializedViewGenerator.class);
+    when(rebuilt.getIndexGeneration()).thenReturn(gen);
+    when(mocks.materializedViewGeneratorFactory.create(gen)).thenReturn(rebuilt);
+    Mockito.clearInvocations(mocks.materializedViewGeneratorFactory);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(mocks.materializedViewGeneratorFactory, never()).create(gen);
+    assertSame(
+        shutDownGenerator, mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    // A deliberate skip, not a retry outcome: neither counter moves.
+    assertEquals(0.0, retryCount(mocks, "success"), 0.0);
+    assertEquals(0.0, retryCount(mocks, "failure"), 0.0);
+  }
+
+  // A failed transition to follower leaves a SHUT_DOWN generator in the map. refreshStatus
+  // recreates
+  // it as a fresh follower — but not while a shutdown is still in flight for that generation.
+  @Test
+  public void refreshStatus_recreatesShutDownGenerator() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator shutDownGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(shutDownGenerator).getState();
+
+    // The retry creates a fresh, healthy generator in its place.
+    MaterializedViewGenerator healthyGenerator = mock(MaterializedViewGenerator.class);
+    when(healthyGenerator.getIndexGeneration()).thenReturn(gen);
+    when(mocks.materializedViewGeneratorFactory.create(gen)).thenReturn(healthyGenerator);
+
+    // In-flight shutdown for this generation: the SHUT_DOWN generator must not be recreated.
+    Mockito.clearInvocations(
+        shutDownGenerator, healthyGenerator, mocks.materializedViewGeneratorFactory);
+    mocks.manager.pendingShutdowns.put(gen.getGenerationId(), new CompletableFuture<>());
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    assertSame(
+        shutDownGenerator, mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    verify(shutDownGenerator, never()).clearLeaderState();
+    verify(mocks.materializedViewGeneratorFactory, never()).create(gen);
+    verify(healthyGenerator, never()).becomeLeader();
+    assertEquals(0.0, retryCount(mocks, "success"), 0.0);
+
+    // Shutdown no longer in flight: the SHUT_DOWN generator is replaced by a fresh one.
+    mocks.manager.pendingShutdowns.remove(gen.getGenerationId());
+    Mockito.clearInvocations(
+        shutDownGenerator, healthyGenerator, mocks.materializedViewGeneratorFactory);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    assertSame(
+        healthyGenerator, mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    InOrder replacementOrder =
+        Mockito.inOrder(
+            shutDownGenerator, mocks.materializedViewGeneratorFactory, healthyGenerator);
+    replacementOrder.verify(shutDownGenerator).clearLeaderState();
+    replacementOrder.verify(mocks.materializedViewGeneratorFactory).create(gen);
+    replacementOrder.verify(healthyGenerator).becomeLeader();
+    assertEquals(1.0, retryCount(mocks, "success"), 0.0);
+  }
+
+  @Test
+  public void refreshStatus_dynamicShutDownLeaderStaysFollowerUntilLeaseReacquired() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerationId generationId = gen.getGenerationId();
+    AtomicBoolean ownsLease = new AtomicBoolean(true);
+    when(mocks.leaseManager.isLeader(generationId)).thenAnswer(ignored -> ownsLease.get());
+
+    MaterializedViewGenerator shutDownGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    verify(shutDownGenerator).becomeLeader();
+
+    ownsLease.set(false);
+    doReturn(IndexManager.State.SHUT_DOWN).when(shutDownGenerator).getState();
+    MaterializedViewGenerator replacement = mocks.mockMaterializedViewGenerator(gen);
+    doReturn(IndexManager.State.INITIAL_SYNC).when(replacement).getState();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(LeaseManager.FollowerPollResult.EMPTY);
+    Mockito.clearInvocations(
+        shutDownGenerator, replacement, mocks.materializedViewGeneratorFactory, mocks.leaseManager);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertSame(replacement, mocks.manager.getMatViewGenerator(generationId).orElseThrow());
+    InOrder replacementOrder =
+        Mockito.inOrder(shutDownGenerator, mocks.materializedViewGeneratorFactory);
+    replacementOrder.verify(shutDownGenerator).clearLeaderState();
+    replacementOrder.verify(mocks.materializedViewGeneratorFactory).create(gen);
+    verify(replacement, never()).becomeLeader();
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(generationId);
+
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(generationId, IndexStatus.unknown()), Set.of(generationId)));
+    when(mocks.leaseManager.tryAcquireLeadership(generationId))
+        .thenAnswer(
+            ignored -> {
+              ownsLease.set(true);
+              return true;
+            });
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    InOrder acquisitionOrder = Mockito.inOrder(mocks.leaseManager, replacement);
+    acquisitionOrder.verify(mocks.leaseManager).tryAcquireLeadership(generationId);
+    acquisitionOrder.verify(replacement).becomeLeader();
+  }
+
+  @Test
+  public void refreshStatus_transientFailureRecreatingShutDownGenerator_retries() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator shutDownGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(shutDownGenerator).getState();
+
+    MaterializedViewGenerator healthyGenerator = mock(MaterializedViewGenerator.class);
+    when(healthyGenerator.getIndexGeneration()).thenReturn(gen);
+    when(mocks.materializedViewGeneratorFactory.create(gen))
+        .thenThrow(
+            new MaterializedViewTransientException(
+                "simulated lease read failure",
+                MaterializedViewTransientException.Reason.READ_LEASE_FAILED))
+        .thenReturn(healthyGenerator);
+    Mockito.clearInvocations(
+        shutDownGenerator,
+        healthyGenerator,
+        mocks.materializedViewGeneratorFactory,
+        mocks.leaseManager);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertSame(
+        shutDownGenerator, mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    verify(shutDownGenerator).clearLeaderState();
+    verify(mocks.materializedViewGeneratorFactory).create(gen);
+    verify(mocks.leaseManager).drop(gen.getGenerationId());
+    verify(healthyGenerator, never()).becomeLeader();
+    assertEquals(1.0, retryCount(mocks, "failure"), 0.0);
+    assertEquals(0.0, retryCount(mocks, "success"), 0.0);
+
+    Mockito.clearInvocations(
+        shutDownGenerator,
+        healthyGenerator,
+        mocks.materializedViewGeneratorFactory,
+        mocks.leaseManager);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertSame(
+        healthyGenerator, mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    InOrder replacementOrder =
+        Mockito.inOrder(
+            shutDownGenerator, mocks.materializedViewGeneratorFactory, healthyGenerator);
+    replacementOrder.verify(shutDownGenerator).clearLeaderState();
+    replacementOrder.verify(mocks.materializedViewGeneratorFactory).create(gen);
+    replacementOrder.verify(healthyGenerator).becomeLeader();
+    verify(mocks.leaseManager, never()).drop(gen.getGenerationId());
+    assertEquals(1.0, retryCount(mocks, "failure"), 0.0);
+    assertEquals(1.0, retryCount(mocks, "success"), 0.0);
+  }
+
+  private static double retryCount(Mocks mocks, String outcome) {
+    return mocks
+        .meterRegistry
+        .counter(MaterializedViewManager.GENERATOR_CREATION_RETRY_COUNTER_NAME, "outcome", outcome)
+        .count();
+  }
+
+  // ================== Retired generations — MV collection missing (CLOUDP-437172)
+  // ==================
+  //
+  // Recreating such a generator only restarts the flap, because it hands back the lease this host
+  // still owns in the database and then shuts down again on the replayed COLLECTION_NOT_FOUND.
+
+  private static double retiredCount(Mocks mocks) {
+    return mocks
+        .meterRegistry
+        .counter(MaterializedViewManager.RETIRED_GENERATION_COUNTER_NAME)
+        .count();
+  }
+
+  private static void runHeartbeatOnce(Mocks mocks) {
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+  }
+
+  // Retired once on first observation, then never recreated and never re-counted — by later refresh
+  // ticks, by restartReplication, or once the status the retirement was derived from is
+  // overwritten.
+  @Test
+  public void refreshStatus_shutDownForCollectionNotFound_retiresGenerationAndStopsRecreating() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    gen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertTrue(
+        "generation should be retired",
+        mocks.manager.retiredGenerations.contains(gen.getGenerationId()));
+    assertSame(
+        "the dead generator must not be replaced",
+        deadGenerator,
+        mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    verify(mocks.leaseManager).clearCheckpointCommitRisk(gen.getGenerationId());
+
+    // refreshStatus overwrites this status from the lease on every tick a generator is not leader.
+    gen.getIndex().setStatus(IndexStatus.steady());
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    mocks.manager.restartReplication();
+
+    // The one create is addIndexForReplication's; nothing recreated the generator since.
+    verify(mocks.materializedViewGeneratorFactory, times(1)).create(gen);
+    assertEquals("retirement is observed once", 1.0, retiredCount(mocks), 0.0);
+    assertEquals(0.0, retryCount(mocks, "success"), 0.0);
+    assertEquals("a retirement is not a retry failure", 0.0, retryCount(mocks, "failure"), 0.0);
+  }
+
+  // Retirement is keyed by generation id, so recreating the index — the only way this state
+  // recovers — still gets a generator.
+  @Test
+  public void refreshStatus_newUserGenerationForRetiredIndex_isNotBlocked() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration deadGen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID));
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(deadGen);
+    mocks.addIndexForReplication(deadGen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    deadGen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    assertTrue(mocks.manager.retiredGenerations.contains(deadGen.getGenerationId()));
+
+    // The index is recreated: same indexId, incremented user index version, new generation id.
+    var newGenId =
+        new MaterializedViewGenerationId(
+            MOCK_MAT_VIEW_GENERATION_ID.indexId,
+            MOCK_MAT_VIEW_GENERATION_ID.generation.incrementUser());
+    MaterializedViewIndexGeneration newGen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(newGenId, 1));
+    MaterializedViewGenerator newGenerator = mocks.mockMaterializedViewGenerator(newGen);
+    mocks.addIndexForReplication(newGen);
+
+    assertFalse(
+        "a new generation must not inherit the retirement",
+        mocks.manager.retiredGenerations.contains(newGenId));
+    assertSame(newGenerator, mocks.manager.getMatViewGenerator(newGenId).orElseThrow());
+  }
+
+  // Heartbeat pass 1 releases the lease for any terminal generator, but retires the generation only
+  // when the collection is missing: a transient terminal must stay acquirable by a healthy node.
+  @Test
+  public void dynamicLeader_heartbeat_retiresPermanentTerminalsOnly() {
+    Mocks collectionGone = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration goneGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator goneGenerator = collectionGone.mockMaterializedViewGenerator(goneGen);
+    collectionGone.addIndexForReplication(goneGen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(goneGenerator).getState();
+    goneGen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+
+    runHeartbeatOnce(collectionGone);
+
+    verify(collectionGone.leaseManager).releaseLeadership(goneGen.getGenerationId());
+    assertTrue(
+        "a missing MV collection should retire the generation",
+        collectionGone.manager.retiredGenerations.contains(goneGen.getGenerationId()));
+    assertEquals(1.0, retiredCount(collectionGone), 0.0);
+
+    Mocks transientTerminal = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration failedGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator failedGenerator =
+        transientTerminal.mockMaterializedViewGenerator(failedGen);
+    transientTerminal.addIndexForReplication(failedGen);
+    doReturn(IndexManager.State.FAILED).when(failedGenerator).getState();
+
+    runHeartbeatOnce(transientTerminal);
+
+    verify(transientTerminal.leaseManager).releaseLeadership(failedGen.getGenerationId());
+    verify(transientTerminal.leaseManager, never()).clearCheckpointCommitRisk(any());
+    verify(transientTerminal.leaseManager, never()).clearCheckpointCommitRiskForIndex(any());
+    assertFalse(
+        "a transient terminal must not retire the generation",
+        transientTerminal.manager.retiredGenerations.contains(failedGen.getGenerationId()));
+    assertEquals(0.0, retiredCount(transientTerminal), 0.0);
+  }
+
+  // A recovery attempt bumps the search attempt but keeps the MV generation id, so it reaches
+  // add() → computeGenerator() → replaceGenerator() rather than the recreation path.
+  @Test
+  public void add_sameGenerationAfterRetirement_doesNotReplaceGenerator() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID));
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    gen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // Same generation id, higher definition version: a retry attempt for the retired generation.
+    MaterializedViewIndexGeneration retryGen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID, 1));
+    MaterializedViewGenerator retryGenerator = mocks.mockMaterializedViewGenerator(retryGen);
+    mocks.addIndexForReplication(retryGen);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertSame(
+        "the retired generator must not be replaced",
+        deadGenerator,
+        mocks.manager.getMatViewGenerator(gen.getGenerationId()).orElseThrow());
+    verify(retryGenerator, never()).becomeLeader();
+  }
+
+  // shutdownReplication clears the generator map, so a retired generation then looks like a missing
+  // one on every refresh.
+  @Test
+  public void refreshStatus_afterShutdownClearsRetiredGenerator_recordsNoRetryFailures()
+      throws Exception {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    gen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // shutdownReplication clears the generator map; restartReplication skips the retired
+    // generation, so every later refresh sees no generator for a still-active generation.
+    mocks.manager.shutdownReplication().get(5, TimeUnit.SECONDS);
+    mocks.manager.restartReplication();
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertEquals("a retirement is not a retry failure", 0.0, retryCount(mocks, "failure"), 0.0);
+    assertEquals(0.0, retryCount(mocks, "success"), 0.0);
+    verify(mocks.materializedViewGeneratorFactory, times(1)).create(gen);
+  }
+
+  // The retired generation's lease still carries the status this host published before the
+  // collection went missing, so copying it back would report a missing collection as queryable.
+  @Test
+  public void refreshStatus_retiredGeneration_keepsCollectionNotFoundStatus() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    MaterializedViewGenerationId genId = gen.getGenerationId();
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    // Retirement clears leader state, which is what opens the follower status-update branch.
+    doReturn(false).when(deadGenerator).isLeader();
+    gen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+    // The lease still reports the healthy status published before the collection disappeared.
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(genId, IndexStatus.steady()), Set.of(genId)));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertTrue(mocks.manager.retiredGenerations.contains(genId));
+    assertTrue(
+        "a retired generation must not be reported queryable",
+        gen.getIndex().getStatus().isCollectionNotFound());
+  }
+
+  // This host keeps the retired generation's lease row, so the lease stays acquirable on every
+  // poll and must be skipped rather than re-entering the election path each tick.
+  @Test
+  public void refreshStatus_retiredGenerationStillAcquirable_isNotReconsideredForElection() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    MaterializedViewGenerationId genId = gen.getGenerationId();
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    gen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(genId, IndexStatus.unknown()), Set.of(genId)));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertTrue(mocks.manager.retiredGenerations.contains(genId));
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(genId);
+    // The disqualification branch shuts the generator down; a retired generation must not re-enter
+    // it on every tick.
+    verify(deadGenerator, never()).shutdown();
+  }
+
+  // A shutdown between retiring and the next heartbeat would otherwise leave the lease manager
+  // renewing a lease that no generator will ever claim.
+  @Test
+  public void refreshStatus_retiringGeneration_releasesLeadershipImmediately() {
+    Mocks mocks = Mocks.createStaticLeaderWithRefreshCapture();
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+    MaterializedViewIndexGeneration gen =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(new ObjectId()));
+    MaterializedViewGenerator deadGenerator = mocks.mockMaterializedViewGenerator(gen);
+    mocks.addIndexForReplication(gen);
+    doReturn(IndexManager.State.SHUT_DOWN).when(deadGenerator).getState();
+    gen.getIndex().setStatus(IndexStatus.doesNotExist(IndexStatus.Reason.COLLECTION_NOT_FOUND));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(mocks.leaseManager).releaseLeadership(gen.getGenerationId());
+    verify(deadGenerator).clearLeaderState();
   }
 
   @Test
@@ -1050,6 +2553,38 @@ public class MaterializedViewManagerTest {
     verify(generator).shutdown();
     verify(mocks.materializedViewGeneratorFactory).markUninitialized();
     assertFalse(mocks.manager.isReplicationSupported());
+  }
+
+  @Test
+  public void shutdownReplication_abortsFactoryClientsBeforeWaitingForGeneratorShutdown()
+      throws Exception {
+    Mocks mocks = Mocks.create();
+
+    MaterializedViewIndexGeneration matViewIndexGeneration =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator =
+        mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+
+    // Model an initial-sync thread that cannot unwind until its MongoDB client is closed.
+    CompletableFuture<Void> generatorShutdown = new CompletableFuture<>();
+    doReturn(generatorShutdown).when(generator).shutdown();
+    doAnswer(
+            invocation -> {
+              generatorShutdown.complete(null);
+              return null;
+            })
+        .when(mocks.materializedViewGeneratorFactory)
+        .abortClients();
+
+    mocks.addIndexForReplication(matViewIndexGeneration);
+    Mockito.clearInvocations(mocks.materializedViewGeneratorFactory, generator);
+
+    mocks.manager.shutdownReplication().get(5, TimeUnit.SECONDS);
+
+    InOrder inOrder = Mockito.inOrder(generator, mocks.materializedViewGeneratorFactory);
+    inOrder.verify(generator).shutdown();
+    inOrder.verify(mocks.materializedViewGeneratorFactory).abortClients();
+    inOrder.verify(mocks.materializedViewGeneratorFactory).shutdown();
   }
 
   @Test
@@ -1569,11 +3104,12 @@ public class MaterializedViewManagerTest {
             new Generation(Generation.CURRENT.userIndexVersion, IndexFormatVersion.CURRENT, 0));
 
     // dropIndex(a0): first attempt dropped — lease should survive
+    mocks.markIndexDeleted();
     mocks.manager.dropIndex(genIdA0).get(5, TimeUnit.SECONDS);
 
-    // Verify lease was NOT cleaned up (leaseManager.drop and dropLease not called yet)
+    // Verify lease was NOT cleaned up (leaseManager.drop and the lease delete not called yet)
     verify(mocks.leaseManager, never()).drop(any());
-    verify(mocks.leaseManager, never()).dropLease(any());
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any());
     // Generator should NOT be shut down (other attempt still active, same UUID)
     verify(generator, never()).shutdown();
 
@@ -1592,7 +3128,7 @@ public class MaterializedViewManagerTest {
     // cleanup. Both calls are idempotent.
     verify(generator).shutdown();
     verify(mocks.leaseManager, times(2)).drop(defGen.getGenerationId());
-    verify(mocks.leaseManager).dropLease(any(String.class));
+    verify(mocks.leaseManager, timeout(5000)).cleanupLeaseForDeletedIndex(any(String.class));
     verify(mocks.metadataCatalog).removeMetadata(defGen.getGenerationId());
   }
 
@@ -1674,10 +3210,11 @@ public class MaterializedViewManagerTest {
         new GenerationId(
             indexId,
             new Generation(Generation.CURRENT.userIndexVersion, IndexFormatVersion.CURRENT, 0));
+    mocks.markIndexDeleted();
     mocks.manager.dropIndex(genIdU0A0).get(5, TimeUnit.SECONDS);
 
     verify(mocks.leaseManager, never()).drop(any());
-    verify(mocks.leaseManager, never()).dropLease(any());
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any());
     verify(generatorU1, never()).shutdown();
     verify(mocks.metadataCatalog, never()).removeMetadata(any());
     assertEquals(4, catalog.genIdByMatViewCollection.get(uuid).size());
@@ -1703,7 +3240,7 @@ public class MaterializedViewManagerTest {
     mocks.manager.dropIndex(genIdU0A2).get(5, TimeUnit.SECONDS);
 
     verify(mocks.leaseManager).drop(any());
-    verify(mocks.leaseManager, never()).dropLease(any());
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any());
     verify(generatorU1, never()).shutdown();
     // u0's metadata cleaned up because genIdByMatViewGenId["u0"] is empty
     verify(mocks.metadataCatalog).removeMetadata(defGenU0.getGenerationId());
@@ -1719,13 +3256,13 @@ public class MaterializedViewManagerTest {
     mocks.manager.dropIndex(genIdU1A0).get(5, TimeUnit.SECONDS);
 
     verify(mocks.leaseManager, never()).drop(any());
-    verify(mocks.leaseManager, never()).dropLease(any());
+    verify(mocks.leaseManager, never()).cleanupLeaseForDeletedIndex(any());
     verify(generatorU1, never()).shutdown();
     verify(mocks.metadataCatalog, never()).removeMetadata(any());
     assertEquals(1, catalog.genIdByMatViewCollection.get(uuid).size());
     assertEquals(1, catalog.genIdByMatViewGenId.get(canonicalKeyU1).size());
 
-    // === Drop u1-a1: uuid set=0 → shutdown + drop + dropLease. generatorId["u1"]=0 →
+    // === Drop u1-a1: uuid set=0 → shutdown + drop + lease delete. generatorId["u1"]=0 →
     // removeMetadata(u1) ===
     GenerationId genIdU1A1 =
         new GenerationId(indexId, new Generation(u1Version, IndexFormatVersion.CURRENT, 1));
@@ -1737,7 +3274,7 @@ public class MaterializedViewManagerTest {
     // cleanup. Both calls are idempotent.
     verify(generatorU1).shutdown();
     verify(mocks.leaseManager, times(2)).drop(defGenU1.getGenerationId());
-    verify(mocks.leaseManager).dropLease(any(String.class));
+    verify(mocks.leaseManager, timeout(5000)).cleanupLeaseForDeletedIndex(any(String.class));
     // Metadata cleanup
     verify(mocks.metadataCatalog).removeMetadata(defGenU1.getGenerationId());
     // Both maps fully cleaned
@@ -1863,6 +3400,152 @@ public class MaterializedViewManagerTest {
     // tryAcquireLeadership should be called and becomeLeader() invoked.
     verify(mocks.leaseManager).tryAcquireLeadership(matViewGenId);
     verify(generator).becomeLeader();
+    assertEquals(
+        0.0,
+        mocks
+            .meterRegistry
+            .counter(MaterializedViewManager.UNSAFE_LEADERSHIP_REACQUISITION_COUNTER_NAME)
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void dynamicLeader_acquireLease_skipsAcquisitionWhileGeneratorStillLeads() {
+    // CLOUDP-437680 (lose-and-reacquire ABA): the lease manager demoted this generation (that
+    // is what made the lease acquirable), but its generator still leads the prior tenure.
+    // Acquiring now would re-activate that generator under a fresh lease while its in-flight
+    // work holds the prior tenure's pin, before heartbeat pass 2 can drain it. refreshStatus
+    // must skip acquisition and leave the drain to the heartbeat pass.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    doReturn(IndexManager.State.STEADY_STATE).when(generator).getState();
+    doReturn(true).when(generator).isLeader();
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId)).thenReturn(true);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // The reacquisition that re-activates the still-leading generator never happens; the
+    // post-acquisition tripwire counter stays at zero.
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(any());
+    verify(generator, never()).becomeLeader();
+    assertEquals(
+        0.0,
+        mocks
+            .meterRegistry
+            .counter(MaterializedViewManager.UNSAFE_LEADERSHIP_REACQUISITION_COUNTER_NAME)
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void dynamicLeader_acquireLease_acquiresForReplacementAfterHeartbeatDrain() {
+    // Companion to the skip test: the skipped cycle lets heartbeat pass 2 drain the demoted
+    // generator (transitionToFollower installs a fresh follower), and the next refreshStatus
+    // cycle acquires for that replacement — becomeLeader pins the new tenure's leaseVersion,
+    // above every stamp of the demoted tenure.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator oldGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    doReturn(IndexManager.State.STEADY_STATE).when(oldGenerator).getState();
+    doReturn(true).when(oldGenerator).isLeader();
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId)).thenReturn(true);
+
+    // The replacement follower the heartbeat's transitionToFollower installs.
+    MaterializedViewGenerator replacement = mock(MaterializedViewGenerator.class);
+    doReturn(false).when(replacement).isLeader();
+    doReturn(IndexManager.State.INITIAL_SYNC).when(replacement).getState();
+    doReturn(matViewIndexGen).when(replacement).getIndexGeneration();
+    when(mocks.materializedViewGeneratorFactory.create(eq(matViewIndexGen)))
+        .thenReturn(replacement);
+
+    // Cycle 1: acquisition is skipped while the generator still leads.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    verify(mocks.leaseManager, never()).tryAcquireLeadership(any());
+
+    // Heartbeat pass 2 detects the demotion and drains the old generator.
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+    verify(oldGenerator).shutdown();
+
+    // Cycle 2: the drain completed (shutdown future done, queue clean), so acquisition
+    // proceeds for the replacement follower.
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(mocks.leaseManager).tryAcquireLeadership(matViewGenId);
+    verify(replacement).becomeLeader();
+  }
+
+  @Test
+  public void dynamicLeader_acquireLease_replacedDuringAcquisition_backsOffInsteadOfActivating() {
+    // Regression test: refreshStatus()'s acquisition loop re-checks the map under the manager
+    // monitor after tryAcquireLeadership() returns, because a concurrent same-generation re-add
+    // can run replaceGenerator() in between — populating pendingShutdowns and installing a
+    // replacement — so the generator captured before the acquisition call is stale. Activating
+    // that replacement would bypass the deferred-activation pendingShutdowns drain (the only
+    // place that verifies the predecessor's shutdown/queue cleanup actually finished), so the
+    // recheck must back off and release the lease instead.
+    //
+    // The real interleaving (acquisition racing a concurrent add()) is reproduced
+    // single-threaded: the re-add runs inside the tryAcquireLeadership() answer, at exactly the
+    // point the concurrent add would land — after every pre-check, before the monitor.
+    // (The pre-CLOUDP-437680 form of this test ran the concurrent replacement through heartbeat
+    // pass 2's transitionToFollower with two parked threads; that entrance is closed now that
+    // refreshStatus skips acquisition while the local generator still leads, and the
+    // same-generation re-add is the reachable trigger.)
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator staleGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    doReturn(IndexManager.State.STEADY_STATE).when(staleGenerator).getState();
+    MaterializedViewGenerator replacement = mock(MaterializedViewGenerator.class);
+    doReturn(IndexManager.State.STEADY_STATE).when(replacement).getState();
+    doReturn(matViewIndexGen).when(replacement).getIndexGeneration();
+    when(mocks.materializedViewGeneratorFactory.create(eq(matViewIndexGen)))
+        .thenReturn(replacement);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+
+    // The lease is acquired; while the acquisition call is in flight, a same-generation re-add
+    // replaces the generator and registers its predecessor's shutdown.
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId))
+        .thenAnswer(
+            invocation -> {
+              mocks.addIndexForReplication(matViewIndexGen);
+              return true;
+            });
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    // The stale captured generator was drained by the re-add, and the recheck released the
+    // freshly acquired lease rather than activating the replacement mid-drain.
+    verify(staleGenerator).shutdown();
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+    verify(replacement, never()).becomeLeader();
+    assertTrue(mocks.manager.pendingShutdowns.containsKey(matViewGenId));
   }
 
   @Test
@@ -2078,10 +3761,79 @@ public class MaterializedViewManagerTest {
         .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
     heartbeatCaptor.getValue().run();
 
-    InOrder inOrder = Mockito.inOrder(mocks.leaseManager, mocks.materializedViewGeneratorFactory);
+    // shutdown() must run before factory.create(). shutdown() ends the demoted generator's tenure
+    // synchronously (and transitions it to SHUT_DOWN in the same step), so ordering it first stops
+    // it committing under its obsolete fencing token for the duration of the slow factory call.
+    InOrder inOrder =
+        Mockito.inOrder(mocks.leaseManager, generator, mocks.materializedViewGeneratorFactory);
     inOrder.verify(mocks.leaseManager).heartbeat();
+    inOrder.verify(generator).shutdown();
     inOrder.verify(mocks.materializedViewGeneratorFactory).create(matViewIndexGen);
-    verify(generator).shutdown();
+  }
+
+  @Test
+  public void dynamicLeader_transitionToFollower_createFailsAfterShutdown_recoversAndActivates() {
+    // Full recovery assertion for the create-fails-after-shutdown case. With shutdown() ordered
+    // before factory.create(), a failing create leaves the ex-leader SHUT_DOWN in the map with a
+    // real shutdown future in pendingShutdowns. That must not be terminal: once refreshStatus
+    // drains pendingShutdowns, retryFailedGeneratorCreations must build a fresh follower, and
+    // that follower must then be able to acquire leadership and activate.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator leader = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    verify(leader).becomeLeader();
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    // The demoted leader shuts down cleanly; the replacement build fails on this attempt and
+    // succeeds on the retry.
+    doReturn(COMPLETED_FUTURE).when(leader).shutdown();
+    MaterializedViewGenerator recovered = mock(MaterializedViewGenerator.class);
+    doReturn(IndexManager.State.STEADY_STATE).when(recovered).getState();
+    doReturn(matViewIndexGen).when(recovered).getIndexGeneration();
+    when(mocks.materializedViewGeneratorFactory.create(matViewIndexGen))
+        .thenThrow(new RuntimeException("factory failure"))
+        .thenReturn(recovered);
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(false);
+    // retryFailedGeneratorCreations() is a no-op unless the factory reports initialized.
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    ArgumentCaptor<Runnable> heartbeatCaptor = ArgumentCaptor.forClass(Runnable.class);
+    verify(mocks.heartbeatExecutor)
+        .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
+    heartbeatCaptor.getValue().run();
+
+    // Demotion happened, the replacement build failed, and the ex-leader's shutdown is tracked.
+    verify(leader).shutdown();
+    assertTrue(mocks.manager.pendingShutdowns.containsKey(matViewGenId));
+    // The ex-leader is SHUT_DOWN from here on, which is what makes it eligible for recreation.
+    doReturn(IndexManager.State.SHUT_DOWN).when(leader).getState();
+
+    // Tick 1: retryFailedGeneratorCreations still declines (pendingShutdowns is populated), then
+    // the deferred-activation cleanup drains pendingShutdowns now that the future is done and the
+    // InitialSyncQueue is clean.
+    when(mocks.materializedViewGeneratorFactory.hasQueueEntry(matViewGenId)).thenReturn(false);
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(LeaseManager.FollowerPollResult.EMPTY);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+    assertFalse(
+        "pendingShutdowns should drain once shutdown completed and the queue is clean",
+        mocks.manager.pendingShutdowns.containsKey(matViewGenId));
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(matViewIndexGen);
+
+    // Tick 2: the retry now rebuilds the follower, and the lease becomes acquirable again, so the
+    // rebuilt generator activates. This is the assertion that the failure was fully recoverable.
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId)).thenReturn(true);
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(mocks.materializedViewGeneratorFactory, times(3)).create(matViewIndexGen);
+    assertSame(recovered, mocks.manager.getMatViewGenerator(matViewGenId).orElseThrow());
+    verify(recovered).becomeLeader();
   }
 
   @Test
@@ -2176,6 +3928,54 @@ public class MaterializedViewManagerTest {
         0.0);
   }
 
+  @Test
+  public void dynamicLeader_acquireLease_heartbeatPartialUpdateOff_stillReacquiresWhileLeading() {
+    // The skip is gated on LEASE_HEARTBEAT_PARTIAL_UPDATE: with the flag off, a reacquisition
+    // granted while the prior local generator still leads is usually a benign CLOUDP-397647
+    // OCC self-heal (the lease still names this host unexpired, so no interim leader was
+    // possible), so master's immediate re-acquisition stays — and the tripwire counter keeps
+    // recording it (CLOUDP-437680).
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    doReturn(IndexManager.State.STEADY_STATE).when(generator).getState();
+    doReturn(true).when(generator).isLeader();
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(matViewGenId, IndexStatus.unknown()), Set.of(matViewGenId)));
+    when(mocks.leaseManager.tryAcquireLeadership(matViewGenId)).thenReturn(true);
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.LEASE_HEARTBEAT_PARTIAL_UPDATE))
+        .thenReturn(false);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    verify(mocks.leaseManager).tryAcquireLeadership(matViewGenId);
+    verify(generator).becomeLeader();
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(MaterializedViewManager.UNSAFE_LEADERSHIP_REACQUISITION_COUNTER_NAME)
+            .count(),
+        0.0);
+    // The last-event timestamp gauge must advance alongside the counter (CLOUDP-451834).
+    var lastEventSeconds =
+        mocks
+            .meterRegistry
+            .get(MaterializedViewManager.UNSAFE_LEADERSHIP_REACQUISITION_LAST_EVENT_GAUGE_NAME)
+            .gauge()
+            .value();
+    assertTrue(
+        "gauge should record an epoch-seconds timestamp near now",
+        Math.abs(lastEventSeconds - System.currentTimeMillis() / 1000.0) < 60.0);
+  }
+
   // ==================== Stale generator guard in refreshStatus ====================
 
   @Test
@@ -2242,6 +4042,105 @@ public class MaterializedViewManagerTest {
     verify(mocks.leaseManager).releaseLeadership(matViewGenId);
   }
 
+  @Test
+  public void dynamicLeader_fencingRejection_retiresAndReplacesStaleGenerator() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator staleGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    MaterializedViewGenerator replacementGenerator =
+        mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    Mockito.clearInvocations(mocks.leaseManager, mocks.materializedViewGeneratorFactory);
+
+    mocks.manager.handleFencingRejection(staleGenerator);
+
+    verify(mocks.leaseManager).releaseLeadership(matViewIndexGen.getGenerationId());
+    verify(staleGenerator).shutdown();
+    verify(mocks.materializedViewGeneratorFactory).create(matViewIndexGen);
+    // shutdown() ends the tenure atomically with the SHUT_DOWN transition (see
+    // MaterializedViewGenerator#shutdown()), so it must happen before the slower factory.create()
+    // call, not after: that's what stops the fenced generator from committing under its obsolete
+    // token instead of only once the async drain eventually catches up.
+    InOrder inOrder = Mockito.inOrder(staleGenerator, mocks.materializedViewGeneratorFactory);
+    inOrder.verify(staleGenerator).shutdown();
+    inOrder.verify(mocks.materializedViewGeneratorFactory).create(matViewIndexGen);
+    assertSame(
+        replacementGenerator,
+        mocks.manager.getMatViewGenerator(matViewIndexGen.getGenerationId()).orElseThrow());
+  }
+
+  @Test
+  public void dynamicLeader_fencingRejection_metadataAlreadyRemoved_doesNotThrow() {
+    // handleFencingRejection() runs asynchronously on lifecycleExecutor, so a concurrent
+    // dropIndex() can remove this generation's metadata before it runs. getCollectionUuid()
+    // checkState-throws when metadata is absent, which would otherwise escape uncaught from the
+    // executor and halt the process; must bail out via a null-safe lookup instead.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator staleGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    when(mocks.metadataCatalog.getMetadataIfPresent(matViewIndexGen.getGenerationId()))
+        .thenReturn(Optional.empty());
+    Mockito.clearInvocations(mocks.leaseManager, mocks.materializedViewGeneratorFactory);
+
+    mocks.manager.handleFencingRejection(staleGenerator);
+
+    verify(mocks.leaseManager, never()).releaseLeadership(any());
+    verify(mocks.materializedViewGeneratorFactory, never()).create(any());
+  }
+
+  @Test
+  public void dynamicLeader_fencingRejection_afterManagerShutdown_doesNotInstallGenerator() {
+    // A fencing rejection queued before shutdown() but executed after it must not install a new
+    // generator: shutdown() snapshots the generator map without clearing it (or setting any other
+    // flag this previously checked), so a generator installed afterward would never be shut down.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator staleGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    Mockito.clearInvocations(mocks.leaseManager, mocks.materializedViewGeneratorFactory);
+
+    mocks.manager.shutdown();
+    mocks.manager.handleFencingRejection(staleGenerator);
+
+    verify(mocks.leaseManager, never()).releaseLeadership(any());
+    verify(mocks.materializedViewGeneratorFactory, never()).create(any());
+  }
+
+  @Test
+  public void scheduleFencingRejection_lifecycleExecutorAlreadyShutDown_doesNotThrow() {
+    // The manager's own shutdown() stops lifecycleExecutor before it gets to shutting down this
+    // generator; a fencing rejection reported concurrently must not let the resulting
+    // RejectedExecutionException escape uncaught (crash risk) -- shutdown() shuts down every
+    // managed generator regardless, so there is nothing left here to retire.
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator staleGenerator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+    doThrow(new RejectedExecutionException()).when(mocks.executorService).execute(any());
+
+    mocks.manager.scheduleFencingRejection(staleGenerator);
+  }
+
+  @Test
+  public void staticLeader_fencingRejection_generatorHasNoRetireHandler() {
+    // StaticLeaderLeaseManager's releaseLeadership()/tryAcquireLeadership() are no-ops, so a
+    // static-leader generator retired as a follower would never be reactivated. Static-leader
+    // generators must therefore keep resyncing in place instead of being wired up for retirement.
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    verify(generator, never()).setFencingRejectionHandler(any());
+  }
+
   // ==================== Zombie lease detection — state-based =====================================
   //
   // On the async failAndDropIndex path, MaterializedViewGenerator.isLeader stays true even
@@ -2293,7 +4192,10 @@ public class MaterializedViewManagerTest {
         .scheduleWithFixedDelay(heartbeatCaptor.capture(), anyLong(), anyLong(), any());
     heartbeatCaptor.getValue().run();
 
-    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+    InOrder demotionOrder = Mockito.inOrder(mocks.leaseManager, generator);
+    demotionOrder.verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+    demotionOrder.verify(generator).clearLeaderState();
+    demotionOrder.verify(mocks.leaseManager).heartbeat();
   }
 
   @Test
@@ -2699,6 +4601,41 @@ public class MaterializedViewManagerTest {
   }
 
   @Test
+  public void refreshStatus_deferredLeadershipActivationFails_releasesLeadership() {
+    // If becomeLeader() throws (e.g. the tenure indexer rejects an invalid lease), the generator's
+    // isLeader flag is never set, but the lease manager still shows this generation as owned. If
+    // nothing released it, the generation would be stuck forever: refreshStatus only attempts
+    // acquisition for generations the lease manager reports as acquirable, and an already-owned
+    // generation never appears there.
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    MaterializedViewIndexGeneration matViewIndexGen =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerator generator = mocks.mockMaterializedViewGenerator(matViewIndexGen);
+    mocks.addIndexForReplication(matViewIndexGen);
+
+    MaterializedViewGenerationId matViewGenId = matViewIndexGen.getGenerationId();
+
+    mocks.manager.pendingShutdowns.put(matViewGenId, COMPLETED_FUTURE);
+    when(mocks.materializedViewGeneratorFactory.hasQueueEntry(matViewGenId)).thenReturn(false);
+    when(mocks.leaseManager.isLeader(matViewGenId)).thenReturn(true);
+    doReturn(false).when(generator).isLeader();
+    doThrow(new RuntimeException("beginTenure rejected an invalid lease"))
+        .when(generator)
+        .becomeLeader();
+
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(LeaseManager.FollowerPollResult.EMPTY);
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertFalse(
+        "pendingShutdowns should still be cleared even though activation failed",
+        mocks.manager.pendingShutdowns.containsKey(matViewGenId));
+    verify(mocks.leaseManager).releaseLeadership(matViewGenId);
+  }
+
+  @Test
   public void refreshStatus_skipsDeferredLeadershipWhenQueueDirty() {
     // Same scenario as above, but the queue still has a stale entry from the old generator.
     // refreshStatus should NOT activate leadership and should keep the pendingShutdowns entry.
@@ -2883,6 +4820,8 @@ public class MaterializedViewManagerTest {
 
     // Simulate that we were leader for the old generation.
     when(mocks.leaseManager.isLeader(gen1Id)).thenReturn(true);
+    // Simulate add() retaining leadership for the new generation.
+    when(mocks.leaseManager.isLeader(gen2Id)).thenReturn(true);
 
     mocks.addIndexForReplication(matViewIndexGen2);
 
@@ -2921,6 +4860,35 @@ public class MaterializedViewManagerTest {
         mocks.manager.pendingShutdowns.containsKey(newGenId));
     // becomeLeader should have been called by refreshStatus's deferred activation.
     verify(gen2).becomeLeader();
+  }
+
+  @Test
+  public void replaceGenerator_differentGenId_losesLeadershipDuringShutdown_staysFollower() {
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+
+    var gen1Id = MOCK_MAT_VIEW_GENERATION_ID;
+    var matViewIndexGen1 = mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(gen1Id));
+    when(mocks.leaseManager.isLeader(gen1Id)).thenReturn(true);
+    MaterializedViewGenerator gen1 = mocks.mockMaterializedViewGenerator(matViewIndexGen1);
+    mocks.addIndexForReplication(matViewIndexGen1);
+
+    CompletableFuture<Void> slowShutdownFuture = new CompletableFuture<>();
+    doReturn(slowShutdownFuture).when(gen1).shutdown();
+
+    var gen2Id =
+        new MaterializedViewGenerationId(
+            MOCK_MAT_VIEW_GENERATION_ID.indexId,
+            MOCK_MAT_VIEW_GENERATION_ID.generation.incrementUser());
+    var matViewIndexGen2 = mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(gen2Id, 1));
+    MaterializedViewGenerator gen2 = mocks.mockMaterializedViewGenerator(matViewIndexGen2);
+    when(mocks.leaseManager.isLeader(gen2Id)).thenReturn(false);
+
+    mocks.addIndexForReplication(matViewIndexGen2);
+    slowShutdownFuture.complete(null);
+
+    verify(mocks.leaseManager).drop(gen1Id);
+    verify(mocks.leaseManager).add(matViewIndexGen2, false);
+    verify(gen2, never()).becomeLeader();
   }
 
   @Test
@@ -2963,7 +4931,7 @@ public class MaterializedViewManagerTest {
     // Ensure we are NOT the leader for this generation.
     when(mocks.leaseManager.isLeader(gen1Id)).thenReturn(false);
 
-    // Add gen2 (higher version -> different genId -> replaceGenerator with wasLeader=false).
+    // Add gen2 (higher version -> different genId) while the new generation remains a follower.
     var gen2Id =
         new MaterializedViewGenerationId(
             MOCK_MAT_VIEW_GENERATION_ID.indexId,
@@ -2973,8 +4941,8 @@ public class MaterializedViewManagerTest {
     Mockito.clearInvocations(gen1, gen2);
     mocks.addIndexForReplication(matViewIndexGen2);
 
-    // becomeLeader should NOT have been called on either generator —
-    // we were not leader for the old generation, so leadership should not transfer.
+    // becomeLeader should NOT have been called on either generator because add() left the new
+    // generation as a follower.
     verify(gen1, never()).becomeLeader();
     verify(gen2, never()).becomeLeader();
 
@@ -3086,7 +5054,7 @@ public class MaterializedViewManagerTest {
     assertFalse("Generator should be empty when no metadata exists", result.isPresent());
   }
 
-  // ==================== Dynamic Leader with Unexpired Lease Tests ====================
+  // ==================== Dynamic Leader Restart Tests ====================
 
   @Test
   public void dynamicLeader_restartWithUnexpiredLease_activatesLeadershipImmediately() {
@@ -3108,10 +5076,70 @@ public class MaterializedViewManagerTest {
     verify(materializedViewGenerator).becomeLeader();
   }
 
+  @Test
+  public void dynamicLeader_restartWithExpiredLease_doesNotActivateLeadership() throws Exception {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    MaterializedViewIndexGeneration matViewIndexGeneration =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    MaterializedViewGenerationId generationId = matViewIndexGeneration.getGenerationId();
+
+    AtomicInteger registrations = new AtomicInteger();
+    AtomicBoolean isLeader = new AtomicBoolean();
+    doAnswer(
+            invocation -> {
+              isLeader.set(registrations.getAndIncrement() == 0);
+              return null;
+            })
+        .when(mocks.leaseManager)
+        .add(matViewIndexGeneration, false);
+    when(mocks.leaseManager.isLeader(generationId)).thenAnswer(invocation -> isLeader.get());
+    when(mocks.materializedViewGeneratorFactory.shutdown()).thenReturn(COMPLETED_FUTURE);
+    when(mocks.materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
+
+    MaterializedViewGenerator oldGenerator =
+        mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    mocks.addIndexForReplication(matViewIndexGeneration);
+    verify(oldGenerator).becomeLeader();
+
+    mocks.manager.shutdownReplication().get(5, TimeUnit.SECONDS);
+
+    MaterializedViewGenerator restartedGenerator =
+        mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    mocks.manager.restartReplication();
+
+    verify(mocks.leaseManager, times(2)).add(matViewIndexGeneration, false);
+    verify(mocks.materializedViewGeneratorFactory, times(2)).create(matViewIndexGeneration);
+    assertSame(restartedGenerator, mocks.manager.getMatViewGenerator(generationId).orElseThrow());
+    verify(restartedGenerator, never()).becomeLeader();
+    assertFalse(restartedGenerator.isLeader());
+  }
+
   // ==================== Stale-Lease GC Scanner Tests ====================
+
+  // A lease expired this long ago is past the GC delete grace the manager uses. Derived from the
+  // same config default the manager reads, so cleanup tests stay correct if that
+  // default changes.
+  private static final Duration PAST_DELETE_GRACE =
+      Duration.ofMillis(
+              AutoEmbeddingMaterializedViewConfig.getDefault().staleLeaseDeleteGracePeriodMs)
+          .plus(Duration.ofHours(1));
 
   private static Lease leaseWithExpiration(
       String leaseKey, Instant leaseExpiration, Lease.CleanupState cleanupState) {
+    return leaseWithExpiration(leaseKey, leaseExpiration, cleanupState, UUID.randomUUID());
+  }
+
+  private static Lease leaseWithExpiration(
+      String leaseKey, Instant leaseExpiration, Lease.CleanupState cleanupState, UUID matViewUuid) {
+    return leaseWithExpiration(leaseKey, leaseExpiration, cleanupState, matViewUuid, "0");
+  }
+
+  private static Lease leaseWithExpiration(
+      String leaseKey,
+      Instant leaseExpiration,
+      Lease.CleanupState cleanupState,
+      UUID matViewUuid,
+      String latestIndexDefinitionVersion) {
     return new Lease(
         leaseKey,
         Lease.SCHEMA_VERSION,
@@ -3121,45 +5149,592 @@ public class MaterializedViewManagerTest {
         leaseExpiration,
         1L,
         "",
-        "0",
+        latestIndexDefinitionVersion,
         Map.of(),
         new MaterializedViewCollectionMetadata(
             new MaterializedViewCollectionMetadata.MaterializedViewSchemaMetadata(0, Map.of()),
-            UUID.randomUUID(),
+            matViewUuid,
             leaseKey),
         null,
-        cleanupState);
+        cleanupState,
+        0L);
+  }
+
+  /**
+   * A fresh, higher-version lease of the same index as {@code superseded}. The sweep derives the
+   * never-mark-current set from the scan itself, so a stale lease is only markable if the scan also
+   * holds a newer sibling of its index — without one, it is its index's current version and is
+   * protected. The sibling carries a v1-format name ({@code "<indexId>-<hash>-1-<aeVersion>"}), so
+   * {@link Lease#indexId()} groups it with the (v0-named, dash-free) superseded lease.
+   */
+  private static Lease currentVersionSiblingOf(Lease superseded) {
+    return leaseWithExpiration(
+        superseded.indexId() + "-h2-1-1",
+        Instant.now().plus(Duration.ofMinutes(5)),
+        Lease.CleanupState.NOT_ELIGIBLE,
+        UUID.randomUUID(),
+        "1");
   }
 
   @Test
-  public void scanStaleLeases_disabledByDefault_threadNotScheduled() {
+  public void scanStaleLeases_threadAlwaysScheduled() {
     Mocks mocks = Mocks.create();
 
-    // The GC scanner thread is gated off (STALE_LEASE_SCAN_ENABLED = false): the periodic scan task
-    // is never scheduled on its executor, so no background thread is created.
-    verify(mocks.staleLeaseScannerExecutor, never())
+    // The GC scanner thread is always scheduled; the MV_GC_ENABLED dynamic flag gates the work per
+    // tick (not the scheduling), so cleanup can be toggled at runtime without a restart.
+    verify(mocks.staleLeaseScannerExecutor)
         .scheduleWithFixedDelay(any(), anyLong(), anyLong(), any());
+  }
+
+  @Test
+  public void scanStaleLeases_flagDisabled_doesNothing() {
+    Mocks mocks = Mocks.create();
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_ENABLED))
+        .thenReturn(false);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Flag off: the sweep short-circuits before it ever queries for candidates.
+    verify(mocks.leaseManager, never()).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_emptyLeaseTable_goesIdleUntilIndexAdded() {
+    Mocks mocks = Mocks.create();
+    // A cluster that has never created an auto-embedding index: the scan succeeds and finds
+    // nothing, so the sweep has no reason to keep querying the source mongod. Once an index exists
+    // its lease shows up on the next scan.
+    Lease lease =
+        leaseWithExpiration(
+            "new-index", Instant.now().plus(Duration.ofHours(1)), Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true))
+        .thenReturn(new LeaseManager.GcScanResult(List.of(lease), true));
+    assertEquals(0.0, idleGaugeValue(mocks), 0.0);
+
+    for (int tick = 0; tick < 20; tick++) {
+      mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    }
+
+    // One scan, then idle for as long as the process runs.
+    verify(mocks.leaseManager, times(1)).findGcCandidates();
+    assertEquals(1.0, idleGaugeValue(mocks), 0.0);
+
+    // An index arrives: the next tick leaves idle and scans.
+    mocks.manager.add(mockAutoEmbeddingIndexGeneration(mocks));
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+    assertEquals(0.0, idleGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_incompleteScan_doesNotGoIdle() {
+    Mocks mocks = Mocks.create();
+    // The read failed, so the empty result says nothing about whether leases exist. Going idle
+    // here would stand GC down for the life of the process because of a transient outage.
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), false));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+    assertEquals(0.0, idleGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_leasesPresent_doesNotGoIdle() {
+    Mocks mocks = Mocks.create();
+    Lease lease =
+        leaseWithExpiration(
+            "live", Instant.now().plus(Duration.ofHours(1)), Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(lease), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Any lease at all keeps the sweep scanning, even one that is not a cleanup candidate.
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_corruptedDocumentsOnly_doesNotGoIdle() {
+    Mocks mocks = Mocks.create();
+    // The table holds documents that failed to parse: no leases came back, but the table is not
+    // empty. Going idle would stop re-counting the corrupted documents and silence that alert.
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true, true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+    assertEquals(0.0, idleGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_flagDisabledWhileIdle_staysIdleWhenReEnabled() {
+    Mocks mocks = Mocks.create();
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(1)).findGcCandidates();
+
+    // Toggling the GC flag is not a reason to re-read an empty table; only an index is.
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_ENABLED))
+        .thenReturn(false);
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_ENABLED))
+        .thenReturn(true);
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, times(1)).findGcCandidates();
+    assertEquals(1.0, idleGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_indexAddedWhileIdle_scansOnNextTick() {
+    Mocks mocks = Mocks.create();
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
+
+    // Empty sweep goes idle.
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(1)).findGcCandidates();
+
+    // The cluster's first auto-embedding index arrives. The lease table is no longer empty, so the
+    // next tick must scan again.
+    MaterializedViewIndexGeneration matViewIndexGeneration =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    AutoEmbeddingIndexGeneration autoEmbeddingIndexGeneration =
+        mock(AutoEmbeddingIndexGeneration.class);
+    when(autoEmbeddingIndexGeneration.getMaterializedViewIndexGeneration())
+        .thenReturn(matViewIndexGeneration);
+    when(autoEmbeddingIndexGeneration.getGenerationId())
+        .thenReturn(matViewIndexGeneration.getGenerationId());
+    mocks.manager.add(autoEmbeddingIndexGeneration);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_indexAddedDuringScan_doesNotGoIdle() {
+    Mocks mocks = Mocks.create();
+    MaterializedViewIndexGeneration matViewIndexGeneration =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    AutoEmbeddingIndexGeneration autoEmbeddingIndexGeneration =
+        mock(AutoEmbeddingIndexGeneration.class);
+    when(autoEmbeddingIndexGeneration.getMaterializedViewIndexGeneration())
+        .thenReturn(matViewIndexGeneration);
+    when(autoEmbeddingIndexGeneration.getGenerationId())
+        .thenReturn(matViewIndexGeneration.getGenerationId());
+    // The race: the scan reads an empty lease table, and add() lands before the sweep acts on
+    // that result. The index is cataloged, so the empty read must not send the sweep idle.
+    when(mocks.leaseManager.findGcCandidates())
+        .thenAnswer(
+            invocation -> {
+              mocks.manager.add(autoEmbeddingIndexGeneration);
+              return new LeaseManager.GcScanResult(List.of(), true);
+            })
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_indexConfiguredButLeaseNotYetWritten_doesNotGoIdle() {
+    Mocks mocks = Mocks.create();
+    // Dynamic leader election writes the lease document on a later acquisition, so right after
+    // add() the table can still read empty. That must not be mistaken for a cluster without
+    // auto-embedding: the lease is coming and will need collecting one day.
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
+    mocks.manager.add(mockAutoEmbeddingIndexGeneration(mocks));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+    assertEquals(0.0, idleGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_indexAddedWhileReplicationDisabled_wakesOnRestart() {
+    Mocks mocks = Mocks.create();
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
+
+    // Empty sweep goes idle.
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(1)).findGcCandidates();
+
+    // An index arrives while replication is disabled: add() only catalogs it, no generator and no
+    // lease registration. GC ticks are off entirely in this state.
+    mocks.manager.setIsReplicationEnabled(false);
+    MaterializedViewIndexGeneration matViewIndexGeneration =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    mocks.addIndexForReplication(matViewIndexGeneration);
+    verify(mocks.leaseManager, never()).add(any(), anyBoolean());
+
+    // restartReplication() builds the buffered generator. The catalog already holds the index, so
+    // the first tick afterwards leaves idle and scans, with no dependency on add() having run
+    // while replication was on.
+    mocks.manager.restartReplication();
+    verify(mocks.leaseManager).add(eq(matViewIndexGeneration), anyBoolean());
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+    assertEquals(0.0, idleGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_overdueGauge_resetsWhenLeaseTableEmpties() {
+    Mocks mocks = Mocks.create();
+    Lease blocked =
+        leaseWithExpiration(
+            "blocked",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(blocked, currentVersionSiblingOf(blocked)), true))
+        .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("blocked"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    doThrow(new RuntimeException("drop failed")).when(collection).drop();
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(1.0, overdueGaugeValue(mocks), 0.0);
+
+    // The blocked lease disappears out from under GC (e.g. removed by hand). The empty scan that
+    // sends the sweep idle must still run to its end and reset the push-based gauge, otherwise the
+    // stale 1 would be held for as long as the sweep stays idle and could page.
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(0.0, overdueGaugeValue(mocks), 0.0);
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    verify(mocks.leaseManager, times(2)).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_flagEvaluationThrows_containedNotPropagated() {
+    Mocks mocks = Mocks.create();
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_ENABLED))
+        .thenThrow(new RuntimeException("transient registry error"));
+
+    // Must not throw: a flag-evaluation failure has to be contained, otherwise VerboseRunnable
+    // rethrows and scheduleWithFixedDelay cancels the scanner for the life of the process.
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Contained before the sweep touched the lease manager; the task keeps ticking next interval.
+    verify(mocks.leaseManager, never()).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_deletionFlagDisabled_marksButDoesNotDelete() {
+    Mocks mocks = Mocks.create();
+    // GC on, deletion off: mark-only mode.
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_DELETION_ENABLED))
+        .thenReturn(false);
+    // A never-marked stale lease (the mark pass should flag it) and an already-marked overdue lease
+    // (the cleanup pass must NOT delete it while deletion is disabled).
+    Lease toMark =
+        leaseWithExpiration(
+            "toMark", Instant.now().minus(Duration.ofHours(1)), Lease.CleanupState.NOT_ELIGIBLE);
+    Lease overdue =
+        leaseWithExpiration(
+            "overdue",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(toMark, currentVersionSiblingOf(toMark), overdue), true));
+    when(mocks.leaseManager.markEligibleForCleanup(eq("toMark"), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Mark pass still runs ...
+    verify(mocks.leaseManager).markEligibleForCleanup(eq("toMark"), any());
+    // ... but nothing is dropped or deleted.
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+    // Deletion deliberately off: the overdue gauge resets to 0 (nothing is blocked).
+    assertEquals(0.0, overdueGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_scannerAliveGauge_tracksDynamicFlag() {
+    Mocks mocks = Mocks.create();
+
+    // Flag on (Mocks default): A is registered at construction and reads 1 (GC running) once the
+    // sweep has run with the flag on.
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .get("replication.mongodb." + MaterializedViewManager.MAT_VIEW_GC_SCANNER_ALIVE_GAUGE)
+            .gauge()
+            .value(),
+        0.0);
+
+    // Control plane turns the flag off: the bound gauge re-evaluates the flag on scrape and drops
+    // to 0 in lockstep — no restart, no re-registration, even though the scanner thread is still
+    // scheduled.
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_ENABLED))
+        .thenReturn(false);
+    assertEquals(
+        0.0,
+        mocks
+            .meterRegistry
+            .get("replication.mongodb." + MaterializedViewManager.MAT_VIEW_GC_SCANNER_ALIVE_GAUGE)
+            .gauge()
+            .value(),
+        0.0);
+  }
+
+  @Test
+  public void generatorStateGauge_readsStateWithoutLock() {
+    Mocks mocks = Mocks.create();
+    var matViewIndexGeneration =
+        mockMatViewIndexGeneration(mockMatViewDefinitionGeneration(MOCK_MAT_VIEW_GENERATION_ID));
+    MaterializedViewGenerator generator =
+        mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    doReturn(IndexManager.State.STEADY_STATE).when(generator).getStateWithoutLock();
+
+    mocks.addIndexForReplication(matViewIndexGeneration);
+
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .get("replication.mongodb." + MaterializedViewManager.MAT_VIEW_MANAGER_STATE)
+            .tag(MaterializedViewManager.STATE_LABEL, IndexManager.State.STEADY_STATE.name())
+            .gauge()
+            .value(),
+        0.0);
+    // verify that the generator doesn't call getState()
+    verify(generator, never()).getState();
+  }
+
+  /** Current value of the matViewGcIdle gauge. */
+  private static double idleGaugeValue(Mocks mocks) {
+    return mocks
+        .meterRegistry
+        .get("replication.mongodb." + StaleLeaseGarbageCollector.MAT_VIEW_GC_IDLE_GAUGE)
+        .gauge()
+        .value();
+  }
+
+  /** A mock auto-embedding generation wired so {@code manager.add} creates a generator for it. */
+  private static AutoEmbeddingIndexGeneration mockAutoEmbeddingIndexGeneration(Mocks mocks) {
+    MaterializedViewIndexGeneration matViewIndexGeneration =
+        mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    mocks.mockMaterializedViewGenerator(matViewIndexGeneration);
+    AutoEmbeddingIndexGeneration autoEmbeddingIndexGeneration =
+        mock(AutoEmbeddingIndexGeneration.class);
+    when(autoEmbeddingIndexGeneration.getMaterializedViewIndexGeneration())
+        .thenReturn(matViewIndexGeneration);
+    when(autoEmbeddingIndexGeneration.getGenerationId())
+        .thenReturn(matViewIndexGeneration.getGenerationId());
+    return autoEmbeddingIndexGeneration;
+  }
+
+  /** Current value of the single aggregate overdue gauge (matViewGcLeasesOverdue). */
+  private static double overdueGaugeValue(Mocks mocks) {
+    return mocks
+        .meterRegistry
+        .get("replication.mongodb." + StaleLeaseGarbageCollector.MAT_VIEW_GC_LEASES_OVERDUE_GAUGE)
+        .gauge()
+        .value();
+  }
+
+  /** Count of the shared matViewCollectionDrop counter for one scenario+outcome tag combination. */
+  private static double collectionDropCount(Mocks mocks, String scenario, String outcome) {
+    return mocks
+        .meterRegistry
+        .counter(
+            "replication.mongodb." + MaterializedViewManager.MAT_VIEW_COLLECTION_DROP_COUNTER_NAME,
+            MaterializedViewManager.DROP_SCENARIO_TAG,
+            scenario,
+            MaterializedViewManager.DROP_OUTCOME_TAG,
+            outcome)
+        .count();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_overdueGauge_countsBlockedNotWithinGrace() {
+    Mocks mocks = Mocks.create();
+    // "blocked": past the delete grace, but its MV drop fails, so the cleanup pass can't delete it.
+    Lease blocked =
+        leaseWithExpiration(
+            "blocked",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    // "within-grace": marked but not yet past the delete grace — not overdue, so not counted.
+    Lease withinGrace =
+        leaseWithExpiration(
+            "within-grace",
+            Instant.now().minus(Duration.ofMinutes(35)),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(blocked, currentVersionSiblingOf(blocked), withinGrace), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("blocked"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    doThrow(new RuntimeException("drop failed")).when(collection).drop();
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Only the blocked overdue lease is counted; the within-grace one isn't overdue, and the count
+    // is a single aggregate (no per-lease series).
+    assertEquals(1.0, overdueGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_overdueGauge_resetsWhenFlagDisabled() {
+    Mocks mocks = Mocks.create();
+    Lease blocked =
+        leaseWithExpiration(
+            "blocked",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(blocked, currentVersionSiblingOf(blocked)), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("blocked"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    doThrow(new RuntimeException("drop failed")).when(collection).drop();
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(1.0, overdueGaugeValue(mocks), 0.0);
+
+    // Control plane disables GC: the sweep early-returns but resets the push-based gauge to 0,
+    // rather than holding the stale 1 while GC is off.
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_ENABLED))
+        .thenReturn(false);
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(0.0, overdueGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_overdueGauge_resetsWhenDeletionFlagDisabled() {
+    Mocks mocks = Mocks.create();
+    // Deletion on, one blocked overdue lease (its MV drop fails): the gauge reads 1.
+    Lease blocked =
+        leaseWithExpiration(
+            "blocked",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(blocked, currentVersionSiblingOf(blocked)), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("blocked"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    doThrow(new RuntimeException("drop failed")).when(collection).drop();
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(1.0, overdueGaugeValue(mocks), 0.0);
+
+    // Deletion turned off (GC stays on, mark-only): the next sweep resets the gauge to 0 even
+    // though the blocked lease is still a candidate.
+    when(mocks.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+            DynamicFeatureFlags.MV_GC_DELETION_ENABLED))
+        .thenReturn(false);
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+    assertEquals(0.0, overdueGaugeValue(mocks), 0.0);
   }
 
   @Test
   public void scanStaleLeases_staleLease_marksEligible() {
     Mocks mocks = Mocks.create();
     Instant longExpired = Instant.now().minus(Duration.ofHours(1));
-    Lease stale =
-        leaseWithExpiration("stale-lease", longExpired, Lease.CleanupState.NOT_ELIGIBLE);
-    when(mocks.leaseManager.findGcCandidates(any())).thenReturn(List.of(stale));
+    Lease stale = leaseWithExpiration("staleLease", longExpired, Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(stale, currentVersionSiblingOf(stale)), true));
     when(mocks.leaseManager.markEligibleForCleanup(any(), any())).thenReturn(true);
 
-    mocks.manager.scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
 
-    // The same cutoff is used for the candidate query and the mark: now minus the grace period.
-    ArgumentCaptor<Instant> queryCutoff = ArgumentCaptor.forClass(Instant.class);
+    // The mark's OCC cutoff is now minus the grace period — the same cutoff that made the lease a
+    // candidate in the sweep's client-side staleness filter.
     ArgumentCaptor<Instant> markCutoff = ArgumentCaptor.forClass(Instant.class);
-    verify(mocks.leaseManager).findGcCandidates(queryCutoff.capture());
-    verify(mocks.leaseManager).markEligibleForCleanup(eq("stale-lease"), markCutoff.capture());
-    assertEquals(queryCutoff.getValue(), markCutoff.getValue());
+    verify(mocks.leaseManager).markEligibleForCleanup(eq("staleLease"), markCutoff.capture());
     assertTrue(markCutoff.getValue().isBefore(Instant.now()));
     assertTrue(markCutoff.getValue().isAfter(longExpired));
+  }
+
+  @Test
+  public void scanStaleLeases_expiredWithinMarkGrace_notACandidate() {
+    Mocks mocks = Mocks.create();
+    // Expired, but more recently than the mark grace — the sweep's staleness filter must leave it
+    // alone. A fresh higher-version sibling is in the scan, so the grace filter (not the
+    // never-mark-current safeguard) is what protects it.
+    Lease recentlyExpired =
+        leaseWithExpiration(
+            "recentLease",
+            Instant.now().minus(Duration.ofMinutes(10)),
+            Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(recentlyExpired, currentVersionSiblingOf(recentlyExpired)), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
   }
 
   @Test
@@ -3170,9 +5745,10 @@ public class MaterializedViewManagerTest {
             "already-marked",
             Instant.now().minus(Duration.ofHours(2)),
             Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
-    when(mocks.leaseManager.findGcCandidates(any())).thenReturn(List.of(alreadyMarked));
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(alreadyMarked), true));
 
-    mocks.manager.scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
 
     verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
   }
@@ -3182,7 +5758,7 @@ public class MaterializedViewManagerTest {
     Mocks mocks = Mocks.create();
     Lease stale =
         leaseWithExpiration(
-            "stale-lease",
+            "staleLease",
             Instant.now().minus(Duration.ofHours(1)),
             Lease.CleanupState.NOT_ELIGIBLE);
     Lease alreadyMarked =
@@ -3190,12 +5766,15 @@ public class MaterializedViewManagerTest {
             "already-marked",
             Instant.now().minus(Duration.ofHours(2)),
             Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
-    when(mocks.leaseManager.findGcCandidates(any())).thenReturn(List.of(stale, alreadyMarked));
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(stale, currentVersionSiblingOf(stale), alreadyMarked), true));
     when(mocks.leaseManager.markEligibleForCleanup(any(), any())).thenReturn(true);
 
-    mocks.manager.scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
 
-    verify(mocks.leaseManager).markEligibleForCleanup(eq("stale-lease"), any());
+    verify(mocks.leaseManager).markEligibleForCleanup(eq("staleLease"), any());
     verify(mocks.leaseManager, never()).markEligibleForCleanup(eq("already-marked"), any());
   }
 
@@ -3204,36 +5783,51 @@ public class MaterializedViewManagerTest {
     Mocks mocks = Mocks.create();
     Lease throwing =
         leaseWithExpiration(
-            "throwing-lease",
+            "throwingLease",
             Instant.now().minus(Duration.ofHours(1)),
             Lease.CleanupState.NOT_ELIGIBLE);
     Lease second =
         leaseWithExpiration(
-            "second-lease",
+            "secondLease",
             Instant.now().minus(Duration.ofHours(2)),
             Lease.CleanupState.NOT_ELIGIBLE);
-    when(mocks.leaseManager.findGcCandidates(any())).thenReturn(List.of(throwing, second));
-    when(mocks.leaseManager.markEligibleForCleanup(eq("throwing-lease"), any()))
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(
+                    throwing, currentVersionSiblingOf(throwing),
+                    second, currentVersionSiblingOf(second)),
+                true));
+    when(mocks.leaseManager.markEligibleForCleanup(eq("throwingLease"), any()))
         .thenThrow(new RuntimeException("simulated mark failure"));
-    when(mocks.leaseManager.markEligibleForCleanup(eq("second-lease"), any())).thenReturn(true);
+    when(mocks.leaseManager.markEligibleForCleanup(eq("secondLease"), any())).thenReturn(true);
 
-    mocks.manager.scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
 
     // The first lease's failure is contained per-iteration; the sweep still marks the second.
-    verify(mocks.leaseManager).markEligibleForCleanup(eq("second-lease"), any());
+    verify(mocks.leaseManager).markEligibleForCleanup(eq("secondLease"), any());
   }
 
   @Test
   public void scanStaleLeases_scanThrows_isContained() {
     Mocks mocks = Mocks.create();
-    when(mocks.leaseManager.findGcCandidates(any()))
+    when(mocks.leaseManager.findGcCandidates())
         .thenThrow(new RuntimeException("simulated scan failure"));
 
     // Must not propagate: VerboseRunnable rethrows and scheduleWithFixedDelay would cancel the
     // periodic task permanently.
-    mocks.manager.scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
 
     verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+    // matViewGcSweepFailures: the aborted tick is counted — otherwise a persistently failing
+    // sweep is invisible in metrics (scannerAlive stays 1 and the overdue gauge just holds).
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(StaleLeaseGarbageCollector.MAT_VIEW_GC_SWEEP_FAILURE_COUNTER_NAME)
+            .count(),
+        0.0);
   }
 
   @Test
@@ -3243,10 +5837,760 @@ public class MaterializedViewManagerTest {
 
     // The scanner is scheduled unconditionally, so the isReplicationSupported() guard must keep it
     // from touching the lease store when replication is disabled.
-    mocks.manager.scanStaleLeasesForCleanup();
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
 
-    verify(mocks.leaseManager, never()).findGcCandidates(any());
+    verify(mocks.leaseManager, never()).findGcCandidates();
     verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+  }
+
+  // ==================== dropStaleMatViewCollection ====================
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void dropStaleMatViewCollection_resolvedNamespace_dropsCollection() {
+    Mocks mocks = Mocks.create();
+    Instant cutoff = Instant.now();
+    when(mocks.leaseManager.resolveStaleMatViewNamespace("lease-key", 1L, cutoff))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+
+    assertTrue(
+        mocks
+            .manager
+            .staleLeaseGarbageCollector()
+            .dropStaleMatViewCollection("lease-key", 1L, cutoff));
+    verify(collection).drop();
+  }
+
+  @Test
+  public void dropStaleMatViewCollection_notResolved_returnsFalse() {
+    Mocks mocks = Mocks.create();
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(any(), anyLong(), any()))
+        .thenReturn(Optional.empty());
+
+    assertFalse(
+        mocks
+            .manager
+            .staleLeaseGarbageCollector()
+            .dropStaleMatViewCollection("lease-key", 1L, Instant.now()));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void dropStaleMatViewCollection_dropThrows_returnsFalse() {
+    Mocks mocks = Mocks.create();
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(any(), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    doThrow(new RuntimeException("drop failed")).when(collection).drop();
+
+    assertFalse(
+        mocks
+            .manager
+            .staleLeaseGarbageCollector()
+            .dropStaleMatViewCollection("lease-key", 1L, Instant.now()));
+  }
+
+  @Test
+  public void dropStaleMatViewCollection_missingWriterClient_returnsFalse() {
+    Mocks mocks = Mocks.create();
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(any(), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    // Writer client absent: Check.isPresent throws AssertionError, swallowed as a false return.
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.empty());
+
+    assertFalse(
+        mocks
+            .manager
+            .staleLeaseGarbageCollector()
+            .dropStaleMatViewCollection("lease-key", 1L, Instant.now()));
+  }
+
+  // ==================== Cleanup pass (cleaner) ====================
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_markedPastDeleteGrace_dropsCollectionThenLease() {
+    Mocks mocks = Mocks.create();
+    // Marked in an earlier sweep, lapsed far past the delete grace.
+    Lease marked =
+        leaseWithExpiration(
+            "cleanMe",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(marked, currentVersionSiblingOf(marked)), true));
+    // Drive the real StaleLeaseGarbageCollector.dropStaleMatViewCollection: resolve the namespace,
+    // then drop the collection through the writer client.
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("cleanMe"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    when(mocks.leaseManager.deleteStaleLease(eq("cleanMe"), anyLong(), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Collection first, lease second: the lease is the GC source of truth.
+    InOrder inOrder = Mockito.inOrder(collection, mocks.leaseManager);
+    inOrder.verify(collection).drop();
+    inOrder.verify(mocks.leaseManager).deleteStaleLease(eq("cleanMe"), anyLong(), any());
+    // Already-marked leases are not re-marked.
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+    // The namespace resolve (inside the drop) and the OCC delete receive the SAME cutoff, and it
+    // is the delete grace (now − delete grace), not the mark grace — that cutoff drives the
+    // pre-drop re-read veto and the OCC delete filter, the last defenses against cleaning up a
+    // resurrected lease.
+    ArgumentCaptor<Instant> resolveCutoff = ArgumentCaptor.forClass(Instant.class);
+    ArgumentCaptor<Instant> deleteCutoff = ArgumentCaptor.forClass(Instant.class);
+    verify(mocks.leaseManager)
+        .resolveStaleMatViewNamespace(eq("cleanMe"), anyLong(), resolveCutoff.capture());
+    verify(mocks.leaseManager).deleteStaleLease(eq("cleanMe"), anyLong(), deleteCutoff.capture());
+    assertEquals(resolveCutoff.getValue(), deleteCutoff.getValue());
+    Instant expectedDeleteCutoff =
+        Instant.now()
+            .minus(
+                Duration.ofMillis(
+                    AutoEmbeddingMaterializedViewConfig.getDefault()
+                        .staleLeaseDeleteGracePeriodMs));
+    assertTrue(
+        "delete cutoff should be ~now − the delete grace, not the mark grace",
+        Duration.between(deleteCutoff.getValue(), expectedDeleteCutoff).abs().toMinutes() < 5);
+    // The overdue lease was cleaned this sweep, so it is not counted as blocked.
+    assertEquals(0.0, overdueGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_markedThisSweep_notCleanedUpInSameSweep() {
+    Mocks mocks = Mocks.create();
+    // Ancient lease, but NOT_ELIGIBLE in this sweep's snapshot: the mark pass marks it, and the
+    // cleanup pass must wait for a later sweep — mark and cleanup always span two sweeps.
+    Lease stale =
+        leaseWithExpiration(
+            "justMarked", Instant.now().minus(Duration.ofDays(1)), Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(stale, currentVersionSiblingOf(stale)), true));
+    when(mocks.leaseManager.markEligibleForCleanup(eq("justMarked"), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager).markEligibleForCleanup(eq("justMarked"), any());
+    // cleanUpStaleLease returns at the cleanupState check before touching the collection.
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+    // The two-sweep guarantee rests on a single scan per sweep: both passes act on the same
+    // snapshot, so a lease the mark pass just flipped is still NOT_ELIGIBLE to the cleanup pass.
+    // A re-scan here would re-read it as ELIGIBLE and clean it up same-sweep.
+    verify(mocks.leaseManager, times(1)).findGcCandidates();
+  }
+
+  @Test
+  public void scanStaleLeases_markedWithinDeleteGrace_notCleanedUp() {
+    Mocks mocks = Mocks.create();
+    // Past the 30-minute mark grace (so it is a candidate) but not the (much longer) delete grace.
+    Lease marked =
+        leaseWithExpiration(
+            "too-fresh",
+            Instant.now().minus(Duration.ofMinutes(35)),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(marked), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // cleanUpStaleLease returns at the delete-grace check before touching the collection.
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_collectionDropFails_leaseKept() {
+    Mocks mocks = Mocks.create();
+    Lease marked =
+        leaseWithExpiration(
+            "dropFails",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(marked, currentVersionSiblingOf(marked)), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("dropFails"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    doThrow(new RuntimeException("drop failed")).when(collection).drop();
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // dropStaleMatViewCollection swallows the failure and returns false; the lease survives so the
+    // next sweep can rediscover and retry.
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+    // matViewCollectionDrop{scenario=gc, outcome=failure}: the GC drop failure is counted (alert
+    // source for GC blocked on MV deletion).
+    assertEquals(
+        1.0, collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_GC, "failure"), 0.0);
+    assertEquals(
+        0.0, collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_GC, "success"), 0.0);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_collectionDropSucceeds_countsGcSuccess() {
+    Mocks mocks = Mocks.create();
+    Lease marked =
+        leaseWithExpiration(
+            "dropOk",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(marked, currentVersionSiblingOf(marked)), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("dropOk"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    when(mocks.leaseManager.deleteStaleLease(eq("dropOk"), anyLong(), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // The drop (a void no-op on the mock) succeeds, so the lease is deleted.
+    verify(mocks.leaseManager).deleteStaleLease(eq("dropOk"), anyLong(), any());
+    // matViewCollectionDrop{scenario=gc, outcome=success}, and no failure recorded.
+    assertEquals(
+        1.0, collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_GC, "success"), 0.0);
+    assertEquals(
+        0.0, collectionDropCount(mocks, MaterializedViewManager.DROP_SCENARIO_GC, "failure"), 0.0);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_cleanupThrows_continuesToNextLease() {
+    Mocks mocks = Mocks.create();
+    Lease throwing =
+        leaseWithExpiration(
+            "throwingCleanup",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    Lease second =
+        leaseWithExpiration(
+            "secondCleanup",
+            Instant.now().minus(PAST_DELETE_GRACE.plusHours(1)),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(
+                List.of(
+                    throwing, currentVersionSiblingOf(throwing),
+                    second, currentVersionSiblingOf(second)),
+                true));
+    // The first lease's cleanup blows up (resolve runs before the drop's try/catch, so it
+    // propagates); the per-lease catch must contain it and move on.
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("throwingCleanup"), anyLong(), any()))
+        .thenThrow(new RuntimeException("simulated cleanup failure"));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("secondCleanup"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    when(mocks.leaseManager.deleteStaleLease(eq("secondCleanup"), anyLong(), any()))
+        .thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // The first lease's failure is contained per-iteration; the second is still cleaned up.
+    verify(mocks.leaseManager).deleteStaleLease(eq("secondCleanup"), anyLong(), any());
+  }
+
+  @Test
+  public void scanStaleLeases_matViewUsedByLocalGeneration_notMarked() {
+    Mocks mocks = Mocks.create();
+    UUID matViewUuid = UUID.randomUUID();
+    Lease inUse =
+        leaseWithExpiration(
+            "inUse",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.NOT_ELIGIBLE,
+            matViewUuid);
+    // A fresh higher-version sibling keeps the never-mark-current safeguard out of the way; the
+    // in-use guard is what must protect this lease.
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(inUse, currentVersionSiblingOf(inUse)), true));
+    // A local generation still reads this collection, so this mongot still needs it — the mark-time
+    // safeguard must skip it even though its heartbeat has gone stale.
+    synchronized (mocks.manager) {
+      mocks.manager.activeGenerationIdCatalog.genIdByMatViewCollection.put(matViewUuid, Set.of());
+    }
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Never marked, so it never reaches the OCC-guarded cleanup phase either.
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(eq("inUse"), any());
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+    // matViewGcLeaseInUseRefusals: the refusal is counted — a non-zero value warrants
+    // investigation.
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(StaleLeaseGarbageCollector.MAT_VIEW_GC_LEASE_IN_USE_REFUSAL_COUNTER_NAME)
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_matViewUsedByLocalGenerationAtDeleteTime_notDeleted() {
+    Mocks mocks = Mocks.create();
+    UUID matViewUuid = UUID.randomUUID();
+    // Already marked (by some other mongot) and past the delete grace, so it reaches the cleanup
+    // pass — but a local generation on THIS mongot still reads its MV. GC is leaderless, so the
+    // marking mongot and the deleting mongot can differ; the in-use guard must re-run at delete
+    // time because a local reader never bumps the lease version for OCC to catch. The fresh
+    // higher-version sibling keeps the never-touch-current safeguard out of the way.
+    Lease inUse =
+        leaseWithExpiration(
+            "inUseAtDelete",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP,
+            matViewUuid);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(inUse, currentVersionSiblingOf(inUse)), true));
+    synchronized (mocks.manager) {
+      mocks.manager.activeGenerationIdCatalog.genIdByMatViewCollection.put(matViewUuid, Set.of());
+    }
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // The destructive drop/delete is refused before touching the collection or the lease.
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+    // matViewGcLeaseInUseRefusals: the delete-time refusal is counted, same as the mark-time one.
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(StaleLeaseGarbageCollector.MAT_VIEW_GC_LEASE_IN_USE_REFUSAL_COUNTER_NAME)
+            .count(),
+        0.0);
+    // Overdue but refused, so it counts as blocked (not cleaned this sweep).
+    assertEquals(1.0, overdueGaugeValue(mocks), 0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_markedCurrentVersionLease_notDeleted() {
+    Mocks mocks = Mocks.create();
+    // Marked and long past the delete grace, but it is its index's current (highest) version:
+    // the mark didn't come from this code's mark pass (older build, manual edit), or its siblings
+    // were deleted after it was marked. The cleanup pass must re-apply the never-touch-current
+    // safeguard rather than trust the mark.
+    Lease markedCurrent =
+        leaseWithExpiration(
+            "markedCurrent",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(markedCurrent), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // Refused before touching the collection or the lease.
+    verify(mocks.leaseManager, never()).resolveStaleMatViewNamespace(any(), anyLong(), any());
+    verify(mocks.leaseManager, never()).deleteStaleLease(any(), anyLong(), any());
+    // Overdue but refused: counted as blocked so the anomalous marked-current state is visible.
+    assertEquals(1.0, overdueGaugeValue(mocks), 0.0);
+    // matViewGcMarkedCurrentRefusals: the refusal is counted — recurring refusals mean some
+    // writer violated the never-mark-current rule and are alertable.
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(StaleLeaseGarbageCollector.MAT_VIEW_GC_MARKED_CURRENT_REFUSAL_COUNTER_NAME)
+            .count(),
+        0.0);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_dropSucceedsButLeaseDeleteMisses_noErrorAndMovesOn() {
+    Mocks mocks = Mocks.create();
+    // Marked + past the delete grace, so the collection is dropped — but the OCC lease delete
+    // misses: the lease was reused/renewed in the drop→delete window, so it no longer matches
+    // (cleanupState == ELIGIBLE_FOR_CLEANUP && expired). deleteStaleLease returns false. The
+    // cleaner must simply move on — no throw, no retry, no re-mark. A later sweep won't re-clean
+    // it either: a reused lease's expiration is now in the future, so it is no longer a candidate.
+    Lease marked =
+        leaseWithExpiration(
+            "deleteMisses",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(marked, currentVersionSiblingOf(marked)), true));
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq("deleteMisses"), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    // Collection drop succeeds; the OCC lease delete misses.
+    when(mocks.leaseManager.deleteStaleLease(eq("deleteMisses"), anyLong(), any()))
+        .thenReturn(false);
+
+    // Must not throw.
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // The collection was dropped and the delete was attempted exactly once; the cleaner then moves
+    // on without re-marking or retrying.
+    verify(collection).drop();
+    verify(mocks.leaseManager).deleteStaleLease(eq("deleteMisses"), anyLong(), any());
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+  }
+
+  @Test
+  public void scanStaleLeases_currentVersionLease_notMarked() {
+    Mocks mocks = Mocks.create();
+    // Both leases of index "idxA" are stale (e.g. a fleet-wide outage), but one holds the higher
+    // definition version. The sweep derives the never-mark set from the scan itself, so it must
+    // recognize the higher-version lease as current and mark only the superseded one.
+    Instant longExpired = Instant.now().minus(Duration.ofHours(1));
+    Lease currentVersion =
+        leaseWithExpiration(
+            "idxA-h2-1-1", longExpired, Lease.CleanupState.NOT_ELIGIBLE, UUID.randomUUID(), "1");
+    Lease supersededVersion =
+        leaseWithExpiration(
+            "idxA-h1-1-0", longExpired, Lease.CleanupState.NOT_ELIGIBLE, UUID.randomUUID(), "0");
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(
+            new LeaseManager.GcScanResult(List.of(currentVersion, supersededVersion), true));
+    when(mocks.leaseManager.markEligibleForCleanup(any(), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    // The current version is protected; only the superseded lease is marked.
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(eq("idxA-h2-1-1"), any());
+    verify(mocks.leaseManager).markEligibleForCleanup(eq("idxA-h1-1-0"), any());
+  }
+
+  @Test
+  public void scanStaleLeases_soleLeaseOfIndex_neverMarked() {
+    Mocks mocks = Mocks.create();
+    // A stale lease with no higher-version sibling in the scan is its index's current version and
+    // must never be marked. This is also what makes a partial scan (a failed database dropping
+    // leases from the result) safe: marking requires a present higher-version sibling, so a
+    // missing lease can only leave its siblings protected like this one, never expose them.
+    Lease sole =
+        leaseWithExpiration(
+            "soleLease", Instant.now().minus(Duration.ofHours(1)), Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(sole), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+  }
+
+  @Test
+  public void scanStaleLeases_deletedIndex_soleLeaseMarked() {
+    Mocks mocks = Mocks.create();
+    // The index is gone from the config: its highest-version (here: sole) lease is no longer a
+    // current version to protect, or nothing would ever clean it up.
+    ObjectId deletedIndexId = new ObjectId();
+    Lease lastLease =
+        leaseWithExpiration(
+            deletedIndexId.toHexString() + "-h1-1-0",
+            Instant.now().minus(Duration.ofHours(1)),
+            Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(lastLease), true));
+    when(mocks.indexCatalog.getIndexById(deletedIndexId)).thenReturn(Optional.empty());
+    when(mocks.leaseManager.markEligibleForCleanup(any(), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager).markEligibleForCleanup(eq(lastLease.id()), any());
+    // matViewGcDeletedIndexLeases: the unprotected deleted-index lease is counted.
+    assertEquals(
+        1.0,
+        mocks
+            .meterRegistry
+            .counter(StaleLeaseGarbageCollector.MAT_VIEW_GC_DELETED_INDEX_LEASE_COUNTER_NAME)
+            .count(),
+        0.0);
+  }
+
+  @Test
+  public void scanStaleLeases_configuredIndex_soleLeaseStillProtected() {
+    Mocks mocks = Mocks.create();
+    // Same shape, but the index is still in the config (the Mocks default): the safeguard holds
+    // even though the lease's heartbeat has gone stale.
+    Lease sole =
+        leaseWithExpiration(
+            new ObjectId().toHexString() + "-h1-1-0",
+            Instant.now().minus(Duration.ofHours(1)),
+            Lease.CleanupState.NOT_ELIGIBLE);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(sole), true));
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(mocks.leaseManager, never()).markEligibleForCleanup(any(), any());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void scanStaleLeases_deletedIndex_markedOverdueLeaseCleaned() {
+    Mocks mocks = Mocks.create();
+    // Already marked (e.g. by the deletion drop path after a failed delete) and far past the
+    // delete grace, with no higher-version sibling: the delete-time safeguard re-check must also
+    // recognize the deleted index, or the lease stays refused forever.
+    ObjectId deletedIndexId = new ObjectId();
+    Lease marked =
+        leaseWithExpiration(
+            deletedIndexId.toHexString() + "-h1-1-0",
+            Instant.now().minus(PAST_DELETE_GRACE),
+            Lease.CleanupState.ELIGIBLE_FOR_CLEANUP);
+    when(mocks.leaseManager.findGcCandidates())
+        .thenReturn(new LeaseManager.GcScanResult(List.of(marked), true));
+    when(mocks.indexCatalog.getIndexById(deletedIndexId)).thenReturn(Optional.empty());
+    when(mocks.leaseManager.resolveStaleMatViewNamespace(eq(marked.id()), anyLong(), any()))
+        .thenReturn(Optional.of(new MongoNamespace("test-db", "mv-collection")));
+    MongoClient writerClient = mock(MongoClient.class);
+    MongoDatabase database = mock(MongoDatabase.class);
+    MongoCollection<Document> collection = mock(MongoCollection.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+        .thenReturn(Optional.of(writerClient));
+    when(writerClient.getDatabase("test-db")).thenReturn(database);
+    when(database.getCollection("mv-collection")).thenReturn(collection);
+    when(mocks.leaseManager.deleteStaleLease(eq(marked.id()), anyLong(), any())).thenReturn(true);
+
+    mocks.manager.staleLeaseGarbageCollector().scanStaleLeasesForCleanup();
+
+    verify(collection).drop();
+    verify(mocks.leaseManager).deleteStaleLease(eq(marked.id()), anyLong(), any());
+  }
+
+  @Test
+  public void firstScanDelay_isAtLeastMarkGracePeriod() {
+    // The first GC sweep is deferred past a just-restarted mongot's
+    // replication/lease-renewal resume. With defaults, mark grace (30m) > scan interval (5m), so
+    // the initial delay is a full mark grace; the scan interval is the floor.
+    AutoEmbeddingMaterializedViewConfig config = AutoEmbeddingMaterializedViewConfig.getDefault();
+    assertEquals(
+        config.staleLeaseMarkGracePeriodMs, StaleLeaseGarbageCollector.firstScanDelayMs(config));
+    assertTrue(
+        StaleLeaseGarbageCollector.firstScanDelayMs(config) >= config.staleLeaseScanIntervalMs);
+  }
+
+  @Test
+  public void updateMaxReplicationOpTime_leadershipLossDuringUpdate_usesFollowerPollOptime()
+      throws Exception {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    var indexGeneration = mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    var metricsUpdater = mock(IndexMetricsUpdater.class);
+    var indexingMetricsUpdater = mock(IndexMetricsUpdater.IndexingMetricsUpdater.class);
+    var opTimeInfo = new ReplicationOpTimeInfo();
+    when(indexGeneration.getIndex().getMetricsUpdater()).thenReturn(metricsUpdater);
+    when(metricsUpdater.getIndexingMetricsUpdater()).thenReturn(indexingMetricsUpdater);
+    when(indexingMetricsUpdater.getReplicationOpTimeInfo()).thenReturn(opTimeInfo);
+
+    var generator = mocks.mockMaterializedViewGenerator(indexGeneration);
+    mocks.addIndexForReplication(indexGeneration);
+    assertTrue(generator.isLeader());
+
+    BsonTimestamp oldReplicationOpTime = new BsonTimestamp(100, 1);
+    BsonTimestamp oldMaxOpTime = new BsonTimestamp(120, 1);
+    BsonTimestamp followerReplicationOpTime = new BsonTimestamp(150, 1);
+    BsonTimestamp newMaxOpTime = new BsonTimestamp(200, 1);
+    opTimeInfo.update(oldReplicationOpTime.getValue(), oldMaxOpTime.getValue());
+
+    MongoClient mongoClient = mock(MongoClient.class);
+    MongoDatabase adminDatabase = mock(MongoDatabase.class);
+    when(mocks.autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient())
+        .thenReturn(Optional.of(mongoClient));
+    when(mongoClient.getDatabase("admin")).thenReturn(adminDatabase);
+    CountDownLatch optimeReadStarted = new CountDownLatch(1);
+    CountDownLatch finishOptimeRead = new CountDownLatch(1);
+    when(adminDatabase.runCommand(any(Bson.class), eq(BsonDocument.class)))
+        .thenAnswer(
+            invocation -> {
+              optimeReadStarted.countDown();
+              assertTrue(finishOptimeRead.await(5, TimeUnit.SECONDS));
+              return replSetStatus(newMaxOpTime);
+            });
+
+    CompletableFuture<Void> optimeUpdate =
+        CompletableFuture.runAsync(mocks.manager.statusUpdater()::updateMaxReplicationOpTime);
+    assertTrue(optimeReadStarted.await(5, TimeUnit.SECONDS));
+    try {
+      when(mocks.leaseManager.isLeader(indexGeneration.getGenerationId())).thenReturn(false);
+      doReturn(false).when(generator).isLeader();
+      when(mocks.leaseManager.pollFollowerStatuses())
+          .thenReturn(
+              new LeaseManager.FollowerPollResult(
+                  Map.of(indexGeneration.getGenerationId(), IndexStatus.steady()),
+                  Map.of(indexGeneration.getGenerationId(), followerReplicationOpTime),
+                  Set.of()));
+
+      mocks.runnableCaptor.orElseThrow().getValue().run();
+
+      assertEquals(
+          followerReplicationOpTime.getValue(), opTimeInfo.snapshotOrThrow().replicationOpTime());
+    } finally {
+      finishOptimeRead.countDown();
+    }
+    optimeUpdate.get(5, TimeUnit.SECONDS);
+
+    assertEquals(
+        followerReplicationOpTime.getValue(), opTimeInfo.snapshotOrThrow().replicationOpTime());
+    assertEquals(
+        newMaxOpTime.getValue(), opTimeInfo.snapshotOrThrow().maxPossibleReplicationOpTime());
+  }
+
+  @Test
+  public void updateMaxReplicationOpTime_nonQueryableFollower_clearsReplicationOpTimeInfo() {
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+    var indexGeneration = mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    var opTimeInfo = ensureReplicationOpTimeInfo(indexGeneration);
+    opTimeInfo.update(new BsonTimestamp(100, 1).getValue(), new BsonTimestamp(120, 1).getValue());
+    mocks.mockMaterializedViewGenerator(indexGeneration);
+    mocks.addIndexForReplication(indexGeneration);
+    var generationId = indexGeneration.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(generationId, IndexStatus.notStarted()), Map.of(), Set.of()));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertTrue(opTimeInfo.snapshot().isPresent());
+
+    mocks.manager.statusUpdater().updateMaxReplicationOpTime();
+
+    assertTrue(opTimeInfo.snapshot().isEmpty());
+  }
+
+  @Test
+  public void updateMaxReplicationOpTime_nonQueryableLeader_clearsReplicationOpTimeInfo() {
+    Mocks mocks = Mocks.createDynamicLeaderWithDynamicLeaseManager();
+    var indexGeneration = mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    var opTimeInfo = ensureReplicationOpTimeInfo(indexGeneration);
+    opTimeInfo.update(new BsonTimestamp(100, 1).getValue(), new BsonTimestamp(120, 1).getValue());
+    var generator = mocks.mockMaterializedViewGenerator(indexGeneration);
+    mocks.addIndexForReplication(indexGeneration);
+    assertTrue(generator.isLeader());
+    indexGeneration.getIndex().setStatus(IndexStatus.notStarted());
+
+    mocks.manager.statusUpdater().updateMaxReplicationOpTime();
+
+    assertTrue(opTimeInfo.snapshot().isEmpty());
+  }
+
+  @Test
+  public void refreshStatus_queryableFollowerWithoutCheckpoint_preservesReplicationOpTimeInfo() {
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+    var indexGeneration = mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    var opTimeInfo = ensureReplicationOpTimeInfo(indexGeneration);
+    BsonTimestamp replicationOpTime = new BsonTimestamp(100, 1);
+    BsonTimestamp maxOpTime = new BsonTimestamp(120, 1);
+    opTimeInfo.update(replicationOpTime.getValue(), maxOpTime.getValue());
+    mocks.mockMaterializedViewGenerator(indexGeneration);
+    mocks.addIndexForReplication(indexGeneration);
+    var generationId = indexGeneration.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(generationId, IndexStatus.steady()), Map.of(), Set.of()));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertEquals(replicationOpTime.getValue(), opTimeInfo.snapshotOrThrow().replicationOpTime());
+    assertEquals(maxOpTime.getValue(), opTimeInfo.snapshotOrThrow().maxPossibleReplicationOpTime());
+  }
+
+  @Test
+  public void refreshStatus_queryableFollowerWithoutCheckpoint_leavesReplicationOpTimeInfoUnset() {
+    Mocks mocks = Mocks.createDynamicFollowerWithAcquirableLeases();
+    var indexGeneration = mockMatViewIndexGeneration(MOCK_INDEX_DEFINITION_GENERATION);
+    var opTimeInfo = ensureReplicationOpTimeInfo(indexGeneration);
+    mocks.mockMaterializedViewGenerator(indexGeneration);
+    mocks.addIndexForReplication(indexGeneration);
+    var generationId = indexGeneration.getGenerationId();
+    when(mocks.leaseManager.pollFollowerStatuses())
+        .thenReturn(
+            new LeaseManager.FollowerPollResult(
+                Map.of(generationId, IndexStatus.steady()), Map.of(), Set.of()));
+
+    mocks.runnableCaptor.orElseThrow().getValue().run();
+
+    assertTrue(opTimeInfo.snapshot().isEmpty());
+  }
+
+  private static ReplicationOpTimeInfo ensureReplicationOpTimeInfo(
+      MaterializedViewIndexGeneration indexGeneration) {
+    var matViewIndex = indexGeneration.getIndex();
+    if (matViewIndex.getMetricsUpdater() != null) {
+      return matViewIndex
+          .getMetricsUpdater()
+          .getIndexingMetricsUpdater()
+          .getReplicationOpTimeInfo();
+    }
+    var metricsUpdater = mock(IndexMetricsUpdater.class);
+    var indexingMetricsUpdater = mock(IndexMetricsUpdater.IndexingMetricsUpdater.class);
+    var opTimeInfo = new ReplicationOpTimeInfo();
+    when(matViewIndex.getMetricsUpdater()).thenReturn(metricsUpdater);
+    when(metricsUpdater.getIndexingMetricsUpdater()).thenReturn(indexingMetricsUpdater);
+    when(indexingMetricsUpdater.getReplicationOpTimeInfo()).thenReturn(opTimeInfo);
+    return opTimeInfo;
+  }
+
+  private static BsonDocument replSetStatus(BsonTimestamp opTime) {
+    BsonDocument opTimeDocument = new BsonDocument("ts", opTime).append("t", new BsonInt64(1L));
+    return new BsonDocument(
+        "optimes",
+        new BsonDocument()
+            .append("lastCommittedOpTime", opTimeDocument)
+            .append("readConcernMajorityOpTime", opTimeDocument)
+            .append("appliedOpTime", opTimeDocument)
+            .append("durableOpTime", opTimeDocument));
   }
 
   static class Mocks {
@@ -3256,18 +6600,22 @@ public class MaterializedViewManagerTest {
     final Map<String, ClientSessionRecord> clientSessionRecordMap;
     final InitialSyncQueue initialSyncQueue;
     final SteadyStateManager steadyStateManager;
-    final MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory;
+    final MaterializedViewGeneratorFactory materializedViewGeneratorFactory;
     final NamedScheduledExecutorService heartbeatExecutor;
     final Supplier<MaterializedViewManager> managerSupplier;
     final DecodingWorkScheduler decodingScheduler;
     final MeterRegistry meterRegistry;
     final LeaseManager leaseManager;
+    final AutoEmbeddingMongoClient autoEmbeddingMongoClient;
     final NamedScheduledExecutorService statusRefreshExecutor;
     final NamedScheduledExecutorService optimeUpdaterExecutor;
     final IndexStatus expectedStatus; // For follower mode tests
     final Optional<ArgumentCaptor<Runnable>> runnableCaptor; // For follower mode tests
     final MaterializedViewCollectionMetadataCatalog metadataCatalog;
     final NamedScheduledExecutorService staleLeaseScannerExecutor;
+    final DynamicFeatureFlagRegistry dynamicFeatureFlagRegistry;
+    final EmbeddingRetryCache embeddingRetryCache;
+    final IndexCatalog indexCatalog;
 
     MaterializedViewManager manager;
 
@@ -3279,7 +6627,7 @@ public class MaterializedViewManagerTest {
         Map<String, ClientSessionRecord> clientSessionRecordMap,
         InitialSyncQueue initialSyncQueue,
         SteadyStateManager steadyStateManager,
-        MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory,
+        MaterializedViewGeneratorFactory materializedViewGeneratorFactory,
         NamedScheduledExecutorService heartbeatExecutor,
         NamedScheduledExecutorService statusRefreshExecutor,
         NamedScheduledExecutorService optimeUpdaterExecutor,
@@ -3304,6 +6652,27 @@ public class MaterializedViewManagerTest {
       this.leaseManager = leaseManager;
       this.metadataCatalog = metadataCatalog;
       this.staleLeaseScannerExecutor = mockScheduledExecutor("mat-view-stale-lease-scanner");
+      // GC sweep + deletion both enabled by default for these tests; the flag-disabled paths are
+      // covered separately.
+      this.dynamicFeatureFlagRegistry = mock(DynamicFeatureFlagRegistry.class);
+      when(this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+              DynamicFeatureFlags.MV_GC_ENABLED))
+          .thenReturn(true);
+      when(this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+              DynamicFeatureFlags.MV_GC_DELETION_ENABLED))
+          .thenReturn(true);
+      // The reacquisition skip (CLOUDP-437680) is gated on this flag; on by default so the
+      // dynamic-leader tests exercise the gated path, mirroring the post-flip state. The
+      // flag-off behavior (master's reacquisition-while-leading) is covered by its own test.
+      when(this.dynamicFeatureFlagRegistry.evaluateClusterInvariant(
+              DynamicFeatureFlags.LEASE_HEARTBEAT_PARTIAL_UPDATE))
+          .thenReturn(true);
+      this.embeddingRetryCache = mock(EmbeddingRetryCache.class);
+      // Every index is configured by default, so the GC current-version safeguard behaves as
+      // before; deleted-index tests stub specific ids back to empty.
+      this.indexCatalog = mock(IndexCatalog.class);
+      when(this.indexCatalog.getIndexById(any()))
+          .thenReturn(Optional.of(mock(IndexGeneration.class)));
 
       SyncSourceConfig syncSourceConfig =
           SyncSourceConfig.builder()
@@ -3314,11 +6683,14 @@ public class MaterializedViewManagerTest {
               .mongodClusterReadWriteUri(
                   ConnectionStringUtil.toConnectionInfoUnchecked("mongodb://newString"))
               .build();
-      AutoEmbeddingMongoClient autoEmbeddingMongoClient =
-          new AutoEmbeddingMongoClient(
-              Optional.of(syncSourceConfig),
-              new SimpleMeterRegistry(),
-              AutoEmbeddingMaterializedViewConfig.getDefault());
+      AutoEmbeddingMongoClient autoEmbeddingMongoClient = mock(AutoEmbeddingMongoClient.class);
+      when(autoEmbeddingMongoClient.getSyncSourceConfig())
+          .thenReturn(Optional.of(syncSourceConfig));
+      when(autoEmbeddingMongoClient.getMaterializedViewResolverMongoClient())
+          .thenReturn(Optional.empty());
+      when(autoEmbeddingMongoClient.getMaterializedViewWriterMongoClient())
+          .thenReturn(Optional.empty());
+      this.autoEmbeddingMongoClient = autoEmbeddingMongoClient;
 
       this.managerSupplier =
           () ->
@@ -3334,15 +6706,36 @@ public class MaterializedViewManagerTest {
                   this.staleLeaseScannerExecutor,
                   this.meterRegistry,
                   leaseManager,
+                  this.indexCatalog,
                   metadataCatalog,
-                  AutoEmbeddingMaterializedViewConfig.getDefault());
+                  AutoEmbeddingMaterializedViewConfig.getDefault(),
+                  this.dynamicFeatureFlagRegistry,
+                  this.embeddingRetryCache);
       this.manager = this.managerSupplier.get();
       this.manager.setIsReplicationEnabled(true);
+    }
+
+    /**
+     * Returns the source-collection-drop handler the manager wired into the generator factory, i.e.
+     * what a generator's DROPPED handling invokes.
+     */
+    Consumer<MaterializedViewIndexGeneration> onSourceCollectionDropped() {
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<Consumer<MaterializedViewIndexGeneration>> captor =
+          ArgumentCaptor.forClass(Consumer.class);
+      verify(this.materializedViewGeneratorFactory, atLeast(1))
+          .setOnSourceCollectionDropped(captor.capture());
+      return captor.getValue();
     }
 
     public void recreateManager() {
       this.manager = this.managerSupplier.get();
       this.manager.setIsReplicationEnabled(true);
+    }
+
+    /** Removes every index from the mocked IndexCatalog, so drops read as index deletions. */
+    void markIndexDeleted() {
+      when(this.indexCatalog.getIndexById(any())).thenReturn(Optional.empty());
     }
 
     private static Mocks create() {
@@ -3370,8 +6763,8 @@ public class MaterializedViewManagerTest {
 
       com.mongodb.client.MongoClient syncMongoClient = mock(com.mongodb.client.MongoClient.class);
 
-      MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
-          mock(MaterializedViewManager.MaterializedViewGeneratorFactory.class);
+      MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
+          mock(MaterializedViewGeneratorFactory.class);
       when(materializedViewGeneratorFactory.shutdown())
           .thenReturn(CompletableFuture.completedFuture(null));
       when(materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
@@ -3395,7 +6788,13 @@ public class MaterializedViewManagerTest {
       StaticLeaderLeaseManager leaseManager = mock(StaticLeaderLeaseManager.class);
       doNothing().when(leaseManager).drop(any());
       when(leaseManager.dropLease(any(String.class))).thenReturn(COMPLETED_FUTURE);
+      when(leaseManager.cleanupLeaseForDeletedIndex(any(String.class))).thenReturn(true);
+      when(leaseManager.findLeasesForDeletedIndex(any(), any(String.class))).thenReturn(List.of());
       when(leaseManager.isLeader(any())).thenReturn(true);
+      // Default: an empty scan — no candidates, nothing protected. GC tests override this with
+      // their own lease topology.
+      when(leaseManager.findGcCandidates())
+          .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
       // Mock getLeaderGenerationIds to return a non-empty set for heartbeat test
       MaterializedViewGenerationId leaderGenId =
           new MaterializedViewGenerationId(
@@ -3452,8 +6851,8 @@ public class MaterializedViewManagerTest {
 
       com.mongodb.client.MongoClient syncMongoClient = mock(com.mongodb.client.MongoClient.class);
 
-      MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
-          mock(MaterializedViewManager.MaterializedViewGeneratorFactory.class);
+      MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
+          mock(MaterializedViewGeneratorFactory.class);
       when(materializedViewGeneratorFactory.shutdown())
           .thenReturn(CompletableFuture.completedFuture(null));
       when(indexingWorkSchedulerFactory.getIndexingWorkSchedulers()).thenReturn(Map.of());
@@ -3488,7 +6887,13 @@ public class MaterializedViewManagerTest {
       StaticLeaderLeaseManager leaseManager = mock(StaticLeaderLeaseManager.class);
       doNothing().when(leaseManager).drop(any());
       when(leaseManager.dropLease(any(String.class))).thenReturn(COMPLETED_FUTURE);
+      when(leaseManager.cleanupLeaseForDeletedIndex(any(String.class))).thenReturn(true);
+      when(leaseManager.findLeasesForDeletedIndex(any(), any(String.class))).thenReturn(List.of());
       when(leaseManager.isLeader(any())).thenReturn(true);
+      // Default: an empty scan — no candidates, nothing protected. GC tests override this with
+      // their own lease topology.
+      when(leaseManager.findGcCandidates())
+          .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
       // Mock getLeaderGenerationIds to return a non-empty set for heartbeat test
       MaterializedViewGenerationId leaderGenId =
           new MaterializedViewGenerationId(
@@ -3530,6 +6935,9 @@ public class MaterializedViewManagerTest {
       when(mockLeaseManager.isLeader(any())).thenReturn(false);
       doNothing().when(mockLeaseManager).drop(any());
       when(mockLeaseManager.dropLease(any(String.class))).thenReturn(COMPLETED_FUTURE);
+      when(mockLeaseManager.cleanupLeaseForDeletedIndex(any(String.class))).thenReturn(true);
+      when(mockLeaseManager.findLeasesForDeletedIndex(any(), any(String.class)))
+          .thenReturn(List.of());
       // Track added generation IDs to return from getFollowerGenerationIds
       Set<MaterializedViewGenerationId> addedGenerationIds = ConcurrentHashMap.newKeySet();
       doAnswer(
@@ -3567,16 +6975,15 @@ public class MaterializedViewManagerTest {
           .scheduleWithFixedDelay(any(), anyLong(), anyLong(), any());
 
       // Create a mock generator factory that returns a mock generator for any input
-      MaterializedViewManager.MaterializedViewGeneratorFactory mockGeneratorFactory =
-          mock(MaterializedViewManager.MaterializedViewGeneratorFactory.class);
+      MaterializedViewGeneratorFactory mockGeneratorFactory =
+          mock(MaterializedViewGeneratorFactory.class);
       when(mockGeneratorFactory.create(any()))
           .thenAnswer(
               invocation -> {
                 MaterializedViewIndexGeneration matViewIndexGen = invocation.getArgument(0);
                 MaterializedViewGenerator mockGenerator = mock(MaterializedViewGenerator.class);
                 when(mockGenerator.getIndexGeneration()).thenReturn(matViewIndexGen);
-                when(mockGenerator.getState())
-                    .thenReturn(IndexManager.State.INITIAL_SYNC);
+                when(mockGenerator.getState()).thenReturn(IndexManager.State.INITIAL_SYNC);
                 when(mockGenerator.shutdown()).thenReturn(CompletableFuture.completedFuture(null));
                 return mockGenerator;
               });
@@ -3633,14 +7040,18 @@ public class MaterializedViewManagerTest {
         throw new RuntimeException(e);
       }
 
-      MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
-          mock(MaterializedViewManager.MaterializedViewGeneratorFactory.class);
+      MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
+          mock(MaterializedViewGeneratorFactory.class);
 
       NamedScheduledExecutorService heartbeatExecutor =
           mockScheduledExecutor("mat-view-leader-heartbeat");
 
       NamedScheduledExecutorService statusRefreshExecutor =
           mockScheduledExecutor("mat-view-status-refresh");
+      ArgumentCaptor<Runnable> statusRefreshCaptor = ArgumentCaptor.forClass(Runnable.class);
+      doReturn(mock(ScheduledFuture.class))
+          .when(statusRefreshExecutor)
+          .scheduleWithFixedDelay(statusRefreshCaptor.capture(), anyLong(), anyLong(), any());
 
       NamedScheduledExecutorService optimeUpdaterExecutor =
           mockScheduledExecutor("mat-view-optime-updater");
@@ -3654,6 +7065,13 @@ public class MaterializedViewManagerTest {
       LeaseManager mockLeaseManager = mock(leaseManagerType);
       doNothing().when(mockLeaseManager).drop(any());
       when(mockLeaseManager.dropLease(any(String.class))).thenReturn(COMPLETED_FUTURE);
+      when(mockLeaseManager.cleanupLeaseForDeletedIndex(any(String.class))).thenReturn(true);
+      when(mockLeaseManager.findLeasesForDeletedIndex(any(), any(String.class)))
+          .thenReturn(List.of());
+      // Default: an empty scan — no candidates, nothing protected. GC tests override this with
+      // their own lease topology.
+      when(mockLeaseManager.findGcCandidates())
+          .thenReturn(new LeaseManager.GcScanResult(List.of(), true));
 
       // Track added generation IDs and mark them as leaders (simulating unexpired lease)
       Set<GenerationId> leaderGenerationIds = ConcurrentHashMap.newKeySet();
@@ -3684,7 +7102,7 @@ public class MaterializedViewManagerTest {
           optimeUpdaterExecutor,
           mockLeaseManager,
           IndexStatus.unknown(),
-          Optional.empty(),
+          Optional.of(statusRefreshCaptor),
           createMockMetadataCatalog());
     }
 
@@ -3709,8 +7127,8 @@ public class MaterializedViewManagerTest {
       SteadyStateManager steadyStateManager = mock(SteadyStateManager.class);
       when(steadyStateManager.shutdown()).thenReturn(COMPLETED_FUTURE);
 
-      MaterializedViewManager.MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
-          mock(MaterializedViewManager.MaterializedViewGeneratorFactory.class);
+      MaterializedViewGeneratorFactory materializedViewGeneratorFactory =
+          mock(MaterializedViewGeneratorFactory.class);
       when(materializedViewGeneratorFactory.shutdown())
           .thenReturn(CompletableFuture.completedFuture(null));
       when(materializedViewGeneratorFactory.isInitialized()).thenReturn(true);
@@ -3740,6 +7158,9 @@ public class MaterializedViewManagerTest {
       DynamicLeaderLeaseManager mockLeaseManager = mock(DynamicLeaderLeaseManager.class);
       doNothing().when(mockLeaseManager).drop(any());
       when(mockLeaseManager.dropLease(any(String.class))).thenReturn(COMPLETED_FUTURE);
+      when(mockLeaseManager.cleanupLeaseForDeletedIndex(any(String.class))).thenReturn(true);
+      when(mockLeaseManager.findLeasesForDeletedIndex(any(), any(String.class)))
+          .thenReturn(List.of());
       when(mockLeaseManager.isLeader(any())).thenReturn(false);
       when(mockLeaseManager.getLeaderGenerationIds()).thenReturn(Set.of());
 
@@ -3803,7 +7224,8 @@ public class MaterializedViewManagerTest {
                   this.initialSyncQueue,
                   this.steadyStateManager,
                   materializedViewIndexGeneration,
-                  mock(InitializedMaterializedViewIndex.class),
+                  // Same index instance the generation exposes, as the production factory does.
+                  materializedViewIndexGeneration.getIndex(),
                   mock(DocumentIndexer.class),
                   mock(PeriodicIndexCommitter.class),
                   new SimpleMetricsFactory(),
@@ -3811,7 +7233,8 @@ public class MaterializedViewManagerTest {
                   Duration.ofSeconds(1),
                   Duration.ofSeconds(1),
                   Duration.ofSeconds(1),
-                  false));
+                  false,
+                  () -> {}));
       // Mock shutdown() to return a completed future so thenRun() callbacks execute immediately
       doReturn(CompletableFuture.completedFuture(null)).when(materializedViewGenerator).shutdown();
       // Mock becomeLeader() to set isLeader=true without starting real async tasks.
@@ -3849,6 +7272,7 @@ public class MaterializedViewManagerTest {
      */
     private void addIndexForReplicationWithAttempt(
         MaterializedViewIndexGeneration materializedViewindexGeneration, int attemptNumber) {
+      ensureReplicationOpTimeInfo(materializedViewindexGeneration);
       AutoEmbeddingIndexGeneration autoEmbeddingIndexGeneration =
           mock(AutoEmbeddingIndexGeneration.class);
       when(autoEmbeddingIndexGeneration.getMaterializedViewIndexGeneration())
@@ -3923,7 +7347,32 @@ public class MaterializedViewManagerTest {
                 && id.indexId.equals(matViewGenId.indexId)
                 && id.generation.userIndexVersion == matViewGenId.generation.userIndexVersion;
     when(catalog.getMetadata(argThat(sameUserVersion))).thenReturn(metadata);
-    when(catalog.getMetadataIfPresent(argThat(sameUserVersion)))
-        .thenReturn(Optional.of(metadata));
+    when(catalog.getMetadataIfPresent(argThat(sameUserVersion))).thenReturn(Optional.of(metadata));
+  }
+
+  @Test
+  public void summarizeReplicationLagMs_computesMaxAndAverageAcrossMaterializedViews() {
+    assertEquals(
+        250.0,
+        MaterializedViewManager.summarizeReplicationLagMs(
+            LongStream.of(100, 250, 40), stats -> (double) stats.getMax()),
+        0.0);
+    assertEquals(
+        130.0,
+        MaterializedViewManager.summarizeReplicationLagMs(
+            LongStream.of(100, 250, 40), LongSummaryStatistics::getAverage),
+        0.0);
+  }
+
+  @Test
+  public void summarizeReplicationLagMs_withNoMaterializedViews_isNaN() {
+    assertTrue(
+        Double.isNaN(
+            MaterializedViewManager.summarizeReplicationLagMs(
+                LongStream.empty(), stats -> (double) stats.getMax())));
+    assertTrue(
+        Double.isNaN(
+            MaterializedViewManager.summarizeReplicationLagMs(
+                LongStream.empty(), LongSummaryStatistics::getAverage)));
   }
 }

@@ -4,15 +4,22 @@ import static com.xgen.mongot.index.definition.MaterializedViewIndexDefinitionGe
 
 import com.google.common.base.Supplier;
 import com.xgen.mongot.embedding.AutoEmbeddingMemoryBudget;
+import com.xgen.mongot.embedding.cache.EmbeddingRetryCache;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
 import com.xgen.mongot.embedding.providers.EmbeddingServiceManager;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
+import com.xgen.mongot.index.version.MaterializedViewGenerationId;
 import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.util.Runtime;
 import com.xgen.mongot.util.concurrent.Executors;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
+import org.bson.types.ObjectId;
+import org.jetbrains.annotations.TestOnly;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,12 +44,18 @@ public class IndexingWorkSchedulerFactory {
     return this.indexingWorkSchedulers;
   }
 
-  // TODO(CLOUDP-405327): remove test-only overload once LIFECYCLE_ATTRIBUTION_METRICS rolls out.
   public static IndexingWorkSchedulerFactory create(
       int numIndexingThreads,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
-      MeterRegistry registry) {
-    return create(numIndexingThreads, embeddingServiceManagerSupplier, registry, false);
+      MeterRegistry registry,
+      boolean enableLifecycleAttributionMetrics) {
+    return create(
+        numIndexingThreads,
+        embeddingServiceManagerSupplier,
+        registry,
+        enableLifecycleAttributionMetrics
+            ? Optional.of(new ThreadPoolResourceMetrics.Bindings())
+            : Optional.empty());
   }
 
   /**
@@ -55,14 +68,13 @@ public class IndexingWorkSchedulerFactory {
       int numIndexingThreads,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
       MeterRegistry registry,
-      boolean enableLifecycleAttributionMetrics) {
+      Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings) {
     log.info(
         "Creating IndexingWorkSchedulerFactory with DEFAULT, CUSTOM_VECTOR_ENGINE and "
             + "EMBEDDING strategies");
     var executor = Executors.fixedSizeThreadPool("indexing-work", numIndexingThreads, registry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("replication").register(executor, registry);
-    }
+    attributionBindings.ifPresent(
+        bindings -> bindings.forSubsystem("replication").register(executor, registry));
     DefaultIndexingWorkScheduler defaultIndexingWorkScheduler =
         DefaultIndexingWorkScheduler.create(executor);
     CustomVectorEngineIndexingWorkScheduler customVectorEngineIndexingWorkScheduler =
@@ -76,23 +88,28 @@ public class IndexingWorkSchedulerFactory {
             IndexingStrategy.EMBEDDING, embeddingIndexingWorkScheduler));
   }
 
-  // TODO(CLOUDP-405327): remove test-only overload once LIFECYCLE_ATTRIBUTION_METRICS rolls out.
-  public static IndexingWorkSchedulerFactory createWithoutEmbeddingStrategy(
-      int numIndexingThreads, MeterRegistry registry) {
-    return createWithoutEmbeddingStrategy(numIndexingThreads, registry, false);
-  }
-
   /**
    * Creates a new IndexingWorkSchedulerFactory without a work scheduler for the EMBEDDING strategy.
    * This is used for Community.
    */
   public static IndexingWorkSchedulerFactory createWithoutEmbeddingStrategy(
       int numIndexingThreads, MeterRegistry registry, boolean enableLifecycleAttributionMetrics) {
+    return createWithoutEmbeddingStrategy(
+        numIndexingThreads,
+        registry,
+        enableLifecycleAttributionMetrics
+            ? Optional.of(new ThreadPoolResourceMetrics.Bindings())
+            : Optional.empty());
+  }
+
+  public static IndexingWorkSchedulerFactory createWithoutEmbeddingStrategy(
+      int numIndexingThreads,
+      MeterRegistry registry,
+      Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings) {
     log.info("Creating IndexingWorkSchedulerFactory without EMBEDDING strategy");
     var executor = Executors.fixedSizeThreadPool("indexing", numIndexingThreads, registry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("replication").register(executor, registry);
-    }
+    attributionBindings.ifPresent(
+        bindings -> bindings.forSubsystem("replication").register(executor, registry));
     DefaultIndexingWorkScheduler defaultIndexingWorkScheduler =
         DefaultIndexingWorkScheduler.create(executor);
     CustomVectorEngineIndexingWorkScheduler customVectorEngineIndexingWorkScheduler =
@@ -112,7 +129,7 @@ public class IndexingWorkSchedulerFactory {
    * @param perBatchMemoryBudgetHeapPercent percentage of JVM max heap for the per-batch embedding
    *     memory budget (1–100; 100 disables the limit)
    */
-  // TODO(CLOUDP-405327): remove test-only overload once LIFECYCLE_ATTRIBUTION_METRICS rolls out.
+  @TestOnly
   public static IndexingWorkSchedulerFactory createEmbeddingIndexingSchedulerOnly(
       int numIndexingThreads,
       Supplier<EmbeddingServiceManager> embeddingServiceManagerSupplier,
@@ -127,7 +144,11 @@ public class IndexingWorkSchedulerFactory {
         registry,
         globalMemoryBudgetHeapPercent,
         perBatchMemoryBudgetHeapPercent,
-        false);
+        Optional.of(new ThreadPoolResourceMetrics.Bindings()),
+        EmbeddingRetryCache.noOp(),
+        () -> false,
+        id -> false,
+        id -> true);
   }
 
   /**
@@ -138,6 +159,7 @@ public class IndexingWorkSchedulerFactory {
    *     budget (1-100; 100 disables the limit)
    * @param perBatchMemoryBudgetHeapPercent percentage of JVM max heap for the per-batch embedding
    *     memory budget (1-100; 100 disables the limit)
+   * @param ownsUsableLease checks whether this host still owns a usable materialized view lease
    */
   public static IndexingWorkSchedulerFactory createEmbeddingIndexingSchedulerOnly(
       int numIndexingThreads,
@@ -146,13 +168,16 @@ public class IndexingWorkSchedulerFactory {
       MeterRegistry registry,
       int globalMemoryBudgetHeapPercent,
       int perBatchMemoryBudgetHeapPercent,
-      boolean enableLifecycleAttributionMetrics) {
+      Optional<ThreadPoolResourceMetrics.Bindings> attributionBindings,
+      EmbeddingRetryCache embeddingRetryCache,
+      BooleanSupplier cacheEnabled,
+      Predicate<ObjectId> skipInvalidRequestEnabledForIndex,
+      Predicate<MaterializedViewGenerationId> ownsUsableLease) {
     log.info("Creating IndexingWorkSchedulerFactory with EmbeddingIndexingWorkScheduler only");
     var executor =
         Executors.fixedSizeThreadPool("indexing-auto-embedding", numIndexingThreads, registry);
-    if (enableLifecycleAttributionMetrics) {
-      ThreadPoolResourceMetrics.create("autoembedding").register(executor, registry);
-    }
+    attributionBindings.ifPresent(
+        bindings -> bindings.forSubsystem("autoembedding").register(executor, registry));
     // A single global budget is shared across all embedding schedulers so that the limit is
     // enforced at the mongot level across all indexes.
     var globalBudget =
@@ -167,7 +192,11 @@ public class IndexingWorkSchedulerFactory {
             embeddingServiceManagerSupplier,
             matViewCollectionMetadataCatalog,
             globalBudget,
-            perBatchBudgetBytes);
+            perBatchBudgetBytes,
+            embeddingRetryCache,
+            cacheEnabled,
+            skipInvalidRequestEnabledForIndex,
+            ownsUsableLease);
     return new IndexingWorkSchedulerFactory(
         Map.of(
             IndexingStrategy.EMBEDDING_MATERIALIZED_VIEW,
@@ -208,7 +237,8 @@ public class IndexingWorkSchedulerFactory {
   /**
    * Each indexing strategy must correspond to a {@link IndexingWorkScheduler} in the
    * indexingWorkSchedulers map. When adding a new indexing strategy, ensure that the corresponding
-   * {@link IndexingWorkScheduler} is added in {@link #create(int, Supplier, MeterRegistry)}.
+   * {@link IndexingWorkScheduler} is added in {@link #create(int, Supplier, MeterRegistry,
+   * boolean)}.
    *
    * <ul>
    *   <li>DEFAULT: Uses the {@link DefaultIndexingWorkScheduler} to exclusively index a batch.

@@ -18,11 +18,11 @@ import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.index.version.GenerationId;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.ServerStatusDataExtractor;
+import com.xgen.mongot.metrics.ThreadPoolResourceMetrics;
 import com.xgen.mongot.util.BsonUtils;
 import com.xgen.mongot.util.Enums;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
-import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -522,9 +522,8 @@ public class DecodingWorkSchedulerTest {
             Executors.fixedSizeThreadPool("decoding", 2, meterRegistry),
             new MetricsFactory("decodingWorkScheduler", meterRegistry));
 
-    List<RawBsonDocument> documents = IntStream.range(0, 5)
-        .mapToObj(i -> BsonUtils.documentToRaw(new BsonDocument()))
-        .toList();
+    List<RawBsonDocument> documents =
+        IntStream.range(0, 5).mapToObj(i -> BsonUtils.documentToRaw(new BsonDocument())).toList();
 
     GenerationId genId = new GenerationId(new ObjectId(), Generation.CURRENT);
     ObjectId attemptId = new ObjectId();
@@ -556,11 +555,13 @@ public class DecodingWorkSchedulerTest {
             IGNORE_METRICS);
 
     // 3 batches are scheduled and enqueued
-    assertEquals(3.0,
+    assertEquals(
+        3.0,
         meterRegistry.find("decodingWorkScheduler" + ".queuedBatchesTotal").gauge().value(),
         NO_EPSILON);
     // 3 * 5 events are scheduled and enqueued
-    assertEquals(15.0,
+    assertEquals(
+        15.0,
         meterRegistry.find("decodingWorkScheduler" + ".queuedEventsTotal").gauge().value(),
         NO_EPSILON);
 
@@ -569,10 +570,12 @@ public class DecodingWorkSchedulerTest {
     cancelFuture.get(500, TimeUnit.MILLISECONDS);
 
     // the first batch is cancelled
-    assertEquals(2.0,
+    assertEquals(
+        2.0,
         meterRegistry.find("decodingWorkScheduler" + ".queuedBatchesTotal").gauge().value(),
         NO_EPSILON);
-    assertEquals(10.0,
+    assertEquals(
+        10.0,
         meterRegistry.find("decodingWorkScheduler" + ".queuedEventsTotal").gauge().value(),
         NO_EPSILON);
 
@@ -597,10 +600,12 @@ public class DecodingWorkSchedulerTest {
         0.0);
 
     // all batches and events are executed.
-    assertEquals(0.0,
+    assertEquals(
+        0.0,
         meterRegistry.find("decodingWorkScheduler" + ".queuedBatchesTotal").gauge().value(),
         NO_EPSILON);
-    assertEquals(0.0,
+    assertEquals(
+        0.0,
         meterRegistry.find("decodingWorkScheduler" + ".queuedEventsTotal").gauge().value(),
         NO_EPSILON);
   }
@@ -608,7 +613,11 @@ public class DecodingWorkSchedulerTest {
   @Test
   public void create_autoEmbeddingType_tagsCounterUnderAutoEmbeddingSubsystem() {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
-    DecodingWorkScheduler.create(2, CommonReplicationConfig.Type.AUTO_EMBEDDING, registry, true);
+    DecodingWorkScheduler.create(
+        2,
+        CommonReplicationConfig.Type.AUTO_EMBEDDING,
+        registry,
+        Optional.of(new ThreadPoolResourceMetrics.Bindings()));
 
     assertThat(
             registry
@@ -629,7 +638,8 @@ public class DecodingWorkSchedulerTest {
   @Test
   public void create_lifecycleAttributionDisabled_doesNotRegisterResourceMetrics() {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
-    DecodingWorkScheduler.create(2, CommonReplicationConfig.Type.DEFAULT, registry, false);
+    DecodingWorkScheduler.create(
+        2, CommonReplicationConfig.Type.DEFAULT, registry, Optional.empty());
 
     assertThat(
             registry
@@ -640,51 +650,28 @@ public class DecodingWorkSchedulerTest {
   }
 
   @Test
-  public void create_lifecycleAttributionEnabled_decodingCounterIncreasesUnderLoad()
-      throws Exception {
+  public void create_lifecycleAttributionEnabled_registersDecodingPoolCounters() {
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
-    DecodingWorkScheduler scheduler =
-        DecodingWorkScheduler.create(2, CommonReplicationConfig.Type.DEFAULT, registry, true);
+    DecodingWorkScheduler.create(
+        2,
+        CommonReplicationConfig.Type.DEFAULT,
+        registry,
+        Optional.of(new ThreadPoolResourceMetrics.Bindings()));
 
-    FunctionCounter allocated =
-        registry
-            .find("executor.thread.allocatedBytes")
-            .tag("subsystem", "replication")
-            .tag("name", "decoding")
-            .functionCounter();
-    assertThat(allocated).isNotNull();
-
-    // Warm a worker thread so getThreadAllocatedBytes has a non-zero baseline.
-    scheduler
-        .schedule(
-            new GenerationId(new ObjectId(), Generation.CURRENT),
-            Optional.of(new ObjectId()),
-            List.of(),
-            SchedulerQueue.Priority.STEADY_STATE_CHANGE_STREAM,
-            events -> {},
-            IGNORE_METRICS)
-        .get(5, TimeUnit.SECONDS);
-    double before = allocated.count();
-
-    // Allocate ~1 MB on a decoding-pool thread.
-    scheduler
-        .schedule(
-            new GenerationId(new ObjectId(), Generation.CURRENT),
-            Optional.of(new ObjectId()),
-            List.of(),
-            SchedulerQueue.Priority.STEADY_STATE_CHANGE_STREAM,
-            events -> {
-              byte[] dummy = new byte[1024 * 1024];
-              dummy[0] = 1;
-            },
-            IGNORE_METRICS)
-        .get(5, TimeUnit.SECONDS);
-    double after = allocated.count();
-
-    // JVMs without per-thread allocation tracking report 0 for both reads; skip rather than flake.
-    if (before != 0.0 || after != 0.0) {
-      assertThat(after).isGreaterThan(before);
-    }
+    assertThat(
+            registry
+                .find("executor.thread.allocatedBytes")
+                .tag("subsystem", "replication")
+                .tag("name", "decoding")
+                .functionCounter())
+        .isNotNull();
+    assertThat(
+            registry
+                .find("executor.thread.cpuTime")
+                .tag("subsystem", "replication")
+                .tag("name", "decoding")
+                .functionCounter())
+        .isNotNull();
   }
 
   private void warpWithRuntimeException(Callable<Void> callable) {

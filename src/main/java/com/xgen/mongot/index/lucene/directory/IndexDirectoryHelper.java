@@ -4,6 +4,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
 import com.xgen.mongot.index.version.Generation;
 import com.xgen.mongot.index.version.GenerationId;
+import com.xgen.mongot.index.version.IndexEngine;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.util.AtomicDirectoryRemover;
 import com.xgen.mongot.util.FileUtils;
@@ -15,6 +16,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.IndexFormatTooNewException;
@@ -24,12 +26,16 @@ import org.slf4j.LoggerFactory;
 
 public class IndexDirectoryHelper {
   private static final Logger LOG = LoggerFactory.getLogger(IndexDirectoryHelper.class);
+  private static final Pattern GENERATION_DIRECTORY_NAME =
+      Pattern.compile("[0-9a-f]{24}_f\\d+_u\\d+_a\\d+");
+
   private final AtomicDirectoryRemover indexRemover;
   private final MetricsFactory metricsFactory;
   private final Path rootPath;
   private final Counter incompatibleIndexFormatCounter;
   private final Counter corruptIndexCounter;
   private final Counter incompatibleCodecCounter;
+  private final Counter incompatibleSpiFormatCounter;
 
   /** Tracks the count of unreadable indexes that occurred on dropped indexes. */
   private final Counter unreadableDroppedIndexCounter;
@@ -43,6 +49,7 @@ public class IndexDirectoryHelper {
     this.corruptIndexCounter = getUnreadableIndexCounter("corruptIndex");
     this.incompatibleIndexFormatCounter = getUnreadableIndexCounter("incompatibleIndexFormat");
     this.incompatibleCodecCounter = getUnreadableIndexCounter("incompatibleCodec");
+    this.incompatibleSpiFormatCounter = getUnreadableIndexCounter("incompatibleSpiFormat");
     // Track a separate metric if index was dropped, as it need not be alertable.
     this.unreadableDroppedIndexCounter = this.metricsFactory.counter("unreadableDroppedIndexes");
   }
@@ -143,19 +150,10 @@ public class IndexDirectoryHelper {
           isRetainFailedIndexDataOnDiskEnabled);
     }
 
-    if (ExceptionUtils.indexOfThrowable(cause, IndexFormatTooOldException.class) >= 0
-        || ExceptionUtils.indexOfThrowable(cause, IndexFormatTooNewException.class) >= 0) {
-      return handleIndexError(
-          generationId,
-          "incompatible index formats",
-          directory,
-          cause,
-          this.incompatibleIndexFormatCounter,
-          isRetainFailedIndexDataOnDiskEnabled);
-    }
-
+    // Lucene wraps an unknown codec name in IndexFormatTooOldException with a "Could not load
+    // codec" message (see SegmentInfos#readCodec). Check the message first so the codec-mismatch
+    // counter wins over the more generic incompatible-format counter.
     if (ExceptionUtils.getThrowableList(cause).stream()
-        .filter(e -> IllegalArgumentException.class.equals(e.getClass()))
         .map(Throwable::getMessage)
         .map(Optional::ofNullable)
         .flatMap(Optional::stream)
@@ -169,50 +167,142 @@ public class IndexDirectoryHelper {
           isRetainFailedIndexDataOnDiskEnabled);
     }
 
+    if (ExceptionUtils.indexOfThrowable(cause, IndexFormatTooOldException.class) >= 0
+        || ExceptionUtils.indexOfThrowable(cause, IndexFormatTooNewException.class) >= 0) {
+      return handleIndexError(
+          generationId,
+          "incompatible index formats",
+          directory,
+          cause,
+          this.incompatibleIndexFormatCounter,
+          isRetainFailedIndexDataOnDiskEnabled);
+    }
+
+    // SPI format lookup failures (e.g. an older binary reading a segment written in a newer
+    // KnnVectorsFormat/PostingsFormat) surface as an IllegalArgumentException with a distinct
+    // message. Match it so the recovery attempt fires and unreadableIndexRecoveries increments,
+    // which is what the downgrade test's assert_no_index_rebuild() keys off of.
+    //
+    // This match depends on the exact wording Lucene's NamedSPILoader produces. It is asserted
+    // against a real Lucene-generated message in
+    // IndexDirectoryHelperTest
+    // #attemptToRecoverUnreadableIndex_spiFormatNotFound_recoversAndIncrementsSpiCounter
+    // -- if a Lucene upgrade changes the message, that test fails. Keep them in sync.
+    if (ExceptionUtils.getThrowableList(cause).stream()
+        .filter(e -> IllegalArgumentException.class.equals(e.getClass()))
+        .map(Throwable::getMessage)
+        .map(Optional::ofNullable)
+        .flatMap(Optional::stream)
+        .anyMatch(s -> s.contains("An SPI class of type") && s.contains("does not exist"))) {
+      return handleIndexError(
+          generationId,
+          "SPI format not found",
+          directory,
+          cause,
+          this.incompatibleSpiFormatCounter,
+          isRetainFailedIndexDataOnDiskEnabled);
+    }
+
     return false;
   }
 
   public Path getIndexDirectoryPath(IndexDefinitionGeneration definition) {
-    if (definition.generation().indexFormatVersion.versionNumber <= 4) {
+    return getIndexDirectoryPath(definition.getGenerationId());
+  }
+
+  /**
+   * Retrieve path where a generation's index data will be stored.
+   *
+   * <p>Takes a {@link GenerationId} rather than a definition because the on-disk location of a
+   * generation's data is a function of its identity alone. This lets data be located, and deleted,
+   * without a parseable index definition.
+   */
+  public Path getIndexDirectoryPath(GenerationId generationId) {
+    if (generationId.generation.formatVersion.engine() == IndexEngine.LUCENE
+        && generationId.generation.formatVersion.versionNumber() <= 4) {
       throw new IllegalStateException("Index format version is not supported");
     }
     // Each index's data will live in a directory with the index's generation ID as the name, as
     // these IDs are unique.
-    if (definition.generation().equals(Generation.FIRST)) {
+    if (generationId.generation.equals(Generation.FIRST)) {
       // indexes preceding the introduction of generations, we use the indexId as the path
-      String indexId = definition.getIndexDefinition().getIndexId().toHexString();
+      String indexId = generationId.indexId.toHexString();
       LOG.atInfo()
           .addKeyValue("indexId", indexId)
-          .addKeyValue("generation", definition.generation())
+          .addKeyValue("generation", generationId.generation)
           .log("using legacy data path for index of first generation");
       return Paths.get(this.rootPath.toString(), indexId);
     }
 
     // for any generation other than Generation.FIRST, we encode the generation as well as the
     // indexId.
-    return Paths.get(this.rootPath.toString(), getNameForGeneration(definition));
-  }
-
-  public Path getCustomEngineIndexPath(IndexDefinitionGeneration definition, String engineName) {
-    Path indexDirectoryPath = this.getIndexDirectoryPath(definition);
-    return Paths.get(indexDirectoryPath.toString(), engineName);
+    return Paths.get(this.rootPath.toString(), getNameForGeneration(generationId));
   }
 
   /**
    * Retrieve path where index metadata (eg: mapping of index files in blobstore) will be stored.
    */
   public Path getIndexMetadataPath(IndexDefinitionGeneration definition) {
-    return Paths.get(this.rootPath.toString(), "indexMetadata", getNameForGeneration(definition));
+    return getIndexMetadataPath(definition.getGenerationId());
+  }
+
+  /**
+   * Retrieve path where index metadata will be stored, given only a generation's identity.
+   *
+   * <p>Unlike {@link #getIndexDirectoryPath}, this has no legacy {@link Generation#FIRST} case:
+   * metadata is always stored under the generation-encoded name.
+   */
+  public Path getIndexMetadataPath(GenerationId generationId) {
+    return Paths.get(this.rootPath.toString(), "indexMetadata", getNameForGeneration(generationId));
+  }
+
+  /**
+   * Deletes all on-disk data and metadata for a generation, without requiring a parsed index
+   * definition. Idempotent: missing directories are ignored.
+   *
+   * <p>Duplicates the two-directory delete in {@code DiskIndexBackingStrategy#releaseResources},
+   * which cannot be reused because its paths are fields of a live backing strategy -- reaching it
+   * requires an {@link com.xgen.mongot.index.Index} built from a parsed definition. Keep the two in
+   * sync if the on-disk footprint gains a directory; {@code
+   * LuceneIndexFactoryTest#deleteGenerationData_removesDataCreatedByTheDefinitionFulPath} fails if
+   * they diverge.
+   *
+   * @throws IllegalStateException if the generation's index format version is not supported, as in
+   *     {@link #getIndexDirectoryPath}.
+   */
+  public void deleteGenerationData(GenerationId generationId) throws IOException {
+    this.indexRemover.deleteDirectory(getIndexDirectoryPath(generationId));
+    this.indexRemover.deleteDirectory(getIndexMetadataPath(generationId));
   }
 
   @VisibleForTesting
   public static String getNameForGeneration(IndexDefinitionGeneration definition) {
+    return getNameForGeneration(definition.getGenerationId());
+  }
+
+  /**
+   * The on-disk directory name for a generation.
+   *
+   * <p>Note this is the underscore-separated form, which differs from {@link
+   * GenerationId#uniqueString()}. The two are not interchangeable: this one names directories.
+   */
+  @VisibleForTesting
+  public static String getNameForGeneration(GenerationId generationId) {
     return String.format(
         "%s_f%s_u%s_a%s",
-        definition.getIndexDefinition().getIndexId().toHexString(),
-        definition.generation().indexFormatVersion.versionNumber,
-        definition.generation().userIndexVersion.versionNumber,
-        definition.generation().attemptNumber);
+        generationId.indexId.toHexString(),
+        generationId.generation.formatVersion.versionNumber(),
+        generationId.generation.userIndexVersion.versionNumber,
+        generationId.generation.attemptNumber);
+  }
+
+  /**
+   * Returns whether {@code name} uses the generation-encoded index directory format.
+   *
+   * <p>Keep this recognition format in sync with {@link #getNameForGeneration(GenerationId)}.
+   */
+  public static boolean isGenerationDirectoryName(String name) {
+    return GENERATION_DIRECTORY_NAME.matcher(name).matches();
   }
 
   public AtomicDirectoryRemover getIndexRemover() {

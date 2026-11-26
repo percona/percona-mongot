@@ -1,8 +1,5 @@
 package com.xgen.mongot.replication.mongodb.initialsync;
 
-import static com.xgen.mongot.index.IndexTypeData.IndexTypeTag.TAG_SEARCH;
-import static com.xgen.mongot.index.IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH;
-import static com.xgen.mongot.index.IndexTypeData.IndexTypeTag.TAG_VECTOR_SEARCH_AUTO_EMBEDDING;
 import static com.xgen.mongot.index.IndexTypeData.getIndexTypeTag;
 import static com.xgen.mongot.index.IndexTypeData.getNumGauge;
 import static com.xgen.mongot.replication.mongodb.initialsync.InitialSyncManager.getFactory;
@@ -10,10 +7,13 @@ import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Stopwatch;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.mongodb.MongoNamespace;
 import com.xgen.mongot.embedding.config.MaterializedViewCollectionMetadataCatalog;
+import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.definition.IndexDefinition;
@@ -40,6 +40,7 @@ import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.FutureUtils;
 import com.xgen.mongot.util.concurrent.LockGuard;
 import com.xgen.mongot.util.concurrent.OneShotSingleThreadExecutor;
+import com.xgen.mongot.util.mongodb.serialization.MongoDbCollectionInfo;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.LongTaskTimer;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -50,6 +51,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -127,12 +129,14 @@ public class InitialSyncQueue {
   private final Set<ObjectId> pauseInitialSyncOnIndexIds;
 
   /** Map of queuedSyncs gauge for each {@link IndexTypeData.IndexTypeTag}. */
-  protected final Map<IndexTypeData.IndexTypeTag, AtomicLong> queuedSyncs;
+  protected final ImmutableMap<IndexTypeData.IndexTypeTag, AtomicLong> queuedSyncs;
 
   /** Gate for pausing initial syncs. */
   private final Gate initialSyncGate;
 
   private final InitialSyncConfig initialSyncConfig;
+  private final Optional<AutoEmbeddingMaterializedViewConfig> autoEmbeddingMaterializedViewConfig;
+  private final FeatureFlags featureFlags;
 
   @VisibleForTesting
   InitialSyncQueue(
@@ -148,7 +152,8 @@ public class InitialSyncQueue {
       InitialSyncConfig initialSyncConfig,
       InitialSyncManagerFactory managerFactory,
       Path dataPath,
-      Gate initialSyncGate) {
+      Gate initialSyncGate,
+      FeatureFlags featureFlags) {
     this.mongoClients = mongoClients;
     this.syncSourceHost = syncSourceHost;
     this.indexingWorkSchedulerFactory = indexingWorkSchedulerFactory;
@@ -156,35 +161,29 @@ public class InitialSyncQueue {
     this.queued = queued;
     this.cancelled = cancelled;
     this.inProgress = inProgress;
+    this.featureFlags = featureFlags;
 
     this.queueLock = new ReentrantLock();
     this.shutdown = false;
 
     this.initialSyncConfig = initialSyncConfig;
+    this.autoEmbeddingMaterializedViewConfig =
+        replicationConfig instanceof AutoEmbeddingMaterializedViewConfig config
+            ? Optional.of(config)
+            : Optional.empty();
 
     MetricsFactory metricsFactory = new MetricsFactory("initialsync.queue", meterRegistry);
     this.requeuedEmbeddingInitialSyncs = metricsFactory.counter("requeuedEmbeddingInitialSyncs");
     String queuedSyncsName = "queuedSyncs";
     this.queuedSyncs =
-        Map.of(
-            TAG_SEARCH,
-            getNumGauge(
-                metricsFactory,
-                queuedSyncsName,
-                TAG_SEARCH,
-                Tag.of("replicationType", replicationConfig.getReplicationType().name())),
-            TAG_VECTOR_SEARCH,
-            getNumGauge(
-                metricsFactory,
-                queuedSyncsName,
-                TAG_VECTOR_SEARCH,
-                Tag.of("replicationType", replicationConfig.getReplicationType().name())),
-            TAG_VECTOR_SEARCH_AUTO_EMBEDDING,
-            getNumGauge(
-                metricsFactory,
-                queuedSyncsName,
-                TAG_VECTOR_SEARCH_AUTO_EMBEDDING,
-                Tag.of("replicationType", replicationConfig.getReplicationType().name())));
+        Maps.toMap(
+            EnumSet.allOf(IndexTypeData.IndexTypeTag.class),
+            tag ->
+                getNumGauge(
+                    metricsFactory,
+                    queuedSyncsName,
+                    tag,
+                    Tag.of("replicationType", replicationConfig.getReplicationType().name())));
 
     // TODO(CLOUDP-360914): Deprecate this condition check after shutting down type:text indexes
     this.maxConcurrentEmbeddingInitialSyncs =
@@ -200,7 +199,12 @@ public class InitialSyncQueue {
     this.dispatcher.start();
   }
 
-  /** Creates a new InitialSyncQueue, while also spawning a corresponding InitialSyncDispatcher. */
+  /**
+   * Creates a new InitialSyncQueue, deferring to {@link #create(MeterRegistry, Map, String,
+   * IndexingWorkSchedulerFactory, CommonReplicationConfig, InitialSyncConfig, Path, Gate,
+   * FeatureFlags, Optional)} with default feature flags. Existing callers that do not care about
+   * {@link FeatureFlags} keep compiling; the real flags flow through the overload below.
+   */
   public static InitialSyncQueue create(
       MeterRegistry meterRegistry,
       Map<String, ClientSessionRecord> mongoClientSessions,
@@ -212,27 +216,48 @@ public class InitialSyncQueue {
       Gate initialSyncGate,
       Optional<MaterializedViewCollectionMetadataCatalog>
           materializedViewCollectionMetadataCatalog) {
+    return create(
+        meterRegistry,
+        mongoClientSessions,
+        syncSourceHost,
+        indexingWorkSchedulerFactory,
+        replicationConfig,
+        initialSyncConfig,
+        dataPath,
+        initialSyncGate,
+        FeatureFlags.getDefault(),
+        materializedViewCollectionMetadataCatalog);
+  }
+
+  /** Creates a new InitialSyncQueue, while also spawning a corresponding InitialSyncDispatcher. */
+  public static InitialSyncQueue create(
+      MeterRegistry meterRegistry,
+      Map<String, ClientSessionRecord> mongoClientSessions,
+      String syncSourceHost,
+      IndexingWorkSchedulerFactory indexingWorkSchedulerFactory,
+      CommonReplicationConfig replicationConfig,
+      InitialSyncConfig initialSyncConfig,
+      Path dataPath,
+      Gate initialSyncGate,
+      FeatureFlags featureFlags,
+      Optional<MaterializedViewCollectionMetadataCatalog>
+          materializedViewCollectionMetadataCatalog) {
     Check.argIsPositive(
         replicationConfig.getNumConcurrentInitialSyncs(), "numConcurrentInitialSyncs");
 
-    Map<String, InitialSyncMongoClient> initialSyncMongoClients = new HashMap<>();
-    mongoClientSessions.forEach(
-        (host, clientSessionRecord) ->
-            initialSyncMongoClients.put(
-                host,
-                DefaultInitialSyncMongoClient.create(
-                    clientSessionRecord.syncMongoClient(),
-                    clientSessionRecord.sessionRefresher(),
-                    meterRegistry,
-                    syncSourceHost,
-                    replicationConfig.getSplitLargeChangeStreamEventsForInitialSync())));
+    Map<String, InitialSyncMongoClient> initialSyncMongoClients =
+        createInitialSyncMongoClients(
+            mongoClientSessions,
+            meterRegistry,
+            replicationConfig.getSplitLargeChangeStreamEventsForInitialSync());
     MetricsFactory metricsFactory = new MetricsFactory("initialSyncManager", meterRegistry);
     InitialSyncManagerFactory factory =
         getFactory(
             initialSyncConfig,
             replicationConfig,
             materializedViewCollectionMetadataCatalog,
-            metricsFactory);
+            metricsFactory,
+            meterRegistry);
 
     return create(
         meterRegistry,
@@ -243,7 +268,8 @@ public class InitialSyncQueue {
         initialSyncConfig,
         factory,
         dataPath,
-        initialSyncGate);
+        initialSyncGate,
+        featureFlags);
   }
 
   @VisibleForTesting
@@ -256,7 +282,8 @@ public class InitialSyncQueue {
       InitialSyncConfig initialSyncConfig,
       InitialSyncManagerFactory managerFactory,
       Path dataPath,
-      Gate initialSyncGate) {
+      Gate initialSyncGate,
+      FeatureFlags featureFlags) {
     Check.argIsPositive(
         replicationConfig.getNumConcurrentInitialSyncs(), "numConcurrentInitialSyncs");
 
@@ -278,7 +305,31 @@ public class InitialSyncQueue {
         initialSyncConfig,
         managerFactory,
         dataPath,
-        initialSyncGate);
+        initialSyncGate,
+        featureFlags);
+  }
+
+  /**
+   * Builds the per-host initial sync clients, labeling each client with its own map key (the host
+   * it connects to) rather than the node's default sync source.
+   */
+  @VisibleForTesting
+  static Map<String, InitialSyncMongoClient> createInitialSyncMongoClients(
+      Map<String, ClientSessionRecord> mongoClientSessions,
+      MeterRegistry meterRegistry,
+      boolean splitLargeChangeStreamEventsForInitialSync) {
+    Map<String, InitialSyncMongoClient> initialSyncMongoClients = new HashMap<>();
+    mongoClientSessions.forEach(
+        (host, clientSessionRecord) ->
+            initialSyncMongoClients.put(
+                host,
+                DefaultInitialSyncMongoClient.create(
+                    clientSessionRecord.syncMongoClient(),
+                    clientSessionRecord.sessionRefresher(),
+                    meterRegistry,
+                    host,
+                    splitLargeChangeStreamEventsForInitialSync)));
+    return initialSyncMongoClients;
   }
 
   /**
@@ -386,6 +437,12 @@ public class InitialSyncQueue {
       boolean removeMatchCollectionUuid,
       boolean isNaturalOrderScanSupported)
       throws InitialSyncException {
+    // A natural-order scan token cannot be honored when natural-order scan is not supported.
+    // Callers must drop such a token (and clear the index) before resuming; see
+    // ReplicationIndexManager#enqueueInitialSyncResume.
+    checkState(
+        isNaturalOrderScanSupported || !resumeInfo.isBufferlessNaturalOrderInitialSyncResumeInfo(),
+        "cannot resume from a natural-order scan token when natural-order scan is not supported");
     return doEnqueue(
         documentIndexer,
         indexDefinition,
@@ -400,7 +457,7 @@ public class InitialSyncQueue {
       DocumentIndexer documentIndexer,
       IndexDefinitionGeneration indexDefinition,
       Runnable initialSyncStartingHandler,
-      @Var Optional<InitialSyncResumeInfo> resumeInfo,
+      Optional<InitialSyncResumeInfo> resumeInfo,
       IndexMetricsUpdater indexMetricsUpdater,
       boolean removeMatchCollectionUuid,
       boolean isNaturalOrderScanSupported)
@@ -445,11 +502,6 @@ public class InitialSyncQueue {
         // Natural Order Scan won't be applied when resuming from _id scan
         if (resumeInfo.get().isBufferlessIdOrderInitialSyncResumeInfo()) {
           useNaturalOrderScan = false;
-        }
-        // If FF is set as false, we ensure _id scan will be applied
-        if (resumeInfo.get().isBufferlessNaturalOrderInitialSyncResumeInfo()
-            && !useNaturalOrderScan) {
-          resumeInfo = Optional.empty();
         }
       }
 
@@ -577,12 +629,12 @@ public class InitialSyncQueue {
   }
 
   /**
-   * Returns true if this generationId has an entry in the queue (queued or in-progress).
-   * Used by {@code MaterializedViewManager.refreshStatus()} to defer leadership acquisition until
-   * stale entries from a previous generator's shutdown are fully cleaned up.
+   * Returns true if this generationId has an entry in the queue (queued or in-progress). Used by
+   * {@code MaterializedViewManager.refreshStatus()} to defer leadership acquisition until stale
+   * entries from a previous generator's shutdown are fully cleaned up.
    *
-   * <p>The cancelled set is not checked because cancelled entries remain in the queued map
-   * until the dispatcher processes them.
+   * <p>The cancelled set is not checked because cancelled entries remain in the queued map until
+   * the dispatcher processes them.
    */
   public boolean hasEntry(GenerationId generationId) {
     try (LockGuard ignored = LockGuard.with(this.queueLock)) {
@@ -609,7 +661,7 @@ public class InitialSyncQueue {
 
     private final InitialSyncManagerFactory initialSyncManagerFactory;
     private final Semaphore concurrentSyncs;
-    private final Map<IndexTypeData.IndexTypeTag, AtomicLong> inProgressSyncs;
+    private final ImmutableMap<IndexTypeData.IndexTypeTag, AtomicLong> inProgressSyncs;
     private final AtomicLong inProgressResumedSyncs;
     private final Map<Boolean, LongTaskTimer> initialSyncLongTimerFeatureFlagMapping;
     private final Map<Boolean, Timer> initialSyncTimerFeatureFlagMapping;
@@ -641,27 +693,18 @@ public class InitialSyncQueue {
       this.embeddingGetMoreBatchSize = getEmbeddingGetMoreBatchSize(replicationConfig);
 
       this.metricsFactory = new MetricsFactory("initialsync.dispatcher", meterRegistry);
+      // Keyed over every IndexTypeTag: looked up unchecked by getIndexTypeTag, so a missing tag
+      // would NPE the first initial sync of that index type.
       String inProgressSyncsName = "inProgressSyncs";
       this.inProgressSyncs =
-          Map.of(
-              TAG_SEARCH,
-              getNumGauge(
-                  this.metricsFactory,
-                  inProgressSyncsName,
-                  TAG_SEARCH,
-                  Tag.of("replicationType", replicationConfig.getReplicationType().name())),
-              TAG_VECTOR_SEARCH,
-              getNumGauge(
-                  this.metricsFactory,
-                  inProgressSyncsName,
-                  TAG_VECTOR_SEARCH,
-                  Tag.of("replicationType", replicationConfig.getReplicationType().name())),
-              TAG_VECTOR_SEARCH_AUTO_EMBEDDING,
-              getNumGauge(
-                  this.metricsFactory,
-                  inProgressSyncsName,
-                  TAG_VECTOR_SEARCH_AUTO_EMBEDDING,
-                  Tag.of("replicationType", replicationConfig.getReplicationType().name())));
+          Maps.toMap(
+              EnumSet.allOf(IndexTypeData.IndexTypeTag.class),
+              tag ->
+                  getNumGauge(
+                      this.metricsFactory,
+                      inProgressSyncsName,
+                      tag,
+                      Tag.of("replicationType", replicationConfig.getReplicationType().name())));
 
       Tags naturalOrderScanTag = Tags.of("scan_type", "natural_order");
       Tags idOrderScanTag = Tags.of("scan_type", "id_order");
@@ -903,10 +946,10 @@ public class InitialSyncQueue {
             .addKeyValue("host", InitialSyncQueue.this.syncSourceHost)
             .log("using default mongoClient");
 
-        // Checking whether natural order scan is being resumed
+        // Checking whether a scan that can only resume against its original node is being resumed
         if (InitialSyncQueue.this.initialSyncConfig.avoidNaturalOrderScanSyncSourceChangeResync()
             && request.getResumeInfo().isPresent()
-            && request.getResumeInfo().get().isBufferlessNaturalOrderInitialSyncResumeInfo()) {
+            && request.getResumeInfo().get().hasNodeLocalResumePosition()) {
           var resumeInfo = request.getResumeInfo().get();
           // check resumeInfo.getSyncSourceHost() is in connection string mappings and is different
           // from the default one
@@ -932,7 +975,7 @@ public class InitialSyncQueue {
         // in syncManager.sync(). This method will throw an exception if the collection
         // does not exist, and reschedule this initial sync in case the collection exists in the
         // future (if the cluster is sharded.)
-        String collectionName =
+        MongoDbCollectionInfo collectionInfo =
             mongoClient.resolveAndUpdateCollectionName(
                 request.getIndexDefinitionGeneration().getIndexDefinition());
 
@@ -956,13 +999,19 @@ public class InitialSyncQueue {
                 this.embeddingGetMoreBatchSize,
                 request.isRemoveMatchCollectionUuid(),
                 request.getUseNaturalOrderScan(),
-                InitialSyncQueue.this.initialSyncGate);
+                InitialSyncQueue.this.initialSyncConfig.enableParallelNaturalOrderScan(),
+                InitialSyncQueue.this.initialSyncConfig.parallelPartitionCount(),
+                InitialSyncQueue.this.initialSyncGate,
+                InitialSyncQueue.this.autoEmbeddingMaterializedViewConfig,
+                InitialSyncQueue.this.featureFlags);
 
         InitialSyncManager syncManager =
             this.initialSyncManagerFactory.create(
                 syncContext,
                 mongoClient,
-                new MongoNamespace(syncContext.getIndexDefinition().getDatabase(), collectionName),
+                new MongoNamespace(
+                    syncContext.getIndexDefinition().getDatabase(), collectionInfo.name()),
+                collectionInfo,
                 request.getResumeInfo());
 
         // Here the index's status is updated to INITIAL_SYNC, and only executes if namespace

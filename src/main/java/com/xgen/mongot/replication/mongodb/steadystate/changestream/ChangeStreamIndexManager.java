@@ -19,10 +19,13 @@ import com.xgen.mongot.replication.mongodb.common.ChangeStreamDocumentUtils.Docu
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
+import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamProgressTracker;
 import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.FutureUtils;
+import com.xgen.mongot.util.regex.RegexInterruptedException;
+import com.xgen.mongot.util.regex.RegexLimitExceededException;
 import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.time.Instant;
@@ -31,7 +34,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import org.apache.commons.codec.DecoderException;
 import org.bson.BsonTimestamp;
 import org.bson.RawBsonDocument;
@@ -41,6 +46,41 @@ import org.bson.types.ObjectId;
 abstract class ChangeStreamIndexManager {
 
   /**
+   * Classification of a change-stream batch by its raw (on-the-wire) size. Used to observe
+   * replication backlog while removing mongot from mongod load-shedding exemptions (CLOUDP-425971):
+   * a run of {@link #FULL} batches means mongot is behind, while {@link #EMPTY} batches mean the
+   * change stream is idle / caught up.
+   */
+  enum BatchFullness {
+    EMPTY("empty"),
+    PARTIAL("partial"),
+    FULL("full");
+
+    /**
+     * A batch whose raw payload is at or above this many bytes is treated as "full": it likely hit
+     * the server's ~16MB change-stream response-size cap, meaning more data was waiting.
+     */
+    static final long FULL_BATCH_RAW_BYTES_THRESHOLD = 15L * 1024 * 1024;
+
+    private final String tagValue;
+
+    BatchFullness(String tagValue) {
+      this.tagValue = tagValue;
+    }
+
+    String tagValue() {
+      return this.tagValue;
+    }
+
+    static BatchFullness classify(int eventCount, long rawBatchBytes) {
+      if (eventCount == 0) {
+        return EMPTY;
+      }
+      return rawBatchBytes >= FULL_BATCH_RAW_BYTES_THRESHOLD ? FULL : PARTIAL;
+    }
+  }
+
+  /**
    * Encapsulates the results of an indexBatch call. Holds a future representing when the indexing
    * finishes. Also holds whether or not the batch had a lifecycle event.
    */
@@ -48,15 +88,26 @@ abstract class ChangeStreamIndexManager {
     final CompletableFuture<Void> indexingFuture;
     final Optional<SteadyStateException> lifecycleEvent;
 
+    /**
+     * The batch's size classification. Populated on the decoding thread before the batch is indexed
+     * and read once {@link #indexingFuture} completes, so it is non-null on the success path. Empty
+     * (null holder value) for batches that never reach classification (e.g. those rejected at
+     * shutdown).
+     */
+    final AtomicReference<BatchFullness> fullness;
+
     BatchInfo(
-        CompletableFuture<Void> indexingFuture, Optional<SteadyStateException> lifecycleEvent) {
+        CompletableFuture<Void> indexingFuture,
+        Optional<SteadyStateException> lifecycleEvent,
+        AtomicReference<BatchFullness> fullness) {
 
       this.indexingFuture = indexingFuture;
       this.lifecycleEvent = lifecycleEvent;
+      this.fullness = fullness;
     }
 
     BatchInfo(CompletableFuture<Void> indexingFuture) {
-      this(indexingFuture, Optional.empty());
+      this(indexingFuture, Optional.empty(), new AtomicReference<>());
     }
   }
 
@@ -69,6 +120,12 @@ abstract class ChangeStreamIndexManager {
   protected final MongoNamespace namespace;
   protected final IndexMetricsUpdater indexMetricsUpdater;
   private final Consumer<ChangeStreamResumeInfo> resumeInfoUpdater;
+
+  /**
+   * Present when parallel change stream readers are enabled: tracks each partition's confirmed
+   * indexing progress so the commit path can persist the low-water mark across partitions.
+   */
+  protected final Optional<PartitionedChangeStreamProgressTracker> partitionTracker;
 
   // use these to limit how often we write the optime to the log
   private volatile Instant optimeLastUpdate;
@@ -108,7 +165,8 @@ abstract class ChangeStreamIndexManager {
       Consumer<ChangeStreamResumeInfo> resumeInfoUpdater,
       IndexMetricsUpdater indexMetricsUpdater,
       CompletableFuture<Void> lifecycleFuture,
-      GenerationId generationId) {
+      GenerationId generationId,
+      Optional<PartitionedChangeStreamProgressTracker> partitionTracker) {
 
     this.logger = logger;
     this.indexDefinition = indexDefinition;
@@ -119,6 +177,7 @@ abstract class ChangeStreamIndexManager {
     this.indexMetricsUpdater = indexMetricsUpdater;
     this.lifecycleFuture = lifecycleFuture;
     this.generationId = generationId;
+    this.partitionTracker = partitionTracker;
 
     this.latestIndexingFuture = FutureUtils.COMPLETED_FUTURE;
     this.shutdown = false;
@@ -164,24 +223,35 @@ abstract class ChangeStreamIndexManager {
       DocumentMetricsUpdater metricsUpdater,
       Timer preprocessingBatchTimer);
 
+  /**
+   * Runs after a batch's indexing completes; {@code resumeInfoSupplier} is read then, so a
+   * partitioned batch reports the low-water mark including its own acknowledgment.
+   */
   protected CompletableFuture<Void> postIndexingPipeline(
       CompletableFuture<Void> schedulingFuture,
       CompletableFuture<Void> indexingFuture,
-      Optional<ChangeStreamResumeInfo> resumeInfo,
+      Supplier<Optional<ChangeStreamResumeInfo>> resumeInfoSupplier,
       Optional<SteadyStateException> lifecycleEvent,
-      BsonTimestamp commandOperationTime) {
+      Optional<BsonTimestamp> commandOperationTime) {
     return schedulingFuture
         .thenRun(
             () -> {
+              Optional<ChangeStreamResumeInfo> resumeInfo = resumeInfoSupplier.get();
               resumeInfo.ifPresent(this.resumeInfoUpdater);
               if (resumeInfo.isPresent()) {
                 try {
                   BsonTimestamp opTime =
                       ResumeTokenUtils.opTimeFromResumeToken(resumeInfo.get().getResumeToken());
-                  this.indexMetricsUpdater
-                      .getIndexingMetricsUpdater()
-                      .getReplicationOpTimeInfo()
-                      .update(opTime.getValue(), commandOperationTime.getValue());
+                  // commandOperationTime is the server "now" used as the upper bound of the
+                  // replication-lag gauge. Driver 5.x omits operationTime on change-stream getMore
+                  // responses; when it is unavailable we skip the lag update rather than fail the
+                  // change stream. The resume-token optime is still recorded below.
+                  if (commandOperationTime.isPresent()) {
+                    this.indexMetricsUpdater
+                        .getIndexingMetricsUpdater()
+                        .getReplicationOpTimeInfo()
+                        .update(opTime.getValue(), commandOperationTime.get().getValue());
+                  }
 
                   if (Instant.now().isAfter(this.optimeLastUpdate.plus(OPTIME_LOG_PERIOD))) {
                     this.optimeLastUpdate = Instant.now();
@@ -325,6 +395,12 @@ abstract class ChangeStreamIndexManager {
             ? throwable.getCause()
             : throwable;
 
+    if (unwrapped instanceof RegexLimitExceededException e) {
+      return SteadyStateException.createAnalysisLimitExceeded(e.getMessage());
+    }
+    if (unwrapped instanceof RegexInterruptedException) {
+      return SteadyStateException.createShutDown();
+    }
     if (unwrapped instanceof FieldExceededLimitsException f) {
       return SteadyStateException.createFieldExceeded(f.getMessage());
     }
@@ -343,7 +419,6 @@ abstract class ChangeStreamIndexManager {
   @FunctionalInterface
   public interface DocumentMetricsUpdater {
 
-    void accept(
-        int updatesWitnessed, int updatesApplicable, int skippedDocumentsWithoutMetadataNamespace);
+    void accept(DocumentEventBatch batch);
   }
 }

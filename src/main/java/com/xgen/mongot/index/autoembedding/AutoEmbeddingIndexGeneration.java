@@ -3,7 +3,10 @@ package com.xgen.mongot.index.autoembedding;
 import static com.xgen.mongot.index.autoembedding.AutoEmbeddingIndexGenerationFactory.createMaterializedViewIndexDefinitionGeneration;
 
 import com.xgen.mongot.index.IndexGeneration;
+import com.xgen.mongot.index.IndexTypeData;
 import com.xgen.mongot.index.definition.IndexDefinitionGeneration;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingCommitMetadata;
+import java.util.Optional;
 
 /** Composite IndexGeneration for Materialized View based AutoEmbedding index */
 public class AutoEmbeddingIndexGeneration extends IndexGeneration {
@@ -39,7 +42,19 @@ public class AutoEmbeddingIndexGeneration extends IndexGeneration {
             compositeIndex.matViewIndex,
             createMaterializedViewIndexDefinitionGeneration(rawDefinitionGeneration));
     this.derivedIndexGeneration =
-        new IndexGeneration(compositeIndex.derivedIndex, derivedIndexDefinitionGeneration);
+        new DerivedLocalIndexGeneration(
+            compositeIndex.derivedIndex,
+            derivedIndexDefinitionGeneration,
+            IndexTypeData.getIndexTypeTag(rawDefinitionGeneration.getIndexDefinition()),
+            () ->
+                new AutoEmbeddingCommitMetadata(
+                    compositeIndex.matViewIndex.isCurrentVersionQueryablePerLease(),
+                    // Both getters are non-null, so these are always present when
+                    // writing. The fields are Optional only so a commit from an older
+                    // binary that predates them still parses as absent (see fromBson).
+                    Optional.of(compositeIndex.matViewIndex.getMaterializedViewDatabaseName()),
+                    Optional.of(
+                        compositeIndex.matViewIndex.getMaterializedViewCollectionMetadata())));
   }
 
   /** Returns derived indexGeneration that contains Lucene index and Lucene index definition */

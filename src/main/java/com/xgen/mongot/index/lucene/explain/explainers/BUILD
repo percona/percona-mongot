@@ -3,11 +3,13 @@ load("//bazel/java:package.bzl", "java_library")
 java_library(
     name = "explainers",
     srcs = [
+        "AggregationFeatureExplainer.java",
         "CollectorTimingFeatureExplainer.java",
         "DynamicFeatureFlagFeatureExplainer.java",
         "FacetFeatureExplainer.java",
         "HighlightFeatureExplainer.java",
         "MetadataFeatureExplainer.java",
+        "OptimizerFeatureExplainer.java",
         "ResultMaterializationFeatureExplainer.java",
         "SortFeatureExplainer.java",
     ],
@@ -23,9 +25,11 @@ java_library(
         "//src/main/java/com/xgen/mongot/index/lucene/explain/information",
         "//src/main/java/com/xgen/mongot/index/lucene/explain/information/creator",
         "//src/main/java/com/xgen/mongot/index/lucene/explain/profiler",
+        "//src/main/java/com/xgen/mongot/index/lucene/explain/query",
         "//src/main/java/com/xgen/mongot/index/lucene/explain/timing",
         "//src/main/java/com/xgen/mongot/index/lucene/explain/tracing",
         "//src/main/java/com/xgen/mongot/index/lucene/field",
+        "//src/main/java/com/xgen/mongot/index/query/aggregation",
         "//src/main/java/com/xgen/mongot/index/query/highlights",
         "//src/main/java/com/xgen/mongot/index/query/sort",
         "//src/main/java/com/xgen/mongot/server/command/search/definition/request",
@@ -36,5 +40,6 @@ java_library(
         "@maven//:org_apache_lucene_lucene_core",
         "@maven//:org_apache_lucene_lucene_facet",
         "@maven//:org_apache_lucene_lucene_highlighter",
+        "@maven//:org_mongodb_bson",
     ],
 )

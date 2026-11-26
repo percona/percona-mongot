@@ -11,13 +11,19 @@ import static org.mockito.Mockito.when;
 import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
+import com.xgen.mongot.index.EncodedUserData;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.MeteredIndexWriter;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistry;
 import com.xgen.mongot.index.analyzer.AnalyzerRegistryFactory;
 import com.xgen.mongot.index.analyzer.InvalidAnalyzerDefinitionException;
 import com.xgen.mongot.index.definition.SearchIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.SearchIndexVectorFieldDefinition;
+import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorIndexDefinitionGeneration;
+import com.xgen.mongot.index.definition.VectorIndexingAlgorithm;
+import com.xgen.mongot.index.definition.VectorSimilarity;
+import com.xgen.mongot.index.definition.quantization.VectorQuantization;
 import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.directory.EnvironmentVariantPerfConfig;
 import com.xgen.mongot.index.lucene.directory.IndexDirectoryHelper;
@@ -31,10 +37,14 @@ import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.monitor.NoOpDiskMonitor;
+import com.xgen.mongot.replication.mongodb.common.AutoEmbeddingCommitMetadata;
+import com.xgen.mongot.replication.mongodb.common.IndexCommitUserData;
 import com.xgen.mongot.util.AtomicDirectoryRemover;
 import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.concurrent.Executors;
 import com.xgen.testing.TestUtils;
+import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.FieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionGenerationBuilder;
 import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionGenerationBuilder;
@@ -45,6 +55,7 @@ import com.xgen.testing.mongot.mock.index.SearchIndex;
 import com.xgen.testing.mongot.mock.index.VectorIndex;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Optional;
@@ -90,7 +101,7 @@ public class LuceneIndexFactoryTest {
       var formatIncremented =
           new Generation(
               Generation.FIRST.userIndexVersion,
-              IndexFormatVersion.create(Generation.FIRST.indexFormatVersion.versionNumber + 1));
+              IndexFormatVersion.create(Generation.FIRST.formatVersion.versionNumber() + 1));
       assertGenerationStoredAtPath(
           factory, indexId, formatIncremented, path.resolve("111122223333444455556666_f6_u0_a0"));
     }
@@ -209,6 +220,65 @@ public class LuceneIndexFactoryTest {
         getUnderlyingMergePolicy(factory.getInitializedIndex(index2, definitionGeneration2));
     Assert.assertSame(mergePolicy1, mergePolicy2);
     assertThat(mergePolicy1).isInstanceOf(VectorMergePolicy.class);
+  }
+
+  @Test
+  public void testNestedSearchVectorUsesVectorMergePolicy()
+      throws IOException, InvalidAnalyzerDefinitionException {
+    var config =
+        LuceneConfigBuilder.builder()
+            .tempDataPath()
+            .vectorMergePolicyConfig(
+                new LuceneConfig.VectorMergePolicyConfig(100, 1024, 2048, 1024, 2048))
+            .build();
+    try (LuceneIndexFactory factory =
+        LuceneIndexFactory.fromConfig(
+            config,
+            FeatureFlags.getDefault(),
+            new DynamicFeatureFlagRegistry(
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()),
+            EnvironmentVariantPerfConfig.getDefault(),
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            Optional.empty(),
+            AnalyzerRegistry.factory(),
+            new NoOpDiskMonitor())) {
+      var vectorSpecification =
+          new VectorFieldSpecification(
+              512,
+              VectorSimilarity.COSINE,
+              VectorQuantization.NONE,
+              new VectorIndexingAlgorithm.HnswIndexingAlgorithm());
+      var mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "_autoEmbed",
+                  FieldDefinitionBuilder.builder()
+                      .document(
+                          DocumentFieldDefinitionBuilder.builder()
+                              .dynamic(false)
+                              .field(
+                                  "content",
+                                  FieldDefinitionBuilder.builder()
+                                      .searchIndexVectorField(
+                                          new SearchIndexVectorFieldDefinition(vectorSpecification))
+                                      .build())
+                              .build())
+                      .build())
+              .build();
+      var definition =
+          SearchIndexDefinitionBuilder.builder().defaultMetadata().mappings(mappings).build();
+      SearchIndexDefinitionGeneration definitionGeneration =
+          SearchIndexDefinitionGenerationBuilder.create(
+              definition, CURRENT, Collections.emptyList());
+
+      var index = factory.getIndex(definitionGeneration);
+      InitializedIndex initializedIndex = factory.getInitializedIndex(index, definitionGeneration);
+
+      assertThat(getUnderlyingMergePolicy(initializedIndex)).isInstanceOf(VectorMergePolicy.class);
+      initializedIndex.close();
+      index.drop();
+    }
   }
 
   @Test
@@ -510,6 +580,202 @@ public class LuceneIndexFactoryTest {
       assertThat(factory.isCacheWarmerEnabled()).isTrue();
 
       verify(systemInfo.get(), times(2)).getOperatingSystem();
+    }
+  }
+
+  @Test
+  public void readPersistedCommitUserData_whenIndexNeverPersisted_returnsEmpty() throws Exception {
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+      assertThat(factory.readPersistedCommitUserData(gen)).isEmpty();
+    }
+  }
+
+  @Test
+  public void readPersistedCommitUserData_singlePartition_roundTripsAutoEmbeddingMetadata()
+      throws Exception {
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+      commitQueryableAutoEmbedding(factory, gen);
+      assertThat(readAutoEmbedding(factory, gen)).hasValue(new AutoEmbeddingCommitMetadata(true));
+    }
+  }
+
+  @Test
+  public void readPersistedCommitUserData_multiPartition_readsPartitionZeroCommit()
+      throws Exception {
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      var definition =
+          SearchIndexDefinitionBuilder.builder()
+              .defaultMetadata()
+              .mappings(SearchIndex.mockSearchDefinition(new ObjectId()).getMappings())
+              .numPartitions(2)
+              .build();
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              definition, CURRENT, Collections.emptyList());
+      commitQueryableAutoEmbedding(factory, gen);
+      // The index directory itself has no segments file: partitions live in "0"/"1"
+      // subdirectories, so this only succeeds because the read targets partition 0.
+      assertThat(readAutoEmbedding(factory, gen)).hasValue(new AutoEmbeddingCommitMetadata(true));
+    }
+  }
+
+  @Test
+  public void readPersistedCommitUserData_whenCommitCorrupt_returnsEmptyWithoutThrowing()
+      throws Exception {
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+      commitQueryableAutoEmbedding(factory, gen);
+      // Overwrite the segments file with garbage so Lucene fails to parse the commit. The read must
+      // swallow the failure (IOException or an unchecked exception from a corrupt SegmentInfos) and
+      // report absent rather than propagate.
+      overwriteSegmentsFilesWithGarbage(cfg.dataPath());
+      assertThat(factory.readPersistedCommitUserData(gen)).isEmpty();
+    }
+  }
+
+  @Test
+  public void readPersistedCommitUserData_whenDirectoryHasNoCommit_returnsEmpty() throws Exception {
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+      commitQueryableAutoEmbedding(factory, gen);
+      // A present but commit-less directory (all index files gone) must also degrade to absent.
+      deleteAllRegularFiles(cfg.dataPath());
+      assertThat(factory.readPersistedCommitUserData(gen)).isEmpty();
+    }
+  }
+
+  @Test
+  public void readPersistedCommitUserData_whenCommitHasNoUserData_returnsEmpty() throws Exception {
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+      // A real commit that carries no user data ("{}", e.g. an older-schema commit) must read back
+      // as absent, not as a present-but-empty payload: empty uniformly means "no persisted signal".
+      var index = factory.getIndex(gen);
+      InitializedIndex initializedIndex = factory.getInitializedIndex(index, gen);
+      initializedIndex.getWriter().commit(EncodedUserData.EMPTY);
+      initializedIndex.close();
+      assertThat(factory.readPersistedCommitUserData(gen)).isEmpty();
+    }
+  }
+
+  @Test
+  public void deleteGenerationData_removesDataCreatedByTheDefinitionFulPath()
+      throws InvalidAnalyzerDefinitionException, IOException {
+    // Pins the definition-free delete path to the definition-ful create path: whatever
+    // getIndex/getInitializedIndex put on disk for a generation must be exactly what
+    // deleteGenerationData removes given only that generation's identity. If the two ever derive
+    // paths differently, quarantined-index cleanup would silently leave data behind.
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+      var index = factory.getIndex(gen);
+      InitializedIndex initializedIndex = factory.getInitializedIndex(index, gen);
+      initializedIndex.close();
+      index.close();
+
+      String name = IndexDirectoryHelper.getNameForGeneration(gen.getGenerationId());
+      Path dataPath = cfg.dataPath().resolve(name);
+      Path metadataPath = cfg.dataPath().resolve("indexMetadata").resolve(name);
+      assertThat(Files.exists(dataPath)).isTrue();
+      assertThat(Files.exists(metadataPath)).isTrue();
+
+      // Note: no index.drop() here -- the point is that deletion succeeds without one.
+      factory.deleteGenerationData(gen.getGenerationId());
+
+      assertThat(Files.exists(dataPath)).isFalse();
+      assertThat(Files.exists(metadataPath)).isFalse();
+    }
+  }
+
+  @Test
+  public void deleteGenerationData_missingData_isNoOp()
+      throws InvalidAnalyzerDefinitionException, IOException {
+    // A quarantined entry may name a generation whose data was already removed before a crash.
+    var cfg = LuceneConfigBuilder.builder().tempDataPath().build();
+    try (LuceneIndexFactory factory = openFactory(cfg)) {
+      SearchIndexDefinitionGeneration gen =
+          SearchIndexDefinitionGenerationBuilder.create(
+              SearchIndex.mockSearchDefinition(new ObjectId()), CURRENT, Collections.emptyList());
+
+      factory.deleteGenerationData(gen.getGenerationId());
+    }
+  }
+
+  private static LuceneIndexFactory openFactory(LuceneConfig cfg)
+      throws InvalidAnalyzerDefinitionException, IOException {
+    return LuceneIndexFactory.fromConfig(
+        cfg,
+        FeatureFlags.getDefault(),
+        new DynamicFeatureFlagRegistry(
+            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()),
+        EnvironmentVariantPerfConfig.getDefault(),
+        MeterAndFtdcRegistry.createWithSimpleRegistries(),
+        Optional.empty(),
+        AnalyzerRegistry.factory(),
+        new NoOpDiskMonitor());
+  }
+
+  private static void commitQueryableAutoEmbedding(
+      LuceneIndexFactory factory, SearchIndexDefinitionGeneration gen)
+      throws InvalidAnalyzerDefinitionException, IOException {
+    var index = factory.getIndex(gen);
+    InitializedIndex initializedIndex = factory.getInitializedIndex(index, gen);
+    IndexCommitUserData userData =
+        IndexCommitUserData.fromEncodedData(
+                EncodedUserData.fromString("{\"backendIndexVersion\": {\"$numberInt\": \"123\"}}"),
+                Optional.of(gen.getGenerationId()))
+            .withAutoEmbeddingMetadata(new AutoEmbeddingCommitMetadata(true));
+    initializedIndex.getWriter().commit(userData.toEncodedData());
+    initializedIndex.close();
+  }
+
+  private static Optional<AutoEmbeddingCommitMetadata> readAutoEmbedding(
+      LuceneIndexFactory factory, SearchIndexDefinitionGeneration gen) {
+    return factory
+        .readPersistedCommitUserData(gen)
+        .map(
+            encoded ->
+                IndexCommitUserData.fromEncodedData(encoded, Optional.of(gen.getGenerationId())))
+        .flatMap(IndexCommitUserData::autoEmbeddingMetadata);
+  }
+
+  private static void overwriteSegmentsFilesWithGarbage(Path root) throws IOException {
+    try (var stream = Files.walk(root)) {
+      for (Path file :
+          stream
+              .filter(Files::isRegularFile)
+              .filter(file -> file.getFileName().toString().startsWith("segments"))
+              .toList()) {
+        Files.write(file, new byte[] {0, 1, 2, 3, 4, 5, 6, 7});
+      }
+    }
+  }
+
+  private static void deleteAllRegularFiles(Path root) throws IOException {
+    try (var stream = Files.walk(root)) {
+      for (Path file : stream.filter(Files::isRegularFile).toList()) {
+        Files.delete(file);
+      }
     }
   }
 }

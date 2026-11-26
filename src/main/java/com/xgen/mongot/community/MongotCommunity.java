@@ -1,13 +1,18 @@
 package com.xgen.mongot.community;
 
 import com.google.common.net.HostAndPort;
-import com.xgen.mongot.config.provider.community.CommunityMongotBootstrapper;
+import com.xgen.mongot.config.provider.community.CommunityConfig;
+import com.xgen.mongot.config.provider.community.OnPremMongotBootstrapper;
+import com.xgen.mongot.featureflag.FeatureFlags;
+import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.index.lucene.vector.Similarity;
 import com.xgen.mongot.logging.Logging;
 import com.xgen.mongot.util.Crash;
+import com.xgen.mongot.util.DeploymentEnvironment;
 import com.xgen.mongot.util.MongotVersionResolver;
 import com.xgen.mongot.util.security.Security;
 import java.nio.file.Path;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -22,7 +27,7 @@ public class MongotCommunity implements Runnable, IVersionProvider {
   private static final Logger LOG = LoggerFactory.getLogger(MongotCommunity.class);
 
   @CommandLine.Option(names = "--config", description = "Path to the mongot YAML config file")
-  public Path configPath;
+  public Optional<Path> configPath = Optional.empty();
 
   // This flag informs the system it was started up in test mode and modifies some behaviour when
   // running $listSearchIndexes for internal e2e and integration tests. It should not be applied
@@ -41,6 +46,12 @@ public class MongotCommunity implements Runnable, IVersionProvider {
               + " used for internal e2e testing",
       defaultValue = "false")
   public boolean internalListAllIndexesForTesting;
+
+  // CLI options that set fields of the mongot YAML config file. These do not override the config
+  // file: if a field is provided both in the YAML config and via the CLI, an error is thrown.
+  @CommandLine.Mixin
+  public CommunityConfig.CommunityConfigCliOptionRegistry communityConfigCliOptionRegistry =
+      new CommunityConfig.CommunityConfigCliOptionRegistry();
 
   @Override
   public void run() {
@@ -64,11 +75,20 @@ public class MongotCommunity implements Runnable, IVersionProvider {
       Crash.because("should be running Java 21").now();
     }
 
+    // On-prem editions don't use DFF; communityDefault() seeds the flags that should default on
+    // for on-prem. This instance is created only once per process.
+    var dynamicFeatureFlagRegistry = DynamicFeatureFlagRegistry.communityDefault();
+    var featureFlags = FeatureFlags.communityDefaults();
+
     Crash.because("failed to bootstrap")
         .ifThrows(
             () ->
-                CommunityMongotBootstrapper.bootstrap(
-                    this.configPath, this.internalListAllIndexesForTesting));
+                new OnPremMongotBootstrapper(
+                        dynamicFeatureFlagRegistry, featureFlags, DeploymentEnvironment.COMMUNITY)
+                    .bootstrap(
+                        this.configPath,
+                        this.internalListAllIndexesForTesting,
+                        this.communityConfigCliOptionRegistry.traverse()));
   }
 
   public static void main(String[] args) {

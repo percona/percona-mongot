@@ -4,6 +4,7 @@ import static com.google.common.flogger.LazyArgs.lazy;
 import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.flogger.FluentLogger;
+import com.xgen.mongot.featureflag.Feature;
 import com.xgen.mongot.index.definition.FieldDefinition;
 import com.xgen.mongot.index.definition.NumericFieldOptions;
 import com.xgen.mongot.index.definition.SearchIndexDefinition;
@@ -12,6 +13,7 @@ import com.xgen.mongot.index.definition.StringFieldDefinition;
 import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.VectorSimilarity;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
+import com.xgen.mongot.index.definition.quantization.VectorTypeFieldResolver;
 import com.xgen.mongot.index.lucene.config.LuceneConfig;
 import com.xgen.mongot.index.lucene.extension.KnnByteVectorField;
 import com.xgen.mongot.index.lucene.extension.KnnFloatVectorField;
@@ -62,7 +64,7 @@ import org.bson.types.ObjectId;
 public class IndexableFieldFactory {
 
   /**
-   * Value in the nullness field for documents that have a value for the corresponding sort field.  
+   * Value in the nullness field for documents that have a value for the corresponding sort field.
    */
   static final long NULLNESS_FIELD_PRESENT = 0L;
 
@@ -75,9 +77,25 @@ public class IndexableFieldFactory {
           .stored(true)
           .build();
 
-  private static final FieldType AUTOCOMPLETE_FIELD_TYPE =
+  // Legacy autocomplete field type. Autocomplete matching is done via TermQuery/AutomatonQuery over
+  // pre-computed edge/n-gram tokens, so positions and offsets are never consulted by the query
+  // path; they are retained here only for indexes built before the reduced field type was
+  // introduced (Lucene forbids changing a field's IndexOptions within an existing index).
+  private static final FieldType AUTOCOMPLETE_FIELD_TYPE_WITH_OFFSETS =
       new FieldTypeBuilder()
           .withIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS)
+          .tokenized(true)
+          .stored(true)
+          .build();
+
+  // Reduced autocomplete field type used at newer feature versions. Positions and offsets are
+  // dropped since the autocomplete query path never reads them; freqs are retained so BM25 scoring
+  // of the gram terms is unchanged. Highlighting of an autocomplete-only field falls back to the
+  // UnifiedHighlighter's re-analysis offset source, which reproduces the same offsets the postings
+  // previously stored. See IndexCapabilities#usesReducedAutocompleteIndexOptions.
+  private static final FieldType AUTOCOMPLETE_FIELD_TYPE_REDUCED =
+      new FieldTypeBuilder()
+          .withIndexOptions(IndexOptions.DOCS_AND_FREQS)
           .tokenized(true)
           .stored(true)
           .build();
@@ -119,7 +137,6 @@ public class IndexableFieldFactory {
           .stored(false)
           .omitNorms(true)
           .build();
-
 
   /**
    * Adds an IndexableField for the `_id` to the root Lucene document for a BSON document we're
@@ -353,10 +370,7 @@ public class IndexableFieldFactory {
   }
 
   private static void addTokenFieldWithAnalyzer(
-      AbstractDocumentWrapper document,
-      String luceneFieldName,
-      String value)
-      throws IOException {
+      AbstractDocumentWrapper document, String luceneFieldName, String value) throws IOException {
     Analyzer indexAnalyzer = document.getIndexAnalyzer().orElseThrow();
     BytesRef analyzedValue =
         new BytesRef(
@@ -374,7 +388,11 @@ public class IndexableFieldFactory {
   static void addAutocompleteField(AbstractDocumentWrapper document, FieldPath path, String value) {
     String luceneFieldName =
         FieldName.TypeField.AUTOCOMPLETE.getLuceneFieldName(path, document.getEmbeddedRoot());
-    document.put(new Field(luceneFieldName, value, AUTOCOMPLETE_FIELD_TYPE));
+    FieldType fieldType =
+        document.getIndexCapabilities().usesReducedAutocompleteIndexOptions()
+            ? AUTOCOMPLETE_FIELD_TYPE_REDUCED
+            : AUTOCOMPLETE_FIELD_TYPE_WITH_OFFSETS;
+    document.put(new Field(luceneFieldName, value, fieldType));
   }
 
   static void addDateField(
@@ -437,8 +455,7 @@ public class IndexableFieldFactory {
    * setting will handle their ordering.
    */
   static void addNullnessField(AbstractDocumentWrapper document, FieldPath path) {
-    String luceneFieldName =
-        FieldName.getNullnessFieldName(path);
+    String luceneFieldName = FieldName.getNullnessFieldName(path);
     document.put(new SortedNumericDocValuesField(luceneFieldName, NULLNESS_FIELD_PRESENT));
   }
 
@@ -526,40 +543,57 @@ public class IndexableFieldFactory {
       return;
     }
 
-    VectorSimilarityFunction similarityFunction = similarity.getLuceneSimilarityFunction();
+    // f16 input is only supported by the vectorlite engine; the Lucene path cannot index it.
+    if (vector.getVectorType() == Vector.VectorType.FLOAT16) {
+      FLOGGER.atWarning().atMostEvery(1, TimeUnit.HOURS).log(
+          "float16 vectors are not supported by the Lucene engine, skipping. _id=%s",
+          lazy(() -> getLoggingId(document)));
+      document.markVectorFieldInvalid(checkFieldName);
+      return;
+    }
 
+    VectorSimilarityFunction similarityFunction = similarity.getLuceneSimilarityFunction();
+    String vectorFieldName =
+        VectorTypeFieldResolver.resolveTypeField(quantization, vector.getVectorType())
+            .getLuceneFieldName(field, document.getEmbeddedRoot());
     try {
       switch (vector.getVectorType()) {
         case FLOAT -> {
-          String floatVectorFieldName =
-              quantization.toTypeField().getLuceneFieldName(field, document.getEmbeddedRoot());
           document.addVectorField(
               new KnnFloatVectorField(
-                  floatVectorFieldName,
-                  vector.asFloatVector().getFloatVector(),
-                  similarityFunction),
+                  vectorFieldName, vector.asFloatVector().getFloatVector(), similarityFunction),
               checkFieldName);
         }
+        // float16 is guarded out above (vectorlite-only); unreachable here.
+        case FLOAT16 ->
+            throw new IllegalStateException(
+                "float16 vectors are not supported by the Lucene engine");
         case BYTE -> {
-          if (isQuantizationEnabled(quantization)) {
+          if (quantization.equals(VectorQuantization.SCALAR)) {
             FLOGGER.atWarning().atMostEvery(10, TimeUnit.MINUTES).log(
-                "Quantization is only supported for FLOAT vectors but found BYTE vector, "
+                "Scalar quantization is only supported for FLOAT vectors but found BYTE vector, "
                     + "skipping. _id=%s",
                 lazy(() -> getLoggingId(document)));
             return;
           }
-          String byteVectorFieldName =
-              FieldName.TypeField.KNN_BYTE.getLuceneFieldName(field, document.getEmbeddedRoot());
+          if (quantization.equals(VectorQuantization.BINARY)
+              && !document.getFeatureFlags().isEnabled(Feature.BYTE_BINARY_QUANTIZATION)) {
+            FLOGGER.atWarning().atMostEvery(10, TimeUnit.MINUTES).log(
+                "Binary quantization is only supported for FLOAT vectors but found BYTE vector, "
+                    + "skipping. _id=%s",
+                lazy(() -> getLoggingId(document)));
+            return;
+          }
           document.addVectorField(
               new KnnByteVectorField(
-                  byteVectorFieldName, vector.asByteVector().getByteVector(), similarityFunction),
+                  vectorFieldName, vector.asByteVector().getByteVector(), similarityFunction),
               checkFieldName);
         }
         case BIT -> {
           if (isQuantizationEnabled(quantization)) {
             FLOGGER.atWarning().atMostEvery(10, TimeUnit.MINUTES).log(
-                "Quantization is only supported for FLOAT vectors but found BIT vector, "
-                    + "skipping. _id=%s",
+                "Quantization is only supported for FLOAT and BYTE vectors but found BIT"
+                    + " vector, skipping. _id=%s",
                 lazy(() -> getLoggingId(document)));
             return;
           }
@@ -569,11 +603,9 @@ public class IndexableFieldFactory {
                 similarity, lazy(() -> getLoggingId(document)));
             return;
           }
-          String bitVectorFieldName =
-              FieldName.TypeField.KNN_BIT.getLuceneFieldName(field, document.getEmbeddedRoot());
           document.addVectorField(
               new KnnByteVectorField(
-                  bitVectorFieldName, vector.asBitVector().getBitVector(), similarityFunction),
+                  vectorFieldName, vector.asBitVector().getBitVector(), similarityFunction),
               checkFieldName);
         }
       }
@@ -872,7 +904,7 @@ public class IndexableFieldFactory {
 
   /**
    * Returns the logging ID of the document wrapper.
-   * 
+   *
    * <p>If the document wrapper does not have a root ID or fails to get the root ID, do not throw
    * and returns "unknown".
    *

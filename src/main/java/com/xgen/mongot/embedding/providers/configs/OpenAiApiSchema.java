@@ -90,7 +90,10 @@ public class OpenAiApiSchema {
               .required();
       // Some OpenAI-compatible servers (e.g. certain Ollama builds) omit usage.
       static final Field.Optional<EmbedUsage> EMBED_USAGE =
-          Field.builder("usage").classField(EmbedUsage::fromBson).allowUnknownFields().optional()
+          Field.builder("usage")
+              .classField(EmbedUsage::fromBson)
+              .allowUnknownFields()
+              .optional()
               .noDefault();
     }
 

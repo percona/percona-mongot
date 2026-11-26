@@ -29,40 +29,51 @@ public class MqlLongSort extends MqlSortedNumericSortField {
       };
 
   private final boolean enablePruning;
-  private final NullEmptySortPosition nullEmptySortPosition;
+  protected final NullEmptySortPosition nullEmptySortPosition;
 
   MqlLongSort(
       FieldName.TypeField fieldType,
       MongotSortField sortField,
       boolean enablePruning,
       Optional<FieldPath> embeddedRoot,
-      boolean indexSorted) {
+      boolean indexSorted,
+      boolean isSortableNumberBetaV1) {
     super(
         fieldType.getLuceneFieldName(sortField.field(), embeddedRoot),
         Type.LONG,
         sortField.options().isReverse(),
         sortField.options().selector().numericSelector,
-        indexSorted);
+        indexSorted,
+        isSortableNumberBetaV1);
     this.enablePruning = enablePruning;
     this.nullEmptySortPosition =
         ((UserFieldSortOptions) sortField.options()).nullEmptySortPosition();
   }
 
   @Override
-  public FieldComparator<?> getComparator(int numHits, Pruning lucenePruning) {
+  protected final FieldComparator<?> createQueryTimeFieldComparator(
+      int numHits, Pruning lucenePruning) {
     // Consider both mongot & lucene pruning configuration
     Pruning configurePruning = this.enablePruning ? lucenePruning : Pruning.NONE;
 
     return new FieldComparatorBsonWrapper<>(
-        new MqlLongComparator(
-            numHits,
-            getField(),
-            getReverse(),
-            configurePruning,
-            getNumericType(),
-            getSelector(),
-            this.nullEmptySortPosition),
+        createComparator(numHits, configurePruning),
         LONG_CONVERTER,
         this.nullEmptySortPosition.getNullMissingSortValue());
+  }
+
+  /**
+   * Builds the underlying long comparator. Overridden by the embeddedDoc-scoped variant to reduce
+   * the value over a parent's matching children instead of reading the parent's own value.
+   */
+  protected MqlLongComparator createComparator(int numHits, Pruning pruning) {
+    return new MqlLongComparator(
+        numHits,
+        getField(),
+        getReverse(),
+        pruning,
+        getNumericType(),
+        getSelector(),
+        this.nullEmptySortPosition);
   }
 }

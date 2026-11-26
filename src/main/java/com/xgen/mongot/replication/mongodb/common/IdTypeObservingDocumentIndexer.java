@@ -10,25 +10,24 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import org.bson.BsonValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * A {@link DocumentIndexer} decorator that observes the {@code _id} BSON type of the first
- * document indexed and reports it via a provided callback. The callback fires at most once.
+ * A {@link DocumentIndexer} decorator that observes the {@code _id} BSON type of the first document
+ * indexed and reports it via a provided callback. The callback fires at most once.
  */
 public final class IdTypeObservingDocumentIndexer implements DocumentIndexer {
 
-  private static final Logger LOG =
-      LoggerFactory.getLogger(IdTypeObservingDocumentIndexer.class);
+  private static final Logger LOG = LoggerFactory.getLogger(IdTypeObservingDocumentIndexer.class);
 
   private final DocumentIndexer delegate;
   private final Consumer<String> onFirstIdType;
   private final AtomicBoolean reported = new AtomicBoolean(false);
 
-  private IdTypeObservingDocumentIndexer(
-      DocumentIndexer delegate, Consumer<String> onFirstIdType) {
+  private IdTypeObservingDocumentIndexer(DocumentIndexer delegate, Consumer<String> onFirstIdType) {
     this.delegate = delegate;
     this.onFirstIdType = onFirstIdType;
   }
@@ -66,6 +65,16 @@ public final class IdTypeObservingDocumentIndexer implements DocumentIndexer {
   @Override
   public void updateCommitUserData(IndexCommitUserData commitUserData) {
     this.delegate.updateCommitUserData(commitUserData);
+  }
+
+  @Override
+  public void updateCommitUserDataSupplier(Supplier<IndexCommitUserData> commitUserDataSupplier) {
+    this.delegate.updateCommitUserDataSupplier(commitUserDataSupplier);
+  }
+
+  @Override
+  public void stageCommitUserData() throws IOException {
+    this.delegate.stageCommitUserData();
   }
 
   @Override

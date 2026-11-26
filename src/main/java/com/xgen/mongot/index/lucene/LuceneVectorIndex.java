@@ -3,9 +3,8 @@ package com.xgen.mongot.index.lucene;
 import static com.xgen.mongot.util.Check.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.xgen.mongot.featureflag.Feature;
-import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.IndexUnavailableException;
+import com.xgen.mongot.index.InitialSyncIndexUnavailableException;
 import com.xgen.mongot.index.VectorIndex;
 import com.xgen.mongot.index.definition.IndexDefinition;
 import com.xgen.mongot.index.definition.VectorIndexDefinition;
@@ -92,7 +91,6 @@ public class LuceneVectorIndex implements VectorIndex {
       Path indexPath,
       Path metadataPath,
       LuceneConfig config,
-      FeatureFlags featureFlags,
       InstrumentedConcurrentMergeScheduler mergeScheduler,
       MergePolicy mergePolicy,
       QueryCacheProvider queryCacheProvider,
@@ -124,9 +122,7 @@ public class LuceneVectorIndex implements VectorIndex {
             indexDefinition.getNumPartitions()),
         concurrentSearchExecutor,
         concurrentVectorRescoringExecutor,
-        featureFlags.isEnabled(Feature.INITIAL_INDEX_STATUS_UNKNOWN)
-            ? IndexStatus.unknown()
-            : IndexStatus.notStarted());
+        IndexStatus.unknown());
   }
 
   private static LuceneVectorIndex create(
@@ -208,11 +204,15 @@ public class LuceneVectorIndex implements VectorIndex {
   public void throwIfUnavailableForQuerying() throws IndexUnavailableException {
     var status = getStatus().getStatusCode();
     switch (status) {
-      case UNKNOWN, NOT_STARTED, INITIAL_SYNC, FAILED -> throw new IndexUnavailableException(
-          String.format(
-              "cannot query vector index %s while in state %s", this.definition, status));
-      case STEADY, STALE, RECOVERING_TRANSIENT, RECOVERING_NON_TRANSIENT, DOES_NOT_EXIST -> {
-      }
+      case INITIAL_SYNC ->
+          throw new InitialSyncIndexUnavailableException(
+              String.format(
+                  "cannot query vector index %s while in state %s", this.definition, status));
+      case UNKNOWN, NOT_STARTED, FAILED ->
+          throw new IndexUnavailableException(
+              String.format(
+                  "cannot query vector index %s while in state %s", this.definition, status));
+      case STEADY, STALE, RECOVERING_TRANSIENT, RECOVERING_NON_TRANSIENT, DOES_NOT_EXIST -> {}
     }
   }
 

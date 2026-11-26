@@ -4,11 +4,11 @@ import static com.xgen.mongot.index.lucene.InstrumentedConcurrentMergeSchedulerT
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_DEFINITION_GENERATION;
 import static com.xgen.testing.mongot.mock.index.SearchIndex.MOCK_INDEX_GENERATION_ID;
-import static org.mockito.ArgumentMatchers.any;
 
 import com.google.common.collect.ImmutableList;
 import com.xgen.mongot.featureflag.FeatureFlags;
 import com.xgen.mongot.index.EncodedUserData;
+import com.xgen.mongot.index.ReplicationOpTimeInfo;
 import com.xgen.mongot.index.analyzer.wrapper.LuceneAnalyzer;
 import com.xgen.mongot.index.lucene.merge.InstrumentedConcurrentMergeScheduler;
 import com.xgen.mongot.index.lucene.searcher.LuceneSearcherFactory;
@@ -16,6 +16,7 @@ import com.xgen.mongot.index.lucene.searcher.LuceneSearcherManager;
 import com.xgen.mongot.index.lucene.searcher.QueryCacheProvider;
 import com.xgen.mongot.index.lucene.writer.SingleLuceneIndexWriter;
 import com.xgen.mongot.index.status.IndexStatus;
+import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.metrics.PerIndexMetricsFactory;
 import com.xgen.testing.TestUtils;
 import com.xgen.testing.mongot.index.analyzer.AnalyzerRegistryBuilder;
@@ -29,10 +30,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.lucene.document.Document;
 import org.apache.lucene.index.TieredMergePolicy;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
+import org.bson.BsonTimestamp;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -63,12 +66,17 @@ public class PeriodicLuceneIndexRefresherTest {
 
     AtomicReference<IndexStatus> statusRef = new AtomicReference<>(IndexStatus.notStarted());
 
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    var processMetricsFactory = new MetricsFactory("test", registry);
+    var metricsFactory = Mockito.mock(PerIndexMetricsFactory.class);
+    Mockito.when(metricsFactory.getProcessMetricsFactory()).thenReturn(processMetricsFactory);
+
     new PeriodicLuceneIndexRefresher(
         Executors.newSingleThreadScheduledExecutor(),
         Duration.ofMillis(50),
         ImmutableList.of(searcherManager),
         statusRef::get,
-        Mockito.mock(PerIndexMetricsFactory.class));
+        metricsFactory);
 
     // The refresher should not refresh while in NOT_STARTED.
     Assert.assertFalse(refreshed.await(500, TimeUnit.MILLISECONDS));
@@ -111,9 +119,10 @@ public class PeriodicLuceneIndexRefresherTest {
           public void afterRefresh(boolean didRefresh) {}
         });
 
-    Timer timer = new SimpleMeterRegistry().timer("testTimer");
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    var processMetricsFactory = new MetricsFactory("test", registry);
     var metricsFactory = Mockito.mock(PerIndexMetricsFactory.class);
-    Mockito.when(metricsFactory.perIndexTimer(any())).thenReturn(timer);
+    Mockito.when(metricsFactory.getProcessMetricsFactory()).thenReturn(processMetricsFactory);
 
     new PeriodicLuceneIndexRefresher(
         Executors.newSingleThreadScheduledExecutor(),
@@ -123,8 +132,58 @@ public class PeriodicLuceneIndexRefresherTest {
         metricsFactory);
 
     Assert.assertTrue(refreshed.await(5, TimeUnit.SECONDS));
+    Timer timer = registry.get("test.refreshDurations").timer();
     Assert.assertTrue(timer.totalTime(TimeUnit.MILLISECONDS) >= 0);
     Assert.assertTrue(timer.count() >= 1);
+  }
+
+  @Test
+  public void testRefreshListenerUpdatesLuceneVisibleOpTime() throws Exception {
+    SingleLuceneIndexWriter writer = getIndexWriter();
+    LuceneSearcherManager searcherManager =
+        LuceneSearcherManager.create(
+            writer.getLuceneWriter(),
+            new LuceneSearcherFactory(
+                MOCK_INDEX_DEFINITION,
+                false,
+                new QueryCacheProvider.DefaultQueryCacheProvider(),
+                Optional.empty(),
+                SearchIndex.mockQueryMetricsUpdater(MOCK_INDEX_DEFINITION.getType())),
+            SearchIndex.mockMetricsFactory(),
+            () -> false);
+
+    ReplicationOpTimeInfo opTimeInfo = new ReplicationOpTimeInfo();
+    long writeOpTime = new BsonTimestamp(100, 0).getValue();
+    opTimeInfo.update(writeOpTime, writeOpTime);
+
+    searcherManager.addListener(
+        new ReferenceManager.RefreshListener() {
+          private volatile long pendingOpTime = -1L;
+
+          @Override
+          public void beforeRefresh() {
+            this.pendingOpTime = opTimeInfo.snapshot().map(s -> s.replicationOpTime()).orElse(-1L);
+          }
+
+          @Override
+          public void afterRefresh(boolean didRefresh) {
+            if (didRefresh && this.pendingOpTime >= 0) {
+              opTimeInfo.updateVisible(this.pendingOpTime);
+            }
+          }
+        });
+
+    // No refresh has occurred yet — visible optime should be empty.
+    Assert.assertTrue(opTimeInfo.visibleOpTime().isEmpty());
+
+    // Add a document so openIfChanged returns a new reader.
+    writer.getLuceneWriter().addDocument(new Document());
+
+    // A refresh should now promote a new reader and fire the listener.
+    searcherManager.maybeRefreshBlocking();
+
+    Assert.assertTrue(opTimeInfo.visibleOpTime().isPresent());
+    Assert.assertEquals(writeOpTime, opTimeInfo.visibleOpTime().getAsLong());
   }
 
   private static LuceneSearcherManager getSearcherManager() throws Exception {
@@ -161,7 +220,7 @@ public class PeriodicLuceneIndexRefresherTest {
             Optional.empty(),
             LuceneAnalyzer.indexAnalyzer(MOCK_INDEX_DEFINITION, AnalyzerRegistryBuilder.empty()),
             MOCK_INDEX_DEFINITION.createFieldDefinitionResolver(
-                MOCK_INDEX_DEFINITION_GENERATION.generation().indexFormatVersion),
+                MOCK_INDEX_DEFINITION_GENERATION.generation().formatVersion.asLucene()),
             SearchIndex.mockIndexingMetricsUpdater(MOCK_INDEX_DEFINITION.getType()),
             Optional.empty(),
             FeatureFlags.getDefault(),

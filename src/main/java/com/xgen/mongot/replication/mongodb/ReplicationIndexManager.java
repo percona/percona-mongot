@@ -19,12 +19,12 @@ import com.xgen.mongot.index.IndexGeneration;
 import com.xgen.mongot.index.InitializedIndex;
 import com.xgen.mongot.index.ReplicationOpTimeInfo;
 import com.xgen.mongot.index.definition.IndexDefinition;
+import com.xgen.mongot.index.definition.VectorIndexDefinition;
 import com.xgen.mongot.index.status.IndexStatus;
 import com.xgen.mongot.index.status.IndexStatus.Reason;
 import com.xgen.mongot.index.status.IndexStatus.StatusCode;
 import com.xgen.mongot.index.status.StaleStatusReason;
 import com.xgen.mongot.index.version.GenerationId;
-import com.xgen.mongot.index.version.IndexFormatVersion;
 import com.xgen.mongot.logging.DefaultKeyValueLogger;
 import com.xgen.mongot.metrics.MetricsFactory;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
@@ -35,6 +35,7 @@ import com.xgen.mongot.replication.mongodb.common.InitialSyncException;
 import com.xgen.mongot.replication.mongodb.common.InitialSyncResumeInfo;
 import com.xgen.mongot.replication.mongodb.common.MongoViewExceptionUtils;
 import com.xgen.mongot.replication.mongodb.common.PeriodicIndexCommitter;
+import com.xgen.mongot.replication.mongodb.common.QueryRejectedBySettingsExceptionUtils;
 import com.xgen.mongot.replication.mongodb.common.ResumeTokenUtils;
 import com.xgen.mongot.replication.mongodb.common.StaleStateInfo;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
@@ -47,9 +48,11 @@ import com.xgen.mongot.util.Check;
 import com.xgen.mongot.util.Crash;
 import com.xgen.mongot.util.DurationUtils;
 import com.xgen.mongot.util.FutureUtils;
+import com.xgen.mongot.util.functionalinterfaces.CheckedRunnable;
 import com.xgen.mongot.util.mongodb.Errors;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
@@ -75,8 +78,22 @@ public class ReplicationIndexManager implements IndexManager {
    */
   public static final Duration DEFAULT_TRANSIENT_BACKOFF = Duration.ofSeconds(30);
 
+  /**
+   * System property specifying the perf-test force-merge-after-initial-sync target segment count.
+   * It is baked into the mongot binary the perf framework builds (via the {@code upload_artifacts}
+   * job), which passes {@code -D<this property>=<n>} on the JVM command line, so perf runs get an
+   * index merged down to {@code n} segments.
+   */
+  static final String FORCE_MERGE_MAX_NUM_SEGMENTS_PROPERTY =
+      "mongot.perf.forceMergeMaxNumSegments";
+
   private static final String EMPTY_EXCEPTION_METRIC_FIELD = "None";
   private static final String INDEX_DROPPED_COUNTER_UNKNOWN_TAG = "unknown";
+  // Base name of the auto-embedding internal-search database. Kept in sync with
+  // InternalDatabaseResolver.DEFAULT_BASE_NAME (duplicated here to avoid coupling the core
+  // replication manager to the embedding package for a single constant). On multi-tenant clusters
+  // the resolved database is "<tenant>___mdb_internal_search"; on dedicated it is the base name.
+  private static final String INTERNAL_SEARCH_DB_BASE_NAME = "__mdb_internal_search";
   @VisibleForTesting static final String EXCEEDED_LIMIT_REASON_PREFIX = "Exceeded max limit: ";
 
   /** The action taken when an index fails. */
@@ -133,9 +150,12 @@ public class ReplicationIndexManager implements IndexManager {
   /** Backoff duration on server ingress request rate limit */
   private final Duration requestRateLimitBackoff;
 
-  /** The current state of the ReplicationIndexManager. */
+  /**
+   * The current state of the ReplicationIndexManager. Volatile so {@link #getStateWithoutLock()}
+   * can read it without the monitor.
+   */
   @GuardedBy("this")
-  private State state;
+  private volatile State state;
 
   /** The future representing the work to initialize the ReplicationIndexManager. */
   @GuardedBy("this")
@@ -237,7 +257,7 @@ public class ReplicationIndexManager implements IndexManager {
       boolean enableNaturalOrderScan) {
     Index index = indexGeneration.getIndex();
     PeriodicIndexCommitter periodicCommitter =
-        PeriodicIndexCommitter.create(index, documentIndexer, commitExecutor, commitInterval);
+        createPeriodicCommitter(index, documentIndexer, commitExecutor, commitInterval);
     return create(
         lifecycleExecutor,
         cursorManager,
@@ -328,6 +348,25 @@ public class ReplicationIndexManager implements IndexManager {
   }
 
   /**
+   * A custom vector engine index needs no Java commit cycle: each completed replication batch
+   * stages its resume position with the writer and the engine schedules its own commits. It gets an
+   * inactive committer so the shutdown path stays uniform; every other index gets periodic commits.
+   */
+  @VisibleForTesting
+  static PeriodicIndexCommitter createPeriodicCommitter(
+      Index index,
+      DocumentIndexer documentIndexer,
+      ScheduledExecutorService commitExecutor,
+      Duration commitInterval) {
+    boolean engineSchedulesCommits =
+        index.getDefinition() instanceof VectorIndexDefinition vectorDef
+            && vectorDef.isCustomVectorEngineIndex();
+    return engineSchedulesCommits
+        ? PeriodicIndexCommitter.createInactive(index, documentIndexer)
+        : PeriodicIndexCommitter.create(index, documentIndexer, commitExecutor, commitInterval);
+  }
+
+  /**
    * Gracefully shuts down the ReplicationIndexManager.
    *
    * @return a future that completes when the ReplicationIndexManager has completed shutting down.
@@ -356,6 +395,12 @@ public class ReplicationIndexManager implements IndexManager {
 
   @Override
   public synchronized State getState() {
+    return this.state;
+  }
+
+  @Override
+  @SuppressWarnings("GuardedBy") // volatile read; writes still happen under this monitor
+  public State getStateWithoutLock() {
     return this.state;
   }
 
@@ -401,20 +446,16 @@ public class ReplicationIndexManager implements IndexManager {
     checkState(
         this.state.equals(State.INITIALIZING), "cannot call init() when not in INITIALIZING");
     checkState(
-        this.indexGeneration
-            .getDefinitionGeneration()
-            .generation()
-            .indexFormatVersion
-            .isSupported(),
+        this.indexGeneration.getDefinitionGeneration().hasSupportedFormatVersion(),
         "index format version is not supported for replication");
 
     IndexCommitUserData userData = getIndexCommitUserData();
-    Optional<String> exceededReason = userData.getExceededLimitsReason();
+    Optional<String> exceededReason = userData.exceededLimitsReason();
     if (exceededReason.isPresent()) {
       exceededIndex(exceededReason.get());
       return;
     }
-    Optional<StaleStateInfo> staleStateInfo = userData.getStaleStateInfo();
+    Optional<StaleStateInfo> staleStateInfo = userData.staleStateInfo();
     if (staleStateInfo.isPresent()) {
       // Do not start replication for indexes that were marked as stale on previous runs
       shutDownReplicationOnStaleIndex(staleStateInfo.get());
@@ -422,7 +463,7 @@ public class ReplicationIndexManager implements IndexManager {
     }
 
     if (this.featureFlags.isEnabled(Feature.SHUT_DOWN_REPLICATION_WHEN_COLLECTION_NOT_FOUND)) {
-      Optional<IndexStateInfo> indexStateInfo = userData.getIndexStateInfo();
+      Optional<IndexStateInfo> indexStateInfo = userData.indexStateInfo();
       if (indexStateInfo.isPresent() && indexStateInfo.get().isCollectionNotFound()) {
         // Do not start replication for indexes that cannot resolve collections on mongod.
         // This typically occurs when a collection is missing on a shard.
@@ -437,7 +478,7 @@ public class ReplicationIndexManager implements IndexManager {
       case RESUME_INITIAL_SYNC ->
           enqueueInitialSyncResume(
               userData
-                  .getInitialSyncResumeInfo()
+                  .initialSyncResumeInfo()
                   .orElseThrow(
                       () ->
                           new IllegalStateException(
@@ -446,7 +487,7 @@ public class ReplicationIndexManager implements IndexManager {
       case RESUME_STEADY_STATE ->
           resumeSteadyState(
               userData
-                  .getResumeInfo()
+                  .resumeInfo()
                   .orElseThrow(
                       () ->
                           new IllegalStateException(
@@ -462,26 +503,24 @@ public class ReplicationIndexManager implements IndexManager {
     }
 
     // This shouldn't happen.
-    if (userData.getBackendIndexVersion().isEmpty()) {
+    if (userData.backendIndexVersion().isEmpty()) {
       this.logger.error("No index version found, resyncing.");
       return InitAction.RUN_INITIAL_SYNC;
     }
 
-    IndexFormatVersion indexFormatVersion = userData.getBackendIndexVersion().get();
-    IndexFormatVersion indexGenerationFormatVersion =
-        this.indexGeneration.getDefinitionGeneration().generation().indexFormatVersion;
-    if (!indexFormatVersion.equals(indexGenerationFormatVersion)) {
+    int committedFormatVersion = userData.backendIndexVersion().get();
+    int formatVersion =
+        this.indexGeneration.getDefinitionGeneration().generation().formatVersion.versionNumber();
+    if (committedFormatVersion != formatVersion) {
       Crash.because(
               String.format(
                   "index [%s] commit metadata index format version mismatch "
                       + "(expecting %s, found on disk %s)",
-                  this.indexGeneration.getGenerationId(),
-                  indexGenerationFormatVersion.versionNumber,
-                  indexFormatVersion.versionNumber))
+                  this.indexGeneration.getGenerationId(), formatVersion, committedFormatVersion))
           .now();
     }
 
-    if (userData.getInitialSyncResumeInfo().isPresent()) {
+    if (userData.initialSyncResumeInfo().isPresent()) {
       this.logger.info("Found initial sync resume data, resuming.");
       return InitAction.RESUME_INITIAL_SYNC;
     }
@@ -489,9 +528,45 @@ public class ReplicationIndexManager implements IndexManager {
     // This shouldn't happen since we commit resume info while an initial sync is in progress; it's
     // only omitted after an initial sync has completed, at which point we should have this
     // information.
-    if (userData.getResumeInfo().isEmpty()) {
+    Optional<ChangeStreamResumeInfo> resumeInfo = userData.resumeInfo();
+    if (resumeInfo.isEmpty()) {
       this.logger.error(
           "No resumeToken or initial sync minValidOpTime found for index, resyncing.");
+      return InitAction.RUN_INITIAL_SYNC;
+    }
+
+    // TODO(CLOUDP-420697): This is a one-time healing shim, not steady-state logic. mongot 1.69.1
+    // stopped new bad checkpoints from being created, and this guard rewrites each wedged
+    // checkpoint on a single resume/restart. Remove it (and INTERNAL_SEARCH_DB_BASE_NAME, the
+    // RESET_STALE_INTERNAL_SEARCH_CHECKPOINT feature flag, the staleInternalSearchNamespaceResync
+    // counter, and the associated tests) once the release carrying this guard has fully rolled out
+    // and the counter is zero fleet-wide.
+    //
+    // Guard against a stale internal-search namespace baked into the checkpoint. An auto-embedding
+    // derived index tails its materialized-view collection in the internal-search database. On a
+    // pre-fix mongot (CLOUDP-407569), a failed initial conf call defaulted isDedicatedCluster=true,
+    // so the resolver produced the un-prefixed base name "__mdb_internal_search" instead of the
+    // tenant-prefixed "<tenant>___mdb_internal_search". The derived index initial-synced against
+    // that wrong collection and persisted its namespace in the resume info. Because the resume path
+    // trusts the persisted namespace and never re-resolves, such an index keeps tailing the wrong
+    // (never-dropped) collection indefinitely -- surviving the upgrade that fixed resolution. If
+    // the
+    // committed namespace's database no longer matches the (now correctly resolved) definition
+    // database, the checkpoint is stale: discard it and resync against the correct namespace.
+    // Scoped
+    // to internal-search databases so non-auto-embedding indexes are unaffected.
+    String resolvedDatabase = this.index.getDefinition().getDatabase();
+    String committedDatabase = resumeInfo.get().getNamespace().getDatabaseName();
+    if (this.featureFlags.isEnabled(Feature.RESET_STALE_INTERNAL_SEARCH_CHECKPOINT)
+        && resolvedDatabase.endsWith(INTERNAL_SEARCH_DB_BASE_NAME)
+        && !committedDatabase.equals(resolvedDatabase)) {
+      this.logger.warn(
+          "Committed change-stream namespace database [{}] does not match the resolved index "
+              + "database [{}]; checkpoint was written against a stale internal-search namespace "
+              + "(CLOUDP-416232). Discarding checkpoint and resyncing.",
+          committedDatabase,
+          resolvedDatabase);
+      this.metricsFactory.counter("staleInternalSearchNamespaceResync").increment();
       return InitAction.RUN_INITIAL_SYNC;
     }
 
@@ -532,6 +607,23 @@ public class ReplicationIndexManager implements IndexManager {
 
   private synchronized void enqueueInitialSyncResume(InitialSyncResumeInfo initialSyncResumeInfo) {
     if (isShutDown()) {
+      return;
+    }
+
+    // If the committed resume info is a natural-order scan token but natural-order scan is no
+    // longer supported, the token cannot be honored: resuming from it with an _id-order scan
+    // would leave documents indexed by the aborted scan that were deleted from the source
+    // before the new high-water mark in the index as ghosts (CLOUDP-449347). Drop the token and
+    // restart from scratch. Dropping the token and clearing the index are deliberately coupled
+    // here rather than in InitialSyncQueue, which must not run a slow index clear while holding
+    // the initial-sync queue lock.
+    if (initialSyncResumeInfo.isBufferlessNaturalOrderInitialSyncResumeInfo()
+        && !this.isNaturalOrderScanSupported) {
+      this.logger.info(
+          "Committed resume info is a natural-order scan token but natural-order scan is no "
+              + "longer supported; clearing the index and restarting initial sync from scratch.");
+      killCursors(IndexStatus.notStarted());
+      enqueueInitialSync(IndexStatus.initialSync());
       return;
     }
 
@@ -606,6 +698,10 @@ public class ReplicationIndexManager implements IndexManager {
       return null;
     }
 
+    // maybeForceMergeAfterInitialSync() can take a long time to complete, and since this method is
+    // synchronized, it holds the manager's monitor for that whole duration
+    // -- e.g. shutdown() will block until the merge finishes.
+    maybeForceMergeAfterInitialSync();
     resumeSteadyState(resumeInfo);
     return null;
   }
@@ -643,23 +739,17 @@ public class ReplicationIndexManager implements IndexManager {
     switch (initialSyncException.getType()) {
       case DROPPED -> {
         this.logger.info(
-            "Collection dropped or does not exist. Stopping replication and dropping index: {}",
+            "Collection was dropped during initial sync. Stopping replication and dropping "
+                + "index: {}",
             initialSyncException.getMessage());
-        dropIndex();
+        handleCollectionDropped();
         return;
       }
       case FAILED -> {
-        if (InitialSyncException.isNotablescanError(throwable.getCause())) {
-          this.metricsFactory.counter("failedInitialSyncDueToNotablescan").increment();
-        }
-        if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
-          failAndCloseIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
-        } else {
-          failAndDropIndex(throwable, Reason.INITIAL_SYNC_REPLICATION_FAILED);
-        }
+        handleInitialSyncFailed(initialSyncException);
         return;
       }
-      case FIELD_EXCEEDED, DOCS_EXCEEDED ->
+      case FIELD_EXCEEDED, DOCS_EXCEEDED, ANALYSIS_LIMIT_EXCEEDED ->
           exceededIndex(String.valueOf(initialSyncException.getMessage()));
       case SHUT_DOWN -> {
         // If the initial sync was shut down, there are 3 possible reasons:
@@ -692,10 +782,24 @@ public class ReplicationIndexManager implements IndexManager {
           return;
         }
 
+        Optional<Throwable> cause = Optional.ofNullable(initialSyncException.getCause());
+        if (QueryRejectedBySettingsExceptionUtils.isQueryRejectedBySettingsError(cause)) {
+          this.metricsFactory.counter("queryRejectedBySettingsInitialSyncRetry").increment();
+
+          IndexStatus status =
+              IndexStatus.initialSync(
+                  QueryRejectedBySettingsExceptionUtils.getQueryRejectedBySettingsErrorMessage(
+                      Check.isPresent(cause, "cause")));
+
+          // Set the index status so the error message is exposed to the user during backoff. The
+          // index keeps resyncing (message is re-set on each retry) until the operation rejection
+          // filter is removed, at which point the error clears on the next successful sync.
+          this.index.setStatus(status);
+          scheduleResync(throwable, status);
+          return;
+        }
+
         if (this.indexGeneration.getDefinition().getView().isPresent()) {
-
-          Optional<Throwable> cause = Optional.ofNullable(initialSyncException.getCause());
-
           if (MongoViewExceptionUtils.isViewPipelineRelated(cause)) {
             this.metricsFactory.counter("viewPipelineRelatedInitialSyncRetry").increment();
 
@@ -831,6 +935,23 @@ public class ReplicationIndexManager implements IndexManager {
     }
   }
 
+  protected void maybeForceMergeAfterInitialSync() {
+    String maxNumSegmentsProperty = System.getProperty(FORCE_MERGE_MAX_NUM_SEGMENTS_PROPERTY);
+    if (isShutDown() || maxNumSegmentsProperty == null) {
+      return;
+    }
+    int maxNumSegments = Integer.parseInt(maxNumSegmentsProperty);
+
+    this.logger.info("Force-merging index to {} segment(s) after initial sync.", maxNumSegments);
+    Crash.because("failed to force-merge index after initial sync")
+        .ifThrowsExceptionOrError(
+            () -> {
+              this.index.getWriter().forceMerge(maxNumSegments);
+              this.documentIndexer.commit();
+              this.index.getReader().refresh();
+            });
+  }
+
   private synchronized void handleSteadyStateException(Throwable throwable) {
     this.recordReplicationExceptionMetric(throwable);
 
@@ -934,7 +1055,7 @@ public class ReplicationIndexManager implements IndexManager {
     switch (steadyStateException.getType()) {
       case DROPPED -> {
         this.logger.info("Collection was dropped. Stopping replication and dropping index.");
-        dropIndex();
+        handleCollectionDropped();
         return;
       }
       case REQUIRES_RESYNC -> {
@@ -971,6 +1092,18 @@ public class ReplicationIndexManager implements IndexManager {
           }
         }
 
+        if (QueryRejectedBySettingsExceptionUtils.isQueryRejectedBySettingsError(cause)) {
+          this.metricsFactory.counter("queryRejectedBySettingsSteadyStateRetry").increment();
+
+          IndexStatus status =
+              IndexStatus.recoveringTransient(
+                  QueryRejectedBySettingsExceptionUtils.getQueryRejectedBySettingsErrorMessage(
+                      Check.isPresent(cause, "cause")));
+
+          // Set index status so that the error message is exposed to the user during the backoff.
+          this.index.setStatus(status);
+        }
+
         // By default, we assume that the matchCollectionUuidForUpdateLookup is supported. If the
         // matchCollectionUuidForUpdateLookup parameter is unsupported, remove it when we resume
         // steady state.
@@ -986,7 +1119,8 @@ public class ReplicationIndexManager implements IndexManager {
         handleSteadyStateNonInvalidatingResync(steadyStateException);
         return;
       }
-      case FIELD_EXCEEDED -> exceededIndex(String.valueOf(steadyStateException.getMessage()));
+      case FIELD_EXCEEDED, ANALYSIS_LIMIT_EXCEEDED ->
+          exceededIndex(String.valueOf(steadyStateException.getMessage()));
       case DOCS_EXCEEDED -> staleIndex(StaleStatusReason.DOCS_EXCEEDED, Optional.empty());
       case RENAMED -> {
         this.logger.info("Witnessed rename event. Resuming immediately.");
@@ -1032,6 +1166,17 @@ public class ReplicationIndexManager implements IndexManager {
     this.index.setStatus(IndexStatus.recoveringNonTransient(getLastOptime()));
   }
 
+  protected void handleInitialSyncFailed(InitialSyncException initialSyncException) {
+    if (InitialSyncException.isNotablescanError(initialSyncException.getCause())) {
+      this.metricsFactory.counter("failedInitialSyncDueToNotablescan").increment();
+    }
+    if (this.featureFlags.isEnabled(Feature.RETAIN_FAILED_INITIAL_SYNC_DATA_ON_DISK)) {
+      failAndCloseIndex(initialSyncException, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+    } else {
+      failAndDropIndex(initialSyncException, Reason.INITIAL_SYNC_REPLICATION_FAILED);
+    }
+  }
+
   private synchronized boolean isShutDown() {
     return this.state.equals(State.SHUT_DOWN);
   }
@@ -1049,6 +1194,22 @@ public class ReplicationIndexManager implements IndexManager {
           .getIndexingMetricsUpdater()
           .getConsecutiveInitialSyncResyncExceptions()
           .set(0);
+    }
+
+    // Reset the per-phase _id field type gauge when leaving a replication phase so it reflects only
+    // the _id type of indexes currently active in that phase (not completed / discarded ones).
+    if (this.state.equals(State.INITIAL_SYNC)) {
+      this.index
+          .getMetricsUpdater()
+          .getReplicationMetricsUpdater()
+          .getInitialSyncMetrics()
+          .resetIdKeyFieldType();
+    } else if (this.state.equals(State.STEADY_STATE)) {
+      this.index
+          .getMetricsUpdater()
+          .getReplicationMetricsUpdater()
+          .getSteadyStateMetrics()
+          .resetIdKeyFieldType();
     }
 
     this.metricsFactory
@@ -1125,8 +1286,8 @@ public class ReplicationIndexManager implements IndexManager {
 
     // Parse the last commit user data to determine whether we should enqueue a resume.
     IndexCommitUserData userData = getIndexCommitUserData();
-    if (userData.getInitialSyncResumeInfo().isPresent()) {
-      enqueueInitialSyncResume(userData.getInitialSyncResumeInfo().get());
+    if (userData.initialSyncResumeInfo().isPresent()) {
+      enqueueInitialSyncResume(userData.initialSyncResumeInfo().get());
     } else {
       enqueueInitialSync(IndexStatus.initialSync());
     }
@@ -1167,6 +1328,11 @@ public class ReplicationIndexManager implements IndexManager {
   }
 
   private synchronized void shutdownReplicationAndCommitStatus(IndexStateInfo indexStateInfo) {
+    // Already shut down (e.g. this generator's own shutdown() already ran for an unrelated
+    // reason): skip the redundant write.
+    if (isShutDown()) {
+      return;
+    }
     transitionState(State.SHUT_DOWN);
     this.index.setStatus(indexStateInfo.toIndexStatus());
 
@@ -1175,7 +1341,7 @@ public class ReplicationIndexManager implements IndexManager {
     IndexCommitUserData userData = IndexCommitUserData.createFromIndexStateInfo(indexStateInfo);
     this.documentIndexer.updateCommitUserData(userData);
     Crash.because("failed to commit index status: " + indexStateInfo.getStatus())
-        .ifThrows(this.documentIndexer::commit);
+        .ifThrows(this::commitIndexer);
   }
 
   private void shutDownReplicationOnStaleIndex(StaleStateInfo staleStateInfo) {
@@ -1198,6 +1364,12 @@ public class ReplicationIndexManager implements IndexManager {
   }
 
   private void staleIndex(StaleStatusReason staleStatusReason, Optional<String> errorMessage) {
+    // Already shut down: skip the redundant write. Every current caller already holds the
+    // generator monitor and checks isShutDown() before reaching here, but this guard makes the
+    // method correct on its own rather than relying on that caller discipline.
+    if (isShutDown()) {
+      return;
+    }
     IndexCommitUserData userData = getIndexCommitUserData();
 
     String message = staleStatusReason.formatMessage(errorMessage.orElse(""));
@@ -1213,7 +1385,7 @@ public class ReplicationIndexManager implements IndexManager {
 
     // commit user data to set STALE status for this index again on restart
     this.documentIndexer.updateCommitUserData(IndexCommitUserData.createStale(staleStateInfo));
-    Crash.because("failed to commit stale status").ifThrows(this.documentIndexer::commit);
+    Crash.because("failed to commit stale status").ifThrows(this::commitIndexer);
   }
 
   private BsonTimestamp getLastOptime() {
@@ -1223,7 +1395,7 @@ public class ReplicationIndexManager implements IndexManager {
   private BsonTimestamp getLastOptimeFromUserData(IndexCommitUserData userData) {
     var resumeInfo =
         userData
-            .getResumeInfo()
+            .resumeInfo()
             .orElseGet(
                 () -> {
                   Crash.because("Failed to get change stream resume info from user data").now();
@@ -1235,6 +1407,12 @@ public class ReplicationIndexManager implements IndexManager {
   }
 
   private void clearIndex(IndexStatus status, IndexCommitUserData indexCommitUserData) {
+    // Already shut down: skip the redundant write. Every current caller already holds the
+    // generator monitor and checks isShutDown() before reaching here, but this guard makes the
+    // method correct on its own rather than relying on that caller discipline.
+    if (isShutDown()) {
+      return;
+    }
     // In order to fully clear the index, we need to:
     //   1. kill all cursors so no more IndexReaders are open against it
     //   2. delete all the documents from the index (commits the map)
@@ -1242,8 +1420,26 @@ public class ReplicationIndexManager implements IndexManager {
     //      the index are removed and data files can be cleaned up
     this.logger.info("Clearing index.");
     killCursors(status);
-    Crash.because("failed to clear index")
-        .ifThrows(() -> this.documentIndexer.clearIndex(indexCommitUserData));
+    Crash.because("failed to clear index").ifThrows(() -> clearIndexer(indexCommitUserData));
+  }
+
+  private void commitIndexer() throws IOException {
+    runIndexerOperation(this.documentIndexer::commit);
+  }
+
+  private void clearIndexer(IndexCommitUserData indexCommitUserData) throws IOException {
+    runIndexerOperation(() -> this.documentIndexer.clearIndex(indexCommitUserData));
+  }
+
+  /**
+   * Runs a commit/clearIndex operation against the document indexer, called from {@link
+   * #shutdownReplicationAndCommitStatus}, {@link #staleIndex}, and {@link #clearIndex}. Base
+   * implementation just runs it; a subclass whose {@link DocumentIndexer} can reject a write for a
+   * reason specific to it may override this to intercept that rejection instead of letting it reach
+   * the {@code Crash.ifThrows()} caller and halt the JVM.
+   */
+  protected void runIndexerOperation(CheckedRunnable<IOException> operation) throws IOException {
+    operation.run();
   }
 
   protected void failAndDropIndex(Throwable throwable, IndexStatus.Reason reason) {
@@ -1372,6 +1568,21 @@ public class ReplicationIndexManager implements IndexManager {
               this.index.close();
               this.synonymMappingManagers.forEach(SynonymMappingManager::shutdown);
             });
+  }
+
+  /**
+   * Handles the tailed collection being dropped out from under this generation — a change-stream
+   * drop event during steady state, or the collection no longer resolving mid-initial-sync after it
+   * had been resolved. Base behavior shuts the generation down and drops the local index.
+   * Subclasses that own shared resources keyed to the dropped collection can override to clean
+   * those up first, while the generation — and any leadership tied to it — is still live; once
+   * {@link #dropIndex()} runs, the state is terminal.
+   *
+   * <p>A collection that is merely not visible yet (start-of-sync resolution failure) never reaches
+   * this: it is classified {@code DOES_NOT_EXIST} and retried.
+   */
+  protected void handleCollectionDropped() {
+    dropIndex();
   }
 
   private void dropIndex() {

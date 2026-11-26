@@ -14,6 +14,8 @@ import com.xgen.mongot.index.analyzer.definition.StockNormalizerName;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import com.xgen.mongot.index.query.sort.SortOrder;
 import com.xgen.mongot.index.query.sort.UserFieldSortOptions;
+import com.xgen.mongot.util.FieldPath;
+import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.testing.BsonDeserializationTestSuite;
 import com.xgen.testing.BsonSerializationTestSuite;
 import com.xgen.testing.mongot.index.analyzer.custom.CustomCharFilterDefinitionBuilder;
@@ -42,6 +44,8 @@ import com.xgen.testing.mongot.index.query.sort.UserFieldSortOptionsBuilder;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -51,6 +55,7 @@ import java.util.stream.Collectors;
 import org.bson.BsonDocument;
 import org.bson.BsonDouble;
 import org.bson.BsonInt32;
+import org.bson.BsonString;
 import org.bson.types.ObjectId;
 import org.junit.Assert;
 import org.junit.Test;
@@ -576,8 +581,7 @@ public class SearchIndexDefinitionTest {
                           "a",
                           FieldDefinitionBuilder.builder()
                               .token(TokenFieldDefinitionBuilder.builder().build())
-                              .number(
-                                  NumericFieldDefinitionBuilder.builder().buildNumberField())
+                              .number(NumericFieldDefinitionBuilder.builder().buildNumberField())
                               .build())
                       .build())
               .sort(
@@ -943,6 +947,316 @@ public class SearchIndexDefinitionTest {
             .lastObservedCollectionName("collection")
             .collectionUuid(BASIC_COLLECTION_UUID)
             .mappings(BASIC_MAPPINGS);
+
+    @Test
+    public void fromBson_autoEmbedField_roundTripsCanonicalSyntax() throws Exception {
+      BsonDocument bson =
+          definitionBuilderWithMappings(
+                  DocumentFieldDefinitionBuilder.builder()
+                      .dynamic(false)
+                      .field(
+                          "content",
+                          FieldDefinitionBuilder.builder()
+                              .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                              .build())
+                      .build())
+              .build()
+              .toBson();
+
+      SearchIndexDefinition parsed = SearchIndexDefinition.fromBson(bson);
+
+      Assert.assertEquals(bson, parsed.toBson());
+      Assert.assertEquals(
+          new BsonString("autoEmbed"),
+          parsed
+              .toBson()
+              .getDocument("mappings")
+              .getDocument("fields")
+              .getDocument("content")
+              .get("type"));
+      Assert.assertFalse(
+          parsed
+              .toBson()
+              .getDocument("mappings")
+              .getDocument("fields")
+              .getDocument("content")
+              .containsKey("path"));
+    }
+
+    @Test
+    public void isAutoEmbeddingIndex_nestedAutoEmbedOnly_returnsTrue() {
+      // The auto-embedding pipeline (MV generation, query embedding) is gated on this flag; an
+      // auto-embed field declared under a `document` field must be recognized.
+      var def = definitionBuilderWithMappings(nestedAutoEmbedMappings()).build();
+      Assert.assertTrue(def.isAutoEmbeddingIndex());
+      Assert.assertEquals(2, def.getParsedAutoEmbeddingFeatureVersion());
+    }
+
+    @Test
+    public void getModelNamePerPath_mixedTopLevelAndNestedAutoEmbed_containsBothPaths() {
+      // EmbeddingIndexingWorkScheduler builds per-path embed configs from this map; a nested
+      // declaration's source field must appear or its values are never embedded.
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "title",
+                  FieldDefinitionBuilder.builder()
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .field("parent", nestedAutoEmbedField())
+              .build();
+      var def = definitionBuilderWithMappings(mappings).build();
+      Assert.assertEquals(
+          Map.of(
+              FieldPath.parse("title"), "voyage-3-large",
+              FieldPath.parse("parent.content"), "voyage-3-large"),
+          def.getModelNamePerPath());
+    }
+
+    @Test
+    public void getModelNamePerPath_literalDottedKey_keepsSingleMappingKeySegment() {
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "parent.content",
+                  FieldDefinitionBuilder.builder()
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .build();
+      var def = definitionBuilderWithMappings(mappings).build();
+
+      FieldPath sourcePath = def.getAutoEmbedFields().byPath().keySet().iterator().next();
+      Assert.assertTrue(sourcePath.isAtRoot());
+      Assert.assertEquals("parent.content", sourcePath.getLeaf());
+    }
+
+    @Test
+    public void fromBson_sameKeyTextAndAutoEmbed_isAccepted() throws Exception {
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "content",
+                  FieldDefinitionBuilder.builder()
+                      .string(StringFieldDefinitionBuilder.builder().build())
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .build();
+      BsonDocument bson = definitionBuilderWithMappings(mappings).build().toBson();
+
+      SearchIndexDefinition parsed = SearchIndexDefinition.fromBson(bson);
+
+      Assert.assertTrue(parsed.getMappings().fields().containsKey("content"));
+      Assert.assertTrue(
+          parsed.getMappings().fields().get("content").stringFieldDefinition().isPresent());
+      Assert.assertTrue(parsed.getAutoEmbedFields().get(FieldPath.parse("content")).isPresent());
+    }
+
+    @Test
+    public void fromBson_sameKeyNumberAndAutoEmbed_isAccepted() throws Exception {
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "price",
+                  FieldDefinitionBuilder.builder()
+                      .number(NumericFieldDefinitionBuilder.builder().buildNumberField())
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .build();
+      BsonDocument bson = definitionBuilderWithMappings(mappings).build().toBson();
+
+      SearchIndexDefinition parsed = SearchIndexDefinition.fromBson(bson);
+
+      Assert.assertTrue(
+          parsed.getMappings().fields().get("price").numberFieldDefinition().isPresent());
+      Assert.assertTrue(parsed.getAutoEmbedFields().get(FieldPath.parse("price")).isPresent());
+    }
+
+    @Test
+    public void fromBson_sameKeyDocumentAndAutoEmbed_throwsParseError() {
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "description",
+                  FieldDefinitionBuilder.builder()
+                      .document(DocumentFieldDefinitionBuilder.builder().dynamic(false).build())
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .build();
+      BsonDocument bson = definitionBuilderWithMappings(mappings).build().toBson();
+
+      BsonParseException exception =
+          Assert.assertThrows(BsonParseException.class, () -> SearchIndexDefinition.fromBson(bson));
+
+      Assert.assertTrue(exception.getMessage().contains("description"));
+    }
+
+    @Test
+    public void fromBson_sameKeyGeoAndAutoEmbed_throwsParseError() {
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "location",
+                  FieldDefinitionBuilder.builder()
+                      .geo(GeoFieldDefinitionBuilder.builder().build())
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .build();
+      BsonDocument bson = definitionBuilderWithMappings(mappings).build().toBson();
+
+      BsonParseException exception =
+          Assert.assertThrows(BsonParseException.class, () -> SearchIndexDefinition.fromBson(bson));
+
+      Assert.assertTrue(exception.getMessage().contains("location"));
+    }
+
+    @Test
+    public void collectDeclaredPathsAndAutoEmbedPaths_autoEmbedOnOwnPathWithScalar_isNotConflict() {
+      // Dual role: a text alternative on the auto-embed source path is allowed.
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "title",
+                  FieldDefinitionBuilder.builder()
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .string(StringFieldDefinitionBuilder.builder().build())
+                      .build())
+              .build();
+
+      CollectedPaths collected = collectPaths(mappings);
+
+      assertEquals(Set.of(), collected.conflictingPaths());
+      assertEquals(Set.of(FieldPath.parse("title")), collected.autoEmbedPaths());
+    }
+
+    @Test
+    public void collectDeclaredPathsAndAutoEmbedPaths_autoEmbedOnOwnPathWithNumber_isNotConflict() {
+      // Scalar alternatives are allowed alongside auto-embed on the same field.
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "description",
+                  FieldDefinitionBuilder.builder()
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .number(NumericFieldDefinitionBuilder.builder().buildNumberField())
+                      .build())
+              .build();
+
+      CollectedPaths collected = collectPaths(mappings);
+
+      assertEquals(Set.of(), collected.conflictingPaths());
+      assertEquals(Set.of(FieldPath.parse("description")), collected.autoEmbedPaths());
+    }
+
+    @Test
+    public void fromBson_autoEmbedUnderEmbeddedDocuments_throwsParseError() {
+      BsonDocument bson =
+          definitionBuilderWithMappings(BASIC_MAPPINGS).build().toBson().clone().toBsonDocument();
+      bson.getDocument("mappings")
+          .put(
+              "fields",
+              BsonDocument.parse(
+                  """
+                  {
+                    "reviews": {
+                      "type": "embeddedDocuments",
+                      "dynamic": false,
+                      "fields": {
+                        "comment": [
+                          {"type": "string"},
+                          {"type": "autoEmbed", "model": "voyage-3-large", "modality": "text"}
+                        ]
+                      }
+                    }
+                  }
+                  """));
+
+      BsonParseException exception =
+          Assert.assertThrows(BsonParseException.class, () -> SearchIndexDefinition.fromBson(bson));
+
+      Assert.assertTrue(exception.getMessage().contains("autoEmbed"));
+      Assert.assertTrue(exception.getMessage().contains("embeddedDocuments"));
+    }
+
+    @Test
+    public void
+        collectDeclaredPathsAndAutoEmbedPaths_nestedScalarSharingSourcePath_isNotConflict() {
+      // Only embeddedDocuments-subtree paths are collected; a nested scalar sharing the source
+      // path is a plain dual role and stays allowed.
+      DocumentFieldDefinition parent =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field(
+                  "title",
+                  FieldDefinitionBuilder.builder()
+                      .string(StringFieldDefinitionBuilder.builder().build())
+                      .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                      .build())
+              .build();
+      DocumentFieldDefinition mappings =
+          DocumentFieldDefinitionBuilder.builder()
+              .dynamic(false)
+              .field("parent", FieldDefinitionBuilder.builder().document(parent).build())
+              .build();
+
+      CollectedPaths collected = collectPaths(mappings);
+
+      assertEquals(Set.of(), collected.conflictingPaths());
+      assertEquals(Set.of(FieldPath.parse("parent.title")), collected.autoEmbedPaths());
+    }
+
+    private record CollectedPaths(Set<FieldPath> conflictingPaths, Set<FieldPath> autoEmbedPaths) {}
+
+    private static CollectedPaths collectPaths(DocumentFieldDefinition mappings) {
+      Set<FieldPath> conflictingPaths = new HashSet<>();
+      Set<FieldPath> autoEmbedPaths = new LinkedHashSet<>();
+      SearchIndexDefinition.collectDeclaredPathsAndAutoEmbedPaths(
+          mappings.fields(), Optional.empty(), conflictingPaths, autoEmbedPaths);
+      return new CollectedPaths(conflictingPaths, autoEmbedPaths);
+    }
+
+    /**
+     * Fresh builder per test: {@code BASIC_DEFINITION_BUILDER} is shared and mutable, so setting
+     * mappings on it would leak into tests that assert the default {@code BASIC_MAPPINGS}.
+     */
+    private static SearchIndexDefinitionBuilder definitionBuilderWithMappings(
+        DocumentFieldDefinition mappings) {
+      return SearchIndexDefinitionBuilder.builder()
+          .indexId(BASIC_INDEX_ID)
+          .name("name")
+          .database("database")
+          .lastObservedCollectionName("collection")
+          .collectionUuid(BASIC_COLLECTION_UUID)
+          .mappings(mappings);
+    }
+
+    private static DocumentFieldDefinition nestedAutoEmbedMappings() {
+      return DocumentFieldDefinitionBuilder.builder()
+          .dynamic(false)
+          .field("parent", nestedAutoEmbedField())
+          .build();
+    }
+
+    private static FieldDefinition nestedAutoEmbedField() {
+      return FieldDefinitionBuilder.builder()
+          .document(
+              DocumentFieldDefinitionBuilder.builder()
+                  .dynamic(false)
+                  .field(
+                      "content",
+                      FieldDefinitionBuilder.builder()
+                          .searchAutoEmbed(new SearchAutoEmbedFieldDefinition("voyage-3-large"))
+                          .build())
+                  .build())
+          .build();
+    }
 
     @Test
     public void typeSet_differs_notEqual() {
@@ -1489,6 +1803,48 @@ public class SearchIndexDefinitionTest {
       Truth.assertThat(parsed.getIndexIdAtCreationTime()).isPresent();
       Truth.assertThat(parsed.getIndexIdAtCreationTime().get()).isEqualTo(indexIdAtCreationTime);
       assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testDefinitionVersionId_roundTrip() throws Exception {
+      var definitionVersionId = new ObjectId("707f191e810c19729de860ec");
+      SearchIndexDefinition original =
+          SearchIndexDefinitionBuilder.builder()
+              .defaultMetadata()
+              .dynamicMapping()
+              .definitionVersionId(definitionVersionId)
+              .build();
+
+      SearchIndexDefinition parsed = SearchIndexDefinition.fromBson(original.toBson());
+
+      Truth.assertThat(parsed.getDefinitionVersionId()).hasValue(definitionVersionId);
+      assertEquals(original, parsed);
+    }
+
+    @Test
+    public void testDefinitionVersionId_whenNotSet_omittedFromBson() {
+      SearchIndexDefinition definition =
+          SearchIndexDefinitionBuilder.builder().defaultMetadata().dynamicMapping().build();
+
+      Truth.assertThat(definition.getDefinitionVersionId()).isEmpty();
+      Truth.assertThat(definition.toBson().containsKey("definitionVersionId")).isFalse();
+    }
+
+    @Test
+    public void testDefinitionVersionId_differentValue_affectsEquality() {
+      SearchIndexDefinition base =
+          SearchIndexDefinitionBuilder.builder().defaultMetadata().dynamicMapping().build();
+      SearchIndexDefinition first =
+          SearchIndexDefinitionBuilder.from(base)
+              .definitionVersionId(new ObjectId("707f191e810c19729de860ec"))
+              .build();
+      SearchIndexDefinition second =
+          SearchIndexDefinitionBuilder.from(base)
+              .definitionVersionId(new ObjectId("707f191e810c19729de860ed"))
+              .build();
+
+      Assert.assertNotEquals(first, second);
+      Assert.assertTrue(first.equalsIgnoringDefinitionVersion(second));
     }
   }
 }

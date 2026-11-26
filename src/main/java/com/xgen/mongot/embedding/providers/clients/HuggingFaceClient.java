@@ -190,7 +190,7 @@ public class HuggingFaceClient implements ClientInterface {
         modelConfig.map(hf -> hf.modelIdOrDefault(catalogModelName)).orElse(catalogModelName);
     Optional<String> apiToken =
         workloadParams.credentials()
-                instanceof EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials hfCreds
+                    instanceof EmbeddingServiceConfig.HuggingFaceEmbeddingCredentials hfCreds
                 && hfCreds.hasToken()
             ? hfCreds.apiToken
             : Optional.empty();

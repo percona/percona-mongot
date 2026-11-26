@@ -139,6 +139,20 @@
       }
     },
     {
+      "description": "auto-numCandidates",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "limit": 10,
+        "queryVector": [
+          2,
+          2,
+          2
+        ],
+        "returnStoredSource": false
+      }
+    },
+    {
       "description": "simple-auto-embedding-query",
       "value": {
         "index": "myVectorIndex",
@@ -194,6 +208,22 @@
         "model": "voyage-3-large",
         "returnStoredSource": false
       }
+    },
+    {
+      "description": "with-indexNamespace",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "numCandidates": 10,
+        "limit": 5,
+        "queryVector": [2, 2, 2],
+        "returnStoredSource": false,
+        "indexNamespace": {
+          "tenantId": {
+            "$eq": "acme"
+          }
+        }
+      }
     }
   ],
   "invalid": [
@@ -233,20 +263,6 @@
         "path": "description",
         "numCandidates": 10,
         "limit": 5,
-        "returnStoredSource": false
-      }
-    },
-    {
-      "description": "missing numCandidates",
-      "value": {
-        "index": "myVectorIndex",
-        "path": "description",
-        "limit": 10,
-        "queryVector": [
-          2,
-          2,
-          2
-        ],
         "returnStoredSource": false
       }
     },
@@ -308,6 +324,21 @@
         ],
         "numCandidates": 10,
         "limit": 11,
+        "returnStoredSource": false
+      }
+    },
+    {
+      "description": "limit > max numCandidates when numCandidates omitted",
+      "errorMessageContains": "limit cannot exceed 10000",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "queryVector": [
+          2,
+          2,
+          2
+        ],
+        "limit": 10001,
         "returnStoredSource": false
       }
     },
@@ -509,6 +540,67 @@
         ],
         "model": "voyage-3-large",
         "returnStoredSource": false
+      }
+    },
+    {
+      "description": "indexNamespace not a document",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "numCandidates": 10,
+        "limit": 5,
+        "queryVector": [2, 2, 2],
+        "returnStoredSource": false,
+        "indexNamespace": "tenantId"
+      }
+    },
+    {
+      "description": "indexNamespace with multiple fields",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "numCandidates": 10,
+        "limit": 5,
+        "queryVector": [2, 2, 2],
+        "returnStoredSource": false,
+        "indexNamespace": {
+          "tenantId": {
+            "$eq": "acme"
+          },
+          "other": {
+            "$eq": "x"
+          }
+        }
+      }
+    },
+    {
+      "description": "indexNamespace without $eq",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "numCandidates": 10,
+        "limit": 5,
+        "queryVector": [2, 2, 2],
+        "returnStoredSource": false,
+        "indexNamespace": {
+          "tenantId": {
+            "$gt": "acme"
+          }
+        }
+      }
+    },
+    {
+      "description": "indexNamespace with bare value",
+      "value": {
+        "index": "myVectorIndex",
+        "path": "description",
+        "numCandidates": 10,
+        "limit": 5,
+        "queryVector": [2, 2, 2],
+        "returnStoredSource": false,
+        "indexNamespace": {
+          "tenantId": "acme"
+        }
       }
     }
   ]

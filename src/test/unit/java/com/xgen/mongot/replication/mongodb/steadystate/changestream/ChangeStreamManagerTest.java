@@ -42,13 +42,17 @@ import com.xgen.mongot.metrics.MeterAndFtdcRegistry;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamBatch;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamModeSelector;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamMongoClient;
+import com.xgen.mongot.replication.mongodb.common.ChangeStreamPartition;
 import com.xgen.mongot.replication.mongodb.common.ChangeStreamResumeInfo;
+import com.xgen.mongot.replication.mongodb.common.CommonReplicationConfig;
 import com.xgen.mongot.replication.mongodb.common.DecodingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.DocumentIndexer;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkScheduler;
 import com.xgen.mongot.replication.mongodb.common.IndexingWorkSchedulerFactory;
+import com.xgen.mongot.replication.mongodb.common.PartitionedChangeStreamProgressTracker;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException;
 import com.xgen.mongot.replication.mongodb.common.SteadyStateException.Type;
+import com.xgen.mongot.replication.mongodb.common.SteadyStateSchedulingMethod;
 import com.xgen.mongot.util.mongodb.Errors;
 import com.xgen.testing.mongot.index.IndexMetricsUpdaterBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
@@ -56,6 +60,7 @@ import com.xgen.testing.mongot.index.version.GenerationIdBuilder;
 import com.xgen.testing.mongot.mock.index.IndexMetricsSupplier;
 import com.xgen.testing.mongot.mock.index.SearchIndex;
 import com.xgen.testing.mongot.replication.mongodb.ChangeStreamUtils;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.Collections;
 import java.util.HashMap;
@@ -66,6 +71,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -106,6 +113,145 @@ public class ChangeStreamManagerTest {
   public static List<ContextTest> params() {
     return List.of(
         new ContextTest("sync-client", ChangeStreamManagerTestSyncHelpers::getSyncParameters));
+  }
+
+  @Test
+  public void createPartitionTracker_parallelReadersEnabled_seedsEveryPartitionAtInitialToken() {
+    SteadyStateReplicationConfig config =
+        SteadyStateReplicationConfig.builder()
+            .setNumConcurrentChangeStreams(1)
+            .setMaxInFlightEmbeddingGetMores(1)
+            .setChangeStreamQueryMaxTimeMs(1000)
+            .setChangeStreamCursorMaxTimeSec(1000)
+            .setEnableParallelChangeStreamReaders(true)
+            .setNumParallelChangeStreamReaders(3)
+            .build();
+
+    Optional<PartitionedChangeStreamProgressTracker> tracker =
+        ChangeStreamManager.createPartitionTracker(config, ChangeStreamUtils.PRE_BATCH_RESUME_INFO);
+
+    BsonDocument seed = ChangeStreamUtils.PRE_BATCH_RESUME_INFO.getResumeToken();
+    Assert.assertEquals(
+        Map.of(
+            new ChangeStreamPartition(0, 3), seed,
+            new ChangeStreamPartition(1, 3), seed,
+            new ChangeStreamPartition(2, 3), seed),
+        tracker.orElseThrow().snapshot());
+  }
+
+  @Test
+  public void createPartitionTracker_parallelReadersDisabled_returnsEmpty() {
+    SteadyStateReplicationConfig config =
+        SteadyStateReplicationConfig.builder()
+            .setNumConcurrentChangeStreams(1)
+            .setMaxInFlightEmbeddingGetMores(1)
+            .setChangeStreamQueryMaxTimeMs(1000)
+            .setChangeStreamCursorMaxTimeSec(1000)
+            .setEnableParallelChangeStreamReaders(false)
+            .build();
+
+    Assert.assertTrue(
+        ChangeStreamManager.createPartitionTracker(config, ChangeStreamUtils.PRE_BATCH_RESUME_INFO)
+            .isEmpty());
+  }
+
+  @Test
+  public void createSync_parallelReadersDisabled_doesNotCreateReaderPool() throws Exception {
+    var registries = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    var config =
+        SteadyStateReplicationConfig.builder()
+            .setNumConcurrentChangeStreams(1)
+            .setMaxInFlightEmbeddingGetMores(1)
+            .setChangeStreamQueryMaxTimeMs(1000)
+            .setChangeStreamCursorMaxTimeSec(1000)
+            .setEnableParallelChangeStreamReaders(false)
+            .build();
+
+    var partitionReaderExecutor =
+        ChangeStreamManager.createPartitionReaderExecutor(registries, config, true);
+    var manager =
+        ChangeStreamManager.createSync(
+            registries,
+            mock(ChangeStreamMongoClientFactory.class),
+            partitionReaderExecutor,
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            config,
+            this.context.getIndexManagerFactory(),
+            true,
+            false,
+            Optional.empty());
+
+    try {
+      assertThat(partitionReaderExecutor).isEmpty();
+      assertThat(
+              registries.meterRegistry().getMeters().stream()
+                  .map(meter -> meter.getId())
+                  .filter(
+                      id ->
+                          id.getName().startsWith("partitioned-change-stream-reader")
+                              || "partitioned-change-stream-reader".equals(id.getTag("name")))
+                  .toList())
+          .isEmpty();
+    } finally {
+      manager.shutdown().get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  public void createSync_partitionReaderPool_limitsConcurrencyAndShutsDown() throws Exception {
+    var registries = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    var firstStarted = new CountDownLatch(1);
+    var releaseFirst = new CountDownLatch(1);
+    var config =
+        SteadyStateReplicationConfig.builder()
+            .setNumConcurrentChangeStreams(1)
+            .setMaxInFlightEmbeddingGetMores(1)
+            .setChangeStreamQueryMaxTimeMs(1000)
+            .setChangeStreamCursorMaxTimeSec(1000)
+            .setEnableParallelChangeStreamReaders(true)
+            .setNumParallelChangeStreamReaders(3)
+            .build();
+    var partitionReaderExecutor =
+        ChangeStreamManager.createPartitionReaderExecutor(registries, config, true);
+    var manager =
+        ChangeStreamManager.createSync(
+            registries,
+            mock(ChangeStreamMongoClientFactory.class),
+            partitionReaderExecutor,
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            config,
+            this.context.getIndexManagerFactory(),
+            true,
+            false,
+            Optional.empty());
+    Executor executor = partitionReaderExecutor.orElseThrow();
+    try {
+      var first =
+          CompletableFuture.runAsync(
+              () -> {
+                firstStarted.countDown();
+                try {
+                  assertThat(releaseFirst.await(5, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                  throw new AssertionError(e);
+                }
+              },
+              executor);
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+      var second = CompletableFuture.supplyAsync(() -> "completed", executor);
+
+      assertThat(second.isDone()).isFalse();
+      releaseFirst.countDown();
+      first.get(5, TimeUnit.SECONDS);
+      assertThat(second.get(5, TimeUnit.SECONDS)).isEqualTo("completed");
+    } finally {
+      releaseFirst.countDown();
+      manager.shutdown().get(5, TimeUnit.SECONDS);
+    }
+    Assert.assertThrows(RejectedExecutionException.class, () -> executor.execute(() -> {}));
   }
 
   @Test
@@ -214,7 +360,7 @@ public class ChangeStreamManagerTest {
     ChangeStreamIndexManagerFactory indexManagerFactory =
         mock(ChangeStreamIndexManagerFactory.class);
 
-    when(indexManagerFactory.create(any(), any(), any(), any(), any(), any(), any(), any()))
+    when(indexManagerFactory.create(any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation -> {
               ChangeStreamIndexManager manager =
@@ -269,7 +415,7 @@ public class ChangeStreamManagerTest {
     ChangeStreamIndexManagerFactory indexManagerFactory =
         mock(ChangeStreamIndexManagerFactory.class);
 
-    when(indexManagerFactory.create(any(), any(), any(), any(), any(), any(), any(), any()))
+    when(indexManagerFactory.create(any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation -> {
               ChangeStreamIndexManager manager =
@@ -1160,7 +1306,8 @@ public class ChangeStreamManagerTest {
             resumeInfoConsumer,
             indexMetricsUpdater,
             externalFuture,
-            generationId) -> {
+            generationId,
+            partitionTracker) -> {
           var manager =
               this.context
                   .getIndexManagerFactory()
@@ -1172,7 +1319,8 @@ public class ChangeStreamManagerTest {
                       resumeInfoConsumer,
                       indexMetricsUpdater,
                       externalFuture,
-                      generationId);
+                      generationId,
+                      partitionTracker);
 
           if (generationId.equals(secondDefinition.getGenerationId())) {
             // shutdown manager for the second index, so we can
@@ -1382,11 +1530,11 @@ public class ChangeStreamManagerTest {
                             Collections.singletonList(
                                 ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                         ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                        new BsonTimestamp()),
+                        Optional.of(new BsonTimestamp())),
                     new ChangeStreamBatch(
                         List.of(),
                         ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                        new BsonTimestamp()))));
+                        Optional.of(new BsonTimestamp())))));
 
     // Create DocumentIndexers that hang while indexing until told to complete.
     BiFunction<CyclicBarrier, CyclicBarrier, Answer<CompletableFuture<Void>>> hangForBarriers =
@@ -1421,7 +1569,7 @@ public class ChangeStreamManagerTest {
 
     ChangeStreamIndexManagerFactory indexManagerFactory =
         mock(ChangeStreamIndexManagerFactory.class);
-    when(indexManagerFactory.create(any(), any(), any(), any(), any(), any(), any(), any()))
+    when(indexManagerFactory.create(any(), any(), any(), any(), any(), any(), any(), any(), any()))
         .thenAnswer(
             invocation ->
                 this.context
@@ -1434,7 +1582,8 @@ public class ChangeStreamManagerTest {
                         invocation.getArgument(4),
                         invocation.getArgument(5),
                         invocation.getArgument(6),
-                        invocation.getArgument(7)));
+                        invocation.getArgument(7),
+                        invocation.getArgument(8)));
 
     // Create a manager with numConcurrentChangeStreams of 2.
     var instance =
@@ -1745,7 +1894,8 @@ public class ChangeStreamManagerTest {
             indexingWorkSchedulerFactory(),
             SteadyStateReplicationConfig.builder()
                 .setNumConcurrentChangeStreams(2)
-                .setMaxInFlightEmbeddingGetMores(1),
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setReplicationType(CommonReplicationConfig.Type.AUTO_EMBEDDING),
             this.context.getIndexManagerFactory(),
             barriers);
 
@@ -1759,8 +1909,15 @@ public class ChangeStreamManagerTest {
         ignoreResumeInfo(),
         IGNORE_METRICS,
         false);
-    // Ensure that getMore is called on the first index before the second.
-    Thread.sleep(100);
+
+    // Wait for the first index's getMore to actually start before adding the second index. This
+    // guarantees the first index has acquired the single in-flight embedding getMore permit, making
+    // the permit-acquisition order deterministic. Relying on Thread.sleep() here was flaky: it only
+    // ordered task submission, not execution, so under load the second index's getMore could win
+    // the permit race, block forever on secondGetMoreStarted (which this test never releases), and
+    // starve the first index's getMore, causing firstGetMoreStarted.await() below to time out.
+    firstGetMoreStarted.await(5, TimeUnit.SECONDS);
+
     manager.add(
         secondGeneration.getGenerationId(),
         secondIndexer,
@@ -1774,9 +1931,8 @@ public class ChangeStreamManagerTest {
     // should be blocked until the first index batch is done.
     //
     // Desired state:
-    //  1. getMore
+    //  1. getMore (first index, holding the only in-flight embedding getMore permit)
     //  2. blocked on getMore (enqueued but rescheduling until first index finishes)
-    firstGetMoreStarted.await(5, TimeUnit.SECONDS);
     Assert.assertThrows(
         TimeoutException.class, () -> secondGetMoreStarted.await(500, TimeUnit.MILLISECONDS));
     secondGetMoreStarted.reset();
@@ -1923,6 +2079,308 @@ public class ChangeStreamManagerTest {
     secondGetMoreDone.await(5, TimeUnit.SECONDS);
   }
 
+  @Test
+  public void testCreateSync_defaultReplicationType_usesDualQueueExecutor() throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(1)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .setSteadyStateSchedulingMethod(SteadyStateSchedulingMethod.OPTIME_LAG)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            true);
+
+    assertThat(changeStreamManager.getTaskExecutorClass())
+        .hasValue(ChangeStreamDualQueueExecutor.class);
+    // ChangeStreamDualQueueExecutor has no semaphore - getEmbeddingAvailablePermits returns empty
+    assertThat(changeStreamManager.getEmbeddingAvailablePermits()).isEmpty();
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void
+      testCreateSync_defaultReplicationType_fifoSchedulingMethod_doesNotUseDualQueueExecutor()
+          throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(1)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .setSteadyStateSchedulingMethod(SteadyStateSchedulingMethod.FIFO)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            true);
+
+    assertThat(changeStreamManager.getTaskExecutorClass()).hasValue(FifoExecutor.class);
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testCreateSync_autoEmbeddingReplicationType_usesAutoEmbeddingExecutor()
+      throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(2)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setReplicationType(CommonReplicationConfig.Type.AUTO_EMBEDDING)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            true);
+
+    // AutoEmbeddingExecutor has a semaphore - getEmbeddingAvailablePermits returns the cap
+    assertThat(changeStreamManager.getEmbeddingAvailablePermits()).hasValue(1);
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testCreateSync_defaultReplicationType_priorityDisabled_usesFifoExecutor()
+      throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    // Priority scheduling off and no getMore cap (maxInFlight >= numConcurrent) => FifoExecutor.
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(2)
+                .setMaxInFlightEmbeddingGetMores(2)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            false);
+
+    assertThat(changeStreamManager.getTaskExecutorClass()).hasValue(FifoExecutor.class);
+    // FifoExecutor has no semaphore - getEmbeddingAvailablePermits returns empty.
+    assertThat(changeStreamManager.getEmbeddingAvailablePermits()).isEmpty();
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testCreateSync_defaultReplicationType_priorityDisabledWithCap_usesAutoEmbedding()
+      throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    // Priority scheduling off but a getMore cap applies (maxInFlight < numConcurrent) =>
+    // AutoEmbeddingExecutor, even for the DEFAULT replication type.
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(2)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            false);
+
+    assertThat(changeStreamManager.getTaskExecutorClass()).hasValue(AutoEmbeddingExecutor.class);
+    assertThat(changeStreamManager.getEmbeddingAvailablePermits()).hasValue(1);
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testCreateSync_autoEmbeddingReplicationType_priorityDisabled_usesAutoEmbedding()
+      throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    // AUTO_EMBEDDING always uses AutoEmbeddingExecutor regardless of the priority-scheduling flag.
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            MeterAndFtdcRegistry.createWithSimpleRegistries(),
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(2)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setReplicationType(CommonReplicationConfig.Type.AUTO_EMBEDDING)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            false);
+
+    assertThat(changeStreamManager.getTaskExecutorClass()).hasValue(AutoEmbeddingExecutor.class);
+    assertThat(changeStreamManager.getEmbeddingAvailablePermits()).hasValue(1);
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testSchedulingConfigGauge_dualQueueExecutor_reportsActiveKnobs() throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    MeterAndFtdcRegistry registry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            registry,
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(1)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .setSteadyStateSchedulingMethod(SteadyStateSchedulingMethod.OPTIME_LAG)
+                .setSteadyStatePriorityRatio(3)
+                .setSteadyStatePriorityOptimeThresholdSeconds(20)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            true);
+
+    assertThat(changeStreamManager.getTaskExecutorClass())
+        .hasValue(ChangeStreamDualQueueExecutor.class);
+    Gauge gauge = registry.meterRegistry().get("replication.steadyState.schedulingConfig").gauge();
+    // Info gauge: the value is always 1 and the settings are carried in the tags.
+    assertThat(gauge.value()).isEqualTo(1.0);
+    assertThat(gauge.getId().getTag("steadyStateSchedulingMethod")).isEqualTo("OPTIME_LAG");
+    assertThat(gauge.getId().getTag("steadyStatePriorityRatio")).isEqualTo("3");
+    assertThat(gauge.getId().getTag("steadyStatePriorityOptimeThresholdSeconds")).isEqualTo("20");
+    assertThat(gauge.getId().getTag("prioritySchedulingFeatureFlag")).isEqualTo("enabled");
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void createPriorityStrategy_topKWorstLag_buildsTopKStrategyOnDualQueueExecutor()
+      throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    MeterAndFtdcRegistry registry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            registry,
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(1)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .setSteadyStateSchedulingMethod(SteadyStateSchedulingMethod.TOP_K_WORST_LAG)
+                .setSteadyStatePriorityRatio(3)
+                .setSteadyStatePriorityOptimeThresholdSeconds(20)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            true);
+
+    assertThat(changeStreamManager.getTaskExecutorClass())
+        .hasValue(ChangeStreamDualQueueExecutor.class);
+    Gauge gauge = registry.meterRegistry().get("replication.steadyState.schedulingConfig").gauge();
+    assertThat(gauge.getId().getTag("steadyStateSchedulingMethod")).isEqualTo("TOP_K_WORST_LAG");
+    assertThat(gauge.getId().getTag("steadyStatePriorityRatio")).isEqualTo("3");
+    assertThat(gauge.getId().getTag("prioritySchedulingFeatureFlag")).isEqualTo("enabled");
+    assertThat(registry.meterRegistry().find("TopKWorstLagPriorityStrategy.executor").meter())
+        .isNotNull();
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testSchedulingConfigGauge_priorityDisabled_reportsFifo() throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    // The config still asks for OPTIME_LAG, but the feature flag is off, so the executor actually
+    // built is FIFO and the gauge must say so.
+    MeterAndFtdcRegistry registry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            registry,
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(2)
+                .setMaxInFlightEmbeddingGetMores(2)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .setSteadyStateSchedulingMethod(SteadyStateSchedulingMethod.OPTIME_LAG)
+                .setSteadyStatePriorityRatio(3)
+                .setSteadyStatePriorityOptimeThresholdSeconds(20)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            false);
+
+    assertThat(changeStreamManager.getTaskExecutorClass()).hasValue(FifoExecutor.class);
+    Gauge gauge = registry.meterRegistry().get("replication.steadyState.schedulingConfig").gauge();
+    // The knobs keep reporting their configured values; only the method reflects that the
+    // feature flag left the executor on the FIFO path.
+    assertThat(gauge.getId().getTag("steadyStateSchedulingMethod")).isEqualTo("FIFO");
+    assertThat(gauge.getId().getTag("steadyStatePriorityRatio")).isEqualTo("3");
+    assertThat(gauge.getId().getTag("steadyStatePriorityOptimeThresholdSeconds")).isEqualTo("20");
+    assertThat(gauge.getId().getTag("prioritySchedulingFeatureFlag")).isEqualTo("disabled");
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  public void testSchedulingConfigGauge_autoEmbedding_reportsUnderOwnNamespace() throws Exception {
+    Assume.assumeTrue(this.context.name.equals("sync-client"));
+
+    // AUTO_EMBEDDING never takes the dual-queue path, and its gauge is namespaced separately so it
+    // does not collide with the DEFAULT manager's.
+    MeterAndFtdcRegistry registry = MeterAndFtdcRegistry.createWithSimpleRegistries();
+    ChangeStreamManager changeStreamManager =
+        ChangeStreamManager.createSync(
+            registry,
+            ChangeStreamManagerTestSyncHelpers.syncSingleEventProducingClient(),
+            mock(ChangeStreamModeSelector.class),
+            indexingWorkSchedulerFactory(),
+            SteadyStateReplicationConfig.builder()
+                .setNumConcurrentChangeStreams(2)
+                .setMaxInFlightEmbeddingGetMores(1)
+                .setReplicationType(CommonReplicationConfig.Type.AUTO_EMBEDDING)
+                .setChangeStreamQueryMaxTimeMs(1000)
+                .setChangeStreamCursorMaxTimeSec(1000)
+                .setSteadyStateSchedulingMethod(SteadyStateSchedulingMethod.OPTIME_LAG)
+                .build(),
+            this.context.getIndexManagerFactory(),
+            true);
+
+    Gauge gauge =
+        registry
+            .meterRegistry()
+            .get("autoEmbedding.replication.steadyState.schedulingConfig")
+            .gauge();
+    assertThat(gauge.getId().getTag("steadyStateSchedulingMethod")).isEqualTo("FIFO");
+    // The flag is on; AUTO_EMBEDDING simply never takes the dual-queue path. The two tags together
+    // distinguish this from a deployment where the flag itself is off.
+    assertThat(gauge.getId().getTag("prioritySchedulingFeatureFlag")).isEqualTo("enabled");
+    changeStreamManager.shutdown().get(5, TimeUnit.SECONDS);
+  }
+
   private static void setupRegistry() {
     EmbeddingModelCatalog.registerModelConfig(
         "voyage-3-large",
@@ -1962,11 +2420,12 @@ public class ChangeStreamManagerTest {
   }
 
   private IndexingWorkSchedulerFactory indexingWorkSchedulerFactory() {
-    return IndexingWorkSchedulerFactory.create(2, mock(Supplier.class), new SimpleMeterRegistry());
+    return IndexingWorkSchedulerFactory.create(
+        2, mock(Supplier.class), new SimpleMeterRegistry(), true);
   }
 
   private AutoCloseable extractMockedMongoClient(
-      ResumeableClientFactory factory, GenerationId generationId) {
+      ResumeableClientFactory factory, GenerationId generationId) throws SteadyStateException {
     return factory.resumeModeAwareChangeStream(
         generationId,
         mock(ChangeStreamResumeInfo.class),
@@ -1990,7 +2449,8 @@ public class ChangeStreamManagerTest {
         GenerationId generationId,
         ChangeStreamResumeInfo resumeInfo,
         IndexDefinition indexDefinition,
-        boolean removeMatchCollectionUuid);
+        boolean removeMatchCollectionUuid)
+        throws SteadyStateException;
   }
 
   @FunctionalInterface
@@ -2109,7 +2569,7 @@ public class ChangeStreamManagerTest {
                       Collections.singletonList(
                           ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                   ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()));
+                  Optional.of(new BsonTimestamp())));
 
       when(clientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
           .thenReturn(client);
@@ -2126,7 +2586,7 @@ public class ChangeStreamManagerTest {
               new ChangeStreamBatch(
                   toRawBsonDocuments(events),
                   ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()));
+                  Optional.of(new BsonTimestamp())));
 
       when(clientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
           .thenReturn(client);
@@ -2156,7 +2616,7 @@ public class ChangeStreamManagerTest {
                       Collections.singletonList(
                           ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                   ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()))
+                  Optional.of(new BsonTimestamp())))
           .thenAnswer(
               ignored -> {
                 started.await();
@@ -2166,7 +2626,7 @@ public class ChangeStreamManagerTest {
                         Collections.singletonList(
                             ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                     ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                    new BsonTimestamp());
+                    Optional.of(new BsonTimestamp()));
               });
 
       when(clientFactory.resumeTimedModeAwareChangeStream(any(), any(), any(), anyBoolean()))
@@ -2175,7 +2635,7 @@ public class ChangeStreamManagerTest {
     }
 
     static ChangeStreamMongoClientFactory syncHangingClient(
-        Map<GenerationId, GetMoreBarrier> barriers) {
+        Map<GenerationId, GetMoreBarrier> barriers) throws Exception {
       var clientFactory = mock(ChangeStreamMongoClientFactory.class);
 
       AtomicInteger count = new AtomicInteger(0);
@@ -2209,7 +2669,8 @@ public class ChangeStreamManagerTest {
      */
     static ChangeStreamMongoClientFactory syncSuccessAndErrorProducingHangingClient(
         Map<GenerationId, GetMoreBarrier> successBarriers,
-        Map<GenerationId, GetMoreBarrier> errorBarriers) {
+        Map<GenerationId, GetMoreBarrier> errorBarriers)
+        throws Exception {
       var clientFactory = mock(ChangeStreamMongoClientFactory.class);
 
       AtomicInteger count = new AtomicInteger(0);
@@ -2289,7 +2750,7 @@ public class ChangeStreamManagerTest {
                       Collections.singletonList(
                           ChangeStreamUtils.insertEvent(0, MOCK_INDEX_DEFINITION))),
                   ChangeStreamUtils.POST_BATCH_RESUME_TOKEN,
-                  new BsonTimestamp()));
+                  Optional.of(new BsonTimestamp())));
     }
 
     public GetMoreBarrier(

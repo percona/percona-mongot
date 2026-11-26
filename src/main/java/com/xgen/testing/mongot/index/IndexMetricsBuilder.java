@@ -9,6 +9,7 @@ import com.xgen.mongot.index.query.collectors.Collector;
 import com.xgen.mongot.index.query.operators.Operator;
 import com.xgen.mongot.index.query.operators.TextOperator;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
+import com.xgen.mongot.index.query.operators.mql.MqlFilterOperator;
 import com.xgen.mongot.index.query.scores.Score;
 import com.xgen.mongot.index.query.sort.NullEmptySortPosition;
 import com.xgen.mongot.index.status.IndexStatus;
@@ -16,6 +17,7 @@ import com.xgen.mongot.metrics.micrometer.Percentiles;
 import com.xgen.mongot.metrics.micrometer.SerializableTimer;
 import com.xgen.mongot.util.Bytes;
 import com.xgen.mongot.util.Check;
+import com.xgen.mongot.util.bson.Vector;
 import com.xgen.testing.mongot.index.IndexMetricsBuilder.QueryingMetricsBuilder.QueryFeaturesMetricsBuilder;
 import com.xgen.testing.mongot.index.definition.DocumentFieldDefinitionBuilder;
 import com.xgen.testing.mongot.index.definition.SearchIndexDefinitionBuilder;
@@ -228,6 +230,8 @@ public class IndexMetricsBuilder {
             .build();
     private IndexMetrics.QueryingMetrics.QueryFeaturesMetrics queryFeaturesMetrics =
         QueryFeaturesMetricsBuilder.builder().build();
+    private long warmQueriesCount = 0;
+    private long coldQueriesCount = 0;
 
     public static QueryingMetricsBuilder builder() {
       return new QueryingMetricsBuilder();
@@ -277,6 +281,16 @@ public class IndexMetricsBuilder {
       return this;
     }
 
+    public QueryingMetricsBuilder warmQueriesCount(long warmQueriesCount) {
+      this.warmQueriesCount = warmQueriesCount;
+      return this;
+    }
+
+    public QueryingMetricsBuilder coldQueriesCount(long coldQueriesCount) {
+      this.coldQueriesCount = coldQueriesCount;
+      return this;
+    }
+
     public IndexMetrics.QueryingMetrics build() {
       return new IndexMetrics.QueryingMetrics(
           this.totalQueryCount,
@@ -286,7 +300,9 @@ public class IndexMetricsBuilder {
           this.searchResultBatchLatency,
           Optional.of(this.tokenFacetsStateRefresh),
           Optional.of(this.stringFacetsStateRefresh),
-          this.queryFeaturesMetrics);
+          this.queryFeaturesMetrics,
+          this.warmQueriesCount,
+          this.coldQueriesCount);
     }
 
     public static class QueryFeaturesMetricsBuilder {
@@ -306,6 +322,12 @@ public class IndexMetricsBuilder {
           initEnumMap(Operator.Type.class);
       private final Map<Operator.Type, Double> searchVectorSearchFilterOperatorTypeCounterMap =
           initEnumMap(Operator.Type.class);
+      private final Map<MqlFilterOperator.Category, Double>
+          vectorSearchFilterOperatorCategoryCountMap =
+              initEnumMap(MqlFilterOperator.Category.class);
+      private final Map<Vector.BsonEncoding, Double> vectorSearchQueryVectorEncodingCountMap =
+          initEnumMap(Vector.BsonEncoding.class);
+      private double vectorSearchFilterCount = 0.0;
       private double synonymCount = 0.0;
       private double textSynonymCount = 0.0;
       private double textSynonymsWithoutMatchCriteriaCount = 0.0;
@@ -321,6 +343,8 @@ public class IndexMetricsBuilder {
       private double sortCount = 0.0;
       private double trackingCount = 0.0;
       private double returnScopeCount = 0.0;
+      private double embeddedScopedFacetCount = 0.0;
+      private double embeddedScopedSortCount = 0.0;
       private double explainCount = 0.0;
       private double facetDrillSidewaysOptimizableCount = 0.0;
       private double facetDrillSidewaysGenericCount = 0.0;
@@ -406,6 +430,16 @@ public class IndexMetricsBuilder {
         return this;
       }
 
+      public QueryFeaturesMetricsBuilder embeddedScopedFacetCount(double embeddedScopedFacetCount) {
+        this.embeddedScopedFacetCount = embeddedScopedFacetCount;
+        return this;
+      }
+
+      public QueryFeaturesMetricsBuilder embeddedScopedSortCount(double embeddedScopedSortCount) {
+        this.embeddedScopedSortCount = embeddedScopedSortCount;
+        return this;
+      }
+
       public QueryFeaturesMetricsBuilder explainCount(double explainCount) {
         this.explainCount = explainCount;
         return this;
@@ -464,6 +498,23 @@ public class IndexMetricsBuilder {
         return this;
       }
 
+      public QueryFeaturesMetricsBuilder vectorSearchFilterOperatorCategoryCount(
+          MqlFilterOperator.Category operatorCategory, double count) {
+        this.vectorSearchFilterOperatorCategoryCountMap.put(operatorCategory, count);
+        return this;
+      }
+
+      public QueryFeaturesMetricsBuilder vectorSearchQueryVectorEncodingCount(
+          Vector.BsonEncoding encoding, double count) {
+        this.vectorSearchQueryVectorEncodingCountMap.put(encoding, count);
+        return this;
+      }
+
+      public QueryFeaturesMetricsBuilder vectorSearchFilterCount(double vectorSearchFilterCount) {
+        this.vectorSearchFilterCount = vectorSearchFilterCount;
+        return this;
+      }
+
       public IndexMetrics.QueryingMetrics.QueryFeaturesMetrics build() {
 
         return new IndexMetrics.QueryingMetrics.QueryFeaturesMetrics(
@@ -475,6 +526,9 @@ public class IndexMetricsBuilder {
             this.vectorSearchQueryTypeCountMap,
             this.knnBetaFilterOperatorTypeCounterMap,
             this.searchVectorSearchFilterOperatorTypeCounterMap,
+            this.vectorSearchFilterOperatorCategoryCountMap,
+            this.vectorSearchQueryVectorEncodingCountMap,
+            this.vectorSearchFilterCount,
             this.synonymCount,
             this.textSynonymCount,
             this.textSynonymsWithoutMatchCriteriaCount,
@@ -491,6 +545,8 @@ public class IndexMetricsBuilder {
             this.sortCount,
             this.trackingCount,
             this.returnScopeCount,
+            this.embeddedScopedFacetCount,
+            this.embeddedScopedSortCount,
             this.facetDrillSidewaysOptimizableCount,
             this.facetDrillSidewaysGenericCount);
       }
@@ -519,6 +575,10 @@ public class IndexMetricsBuilder {
     private Bytes requiredMemory = Bytes.ofBytes(0L);
 
     private int numNestedVectorFields = 0;
+
+    private long coldStorageSizeBytes = 0;
+
+    private long warmCacheSizeBytes = 0;
 
     public static IndexingMetricsBuilder builder() {
       return new IndexingMetricsBuilder();
@@ -611,6 +671,16 @@ public class IndexMetricsBuilder {
       return this;
     }
 
+    public IndexingMetricsBuilder coldStorageSizeBytes(long coldStorageSizeBytes) {
+      this.coldStorageSizeBytes = coldStorageSizeBytes;
+      return this;
+    }
+
+    public IndexingMetricsBuilder warmCacheSizeBytes(long warmCacheSizeBytes) {
+      this.warmCacheSizeBytes = warmCacheSizeBytes;
+      return this;
+    }
+
     public IndexMetrics.IndexingMetrics build() {
       return new IndexMetrics.IndexingMetrics(
           this.documentEventTypeCountMap,
@@ -629,7 +699,9 @@ public class IndexMetricsBuilder {
           this.numFieldsPerDatatype,
           Optional.of(this.batchIndexingTimer),
           this.requiredMemory,
-          this.numNestedVectorFields);
+          this.numNestedVectorFields,
+          this.coldStorageSizeBytes,
+          this.warmCacheSizeBytes);
     }
   }
 
