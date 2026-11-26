@@ -7,7 +7,6 @@ import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlagRegistry;
 import com.xgen.mongot.featureflag.dynamic.DynamicFeatureFlags;
 import com.xgen.mongot.index.IndexMetricsUpdater;
 import com.xgen.mongot.index.definition.FieldDefinitionResolver;
-import com.xgen.mongot.index.definition.VectorFieldSpecification;
 import com.xgen.mongot.index.definition.quantization.VectorQuantization;
 import com.xgen.mongot.index.lucene.LuceneAggregationPlanResolver.AggregationPlan;
 import com.xgen.mongot.index.lucene.LuceneAggregationSearchManager.AggregationQueryInfo;
@@ -18,12 +17,12 @@ import com.xgen.mongot.index.lucene.quantization.BinaryQuantizedVectorRescorer;
 import com.xgen.mongot.index.lucene.query.NestedAvgVectorRescorer;
 import com.xgen.mongot.index.query.OperatorQuery;
 import com.xgen.mongot.index.query.counts.Count;
+import com.xgen.mongot.index.query.operators.ApproximateVectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorEmbeddedOptions;
 import com.xgen.mongot.index.query.operators.VectorSearchCriteria;
 import com.xgen.mongot.index.query.operators.VectorSearchOperator;
 import com.xgen.mongot.index.query.sort.SequenceToken;
 import com.xgen.mongot.util.Check;
-import com.xgen.mongot.util.FieldPath;
 import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.concurrent.NamedExecutorService;
 import java.util.Collection;
@@ -103,7 +102,8 @@ class LuceneSearchManagerFactory {
   private LuceneSearchManager<QueryInfo> newCachingVectorQueryManager(
       Query luceneQuery, VectorSearchCriteria criteria) {
 
-    VectorQuantization quantization = this.resolveQuantization(criteria.path());
+    VectorQuantization quantization =
+        this.fieldDefinitionResolver.resolveQuantization(criteria.path());
     boolean requiresRescoring = requiresRescoring(criteria, quantization);
     boolean requiresNestedAvgRescoring = requiresNestedAvgRescoring(criteria);
     LuceneSearchManager<QueryInfo> innerSearchManager =
@@ -121,7 +121,8 @@ class LuceneSearchManagerFactory {
   LuceneSearchManager<QueryInfo> newVectorQueryManager(
       Query luceneQuery, VectorSearchCriteria criteria) {
 
-    VectorQuantization quantization = this.resolveQuantization(criteria.path());
+    VectorQuantization quantization =
+        this.fieldDefinitionResolver.resolveQuantization(criteria.path());
     boolean requiresRescoring = requiresRescoring(criteria, quantization);
     boolean requiresNestedAvgRescoring = requiresNestedAvgRescoring(criteria);
     LuceneSearchManager<QueryInfo> innerSearchManager =
@@ -140,10 +141,8 @@ class LuceneSearchManagerFactory {
       VectorSearchCriteria criteria, VectorQuantization quantization) {
     Vector vector =
         Check.isPresent(criteria.queryVector(), "criteria has to be materialized up to this point");
-    return quantization == VectorQuantization.BINARY
-        && (vector.getVectorType() == Vector.VectorType.FLOAT
-            || vector.getVectorType() == Vector.VectorType.BYTE)
-        && criteria.getVectorSearchType() == VectorSearchCriteria.Type.APPROXIMATE;
+    return criteria.getVectorSearchType() == VectorSearchCriteria.Type.APPROXIMATE
+        && ApproximateVectorSearchCriteria.isBinaryQuantizedSearch(quantization, vector);
   }
 
   private static boolean requiresNestedAvgRescoring(VectorSearchCriteria criteria) {
@@ -152,13 +151,6 @@ class LuceneSearchManagerFactory {
             .embeddedOptions()
             .map(opts -> opts.scoreMode() == VectorEmbeddedOptions.ScoreMode.AVG)
             .orElse(false);
-  }
-
-  private VectorQuantization resolveQuantization(FieldPath path) {
-    return this.fieldDefinitionResolver
-        .getVectorFieldSpecification(path)
-        .map(VectorFieldSpecification::quantization)
-        .orElse(VectorQuantization.NONE);
   }
 
   LuceneSearchManager<GenericDrillSidewaysResultFacetCollectorQueryInfo>

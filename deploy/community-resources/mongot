@@ -60,6 +60,7 @@ run_mongot() {
     # java.io.tmpdir at startup and dlopen()s them.
     # These files can be installed in different locations depending on the systems filesystem state.
     # BC_FIPS_FLAGS specifies the location of these files.
+    # Keep the temporary CVE-2026-114938 mitigation after user-supplied JVM_FLAGS.
     exec "${JAVA_HOME}/bin/java" \
     -XX:+ExitOnOutOfMemoryError \
     -XX:-UseGCOverheadLimit \
@@ -72,6 +73,7 @@ run_mongot() {
     '--enable-preview' \
     '--enable-native-access=ALL-UNNAMED' \
     ${JVM_FLAGS} \
+    -XX:-UseBASE64Intrinsics \
     -cp "${DIR}/lib/*:${DIR}/bin/mongot_community_deploy.jar" \
     "com.xgen.mongot.community.MongotCommunity" \
     "${PASS_THROUGH_ARGS[@]:-}"

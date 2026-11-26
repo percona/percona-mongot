@@ -105,20 +105,23 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     List<MetaResults> metaResultsList =
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
 
-    executeOnAllPartitions(
-        query,
-        i ->
-            executeVectorOrOperatorQueryOnPartition(
-                i,
-                query,
-                queryCursorOptions,
-                batchSizeStrategy,
-                queryOptimizationFlags,
-                searchBatchProducers,
-                extraBatchProducersToClose,
-                metaResultsList),
-        searchBatchProducers,
-        extraBatchProducersToClose);
+    try {
+      executeOnAllPartitions(
+          query,
+          i ->
+              executeVectorOrOperatorQueryOnPartition(
+                  i,
+                  query,
+                  queryCursorOptions,
+                  batchSizeStrategy,
+                  queryOptimizationFlags,
+                  searchBatchProducers,
+                  extraBatchProducersToClose,
+                  metaResultsList));
+    } catch (Exception e) {
+      closeProducersOfSucceededPartitions(e, searchBatchProducers, extraBatchProducersToClose);
+      throw e;
+    }
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -178,23 +181,26 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     List<LuceneMetricsCollectorMetaBatchProducer> metricsBatchProducers =
         java.util.Collections.synchronizedList(new ArrayList<>(this.readers.size()));
 
-    executeOnAllPartitions(
-        query,
-        i ->
-            executeIntermediateQueryOnPartition(
-                i,
-                query,
-                queryCursorOptions,
-                batchSizeStrategy,
-                queryOptimizationFlags,
-                searchBatchProducers,
-                extraBatchProducersToClose,
-                facetBatchProducers,
-                countBatchProducers,
-                aggregationBatchProducers,
-                metricsBatchProducers),
-        searchBatchProducers,
-        extraBatchProducersToClose);
+    try {
+      executeOnAllPartitions(
+          query,
+          i ->
+              executeIntermediateQueryOnPartition(
+                  i,
+                  query,
+                  queryCursorOptions,
+                  batchSizeStrategy,
+                  queryOptimizationFlags,
+                  searchBatchProducers,
+                  extraBatchProducersToClose,
+                  facetBatchProducers,
+                  countBatchProducers,
+                  aggregationBatchProducers,
+                  metricsBatchProducers));
+    } catch (Exception e) {
+      closeProducersOfSucceededPartitions(e, searchBatchProducers, extraBatchProducersToClose);
+      throw e;
+    }
     var searchMergingBatchProducer =
         searchBatchProducers.isEmpty()
             ? new EmptySearchBatchProducer()
@@ -308,8 +314,27 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     if (unwrapped instanceof LuceneSearchBatchProducer luceneSearchBatchProducer) {
       searchBatchProducers.add(luceneSearchBatchProducer);
     } else {
-      if (this.shouldCollectMultiPartitionEmptyBatchProducer) {
-        extraBatchProducersToClose.add(producer);
+      // Always recorded, so a partition failure can release these producers' searcher references.
+      // A successful query only wraps them in a closer when the flag is on, see the callers.
+      extraBatchProducersToClose.add(producer);
+    }
+  }
+
+  /**
+   * When one partition fails, the producers returned by the partitions that already succeeded each
+   * hold a searcher reference that nothing else will release.
+   */
+  private static void closeProducersOfSucceededPartitions(
+      Exception failure,
+      List<LuceneSearchBatchProducer> searchBatchProducers,
+      List<BatchProducer> extraBatchProducersToClose) {
+    var producers = new ArrayList<BatchProducer>(searchBatchProducers);
+    producers.addAll(extraBatchProducersToClose);
+    for (var producer : producers) {
+      try {
+        producer.close();
+      } catch (IOException | RuntimeException closeFailure) {
+        failure.addSuppressed(closeFailure);
       }
     }
   }
@@ -380,27 +405,6 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
         throws IOException, InvalidQueryException, InterruptedException;
   }
 
-  /**
-   * Runs {@code partitionExecutor} on every partition. If any partition fails, the search producers
-   * already collected from the others are closed before rethrowing, so their searcher references
-   * are released instead of pinning old index readers.
-   */
-  private void executeOnAllPartitions(
-      Query query,
-      PartitionExecutor partitionExecutor,
-      List<LuceneSearchBatchProducer> searchBatchProducers,
-      List<BatchProducer> extraBatchProducersToClose)
-      throws IOException, InvalidQueryException, InterruptedException {
-    try {
-      // The two-argument overload below runs the partitions; this one only adds cleanup.
-      executeOnAllPartitions(query, partitionExecutor);
-    } catch (Exception e) {
-      closeAll(searchBatchProducers, e);
-      closeAll(extraBatchProducersToClose, e);
-      throw e;
-    }
-  }
-
   private void executeOnAllPartitions(Query query, PartitionExecutor partitionExecutor)
       throws IOException, InvalidQueryException, InterruptedException {
     if (query.concurrent() && this.taskExecutor.isPresent()) {
@@ -430,22 +434,6 @@ public class MultiLuceneSearchIndexReader implements SearchIndexReader {
     } else {
       for (int i = 0; i < this.readers.size(); i++) {
         partitionExecutor.execute(i);
-      }
-    }
-  }
-
-  // ponytail: when the query thread is interrupted, Lucene's TaskExecutor stops waiting for the
-  // partition task it was blocked on without cancelling it, so that task can add a producer after
-  // this snapshot and leak it. Closing the gap needs partition tasks to close their own producer
-  // when they finish after cleanup has run.
-  private static void closeAll(List<? extends BatchProducer> producers, Exception failure) {
-    // Copy first because a still-running task may be appending. List.copyOf reads through
-    // toArray(), which Collections.synchronizedList locks like add(), so the copy cannot race.
-    for (BatchProducer producer : List.copyOf(producers)) {
-      try {
-        producer.close();
-      } catch (IOException | RuntimeException e) {
-        failure.addSuppressed(e);
       }
     }
   }

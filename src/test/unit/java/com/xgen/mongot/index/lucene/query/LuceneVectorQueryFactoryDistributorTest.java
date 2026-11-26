@@ -24,6 +24,7 @@ import com.xgen.mongot.util.bson.Vector;
 import com.xgen.mongot.util.bson.parser.BsonParseException;
 import com.xgen.testing.TestUtils;
 import com.xgen.testing.mongot.index.definition.VectorDataFieldDefinitionBuilder;
+import com.xgen.testing.mongot.index.definition.VectorIndexDefinitionBuilder;
 import com.xgen.testing.mongot.index.query.ApproximateVectorQueryCriteriaBuilder;
 import com.xgen.testing.mongot.index.query.ExactVectorCriteriaBuilder;
 import com.xgen.testing.mongot.index.query.VectorQueryBuilder;
@@ -119,6 +120,173 @@ public class LuceneVectorQueryFactoryDistributorTest {
                     .quantization(VectorQuantization.NONE)
                     .build()))
         .assertTranslatedTo(mongotQuery, luceneQuery);
+  }
+
+  @Test
+  public void testCosineQuery_featureVersionFive_normalizesTargetWithoutMutatingQueryVector()
+      throws IOException, InvalidQueryException {
+    var path = FieldPath.parse("foo.bar");
+    var queryVector = Vector.fromFloats(new float[] {3f, 4f}, NATIVE);
+
+    var luceneQuery = translateCosineApproximateQuery(path, queryVector, 5);
+
+    Assert.assertEquals(
+        new MongotKnnFloatQuery(metrics, "$type:knnVector/foo.bar", new float[] {0.6f, 0.8f}, 20),
+        luceneQuery);
+    // The query vector is shared by every partition's query, so it must not be modified.
+    Assert.assertArrayEquals(new float[] {3f, 4f}, queryVector.asFloatVector().getFloatVector(), 0);
+  }
+
+  @Test
+  public void testCosineQuery_featureVersionFive_sharedQueryVectorGivesEveryPartitionUnitTarget()
+      throws IOException, InvalidQueryException {
+    var path = FieldPath.parse("foo.bar");
+    var queryVector = Vector.fromFloats(new float[] {3f, 4f}, NATIVE);
+    var expected =
+        new MongotKnnFloatQuery(metrics, "$type:knnVector/foo.bar", new float[] {0.6f, 0.8f}, 20);
+
+    // Each partition builds its own Lucene query from the same shared query vector.
+    var firstPartition = translateCosineApproximateQuery(path, queryVector, 5);
+    var secondPartition = translateCosineApproximateQuery(path, queryVector, 5);
+    var thirdPartition = translateCosineApproximateQuery(path, queryVector, 5);
+
+    Assert.assertEquals(expected, firstPartition);
+    Assert.assertEquals(expected, secondPartition);
+    Assert.assertEquals(expected, thirdPartition);
+  }
+
+  @Test
+  public void testCosineQuery_featureVersionFour_doesNotNormalize()
+      throws IOException, InvalidQueryException {
+    var path = FieldPath.parse("foo.bar");
+    var queryVector = Vector.fromFloats(new float[] {3f, 4f}, NATIVE);
+
+    var luceneQuery = translateCosineApproximateQuery(path, queryVector, 4);
+
+    Assert.assertEquals(
+        new MongotKnnFloatQuery(metrics, "$type:knnVector/foo.bar", new float[] {3f, 4f}, 20),
+        luceneQuery);
+    Assert.assertArrayEquals(new float[] {3f, 4f}, queryVector.asFloatVector().getFloatVector(), 0);
+  }
+
+  private static Query translateCosineApproximateQuery(
+      FieldPath path, Vector queryVector, int indexFeatureVersion)
+      throws IOException, InvalidQueryException {
+    var mongotQuery =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(path)
+                    .numCandidates(20)
+                    .limit(10)
+                    .queryVector(queryVector)
+                    .build())
+            .build();
+    var indexDefinition =
+        VectorIndexDefinitionBuilder.builder()
+            .setFields(
+                List.of(
+                    VectorDataFieldDefinitionBuilder.builder()
+                        .path(path)
+                        .numDimensions(2)
+                        .similarity(VectorSimilarity.COSINE)
+                        .quantization(VectorQuantization.NONE)
+                        .build()))
+            .indexFeatureVersion(indexFeatureVersion)
+            .build();
+    return new LuceneVectorTranslation(indexDefinition).translate(mongotQuery);
+  }
+
+  @Test
+  public void testAutoNumCandidates_binaryQuantizedField_usesBinaryRatioForK()
+      throws IOException, InvalidQueryException {
+    var path = FieldPath.parse("foo.bar");
+    var mongotQuery =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(path)
+                    .limit(100)
+                    .queryVector(Vector.fromFloats(new float[8], NATIVE))
+                    .build())
+            .build();
+
+    // Binary-quantized field in auto mode: k = clamp(16 * 100, 100, 10000) = 1600.
+    MongotKnnFloatQuery expected =
+        new MongotKnnFloatQuery(metrics, "$type:knnF32Q1/foo.bar", new float[8], 1600);
+
+    new LuceneVectorTranslation(
+            List.of(
+                VectorDataFieldDefinitionBuilder.builder()
+                    .path(path)
+                    .numDimensions(8)
+                    .similarity(VectorSimilarity.EUCLIDEAN)
+                    .quantization(VectorQuantization.BINARY)
+                    .build()))
+        .assertTranslatedTo(mongotQuery, expected);
+  }
+
+  @Test
+  public void testAutoNumCandidates_scalarQuantizedField_usesDefaultRatioForK()
+      throws IOException, InvalidQueryException {
+    var path = FieldPath.parse("foo.bar");
+    var mongotQuery =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(path)
+                    .limit(100)
+                    .queryVector(Vector.fromFloats(new float[] {1f, 2f, 3f}, NATIVE))
+                    .build())
+            .build();
+
+    // Non-binary field in auto mode: k = clamp(8 * 100, 100, 10000) = 800.
+    MongotKnnFloatQuery expected =
+        new MongotKnnFloatQuery(metrics, "$type:knnF32Q7/foo.bar", new float[] {1, 2, 3}, 800);
+
+    new LuceneVectorTranslation(
+            List.of(
+                VectorDataFieldDefinitionBuilder.builder()
+                    .path(path)
+                    .numDimensions(3)
+                    .similarity(VectorSimilarity.EUCLIDEAN)
+                    .quantization(VectorQuantization.SCALAR)
+                    .build()))
+        .assertTranslatedTo(mongotQuery, expected);
+  }
+
+  @Test
+  public void testExplicitNumCandidates_binaryQuantizedField_usesUserValueForK()
+      throws IOException, InvalidQueryException {
+    var path = FieldPath.parse("foo.bar");
+    var mongotQuery =
+        VectorQueryBuilder.builder()
+            .index("test")
+            .criteria(
+                ApproximateVectorQueryCriteriaBuilder.builder()
+                    .path(path)
+                    .limit(10)
+                    .numCandidates(500)
+                    .queryVector(Vector.fromFloats(new float[8], NATIVE))
+                    .build())
+            .build();
+
+    // Explicit numCandidates is never changed, even on a binary-quantized field.
+    MongotKnnFloatQuery expected =
+        new MongotKnnFloatQuery(metrics, "$type:knnF32Q1/foo.bar", new float[8], 500);
+
+    new LuceneVectorTranslation(
+            List.of(
+                VectorDataFieldDefinitionBuilder.builder()
+                    .path(path)
+                    .numDimensions(8)
+                    .similarity(VectorSimilarity.EUCLIDEAN)
+                    .quantization(VectorQuantization.BINARY)
+                    .build()))
+        .assertTranslatedTo(mongotQuery, expected);
   }
 
   @Test

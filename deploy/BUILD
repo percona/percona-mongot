@@ -1,11 +1,31 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:pkg.bzl", "pkg_tar")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(":def.bzl", "package_deploy_tar", "pkg_var", "set_version")
 
 # Sourced by every launcher, so it ships next to each of them in every bundle.
 exports_files(
     ["bc-fips-env.sh"],
     visibility = ["//deploy:__subpackages__"],
+)
+
+exports_files(
+    ["launcher_jvm_flags_test.sh"],
+    visibility = ["//deploy:__subpackages__"],
+)
+
+sh_test(
+    name = "community_jvm_flags_test",
+    size = "small",
+    srcs = ["launcher_jvm_flags_test.sh"],
+    args = [
+        "$(location community-resources/mongot)",
+        "bin/jdk",
+        "com.xgen.mongot.community.MongotCommunity",
+    ],
+    data = ["community-resources/mongot"],
+    tags = ["unit"],
 )
 
 # The two anchoring roots distrusted by CLOUDP-466523. Matches the scope
@@ -132,6 +152,18 @@ alias(
 set_version(
     name = "community_release_version",
     version = "//bazel/config:version",
+)
+
+# MCK replaces the mongot image's entrypoint with its own
+# startup script, which execs the hardcoded path /mongot-community/mongot
+# Define this symlink for backwards compatiblity between old - new MCK versions
+# TODO(CLOUDP-465329): remove this symlink once the oldest supported MCK release
+# execs /mongot-on-prem/mongot directly.
+pkg_tar(
+    name = "mongot-image-compat-link",
+    package_dir = "/",
+    symlinks = {"mongot-community": "/mongot-on-prem"},
+    visibility = ["//visibility:public"],
 )
 
 genrule(

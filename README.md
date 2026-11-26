@@ -49,6 +49,12 @@ If there is no existing report, submit one following these steps:
    - Unique: check whether a Jira ticket already describes the problem.
    - Scoped to a single bug: report only one bug per ticket.
 
+## Security
+
+If you start `mongot` with your own `java` command instead of the bundled
+launcher, add `-XX:-UseBASE64Intrinsics` to your JVM arguments to avoid
+CVE-2026-114938.
+
 ## LICENSE
 
 Percona Search for MongoDB is source-available software, published under the

@@ -320,8 +320,7 @@ public class ChangeStreamManager {
             meterAndFtdcRegistry.meterRegistry(),
             mongoClientFactory,
             taskExecutor,
-            replicationConfig.getReplicationType(),
-            replicationConfig.getRetryThrottledGetMoreOnSameCursor());
+            replicationConfig.getReplicationType());
 
     PartitionTrackerFactory partitionTrackerFactory =
         resumeInfo -> createPartitionTracker(replicationConfig, resumeInfo);
@@ -492,7 +491,11 @@ public class ChangeStreamManager {
                 "steadyStatePriorityOptimeThresholdSeconds",
                 String.valueOf(replicationConfig.getSteadyStatePriorityOptimeThresholdSeconds()),
                 "prioritySchedulingFeatureFlag",
-                prioritySchedulingFeatureFlag ? "enabled" : "disabled"))
+                prioritySchedulingFeatureFlag ? "enabled" : "disabled",
+                "parallelChangeStreamReadersFeatureFlag",
+                replicationConfig.getEnableParallelChangeStreamReaders() ? "enabled" : "disabled",
+                "numParallelChangeStreamReaders",
+                String.valueOf(replicationConfig.getNumParallelChangeStreamReaders())))
         .set(1);
   }
 
@@ -571,7 +574,8 @@ public class ChangeStreamManager {
       ChangeStreamResumeInfo resumeInfo,
       Consumer<ChangeStreamResumeInfo> resumeInfoUpdater,
       IndexMetricsUpdater indexMetricsUpdater,
-      boolean removeMatchCollectionUuid)
+      boolean removeMatchCollectionUuid,
+      boolean eligibleForParallelChangeStreamReaders)
       throws SteadyStateException {
     LOG.atInfo()
         .addKeyValue("indexId", generationId.indexId)
@@ -602,6 +606,10 @@ public class ChangeStreamManager {
       indexDefinition.setLastObservedCollectionName(namespace.getCollectionName());
     }
 
+    Optional<PartitionedChangeStreamProgressTracker> partitionTracker =
+        eligibleForParallelChangeStreamReaders
+            ? this.partitionTrackerFactory.create(resumeInfo)
+            : Optional.empty();
     ChangeStreamIndexManager indexManager =
         this.indexManagerFactory.create(
             indexDefinition,
@@ -612,7 +620,7 @@ public class ChangeStreamManager {
             indexMetricsUpdater,
             lifecycleFuture,
             generationId,
-            this.partitionTrackerFactory.create(resumeInfo));
+            partitionTracker);
 
     this.indexManagers.put(generationId, indexManager);
     this.modeSelector.register(generationId, indexDefinition, namespace);
